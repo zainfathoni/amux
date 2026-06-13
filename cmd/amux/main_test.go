@@ -70,6 +70,45 @@ exit 2
 	}
 }
 
+func TestSpawnRefusesExistingWindowBeforeCreatingThread(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	ampCalledPath := filepath.Join(tmp, "amp-called")
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+touch "`+ampCalledPath+`"
+printf 'T-should-not-exist\n'
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then
+  exit 0
+fi
+if [ "$1" = list-windows ]; then
+  printf 'existing\n'
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	err := run([]string{"--config", configPath, "spawn", "existing", workdir, "hello"})
+	if err == nil {
+		t.Fatal("spawn succeeded, want existing-window error")
+	}
+	if !strings.Contains(err.Error(), `window "existing" already exists in tmux session "Amp"`) {
+		t.Fatalf("got error %q, want existing-window error", err)
+	}
+	if _, err := os.Stat(ampCalledPath); !os.IsNotExist(err) {
+		t.Fatalf("amp threads new was called before existing-window check")
+	}
+}
+
 func writeExecutable(t *testing.T, path, contents string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil {

@@ -319,6 +319,17 @@ func spawn(opts options, args []string) error {
 	if stat, err := os.Stat(expandedWorkdir); err != nil || !stat.IsDir() {
 		return fmt.Errorf("missing workdir: %s", expandedWorkdir)
 	}
+	runner := tmux.Runner{DryRun: opts.dryRun}
+	sessionExists := runner.HasSession(session)
+	if sessionExists {
+		windowNames, err := runner.WindowNames(session)
+		if err != nil {
+			return fmt.Errorf("list tmux windows for session %q: %w", session, err)
+		}
+		if tmux.WindowExists(windowNames, window) {
+			return fmt.Errorf("window %q already exists in tmux session %q", window, session)
+		}
+	}
 
 	threadBytes, err := exec.Command("amp", "threads", "new").Output()
 	if err != nil {
@@ -330,17 +341,9 @@ func spawn(opts options, args []string) error {
 		return err
 	}
 
-	runner := tmux.Runner{DryRun: opts.dryRun}
 	command := tmux.ContinueCommand(expandedWorkdir, thread)
 	var windowID string
-	if runner.HasSession(session) {
-		windowNames, err := runner.WindowNames(session)
-		if err != nil {
-			return fmt.Errorf("list tmux windows for session %q: %w", session, err)
-		}
-		if tmux.WindowExists(windowNames, window) {
-			return fmt.Errorf("window %q already exists in tmux session %q", window, session)
-		}
+	if sessionExists {
 		windowID, err = runner.NewWindowID(session, window, command)
 		if err != nil {
 			return fmt.Errorf("create tmux window %q: %w", window, err)
