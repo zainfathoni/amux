@@ -109,6 +109,102 @@ exit 2
 	}
 }
 
+func TestStoreCurrentInfersWindowAndWorkdirFromTmux(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = display-message ] && [ "$2" = -p ]; then
+  case "$3" in
+    '#W') printf 'current-window\n'; exit 0 ;;
+    '#{pane_current_path}') printf '/tmp/current workdir\n'; exit 0 ;;
+  esac
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "fake-tmux-socket")
+
+	if err := run([]string{"--config", configPath, "store-current", "T-current"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(configBytes), "mac\tcurrent-window\t/tmp/current workdir\tT-current\n"; !strings.Contains(got, want) {
+		t.Fatalf("config did not contain inferred current row\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestStoreCurrentWithExplicitWindowAndWorkdirDoesNotRequireTmux(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	t.Setenv("TMUX", "")
+
+	if err := run([]string{"--config", configPath, "store-current", "mac", "T-current", "explicit-window", "/tmp/explicit-workdir"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(configBytes), "mac\texplicit-window\t/tmp/explicit-workdir\tT-current\n"; !strings.Contains(got, want) {
+		t.Fatalf("config did not contain explicit current row\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestRemoveCurrentInfersWindowFromTmux(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("mac\tcurrent-window\t/tmp\tT-current\nmac\tother\t/tmp\tT-other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = '#W' ]; then
+  printf 'current-window\n'
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "fake-tmux-socket")
+
+	if err := run([]string{"--config", configPath, "remove-current"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(configBytes)
+	if strings.Contains(got, "current-window") {
+		t.Fatalf("config still contains removed current window: %q", got)
+	}
+	if want := "mac\tother\t/tmp\tT-other\n"; !strings.Contains(got, want) {
+		t.Fatalf("config did not preserve other row\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestRemoveCurrentRequiresTmux(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMUX", "")
+
+	err := run([]string{"--config", filepath.Join(tmp, "workspaces.tsv"), "remove-current"})
+	if err == nil {
+		t.Fatal("remove-current succeeded outside tmux, want error")
+	}
+	if !strings.Contains(err.Error(), "current tmux window is unavailable: run inside tmux") {
+		t.Fatalf("got error %q, want outside-tmux error", err)
+	}
+}
+
 func writeExecutable(t *testing.T, path, contents string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil {
