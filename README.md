@@ -32,3 +32,28 @@ The TSV format is:
 ```text
 workspace<TAB>window<TAB>workdir<TAB>thread-id-or-url
 ```
+
+## Install
+
+Build and install the CLI from this repository:
+
+```sh
+go build -o amux ./cmd/amux
+install -m 0755 amux ~/.local/bin/amux
+```
+
+The standalone `amux` repository owns the installed `~/.local/bin/amux` binary. Dotfiles or machine-restore repositories should restore the workspace TSV, but should not track the compiled binary.
+
+## Agent skill
+
+The Amp skill source lives in this repository at:
+
+```text
+skills/amux/SKILL.md
+```
+
+Install or refresh the local skill symlink with:
+
+```sh
+ln -sfn "$PWD/skills/amux" ~/.agents/skills/amux
+```
