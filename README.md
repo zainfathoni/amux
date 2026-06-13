@@ -44,15 +44,35 @@ workspace<TAB>window<TAB>workdir<TAB>thread-id-or-url
 Build and install the CLI from this repository:
 
 ```sh
-go build -o amux ./cmd/amux
+make build
 install -m 0755 amux ~/.local/bin/amux
 ```
 
-Release builds can inject version metadata with Go linker flags:
+`make build` writes `./amux` by default. Override the output path with `BUILD_OUTPUT`:
 
 ```sh
-go build -ldflags "-X main.version=v0.1.0 -X main.commit=$(git rev-parse --short HEAD) -X main.built=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o amux ./cmd/amux
+BUILD_OUTPUT=/tmp/amux make build
 ```
+
+Builds made through `make build` or `scripts/build-amux.sh` inject version metadata into `amux version`:
+
+- tag releases use the tag name, for example `v0.1.0`
+- `main` branch CI builds use `main.<github-run-number>` so every main build has a unique version
+- pull request CI builds use `pr.<pull-request-number>.<github-run-number>`
+- local scripted builds use `dev.<short-sha>` unless `VERSION=...` is provided
+- `commit` is the short commit SHA
+- `built` is the UTC build time, or `SOURCE_DATE_EPOCH` converted to UTC when set
+
+## Release
+
+GitHub publishes release artifacts when a pushed tag matches `v*`:
+
+```sh
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin v0.1.0
+```
+
+The tag push starts the Release workflow. The workflow builds platform archives and injects the tag name as the `amux version` value.
 
 The standalone `amux` repository owns the installed `~/.local/bin/amux` binary. Dotfiles or machine-restore repositories should restore the workspace TSV, but should not track the compiled binary.
 

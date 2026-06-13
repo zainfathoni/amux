@@ -28,4 +28,6 @@ jobs:
         run: go test ./...
 
       - name: Build
-        run: go build -o /tmp/amux ./cmd/amux
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: ./scripts/build-amux.sh /tmp/amux
