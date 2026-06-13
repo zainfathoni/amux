@@ -1,6 +1,6 @@
 ---
 name: amux
-description: "Manages Amp tmux workspace sessions with amux: spawn fresh interactive Amp threads, store/remove current windows, and update restore config. Use when the user asks to add, store, save, remember, restore, remove, spawn, or reset Amp/tmux sessions, current Amp sessions, thread IDs, or restored sessions."
+description: "Manages Amp tmux workspace sessions with amux: spawn fresh interactive Amp threads, store/remove current windows, and update restore config. Use when the user asks to add, store, save, remember, restore, remove, spawn, or reset Amp/tmux sessions, current Amp sessions, thread IDs, or restored sessions. Also use for trigger phrases: 'Park it' means remove the current window from amux restore and close it; 'Pin it' means store the current window for restore."
 ---
 
 # amux
@@ -26,6 +26,26 @@ Use `remove-current` from inside tmux when the current window should no longer b
 Use `spawn` for a fresh interactive Amp session. It must use `amp threads new` plus `amp threads continue` inside tmux; do not use `amp -x` or piped stdin for this workflow.
 Use `doctor` before or after suspicious restore changes to verify dependencies, configured workdirs, selected workspace rows, and current tmux queryability when inside tmux.
 Use `launch --dry-run --no-attach` to inspect restore actions without creating or attaching windows.
+
+## Trigger phrases
+
+These phrases are user-level shorthand and should work from any project when this global skill is available.
+
+- **Park it**: remove the current tmux window from amux restore config, then close the current tmux window.
+- **Pin it**: store the current tmux window in amux restore config. Ask for the thread ID/URL if it is not available in context.
+
+For **Park it**, run the removal before closing the window:
+
+```sh
+amux remove-current
+tmux kill-window
+```
+
+For **Pin it**, prefer:
+
+```sh
+amux store-current <thread-id-or-url>
+```
 
 ## Spawn a fresh interactive session
 
