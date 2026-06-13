@@ -1,0 +1,4 @@
+# workspace	window	workdir	thread-id-or-url
+mac	tycho	~/Code/tycho	T-tycho
+mac	space path	~/Code/with space	T-space
+other	ignored	/tmp	T-ignore
