@@ -77,6 +77,8 @@ func (a app) run(args []string) error {
 		return a.remove(opts, args)
 	case "remove-current":
 		return a.removeCurrent(opts, args)
+	case "park-current":
+		return a.parkCurrent(opts, args)
 	case "spawn":
 		return a.spawn(opts, args)
 	case "path":
@@ -300,6 +302,39 @@ func (a app) removeCurrent(opts options, args []string) error {
 	return a.removeRow(opts, workspace, window)
 }
 
+func (a app) parkCurrent(opts options, args []string) error {
+	if len(args) > 1 {
+		return errors.New("usage: amux park-current [workspace]")
+	}
+	workspace := defaultWorkspace
+	if len(args) == 1 {
+		workspace = args[0]
+	}
+	if os.Getenv("TMUX") == "" {
+		return errors.New("current tmux window is unavailable: run inside tmux")
+	}
+
+	runner := tmux.Runner{DryRun: opts.dryRun}
+	target, err := runner.CurrentTarget()
+	if err != nil {
+		return fmt.Errorf("current tmux target is unavailable: %w", err)
+	}
+	window, err := runner.CurrentWindow()
+	if err != nil {
+		return fmt.Errorf("current tmux window is unavailable: %w", err)
+	}
+
+	if err := a.removeRow(opts, workspace, window); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.stdout, "Closing tmux window %s (%s)\n", target, window)
+	fmt.Fprintln(a.stdout, "Amp thread history is not deleted; parking only removes restore state and stops the local tmux/Amp session.")
+	if err := runner.KillWindow(target); err != nil {
+		return fmt.Errorf("close tmux window %s: %w", target, err)
+	}
+	return nil
+}
+
 func (a app) removeRow(opts options, workspace, window string) error {
 	removed, err := config.Remove(opts.configPath, workspace, window)
 	if err != nil {
@@ -514,6 +549,10 @@ Commands:
 
   remove-current [workspace]
       Remove the current tmux window from a workspace.
+
+  park-current [workspace]
+      Remove the current tmux window from restore config and close it locally.
+      Amp thread history is not deleted.
 
   spawn <window> <workdir> <initial-message> [workspace] [session]
       Create an empty Amp thread, open it in an interactive tmux window,

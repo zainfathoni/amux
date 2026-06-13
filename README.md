@@ -14,6 +14,7 @@ amux store-current <thread-id-or-url>
 amux store-current <workspace> <thread-id-or-url> [window] [workdir]
 amux remove <workspace> <window>
 amux remove-current [workspace]
+amux park-current [workspace]
 amux spawn <window> <workdir> <initial-message> [workspace] [session]
 amux path
 amux doctor

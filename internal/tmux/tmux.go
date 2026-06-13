@@ -103,6 +103,15 @@ func (r Runner) SelectWindow(target string) error {
 	return exec.Command("tmux", args...).Run()
 }
 
+func (r Runner) KillWindow(target string) error {
+	args := []string{"kill-window", "-t", target}
+	if r.DryRun {
+		fmt.Printf("tmux %s\n", shellJoin(args))
+		return nil
+	}
+	return exec.Command("tmux", args...).Run()
+}
+
 func (r Runner) SelectAndAttach(session string, noAttach bool) error {
 	if r.DryRun || noAttach {
 		if r.DryRun {
@@ -121,6 +130,10 @@ func (r Runner) SelectAndAttach(session string, noAttach bool) error {
 
 func (r Runner) CurrentWindow() (string, error) {
 	return displayMessage("#W")
+}
+
+func (r Runner) CurrentTarget() (string, error) {
+	return displayMessage("#S:#I")
 }
 
 func (r Runner) CurrentWorkdir() (string, error) {

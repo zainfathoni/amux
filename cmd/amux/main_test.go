@@ -317,6 +317,74 @@ func TestRemoveCurrentRequiresTmux(t *testing.T) {
 	}
 }
 
+func TestParkCurrentRemovesRestoreRowAndKillsCapturedWindow(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("mac\tcurrent window\t/tmp\tT-current\nmac\tother\t/tmp\tT-other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = display-message ] && [ "$2" = -p ]; then
+  case "$3" in
+    '#S:#I') printf 'Amp:7\n'; exit 0 ;;
+    '#W') printf 'current window\n'; exit 0 ;;
+  esac
+fi
+if [ "$1" = kill-window ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "fake-tmux-socket")
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "park-current"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotConfig := string(configBytes)
+	if strings.Contains(gotConfig, "current window") {
+		t.Fatalf("config still contains parked window: %q", gotConfig)
+	}
+	if want := "mac\tother\t/tmp\tT-other\n"; !strings.Contains(gotConfig, want) {
+		t.Fatalf("config did not preserve other row\ngot:  %q\nwant: %q", gotConfig, want)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if !strings.Contains(log, "kill-window -t Amp:7") {
+		t.Fatalf("tmux log did not kill captured target\nlog:\n%s", log)
+	}
+	if !strings.Contains(stdout.String(), "Amp thread history is not deleted") {
+		t.Fatalf("stdout did not explain Amp history semantics: %q", stdout.String())
+	}
+}
+
+func TestParkCurrentRequiresTmux(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMUX", "")
+
+	err := run([]string{"--config", filepath.Join(tmp, "workspaces.tsv"), "park-current"})
+	if err == nil {
+		t.Fatal("park-current succeeded outside tmux, want error")
+	}
+	if !strings.Contains(err.Error(), "current tmux window is unavailable: run inside tmux") {
+		t.Fatalf("got error %q, want outside-tmux error", err)
+	}
+}
+
 func TestDoctorFailsWhenWorkspaceHasNoRows(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
