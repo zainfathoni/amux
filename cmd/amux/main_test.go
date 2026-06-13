@@ -522,14 +522,7 @@ if [ "$1" = display-message ] && [ "$2" = -p ]; then
     '#W') printf 'current window\n'; exit 0 ;;
   esac
 fi
-if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "Amp:7" ] && [ "$5" = '#{pane_id}' ]; then
-  printf '%%5\n'
-  exit 0
-fi
-if [ "$1" = send-keys ] && [ "$2" = -t ] && [ "$3" = "Amp:7" ]; then
-  exit 0
-fi
-if [ "$1" = kill-window ]; then
+if [ "$1" = run-shell ] && [ "$2" = -b ]; then
   exit 0
 fi
 exit 2
@@ -539,6 +532,7 @@ exit 2
 	t.Setenv("TMUX", "fake-tmux-socket")
 	t.Setenv("TMUX_PANE", "")
 	t.Setenv("AMUX_PARK_GRACE_PERIOD", "0")
+	t.Setenv("AMUX_PARK_SHUTDOWN_DELAY", "0")
 
 	var stdout bytes.Buffer
 	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "park-current"}); err != nil {
@@ -562,8 +556,8 @@ exit 2
 		t.Fatal(err)
 	}
 	log := string(logBytes)
-	if !strings.Contains(log, "kill-window -t Amp:7") {
-		t.Fatalf("tmux log did not kill captured target\nlog:\n%s", log)
+	if !strings.Contains(log, "run-shell -b") {
+		t.Fatalf("tmux log did not schedule captured target shutdown\nlog:\n%s", log)
 	}
 	if !strings.Contains(stdout.String(), "Amp thread history is not deleted") {
 		t.Fatalf("stdout did not explain Amp history semantics: %q", stdout.String())
@@ -574,7 +568,6 @@ func TestParkCurrentGracefullyStopsPaneBeforeKillingWindow(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
 	logPath := filepath.Join(tmp, "calls.log")
-	exitedPath := filepath.Join(tmp, "pane-exited")
 	if err := os.WriteFile(configPath, []byte("mac\tcurrent window\t/tmp\tT-current\nmac\tother\t/tmp\tT-other\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -589,20 +582,7 @@ if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = '#W' ]; then
   printf 'current window\n'
   exit 0
 fi
-if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "Amp:7" ] && [ "$5" = '#{pane_id}' ]; then
-  if [ -e "`+exitedPath+`" ]; then
-    exit 1
-  fi
-  printf '%%5\n'
-  exit 0
-fi
-if [ "$1" = send-keys ] && [ "$2" = -t ] && [ "$3" = "Amp:7" ]; then
-  if [ "$4" = C-d ]; then
-    touch "`+exitedPath+`"
-  fi
-  exit 0
-fi
-if [ "$1" = kill-window ]; then
+if [ "$1" = run-shell ] && [ "$2" = -b ]; then
   exit 0
 fi
 exit 2
@@ -611,6 +591,7 @@ exit 2
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX", "fake-tmux-socket")
 	t.Setenv("TMUX_PANE", "")
+	t.Setenv("AMUX_PARK_SHUTDOWN_DELAY", "0")
 
 	var stdout bytes.Buffer
 	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "park-current"}); err != nil {
@@ -623,15 +604,18 @@ exit 2
 	}
 	log := string(logBytes)
 	for _, want := range []string{
-		"send-keys -t Amp:7 C-c",
-		"send-keys -t Amp:7 C-d",
+		"run-shell -b",
+		"target='Amp:7'",
+		"tmux send-keys -t \"$target\" C-c",
+		"tmux send-keys -t \"$target\" C-d",
+		"tmux kill-window -t \"$target\"",
 	} {
 		if !strings.Contains(log, want) {
-			t.Fatalf("tmux log missing graceful shutdown command %q\nlog:\n%s", want, log)
+			t.Fatalf("tmux log missing deferred shutdown command %q\nlog:\n%s", want, log)
 		}
 	}
-	if strings.Contains(log, "kill-window") {
-		t.Fatalf("park-current force-killed window after graceful exit\nlog:\n%s", log)
+	if strings.Contains(log, "\nsend-keys") || strings.Contains(log, "\nkill-window") {
+		t.Fatalf("park-current stopped pane synchronously instead of scheduling shutdown\nlog:\n%s", log)
 	}
 }
 
@@ -657,14 +641,7 @@ if [ "$1" = display-message ] && [ "$2" = -p ]; then
     '#W') printf 'focused-window\n'; exit 0 ;;
   esac
 fi
-if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "Amp:3" ] && [ "$5" = '#{pane_id}' ]; then
-  printf '%%5\n'
-  exit 0
-fi
-if [ "$1" = send-keys ] && [ "$2" = -t ] && [ "$3" = "Amp:3" ]; then
-  exit 0
-fi
-if [ "$1" = kill-window ]; then
+if [ "$1" = run-shell ] && [ "$2" = -b ]; then
   exit 0
 fi
 exit 2
@@ -674,6 +651,7 @@ exit 2
 	t.Setenv("TMUX", "fake-tmux-socket")
 	t.Setenv("TMUX_PANE", "%42")
 	t.Setenv("AMUX_PARK_GRACE_PERIOD", "0")
+	t.Setenv("AMUX_PARK_SHUTDOWN_DELAY", "0")
 
 	var stdout bytes.Buffer
 	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "park-current"}); err != nil {
@@ -700,8 +678,8 @@ exit 2
 	if !strings.Contains(log, "display-message -p -t %42 #W") {
 		t.Fatalf("tmux log did not target invoking pane for window lookup\nlog:\n%s", log)
 	}
-	if !strings.Contains(log, "kill-window -t Amp:3") {
-		t.Fatalf("tmux log did not kill invoking pane window\nlog:\n%s", log)
+	if !strings.Contains(log, "target='Amp:3'") {
+		t.Fatalf("tmux log did not schedule invoking pane window shutdown\nlog:\n%s", log)
 	}
 }
 
