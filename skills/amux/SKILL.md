@@ -25,7 +25,7 @@ amux spawn <window> <workdir> <initial-message> [workspace] [session]
 Use `store-current` from inside a tmux/Amp thread when possible. It defaults to workspace `mac` plus the current tmux window name and pane path.
 Use `remove-current` from inside tmux when the current window should no longer be restored.
 Use `spawn` for a fresh interactive Amp session. It must use `amp threads new` plus `amp threads continue` inside tmux; do not use `amp -x` or piped stdin for this workflow.
-Use `doctor` before or after suspicious restore changes to verify dependencies, configured workdirs, selected workspace rows, and current tmux queryability when inside tmux.
+Use `doctor` before or after suspicious restore changes to verify dependencies, configured workdirs, selected workspace rows, and live tmux drift in the default `Amp` session. It compares config rows with `tmux list-panes`, reports configured windows that are not running, live windows that are not stored, and pane paths that differ from configured workdirs.
 Use `launch --dry-run --no-attach` to inspect restore actions without creating or attaching windows.
 
 ## Trigger phrases
@@ -129,4 +129,4 @@ Use this when the user asks to remember, save, store, remove, or stop restoring 
 - Do not edit `workspaces.tsv` manually unless the helper cannot express the needed change.
 - Before testing mutations, prefer a temp config with `--config "$tmp/workspaces.tsv"` so live restore rows are not changed accidentally.
 - Do not run live `amux spawn`, `store-current`, or `remove-current` against the default config unless the user asked to change the restore state.
-- If a thread/window looks missing, compare all three sources before changing anything: `amux list mac`, `tmux list-windows -t Amp`, and `ps -eo pid,ppid,stat,args | rg 'amp threads continue T-'`.
+- If a thread/window looks missing, start with `amux doctor mac` and `amux list mac`. Prefer tmux window/pane metadata over `ps`; do not treat the tmux server command line as proof of a live Amp thread.

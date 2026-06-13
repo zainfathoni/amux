@@ -10,6 +10,11 @@ type Runner struct {
 	DryRun bool
 }
 
+type Pane struct {
+	Window string
+	Path   string
+}
+
 func (r Runner) HasSession(session string) bool {
 	if r.DryRun {
 		return false
@@ -30,6 +35,30 @@ func (r Runner) WindowNames(session string) ([]string, error) {
 		return nil, nil
 	}
 	return strings.Split(text, "\n"), nil
+}
+
+func (r Runner) Panes(session string) ([]Pane, error) {
+	if r.DryRun {
+		return nil, nil
+	}
+	out, err := exec.Command("tmux", "list-panes", "-a", "-t", session, "-F", "#{window_name}\t#{pane_current_path}").Output()
+	if err != nil {
+		return nil, err
+	}
+	text := strings.TrimSuffix(string(out), "\n")
+	if text == "" {
+		return nil, nil
+	}
+	lines := strings.Split(text, "\n")
+	panes := make([]Pane, 0, len(lines))
+	for _, line := range lines {
+		fields := strings.SplitN(line, "\t", 2)
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("unexpected tmux pane row %q", line)
+		}
+		panes = append(panes, Pane{Window: fields[0], Path: fields[1]})
+	}
+	return panes, nil
 }
 
 func (r Runner) NewSession(session, window, command string) error {

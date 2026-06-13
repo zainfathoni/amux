@@ -517,10 +517,54 @@ func (a app) doctor(opts options, workspace string) error {
 		_, workdirErr := runner.CurrentWorkdir()
 		check("current tmux pane path", workdirErr)
 	}
+	if err == nil && len(rows) > 0 {
+		runner := tmux.Runner{}
+		checkWorkspaceDrift(check, runner, workspace, defaultSession, rows)
+	}
 	if failed {
 		return errors.New("doctor found problems")
 	}
 	return nil
+}
+
+func checkWorkspaceDrift(check func(string, error), runner tmux.Runner, workspace, session string, rows []config.Row) {
+	panes, err := runner.Panes(session)
+	if err != nil {
+		check("tmux session "+session+" panes", err)
+		return
+	}
+	check("tmux session "+session+" panes", nil)
+
+	configured := make(map[string]config.Row, len(rows))
+	for _, row := range rows {
+		configured[row.Window] = row
+	}
+	live := make(map[string]tmux.Pane, len(panes))
+	for _, pane := range panes {
+		if _, ok := live[pane.Window]; !ok {
+			live[pane.Window] = pane
+		}
+	}
+
+	for _, row := range rows {
+		pane, ok := live[row.Window]
+		if !ok {
+			check("live window "+row.Window, fmt.Errorf("configured in workspace %s but not running in tmux session %s", workspace, session))
+			continue
+		}
+		configuredWorkdir := config.ExpandHome(row.Workdir)
+		if pane.Path != configuredWorkdir {
+			check("pane path "+row.Window, fmt.Errorf("configured %s but live pane path is %s", configuredWorkdir, pane.Path))
+		} else {
+			check("pane path "+row.Window, nil)
+		}
+	}
+
+	for _, pane := range panes {
+		if _, ok := configured[pane.Window]; !ok {
+			check("stored window "+pane.Window, fmt.Errorf("running in tmux session %s but not configured in workspace %s", session, workspace))
+		}
+	}
 }
 
 func ensureConfigWritable(path string) error {
