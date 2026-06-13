@@ -63,6 +63,17 @@ Builds made through `make build` or `scripts/build-amux.sh` inject version metad
 - `commit` is the short commit SHA
 - `built` is the UTC build time, or `SOURCE_DATE_EPOCH` converted to UTC when set
 
+## Release
+
+GitHub publishes release artifacts when a pushed tag matches `v*`:
+
+```sh
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin v0.1.0
+```
+
+The tag push starts the Release workflow. The workflow builds platform archives and injects the tag name as the `amux version` value.
+
 The standalone `amux` repository owns the installed `~/.local/bin/amux` binary. Dotfiles or machine-restore repositories should restore the workspace TSV, but should not track the compiled binary.
 
 ## Agent skill
