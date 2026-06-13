@@ -311,10 +311,19 @@ func spawn(opts options, args []string) error {
 		session = args[4]
 	}
 
-	row := config.Row{Workspace: workspace, Window: window, Workdir: workdir, Thread: initialMessage}
-	if err := row.Validate(); err != nil {
+	if err := config.ValidateField("workspace", workspace); err != nil {
 		return err
 	}
+	if err := config.ValidateField("window", window); err != nil {
+		return err
+	}
+	if err := config.ValidateField("workdir", workdir); err != nil {
+		return err
+	}
+	if err := config.ValidateField("initial-message", initialMessage); err != nil {
+		return err
+	}
+	row := config.Row{Workspace: workspace, Window: window, Workdir: workdir}
 	expandedWorkdir := config.ExpandHome(workdir)
 	if stat, err := os.Stat(expandedWorkdir); err != nil || !stat.IsDir() {
 		return fmt.Errorf("missing workdir: %s", expandedWorkdir)

@@ -199,6 +199,10 @@ func (r Row) Validate() error {
 	return validateField("thread", r.Thread)
 }
 
+func ValidateField(name, value string) error {
+	return validateField(name, value)
+}
+
 func validateField(name, value string) error {
 	if value == "" {
 		return fmt.Errorf("missing %s", name)

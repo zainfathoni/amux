@@ -109,6 +109,103 @@ exit 2
 	}
 }
 
+func TestSpawnAddsWindowToExistingSession(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+if [ "$1" = threads ] && [ "$2" = new ]; then
+  printf 'T-existing-session\n'
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then
+  exit 0
+fi
+if [ "$1" = list-windows ]; then
+  printf 'already-there\n'
+  exit 0
+fi
+if [ "$1" = new-window ]; then
+  printf '@7\n'
+  exit 0
+fi
+if [ "$1" = send-keys ] || [ "$1" = select-window ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	if err := run([]string{"--config", configPath, "spawn", "fresh", workdir, "hello"}); err != nil {
+		t.Fatal(err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if strings.Contains(log, "new-session") {
+		t.Fatalf("spawn created a new session despite existing session\nlog:\n%s", log)
+	}
+	for _, want := range []string{
+		"new-window -P -F #{window_id} -t Amp -n fresh cd '" + workdir + "' && exec amp threads continue 'T-existing-session'",
+		"send-keys -t @7 -l hello",
+		"send-keys -t @7 C-m",
+		"select-window -t @7",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("tmux log missing %q\nlog:\n%s", want, log)
+		}
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(configBytes), "mac\tfresh\t"+workdir+"\tT-existing-session\n"; !strings.Contains(got, want) {
+		t.Fatalf("config did not contain spawned row\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestSpawnRejectsInvalidInitialMessageBeforeCreatingThread(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ampCalledPath := filepath.Join(tmp, "amp-called")
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+touch "`+ampCalledPath+`"
+printf 'T-should-not-exist\n'
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := run([]string{"--config", filepath.Join(tmp, "workspaces.tsv"), "spawn", "fresh", workdir, "hello\nAmp"})
+	if err == nil {
+		t.Fatal("spawn succeeded, want invalid initial-message error")
+	}
+	if !strings.Contains(err.Error(), "initial-message must not contain tabs or newlines") {
+		t.Fatalf("got error %q, want invalid initial-message error", err)
+	}
+	if _, err := os.Stat(ampCalledPath); !os.IsNotExist(err) {
+		t.Fatalf("amp threads new was called before initial-message validation")
+	}
+}
+
 func TestStoreCurrentInfersWindowAndWorkdirFromTmux(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
