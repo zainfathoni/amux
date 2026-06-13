@@ -33,7 +33,7 @@ Use `launch --dry-run --no-attach` to inspect restore actions without creating o
 
 These phrases are user-level shorthand and should work from any project when this global skill is available.
 
-- **Park it**: remove the current tmux window from amux restore config, then close the current tmux window/process. This does not delete the Amp thread from Amp history; it only stops the local tmux/Amp session and prevents restore.
+- **Park it**: remove the current tmux window from amux restore config, then gracefully stop the current tmux window/process. This does not delete the Amp thread from Amp history; it only stops the local tmux/Amp session and prevents restore. `amux park-current` sends interrupt/EOF to the target pane, waits briefly for the Amp process to exit, then force-closes the tmux window only if the graceful stop times out.
 - **Pin it**: store the current tmux window in amux restore config. Ask for the thread ID/URL if it is not available in context.
 
 For **Park it**, use the atomic command, then verify it disappeared locally:

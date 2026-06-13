@@ -522,6 +522,13 @@ if [ "$1" = display-message ] && [ "$2" = -p ]; then
     '#W') printf 'current window\n'; exit 0 ;;
   esac
 fi
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "Amp:7" ] && [ "$5" = '#{pane_id}' ]; then
+  printf '%%5\n'
+  exit 0
+fi
+if [ "$1" = send-keys ] && [ "$2" = -t ] && [ "$3" = "Amp:7" ]; then
+  exit 0
+fi
 if [ "$1" = kill-window ]; then
   exit 0
 fi
@@ -531,6 +538,7 @@ exit 2
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX", "fake-tmux-socket")
 	t.Setenv("TMUX_PANE", "")
+	t.Setenv("AMUX_PARK_GRACE_PERIOD", "0")
 
 	var stdout bytes.Buffer
 	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "park-current"}); err != nil {
@@ -562,6 +570,71 @@ exit 2
 	}
 }
 
+func TestParkCurrentGracefullyStopsPaneBeforeKillingWindow(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	exitedPath := filepath.Join(tmp, "pane-exited")
+	if err := os.WriteFile(configPath, []byte("mac\tcurrent window\t/tmp\tT-current\nmac\tother\t/tmp\tT-other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = '#S:#I' ]; then
+  printf 'Amp:7\n'
+  exit 0
+fi
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = '#W' ]; then
+  printf 'current window\n'
+  exit 0
+fi
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "Amp:7" ] && [ "$5" = '#{pane_id}' ]; then
+  if [ -e "`+exitedPath+`" ]; then
+    exit 1
+  fi
+  printf '%%5\n'
+  exit 0
+fi
+if [ "$1" = send-keys ] && [ "$2" = -t ] && [ "$3" = "Amp:7" ]; then
+  if [ "$4" = C-d ]; then
+    touch "`+exitedPath+`"
+  fi
+  exit 0
+fi
+if [ "$1" = kill-window ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "fake-tmux-socket")
+	t.Setenv("TMUX_PANE", "")
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "park-current"}); err != nil {
+		t.Fatal(err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		"send-keys -t Amp:7 C-c",
+		"send-keys -t Amp:7 C-d",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("tmux log missing graceful shutdown command %q\nlog:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "kill-window") {
+		t.Fatalf("park-current force-killed window after graceful exit\nlog:\n%s", log)
+	}
+}
+
 func TestParkCurrentTargetsInvokingPaneInsteadOfFocusedClient(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
@@ -584,6 +657,13 @@ if [ "$1" = display-message ] && [ "$2" = -p ]; then
     '#W') printf 'focused-window\n'; exit 0 ;;
   esac
 fi
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "Amp:3" ] && [ "$5" = '#{pane_id}' ]; then
+  printf '%%5\n'
+  exit 0
+fi
+if [ "$1" = send-keys ] && [ "$2" = -t ] && [ "$3" = "Amp:3" ]; then
+  exit 0
+fi
 if [ "$1" = kill-window ]; then
   exit 0
 fi
@@ -593,6 +673,7 @@ exit 2
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX", "fake-tmux-socket")
 	t.Setenv("TMUX_PANE", "%42")
+	t.Setenv("AMUX_PARK_GRACE_PERIOD", "0")
 
 	var stdout bytes.Buffer
 	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "park-current"}); err != nil {
