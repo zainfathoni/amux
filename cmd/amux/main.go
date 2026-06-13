@@ -339,36 +339,59 @@ func (a app) parkCurrent(opts options, args []string) error {
 	if err := a.removeRow(opts, workspace, window); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "Stopping tmux window %s (%s)\n", target, window)
+	fmt.Fprintf(a.stdout, "Scheduling tmux window %s (%s) to stop\n", target, window)
 	fmt.Fprintln(a.stdout, "Amp thread history is not deleted; parking only removes restore state and stops the local tmux/Amp session.")
-	if err := runner.SendKey(target, "C-c"); err != nil {
-		return fmt.Errorf("interrupt tmux window %s: %w", target, err)
+	if err := runner.RunShell(parkShutdownScript(target, parkShutdownDelay(), parkGracePeriod())); err != nil {
+		return fmt.Errorf("schedule tmux window %s shutdown: %w", target, err)
 	}
-	if err := runner.SendKey(target, "C-d"); err != nil {
-		return fmt.Errorf("exit tmux window %s: %w", target, err)
-	}
-	if waitForPaneExit(runner, target, parkGracePeriod()) {
-		fmt.Fprintf(a.stdout, "Stopped tmux window %s (%s) gracefully\n", target, window)
-		return nil
-	}
-	fmt.Fprintf(a.stdout, "Graceful stop timed out; force-closing tmux window %s (%s)\n", target, window)
-	if err := runner.KillWindow(target); err != nil {
-		return fmt.Errorf("close tmux window %s: %w", target, err)
-	}
+	fmt.Fprintf(a.stdout, "The local Amp process will be asked to exit in %s; tmux will force-close it only if graceful shutdown times out.\n", parkShutdownDelay())
 	return nil
 }
 
-func waitForPaneExit(runner tmux.Runner, target string, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
-		if !runner.PaneExists(target) {
-			return true
-		}
-		if !time.Now().Before(deadline) {
-			return false
-		}
-		time.Sleep(100 * time.Millisecond)
+func parkShutdownScript(target string, delay, grace time.Duration) string {
+	quotedTarget := shellSingleQuote(target)
+	return strings.Join([]string{
+		"target=" + quotedTarget,
+		"sleep " + shellSeconds(delay),
+		"tmux send-keys -t \"$target\" C-c >/dev/null 2>&1 || exit 0",
+		"sleep 0.200",
+		"tmux send-keys -t \"$target\" C-d >/dev/null 2>&1 || exit 0",
+		"deadline=$(( $(date +%s) + " + fmt.Sprintf("%.0f", grace.Seconds()) + " ))",
+		"while tmux display-message -p -t \"$target\" '#{pane_id}' >/dev/null 2>&1; do",
+		"  if [ \"$(date +%s)\" -ge \"$deadline\" ]; then",
+		"    tmux kill-window -t \"$target\" >/dev/null 2>&1 || true",
+		"    exit 0",
+		"  fi",
+		"  sleep 0.100",
+		"done",
+	}, "\n")
+}
+
+func parkShutdownDelay() time.Duration {
+	value := os.Getenv("AMUX_PARK_SHUTDOWN_DELAY")
+	if value == "" {
+		return 5 * time.Second
 	}
+	delay, err := time.ParseDuration(value)
+	if err == nil {
+		return delay
+	}
+	seconds, err := time.ParseDuration(value + "s")
+	if err == nil {
+		return seconds
+	}
+	return 5 * time.Second
+}
+
+func shellSeconds(duration time.Duration) string {
+	return fmt.Sprintf("%.3f", duration.Seconds())
+}
+
+func shellSingleQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func parkGracePeriod() time.Duration {
@@ -669,8 +692,9 @@ Commands:
       Remove the current tmux window from a workspace.
 
   park-current [workspace]
-      Remove the current tmux window from restore config, ask its pane to exit,
-      and force-close the tmux window only if graceful shutdown times out.
+      Remove the current tmux window from restore config, schedule delayed
+      pane shutdown, and return before the local Amp process exits.
+      The delayed shutdown force-closes tmux only if graceful exit times out.
       Amp thread history is not deleted.
 
   spawn <window> <workdir> <initial-message> [workspace] [session]
