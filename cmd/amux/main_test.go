@@ -1,12 +1,26 @@
 package main
 
 import (
-	"io"
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestPathWritesToInjectedStdout(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	var stdout bytes.Buffer
+
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "path"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := stdout.String(), configPath+"\n"; got != want {
+		t.Fatalf("got stdout %q, want %q", got, want)
+	}
+}
 
 func TestSpawnCreatesInteractiveAmpWindowAndStoresThread(t *testing.T) {
 	tmp := t.TempDir()
@@ -313,7 +327,7 @@ func TestDoctorFailsWhenWorkspaceHasNoRows(t *testing.T) {
 	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 0\n")
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	err := runSilencingStdout(t, []string{"--config", configPath, "doctor", "missing"})
+	err := runWithDiscardedStdout([]string{"--config", configPath, "doctor", "missing"})
 	if err == nil {
 		t.Fatal("doctor succeeded for missing workspace, want error")
 	}
@@ -338,7 +352,7 @@ exit 0
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX", "fake-tmux-socket")
 
-	err := runSilencingStdout(t, []string{"--config", configPath, "doctor", "mac"})
+	err := runWithDiscardedStdout([]string{"--config", configPath, "doctor", "mac"})
 	if err == nil {
 		t.Fatal("doctor succeeded despite broken tmux query, want error")
 	}
@@ -366,29 +380,13 @@ exit 0
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX", "fake-tmux-socket")
 
-	if err := runSilencingStdout(t, []string{"--config", configPath, "doctor", "mac"}); err != nil {
+	if err := runWithDiscardedStdout([]string{"--config", configPath, "doctor", "mac"}); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func runSilencingStdout(t *testing.T, args []string) error {
-	t.Helper()
-	oldStdout := os.Stdout
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = writer
-	runErr := run(args)
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = oldStdout
-	_, _ = io.Copy(io.Discard, reader)
-	if err := reader.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return runErr
+func runWithDiscardedStdout(args []string) error {
+	return (app{}).run(args)
 }
 
 func writeExecutable(t *testing.T, path, contents string) {
