@@ -22,6 +22,30 @@ func TestPathWritesToInjectedStdout(t *testing.T) {
 	}
 }
 
+func TestVersionPrintsDefaultVersion(t *testing.T) {
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"version"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stdout.String(), "amux dev\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestVersionStringIncludesBuildMetadata(t *testing.T) {
+	oldVersion, oldCommit, oldBuilt := version, commit, built
+	t.Cleanup(func() {
+		version, commit, built = oldVersion, oldCommit, oldBuilt
+	})
+	version = "v0.1.0"
+	commit = "abc1234"
+	built = "2026-06-13T11:20:06Z"
+
+	if got, want := versionString(), "amux v0.1.0 commit=abc1234 built=2026-06-13T11:20:06Z"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 func TestSpawnCreatesInteractiveAmpWindowAndStoresThread(t *testing.T) {
 	tmp := t.TempDir()
 	workdir := filepath.Join(tmp, "work dir")

@@ -16,6 +16,7 @@ amux remove <workspace> <window>
 amux remove-current [workspace]
 amux park-current [workspace]
 amux spawn <window> <workdir> <initial-message> [workspace] [session]
+amux version
 amux path
 amux doctor
 ```
@@ -41,6 +42,12 @@ Build and install the CLI from this repository:
 ```sh
 go build -o amux ./cmd/amux
 install -m 0755 amux ~/.local/bin/amux
+```
+
+Release builds can inject version metadata with Go linker flags:
+
+```sh
+go build -ldflags "-X main.version=v0.1.0 -X main.commit=$(git rev-parse --short HEAD) -X main.built=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o amux ./cmd/amux
 ```
 
 The standalone `amux` repository owns the installed `~/.local/bin/amux` binary. Dotfiles or machine-restore repositories should restore the workspace TSV, but should not track the compiled binary.
