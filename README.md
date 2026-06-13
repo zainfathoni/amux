@@ -23,6 +23,8 @@ amux doctor
 
 `--dry-run` validates inputs and checks tmux window conflicts without mutating state. For `spawn`, dry-run does not create an Amp thread, create tmux windows, send keys, or update `workspaces.tsv`; it only prints the intended actions.
 
+`park-current` removes the current window from restore config, sends a graceful terminal shutdown sequence to the target pane, waits briefly for the local Amp process to exit, and only force-closes the tmux window if the graceful stop times out.
+
 Defaults:
 
 - workspace: `mac`

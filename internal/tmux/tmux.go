@@ -124,6 +124,15 @@ func (r Runner) SendEnter(target string) error {
 	return exec.Command("tmux", args...).Run()
 }
 
+func (r Runner) SendKey(target, key string) error {
+	args := []string{"send-keys", "-t", target, key}
+	if r.DryRun {
+		fmt.Printf("tmux %s\n", shellJoin(args))
+		return nil
+	}
+	return exec.Command("tmux", args...).Run()
+}
+
 func (r Runner) SelectWindow(target string) error {
 	args := []string{"select-window", "-t", target}
 	if r.DryRun {
@@ -168,6 +177,14 @@ func (r Runner) CurrentTarget() (string, error) {
 
 func (r Runner) CurrentWorkdir() (string, error) {
 	return displayCurrentMessage("#{pane_current_path}")
+}
+
+func (r Runner) PaneExists(target string) bool {
+	if r.DryRun {
+		return false
+	}
+	_, err := displayMessageForTarget(target, "#{pane_id}")
+	return err == nil
 }
 
 func displayCurrentMessage(format string) (string, error) {
