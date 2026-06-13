@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,14 +25,31 @@ type options struct {
 	noAttach   bool
 }
 
+type app struct {
+	stdout io.Writer
+	stderr io.Writer
+}
+
 func main() {
-	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	a := app{stdout: os.Stdout, stderr: os.Stderr}
+	if err := a.run(os.Args[1:]); err != nil {
+		fmt.Fprintln(a.stderr, err)
 		os.Exit(1)
 	}
 }
 
 func run(args []string) error {
+	return app{stdout: os.Stdout, stderr: os.Stderr}.run(args)
+}
+
+func (a app) run(args []string) error {
+	if a.stdout == nil {
+		a.stdout = io.Discard
+	}
+	if a.stderr == nil {
+		a.stderr = io.Discard
+	}
+
 	opts, args, err := parseOptions(args)
 	if err != nil {
 		return err
@@ -50,22 +68,22 @@ func run(args []string) error {
 	case "launch":
 		return launch(opts, args)
 	case "list":
-		return list(opts, args)
+		return a.list(opts, args)
 	case "store":
-		return store(opts, args)
+		return a.store(opts, args)
 	case "store-current":
-		return storeCurrent(opts, args)
+		return a.storeCurrent(opts, args)
 	case "remove":
-		return remove(opts, args)
+		return a.remove(opts, args)
 	case "remove-current":
-		return removeCurrent(opts, args)
+		return a.removeCurrent(opts, args)
 	case "spawn":
-		return spawn(opts, args)
+		return a.spawn(opts, args)
 	case "path":
 		if len(args) != 0 {
 			return errors.New("usage: amux path")
 		}
-		fmt.Println(opts.configPath)
+		fmt.Fprintln(a.stdout, opts.configPath)
 		return nil
 	case "doctor":
 		if len(args) > 1 {
@@ -75,16 +93,16 @@ func run(args []string) error {
 		if len(args) == 1 {
 			workspace = args[0]
 		}
-		return doctor(opts, workspace)
+		return a.doctor(opts, workspace)
 	case "help", "--help", "-h":
-		usage()
+		a.usage()
 		return nil
 	default:
 		// Compatibility with the Bash helper: `amux mac Amp` means launch.
 		if len(args) <= 1 {
 			return launch(opts, append([]string{command}, args...))
 		}
-		usage()
+		a.usage()
 		return fmt.Errorf("unknown command: %s", command)
 	}
 }
@@ -170,7 +188,7 @@ func launch(opts options, args []string) error {
 	return runner.SelectAndAttach(session, opts.noAttach)
 }
 
-func list(opts options, args []string) error {
+func (a app) list(opts options, args []string) error {
 	if len(args) > 1 {
 		return errors.New("usage: amux list [workspace]")
 	}
@@ -182,24 +200,24 @@ func list(opts options, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("workspace\twindow\tworkdir\tthread-id-or-url")
+	fmt.Fprintln(a.stdout, "workspace\twindow\tworkdir\tthread-id-or-url")
 	for _, row := range rows {
 		if workspace == "" || row.Workspace == workspace {
-			fmt.Printf("%s\t%s\t%s\t%s\n", row.Workspace, row.Window, row.Workdir, row.Thread)
+			fmt.Fprintf(a.stdout, "%s\t%s\t%s\t%s\n", row.Workspace, row.Window, row.Workdir, row.Thread)
 		}
 	}
 	return nil
 }
 
-func store(opts options, args []string) error {
+func (a app) store(opts options, args []string) error {
 	if len(args) != 4 {
 		return errors.New("usage: amux store <workspace> <window> <workdir> <thread-id-or-url>")
 	}
 	row := config.Row{Workspace: args[0], Window: args[1], Workdir: args[2], Thread: args[3]}
-	return storeRow(opts, row)
+	return a.storeRow(opts, row)
 }
 
-func storeCurrent(opts options, args []string) error {
+func (a app) storeCurrent(opts options, args []string) error {
 	if len(args) < 1 || len(args) > 4 {
 		return errors.New("usage: amux store-current <thread-id-or-url> OR amux store-current <workspace> <thread-id-or-url> [window] [workdir]")
 	}
@@ -241,30 +259,30 @@ func storeCurrent(opts options, args []string) error {
 		workdir = currentWorkdir
 	}
 
-	return storeRow(opts, config.Row{Workspace: workspace, Window: window, Workdir: workdir, Thread: thread})
+	return a.storeRow(opts, config.Row{Workspace: workspace, Window: window, Workdir: workdir, Thread: thread})
 }
 
-func storeRow(opts options, row config.Row) error {
+func (a app) storeRow(opts options, row config.Row) error {
 	replaced, err := config.Store(opts.configPath, row)
 	if err != nil {
 		return err
 	}
 	if replaced {
-		fmt.Printf("Updated %s/%s in %s\n", row.Workspace, row.Window, opts.configPath)
+		fmt.Fprintf(a.stdout, "Updated %s/%s in %s\n", row.Workspace, row.Window, opts.configPath)
 	} else {
-		fmt.Printf("Stored %s/%s in %s\n", row.Workspace, row.Window, opts.configPath)
+		fmt.Fprintf(a.stdout, "Stored %s/%s in %s\n", row.Workspace, row.Window, opts.configPath)
 	}
 	return nil
 }
 
-func remove(opts options, args []string) error {
+func (a app) remove(opts options, args []string) error {
 	if len(args) != 2 {
 		return errors.New("usage: amux remove <workspace> <window>")
 	}
-	return removeRow(opts, args[0], args[1])
+	return a.removeRow(opts, args[0], args[1])
 }
 
-func removeCurrent(opts options, args []string) error {
+func (a app) removeCurrent(opts options, args []string) error {
 	if len(args) > 1 {
 		return errors.New("usage: amux remove-current [workspace]")
 	}
@@ -279,23 +297,23 @@ func removeCurrent(opts options, args []string) error {
 	if err != nil {
 		return fmt.Errorf("current tmux window is unavailable: %w", err)
 	}
-	return removeRow(opts, workspace, window)
+	return a.removeRow(opts, workspace, window)
 }
 
-func removeRow(opts options, workspace, window string) error {
+func (a app) removeRow(opts options, workspace, window string) error {
 	removed, err := config.Remove(opts.configPath, workspace, window)
 	if err != nil {
 		return err
 	}
 	if removed {
-		fmt.Printf("Removed %s/%s from %s\n", workspace, window, opts.configPath)
+		fmt.Fprintf(a.stdout, "Removed %s/%s from %s\n", workspace, window, opts.configPath)
 	} else {
-		fmt.Printf("No row found for %s/%s in %s\n", workspace, window, opts.configPath)
+		fmt.Fprintf(a.stdout, "No row found for %s/%s in %s\n", workspace, window, opts.configPath)
 	}
 	return nil
 }
 
-func spawn(opts options, args []string) error {
+func (a app) spawn(opts options, args []string) error {
 	if len(args) < 3 || len(args) > 5 {
 		return errors.New("usage: amux spawn <window> <workdir> <initial-message> [workspace] [session]")
 	}
@@ -376,10 +394,10 @@ func spawn(opts options, args []string) error {
 		return fmt.Errorf("select spawned window: %w", err)
 	}
 
-	if err := storeRow(opts, row); err != nil {
+	if err := a.storeRow(opts, row); err != nil {
 		return err
 	}
-	fmt.Println(thread)
+	fmt.Fprintln(a.stdout, thread)
 	return nil
 }
 
@@ -399,14 +417,14 @@ func spawnDelay() time.Duration {
 	return time.Second
 }
 
-func doctor(opts options, workspace string) error {
+func (a app) doctor(opts options, workspace string) error {
 	failed := false
 	check := func(name string, err error) {
 		if err != nil {
 			failed = true
-			fmt.Printf("FAIL %s: %v\n", name, err)
+			fmt.Fprintf(a.stdout, "FAIL %s: %v\n", name, err)
 		} else {
-			fmt.Printf("OK   %s\n", name)
+			fmt.Fprintf(a.stdout, "OK   %s\n", name)
 		}
 	}
 
@@ -472,9 +490,9 @@ func rowsForWorkspace(path, workspace string) ([]config.Row, error) {
 	return filtered, nil
 }
 
-func usage() {
+func (a app) usage() {
 	program := filepath.Base(os.Args[0])
-	fmt.Printf(`Usage: %s [--config path] [--dry-run] [--no-attach] [command] [args]
+	fmt.Fprintf(a.stdout, `Usage: %s [--config path] [--dry-run] [--no-attach] [command] [args]
 
 Commands:
   launch [workspace] [session]
