@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -158,19 +159,34 @@ func (r Runner) SelectAndAttach(session string, noAttach bool) error {
 }
 
 func (r Runner) CurrentWindow() (string, error) {
-	return displayMessage("#W")
+	return displayCurrentMessage("#W")
 }
 
 func (r Runner) CurrentTarget() (string, error) {
-	return displayMessage("#S:#I")
+	return displayCurrentMessage("#S:#I")
 }
 
 func (r Runner) CurrentWorkdir() (string, error) {
-	return displayMessage("#{pane_current_path}")
+	return displayCurrentMessage("#{pane_current_path}")
+}
+
+func displayCurrentMessage(format string) (string, error) {
+	if pane := os.Getenv("TMUX_PANE"); pane != "" {
+		return displayMessageForTarget(pane, format)
+	}
+	return displayMessage(format)
 }
 
 func displayMessage(format string) (string, error) {
 	out, err := exec.Command("tmux", "display-message", "-p", format).Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(string(out), "\r\n"), nil
+}
+
+func displayMessageForTarget(target, format string) (string, error) {
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", target, format).Output()
 	if err != nil {
 		return "", err
 	}

@@ -22,8 +22,8 @@ amux park-current [workspace]
 amux spawn <window> <workdir> <initial-message> [workspace] [session]
 ```
 
-Use `store-current` from inside a tmux/Amp thread when possible. It defaults to workspace `mac` plus the current tmux window name and pane path.
-Use `remove-current` from inside tmux when the current window should no longer be restored.
+Use `store-current` from inside a tmux/Amp thread when possible. It defaults to workspace `mac` plus the invoking pane's tmux window name and pane path, using `$TMUX_PANE` when available rather than the currently focused tmux client.
+Use `remove-current` from inside tmux when the invoking pane's window should no longer be restored.
 Use `spawn` for a fresh interactive Amp session. It must use `amp threads new` plus `amp threads continue` inside tmux; do not use `amp -x` or piped stdin for this workflow.
 Use `doctor` before or after suspicious restore changes to verify dependencies, configured workdirs, selected workspace rows, and live tmux drift in the default `Amp` session. It compares config rows with `tmux list-panes`, reports configured windows that are not running, live windows that are not stored, and pane paths that differ from configured workdirs.
 Use `launch --dry-run --no-attach` to inspect restore actions without creating or attaching windows.
@@ -72,7 +72,7 @@ Use this when the user asks to remember, save, store, remove, or stop restoring 
 1. Confirm the current tmux context:
 
    ```sh
-   tmux display-message -p 'window=#{window_name} path=#{pane_current_path}'
+   tmux display-message -p -t "$TMUX_PANE" 'window=#{window_name} path=#{pane_current_path}'
    ```
 
 2. Store the current window with the current Amp thread ID or URL:

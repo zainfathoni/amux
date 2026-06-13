@@ -261,6 +261,7 @@ exit 2
 
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX", "fake-tmux-socket")
+	t.Setenv("TMUX_PANE", "")
 
 	if err := run([]string{"--config", configPath, "store-current", "T-current"}); err != nil {
 		t.Fatal(err)
@@ -272,6 +273,46 @@ exit 2
 	}
 	if got, want := string(configBytes), "mac\tcurrent-window\t/tmp/current workdir\tT-current\n"; !strings.Contains(got, want) {
 		t.Fatalf("config did not contain inferred current row\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestStoreCurrentTargetsInvokingPaneInsteadOfFocusedClient(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "%42" ]; then
+  case "$5" in
+    '#W') printf 'pane-window\n'; exit 0 ;;
+    '#{pane_current_path}') printf '/tmp/pane workdir\n'; exit 0 ;;
+  esac
+fi
+if [ "$1" = display-message ] && [ "$2" = -p ]; then
+  case "$3" in
+    '#W') printf 'focused-window\n'; exit 0 ;;
+    '#{pane_current_path}') printf '/tmp/focused workdir\n'; exit 0 ;;
+  esac
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "fake-tmux-socket")
+	t.Setenv("TMUX_PANE", "%42")
+
+	if err := run([]string{"--config", configPath, "store-current", "T-current"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(configBytes), "mac\tpane-window\t/tmp/pane workdir\tT-current\n"; !strings.Contains(got, want) {
+		t.Fatalf("config did not contain invoking pane row\ngot:  %q\nwant: %q", got, want)
+	}
+	if strings.Contains(string(configBytes), "focused-window") {
+		t.Fatalf("config used focused-client window instead of invoking pane: %q", configBytes)
 	}
 }
 
@@ -310,6 +351,7 @@ exit 2
 
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX", "fake-tmux-socket")
+	t.Setenv("TMUX_PANE", "")
 
 	if err := run([]string{"--config", configPath, "remove-current"}); err != nil {
 		t.Fatal(err)
@@ -325,6 +367,46 @@ exit 2
 	}
 	if want := "mac\tother\t/tmp\tT-other\n"; !strings.Contains(got, want) {
 		t.Fatalf("config did not preserve other row\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestRemoveCurrentTargetsInvokingPaneInsteadOfFocusedClient(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("mac\tpane-window\t/tmp/pane\tT-pane\nmac\tfocused-window\t/tmp/focused\tT-focused\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "%42" ] && [ "$5" = '#W' ]; then
+  printf 'pane-window\n'
+  exit 0
+fi
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = '#W' ]; then
+  printf 'focused-window\n'
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "fake-tmux-socket")
+	t.Setenv("TMUX_PANE", "%42")
+
+	if err := run([]string{"--config", configPath, "remove-current"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(configBytes)
+	if strings.Contains(got, "pane-window") {
+		t.Fatalf("config still contains invoking pane window: %q", got)
+	}
+	if want := "mac\tfocused-window\t/tmp/focused\tT-focused\n"; !strings.Contains(got, want) {
+		t.Fatalf("config did not preserve focused-client row\ngot:  %q\nwant: %q", got, want)
 	}
 }
 
@@ -365,6 +447,7 @@ exit 2
 
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX", "fake-tmux-socket")
+	t.Setenv("TMUX_PANE", "")
 
 	var stdout bytes.Buffer
 	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "park-current"}); err != nil {
@@ -393,6 +476,68 @@ exit 2
 	}
 	if !strings.Contains(stdout.String(), "Amp thread history is not deleted") {
 		t.Fatalf("stdout did not explain Amp history semantics: %q", stdout.String())
+	}
+}
+
+func TestParkCurrentTargetsInvokingPaneInsteadOfFocusedClient(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("mac\tpane-window\t/tmp/pane\tT-pane\nmac\tfocused-window\t/tmp/focused\tT-focused\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "%42" ]; then
+  case "$5" in
+    '#S:#I') printf 'Amp:3\n'; exit 0 ;;
+    '#W') printf 'pane-window\n'; exit 0 ;;
+  esac
+fi
+if [ "$1" = display-message ] && [ "$2" = -p ]; then
+  case "$3" in
+    '#S:#I') printf 'Amp:5\n'; exit 0 ;;
+    '#W') printf 'focused-window\n'; exit 0 ;;
+  esac
+fi
+if [ "$1" = kill-window ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "fake-tmux-socket")
+	t.Setenv("TMUX_PANE", "%42")
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "park-current"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotConfig := string(configBytes)
+	if strings.Contains(gotConfig, "pane-window") {
+		t.Fatalf("config still contains invoking pane window: %q", gotConfig)
+	}
+	if !strings.Contains(gotConfig, "mac\tfocused-window\t/tmp/focused\tT-focused\n") {
+		t.Fatalf("config did not preserve focused-client window\ngot: %q", gotConfig)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if !strings.Contains(log, "display-message -p -t %42 #W") {
+		t.Fatalf("tmux log did not target invoking pane for window lookup\nlog:\n%s", log)
+	}
+	if !strings.Contains(log, "kill-window -t Amp:3") {
+		t.Fatalf("tmux log did not kill invoking pane window\nlog:\n%s", log)
 	}
 }
 
