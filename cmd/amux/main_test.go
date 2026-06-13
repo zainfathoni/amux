@@ -109,6 +109,89 @@ exit 2
 	}
 }
 
+func TestSpawnDryRunDoesNotCreateThreadOrWriteConfig(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	ampCalledPath := filepath.Join(tmp, "amp-called")
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+touch "`+ampCalledPath+`"
+printf 'T-should-not-exist\n'
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then
+  exit 1
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "--dry-run", "spawn", "dry", workdir, "hello"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(ampCalledPath); !os.IsNotExist(err) {
+		t.Fatalf("dry-run spawn called amp threads new")
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("dry-run spawn wrote config file")
+	}
+	for _, want := range []string{
+		"Would create Amp thread for mac/dry",
+		"Would create tmux session \"Amp\" with window \"dry\"",
+		"Would start Amp in " + workdir + " and submit initial message",
+		"Would store mac/dry in " + configPath,
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("dry-run output missing %q\nstdout:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestSpawnDryRunRefusesExistingWindowBeforeCreatingThread(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	ampCalledPath := filepath.Join(tmp, "amp-called")
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+touch "`+ampCalledPath+`"
+printf 'T-should-not-exist\n'
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then
+  exit 0
+fi
+if [ "$1" = list-windows ]; then
+  printf 'existing\n'
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := run([]string{"--config", configPath, "--dry-run", "spawn", "existing", workdir, "hello"})
+	if err == nil {
+		t.Fatal("dry-run spawn succeeded, want existing-window error")
+	}
+	if !strings.Contains(err.Error(), `window "existing" already exists in tmux session "Amp"`) {
+		t.Fatalf("got error %q, want existing-window error", err)
+	}
+	if _, err := os.Stat(ampCalledPath); !os.IsNotExist(err) {
+		t.Fatalf("dry-run spawn called amp threads new")
+	}
+}
+
 func TestSpawnRefusesExistingWindowBeforeCreatingThread(t *testing.T) {
 	tmp := t.TempDir()
 	workdir := filepath.Join(tmp, "workdir")

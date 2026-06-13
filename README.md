@@ -21,6 +21,8 @@ amux path
 amux doctor
 ```
 
+`--dry-run` validates inputs and checks tmux window conflicts without mutating state. For `spawn`, dry-run does not create an Amp thread, create tmux windows, send keys, or update `workspaces.tsv`; it only prints the intended actions.
+
 Defaults:
 
 - workspace: `mac`

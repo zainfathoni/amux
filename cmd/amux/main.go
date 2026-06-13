@@ -393,7 +393,7 @@ func (a app) spawn(opts options, args []string) error {
 	if stat, err := os.Stat(expandedWorkdir); err != nil || !stat.IsDir() {
 		return fmt.Errorf("missing workdir: %s", expandedWorkdir)
 	}
-	runner := tmux.Runner{DryRun: opts.dryRun}
+	runner := tmux.Runner{}
 	sessionExists := runner.HasSession(session)
 	if sessionExists {
 		windowNames, err := runner.WindowNames(session)
@@ -403,6 +403,17 @@ func (a app) spawn(opts options, args []string) error {
 		if tmux.WindowExists(windowNames, window) {
 			return fmt.Errorf("window %q already exists in tmux session %q", window, session)
 		}
+	}
+	if opts.dryRun {
+		fmt.Fprintf(a.stdout, "Would create Amp thread for %s/%s\n", workspace, window)
+		if sessionExists {
+			fmt.Fprintf(a.stdout, "Would create tmux window %q in session %q\n", window, session)
+		} else {
+			fmt.Fprintf(a.stdout, "Would create tmux session %q with window %q\n", session, window)
+		}
+		fmt.Fprintf(a.stdout, "Would start Amp in %s and submit initial message\n", expandedWorkdir)
+		fmt.Fprintf(a.stdout, "Would store %s/%s in %s\n", workspace, window, opts.configPath)
+		return nil
 	}
 
 	threadBytes, err := exec.Command("amp", "threads", "new").Output()
@@ -624,6 +635,8 @@ Commands:
   spawn <window> <workdir> <initial-message> [workspace] [session]
       Create an empty Amp thread, open it in an interactive tmux window,
       submit the initial message with tmux send-keys, and store the row.
+      With --dry-run, only validate and print intended actions; do not create
+      an Amp thread, mutate tmux, send keys, or update the config.
 
   doctor [workspace]
       Check dependencies, config readability, and configured workdirs.
