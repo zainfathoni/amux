@@ -19,6 +19,12 @@ const (
 	defaultSession   = "Amp"
 )
 
+var (
+	version = "dev"
+	commit  = ""
+	built   = ""
+)
+
 type options struct {
 	configPath string
 	dryRun     bool
@@ -81,6 +87,12 @@ func (a app) run(args []string) error {
 		return a.parkCurrent(opts, args)
 	case "spawn":
 		return a.spawn(opts, args)
+	case "version":
+		if len(args) != 0 {
+			return errors.New("usage: amux version")
+		}
+		fmt.Fprintln(a.stdout, versionString())
+		return nil
 	case "path":
 		if len(args) != 0 {
 			return errors.New("usage: amux path")
@@ -452,6 +464,17 @@ func spawnDelay() time.Duration {
 	return time.Second
 }
 
+func versionString() string {
+	parts := []string{"amux", version}
+	if commit != "" {
+		parts = append(parts, "commit="+commit)
+	}
+	if built != "" {
+		parts = append(parts, "built="+built)
+	}
+	return strings.Join(parts, " ")
+}
+
 func (a app) doctor(opts options, workspace string) error {
 	failed := false
 	check := func(name string, err error) {
@@ -560,6 +583,9 @@ Commands:
 
   doctor [workspace]
       Check dependencies, config readability, and configured workdirs.
+
+  version
+      Print the amux version and build metadata.
 
   path
       Print the config path.
