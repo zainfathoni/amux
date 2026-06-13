@@ -419,6 +419,9 @@ func doctor(opts options, workspace string) error {
 	rows, err := rowsForWorkspace(opts.configPath, workspace)
 	check("read workspace "+workspace, err)
 	if err == nil {
+		if len(rows) == 0 {
+			check("workspace "+workspace+" rows", fmt.Errorf("no rows found in %s", opts.configPath))
+		}
 		for _, row := range rows {
 			workdir := config.ExpandHome(row.Workdir)
 			stat, statErr := os.Stat(workdir)
@@ -430,6 +433,13 @@ func doctor(opts options, workspace string) error {
 				check("workdir "+row.Window, nil)
 			}
 		}
+	}
+	if os.Getenv("TMUX") != "" {
+		runner := tmux.Runner{}
+		_, windowErr := runner.CurrentWindow()
+		check("current tmux window", windowErr)
+		_, workdirErr := runner.CurrentWorkdir()
+		check("current tmux pane path", workdirErr)
 	}
 	if failed {
 		return errors.New("doctor found problems")

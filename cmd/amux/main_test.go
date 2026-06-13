@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -300,6 +301,94 @@ func TestRemoveCurrentRequiresTmux(t *testing.T) {
 	if !strings.Contains(err.Error(), "current tmux window is unavailable: run inside tmux") {
 		t.Fatalf("got error %q, want outside-tmux error", err)
 	}
+}
+
+func TestDoctorFailsWhenWorkspaceHasNoRows(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("mac\twin\t/tmp\tT-thread\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "tmux"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := runSilencingStdout(t, []string{"--config", configPath, "doctor", "missing"})
+	if err == nil {
+		t.Fatal("doctor succeeded for missing workspace, want error")
+	}
+	if !strings.Contains(err.Error(), "doctor found problems") {
+		t.Fatalf("got error %q, want doctor failure", err)
+	}
+}
+
+func TestDoctorFailsWhenInsideTmuxButTmuxCannotBeQueried(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("mac\twin\t/tmp\tT-thread\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = display-message ]; then
+  exit 2
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "fake-tmux-socket")
+
+	err := runSilencingStdout(t, []string{"--config", configPath, "doctor", "mac"})
+	if err == nil {
+		t.Fatal("doctor succeeded despite broken tmux query, want error")
+	}
+	if !strings.Contains(err.Error(), "doctor found problems") {
+		t.Fatalf("got error %q, want doctor failure", err)
+	}
+}
+
+func TestDoctorPassesWhenInsideTmuxCanBeQueried(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("mac\twin\t/tmp\tT-thread\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = display-message ] && [ "$2" = -p ]; then
+  case "$3" in
+    '#W') printf 'win\n'; exit 0 ;;
+    '#{pane_current_path}') printf '/tmp\n'; exit 0 ;;
+  esac
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "fake-tmux-socket")
+
+	if err := runSilencingStdout(t, []string{"--config", configPath, "doctor", "mac"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func runSilencingStdout(t *testing.T, args []string) error {
+	t.Helper()
+	oldStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = writer
+	runErr := run(args)
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = oldStdout
+	_, _ = io.Copy(io.Discard, reader)
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return runErr
 }
 
 func writeExecutable(t *testing.T, path, contents string) {
