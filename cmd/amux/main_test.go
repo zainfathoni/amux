@@ -467,6 +467,10 @@ if [ "$1" = display-message ] && [ "$2" = -p ]; then
     '#{pane_current_path}') printf '/tmp\n'; exit 0 ;;
   esac
 fi
+if [ "$1" = list-panes ]; then
+  printf 'win\t/tmp\n'
+  exit 0
+fi
 exit 0
 `)
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -477,8 +481,98 @@ exit 0
 	}
 }
 
+func TestDoctorReportsLiveWindowNotStoredInWorkspace(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("mac\tamux\t/tmp\tT-thread\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = list-panes ]; then
+  printf 'amux\t/tmp\nextra\t/tmp\n'
+  exit 0
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	output, err := runCapturingStdout(t, []string{"--config", configPath, "doctor", "mac"})
+	if err == nil {
+		t.Fatal("doctor succeeded despite unstored live window, want error")
+	}
+	if !strings.Contains(output, "FAIL stored window extra") {
+		t.Fatalf("doctor output did not report unstored live window\n%s", output)
+	}
+}
+
+func TestDoctorReportsConfiguredWindowNotRunning(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("mac\tmissing\t/tmp\tT-thread\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = list-panes ]; then
+  printf 'other\t/tmp\n'
+  exit 0
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	output, err := runCapturingStdout(t, []string{"--config", configPath, "doctor", "mac"})
+	if err == nil {
+		t.Fatal("doctor succeeded despite missing configured window, want error")
+	}
+	if !strings.Contains(output, "FAIL live window missing") {
+		t.Fatalf("doctor output did not report missing configured window\n%s", output)
+	}
+}
+
+func TestDoctorReportsPanePathMismatch(t *testing.T) {
+	tmp := t.TempDir()
+	configuredWorkdir := filepath.Join(tmp, "configured")
+	liveWorkdir := filepath.Join(tmp, "live")
+	if err := os.Mkdir(configuredWorkdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(liveWorkdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("mac\ttycho\t"+configuredWorkdir+"\tT-thread\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = list-panes ]; then
+  printf 'tycho\t`+liveWorkdir+`\n'
+  exit 0
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	output, err := runCapturingStdout(t, []string{"--config", configPath, "doctor", "mac"})
+	if err == nil {
+		t.Fatal("doctor succeeded despite pane path mismatch, want error")
+	}
+	if !strings.Contains(output, "FAIL pane path tycho") || !strings.Contains(output, liveWorkdir) {
+		t.Fatalf("doctor output did not report pane path mismatch\n%s", output)
+	}
+}
+
 func runWithDiscardedStdout(args []string) error {
 	return (app{}).run(args)
+}
+
+func runCapturingStdout(t *testing.T, args []string) (string, error) {
+	t.Helper()
+	var stdout bytes.Buffer
+	runErr := (app{stdout: &stdout}).run(args)
+	return stdout.String(), runErr
 }
 
 func writeExecutable(t *testing.T, path, contents string) {
