@@ -155,6 +155,9 @@ func (r Runner) SelectAndAttach(session string, noAttach bool) error {
 	if err := exec.Command("tmux", "select-window", "-t", session+":1").Run(); err != nil {
 		return err
 	}
+	if os.Getenv("TMUX") != "" {
+		return exec.Command("tmux", "switch-client", "-t", session).Run()
+	}
 	if output, err := exec.Command("tmux", "attach", "-t", session).CombinedOutput(); err != nil {
 		if isNoTerminalAttachError(output) {
 			return startTerminalAttach(session)

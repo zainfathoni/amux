@@ -16,6 +16,47 @@ func TestContinueCommandQuotesShellArgs(t *testing.T) {
 	}
 }
 
+func TestSelectAndAttachSwitchesClientWhenAlreadyInsideTmux(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "calls.log")
+
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = select-window ] || [ "$1" = switch-client ]; then
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "uwsm-app"), `#!/bin/sh
+printf 'uwsm-app %s\n' "$*" >> "`+logPath+`"
+exit 0
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "/tmp/tmux-1000/default,123,0")
+
+	if err := (Runner{}).SelectAndAttach("Amp", false); err != nil {
+		t.Fatal(err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		"tmux select-window -t Amp:1",
+		"tmux switch-client -t Amp",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("log missing %q\nlog:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "attach") || strings.Contains(log, "uwsm-app") {
+		t.Fatalf("inside-tmux attach used attach/external terminal instead of switch-client\nlog:\n%s", log)
+	}
+}
+
 func TestSelectAndAttachOpensOmarchyTerminalWhenTmuxCannotAttachWithoutTerminal(t *testing.T) {
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "calls.log")
@@ -45,6 +86,7 @@ exit 0
 `)
 
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "")
 
 	if err := (Runner{}).SelectAndAttach("Amp", false); err != nil {
 		t.Fatal(err)
@@ -86,6 +128,7 @@ exit 0
 `)
 
 	t.Setenv("PATH", tmp)
+	t.Setenv("TMUX", "")
 
 	if err := (Runner{}).SelectAndAttach("Amp", false); err != nil {
 		t.Fatal(err)
