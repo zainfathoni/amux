@@ -16,7 +16,56 @@ func TestContinueCommandQuotesShellArgs(t *testing.T) {
 	}
 }
 
-func TestSelectAndAttachOpensAlacrittyWhenTmuxCannotAttachWithoutTerminal(t *testing.T) {
+func TestSelectAndAttachOpensOmarchyTerminalWhenTmuxCannotAttachWithoutTerminal(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "calls.log")
+
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = select-window ]; then
+  exit 0
+fi
+if [ "$1" = attach ]; then
+  echo 'open terminal failed: not a terminal' >&2
+  exit 1
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "uwsm-app"), `#!/bin/sh
+printf 'uwsm-app %s\n' "$*" >> "`+logPath+`"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(tmp, "xdg-terminal-exec"), `#!/bin/sh
+printf 'xdg-terminal-exec %s\n' "$*" >> "`+logPath+`"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(tmp, "alacritty"), `#!/bin/sh
+printf 'alacritty %s\n' "$*" >> "`+logPath+`"
+exit 0
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := (Runner{}).SelectAndAttach("Amp", false); err != nil {
+		t.Fatal(err)
+	}
+
+	log := waitForLogContaining(t, logPath, "uwsm-app -- xdg-terminal-exec -e tmux attach -t Amp")
+	for _, want := range []string{
+		"tmux select-window -t Amp:1",
+		"tmux attach -t Amp",
+		"uwsm-app -- xdg-terminal-exec -e tmux attach -t Amp",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("log missing %q\nlog:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "alacritty") {
+		t.Fatalf("used alacritty despite Omarchy terminal launcher being available\nlog:\n%s", log)
+	}
+}
+
+func TestSelectAndAttachFallsBackToAlacrittyWithoutOmarchyTerminalLauncher(t *testing.T) {
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "calls.log")
 
@@ -36,21 +85,15 @@ printf 'alacritty %s\n' "$*" >> "`+logPath+`"
 exit 0
 `)
 
-	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PATH", tmp)
 
 	if err := (Runner{}).SelectAndAttach("Amp", false); err != nil {
 		t.Fatal(err)
 	}
 
 	log := waitForLogContaining(t, logPath, "alacritty -e tmux attach -t Amp")
-	for _, want := range []string{
-		"tmux select-window -t Amp:1",
-		"tmux attach -t Amp",
-		"alacritty -e tmux attach -t Amp",
-	} {
-		if !strings.Contains(log, want) {
-			t.Fatalf("log missing %q\nlog:\n%s", want, log)
-		}
+	if !strings.Contains(log, "alacritty -e tmux attach -t Amp") {
+		t.Fatalf("log missing alacritty fallback\nlog:\n%s", log)
 	}
 }
 
