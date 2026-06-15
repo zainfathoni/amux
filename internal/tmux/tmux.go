@@ -157,11 +157,20 @@ func (r Runner) SelectAndAttach(session string, noAttach bool) error {
 	}
 	if output, err := exec.Command("tmux", "attach", "-t", session).CombinedOutput(); err != nil {
 		if isNoTerminalAttachError(output) {
-			return exec.Command("alacritty", "-e", "tmux", "attach", "-t", session).Start()
+			return startTerminalAttach(session)
 		}
 		return err
 	}
 	return nil
+}
+
+func startTerminalAttach(session string) error {
+	if _, err := exec.LookPath("uwsm-app"); err == nil {
+		if _, err := exec.LookPath("xdg-terminal-exec"); err == nil {
+			return exec.Command("uwsm-app", "--", "xdg-terminal-exec", "-e", "tmux", "attach", "-t", session).Start()
+		}
+	}
+	return exec.Command("alacritty", "-e", "tmux", "attach", "-t", session).Start()
 }
 
 func isNoTerminalAttachError(output []byte) bool {
