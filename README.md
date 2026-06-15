@@ -23,6 +23,8 @@ amux doctor
 
 `--dry-run` validates inputs and checks tmux window conflicts without mutating state. For `spawn`, dry-run does not create an Amp thread, create tmux windows, send keys, or update `workspaces.tsv`; it only prints the intended actions.
 
+When launch attaches from an interactive terminal, `amux` attaches to tmux in-place. If tmux reports that the caller is not a terminal, `amux` opens Alacritty with `tmux attach -t <session>` instead, so launcher/hook invocations can still reveal the restored workspace.
+
 `park-current` removes the current window from restore config, schedules a delayed graceful terminal shutdown sequence for the target pane, then returns immediately. This gives Amp time to receive the command result and send a final response before the local process exits. The delayed shutdown only force-closes the tmux window if graceful stop times out.
 
 Defaults:

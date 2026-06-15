@@ -27,7 +27,7 @@ Use `remove-current` from inside tmux when the invoking pane's window should no 
 Use `spawn` for a fresh interactive Amp session. It must use `amp threads new` plus `amp threads continue` inside tmux; do not use `amp -x` or piped stdin for this workflow.
 Use `spawn --dry-run` to inspect a new-session plan safely. It validates inputs and checks live tmux window conflicts, but must not create an Amp thread, mutate tmux, send keys, or update the restore config.
 Use `doctor` before or after suspicious restore changes to verify dependencies, configured workdirs, selected workspace rows, and live tmux drift in the default `Amp` session. It compares config rows with `tmux list-panes`, reports configured windows that are not running, live windows that are not stored, and pane paths that differ from configured workdirs.
-Use `launch --dry-run --no-attach` to inspect restore actions without creating or attaching windows.
+Use `launch --dry-run --no-attach` to inspect restore actions without creating or attaching windows. Launcher/non-TTY `amux` invocations should open Alacritty for `tmux attach` when tmux cannot attach in-place.
 
 ## Trigger phrases
 
