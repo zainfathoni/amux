@@ -155,7 +155,18 @@ func (r Runner) SelectAndAttach(session string, noAttach bool) error {
 	if err := exec.Command("tmux", "select-window", "-t", session+":1").Run(); err != nil {
 		return err
 	}
-	return exec.Command("tmux", "attach", "-t", session).Run()
+	if output, err := exec.Command("tmux", "attach", "-t", session).CombinedOutput(); err != nil {
+		if isNoTerminalAttachError(output) {
+			return exec.Command("alacritty", "-e", "tmux", "attach", "-t", session).Start()
+		}
+		return err
+	}
+	return nil
+}
+
+func isNoTerminalAttachError(output []byte) bool {
+	message := strings.ToLower(string(output))
+	return strings.Contains(message, "not a terminal") || strings.Contains(message, "open terminal failed")
 }
 
 func (r Runner) CurrentWindow() (string, error) {
