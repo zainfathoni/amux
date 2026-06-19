@@ -1,0 +1,33 @@
+name: Go CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Format check
+        run: |
+          gofmt -l . > /tmp/gofmt.out
+          if [ -s /tmp/gofmt.out ]; then
+            cat /tmp/gofmt.out
+            exit 1
+          fi
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: ./scripts/build-amux.sh /tmp/amux

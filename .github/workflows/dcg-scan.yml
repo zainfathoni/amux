@@ -1,0 +1,22 @@
+name: DCG Scan
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dcg
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/main/install.sh" | bash -s -- --easy-mode
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Scan repository
+        run: dcg scan --paths . --fail-on error

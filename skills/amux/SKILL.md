@@ -1,0 +1,131 @@
+---
+name: amux
+description: "Manages Amp tmux workspace sessions with amux: spawn fresh interactive Amp threads, store/remove current windows, and update restore config. Use when the user asks to add, store, save, remember, restore, remove, spawn, or reset Amp/tmux sessions, current Amp sessions, thread IDs, or restored sessions. Also use for trigger phrases: 'Park it' means remove the current window from amux restore and close it; 'Pin it' means store the current window for restore."
+---
+
+# amux
+
+Manage `~/.config/amp-tmux/workspaces.tsv` through `amux` instead of editing the TSV manually.
+
+## Commands
+
+```sh
+amux list mac
+amux doctor mac
+amux launch mac Amp --dry-run
+amux --attach launch mac Amp
+amux --no-attach launch mac Amp
+amux store mac <window> <workdir> <thread-id-or-url>
+amux store-current <thread-id-or-url>
+amux store-current mac <thread-id-or-url> [window] [workdir]
+amux remove mac <window>
+amux remove-current [workspace]
+amux park-current [workspace]
+amux spawn <window> <workdir> <initial-message> [workspace] [session]
+```
+
+Use `store-current` from inside a tmux/Amp thread when possible. It defaults to workspace `mac` plus the invoking pane's tmux window name and pane path, using `$TMUX_PANE` when available rather than the currently focused tmux client.
+Use `remove-current` from inside tmux when the invoking pane's window should no longer be restored.
+Use `spawn` for a fresh interactive Amp session. It must use `amp threads new` plus `amp threads continue` inside tmux; do not use `amp -x` or piped stdin for this workflow.
+Use `spawn --dry-run` to inspect a new-session plan safely. It validates inputs and checks live tmux window conflicts, but must not create an Amp thread, mutate tmux, send keys, or update the restore config.
+Use `doctor` before or after suspicious restore changes to verify dependencies, configured workdirs, selected workspace rows, and live tmux drift in the default `Amp` session. It compares config rows with `tmux list-panes`, reports configured windows that are not running, live windows that are not stored, and pane paths that differ from configured workdirs.
+Launch auto-attaches by default only when the tmux session already existed, no restore work was needed, and its live window set plus pane paths match the configured workspace. Cold restores and partial restores do not auto-attach. Use `launch --dry-run` to inspect restore actions without creating windows, `--attach launch` to force attach, or `--no-attach launch` to suppress auto-attach. If attach is requested from inside tmux, `amux` switches the current client to the target session; if tmux reports there is no terminal, `amux` opens the session through Omarchy's terminal launcher with direct Alacritty fallback.
+
+## Trigger phrases
+
+These phrases are user-level shorthand and should work from any project when this global skill is available.
+
+- **Park it**: remove the current tmux window from amux restore config, then gracefully stop the current tmux window/process. This does not delete the Amp thread from Amp history; it only stops the local tmux/Amp session and prevents restore. `amux park-current` schedules a delayed interrupt/EOF for the target pane, returns so the agent can send its final response, then force-closes the tmux window only if the graceful stop times out.
+- **Pin it**: store the current tmux window in amux restore config. Ask for the thread ID/URL if it is not available in context.
+
+For **Park it**, use the atomic command, then verify it disappeared locally:
+
+```sh
+amux park-current
+amux list mac
+tmux list-windows -t Amp
+ps -eo pid,ppid,stat,args | rg 'amp threads continue T-' || true
+```
+
+If the thread still appears in Amp history after parking, that is expected. Parking is not remote thread deletion.
+
+For **Pin it**, prefer:
+
+```sh
+amux store-current <thread-id-or-url>
+```
+
+## Spawn a fresh interactive session
+
+Use this when the user wants a fresh context window, a remote-started session, or an interactive reset.
+
+```sh
+amux spawn <window> <workdir> "<initial-message>"
+amux list mac
+```
+
+The initial message is submitted via `tmux send-keys` into a normal interactive Amp window. If the user keeps their amux config in a dotfiles or machine-restore repository, remind them to sync the changed `workspaces.tsv` there.
+
+`spawn` refuses to overwrite an existing tmux window and validates inputs before creating a new Amp thread. If a spawn fails, verify whether a new thread or window was created before retrying.
+
+## Current-session workflow
+
+Use this when the user asks to remember, save, store, remove, or stop restoring the current Amp/tmux session.
+
+1. Confirm the current tmux context:
+
+   ```sh
+   tmux display-message -p -t "$TMUX_PANE" 'window=#{window_name} path=#{pane_current_path}'
+   ```
+
+2. Store the current window with the current Amp thread ID or URL:
+
+   ```sh
+   amux store-current <thread-id-or-url>
+   ```
+
+3. Or remove the current window from restore config:
+
+   ```sh
+   amux remove-current
+   ```
+
+4. Verify the row state and remind the user to sync intentional config changes into their dotfiles or machine-restore repository if they use one:
+
+   ```sh
+   amux list mac
+   amux doctor mac
+   ```
+
+## Explicit workspace edits
+
+1. List current rows:
+
+   ```sh
+   amux list mac
+   ```
+
+2. Store or remove a non-current window explicitly:
+
+   ```sh
+   amux store mac <window> <workdir> <thread-id-or-url>
+   amux remove mac <window>
+   ```
+
+3. Verify and remind the user to sync intentional config changes into their dotfiles or machine-restore repository if they use one:
+
+   ```sh
+   amux list mac
+   amux doctor mac
+   ```
+
+4. Commit and push the user's restore-config repository if the change is intentional and they have one.
+
+## Safety
+
+- Do not store secrets in window names, workdirs, or thread identifiers.
+- Prefer thread IDs or `https://ampcode.com/threads/...` URLs only.
+- Do not edit `workspaces.tsv` manually unless the helper cannot express the needed change.
+- Before testing mutations, prefer a temp config with `--config "$tmp/workspaces.tsv"` so live restore rows are not changed accidentally.
+- Do not run live `amux spawn`, `store-current`, or `remove-current` against the default config unless the user asked to change the restore state.
+- If a thread/window looks missing, start with `amux doctor mac` and `amux list mac`. Prefer tmux window/pane metadata over `ps`; do not treat the tmux server command line as proof of a live Amp thread.

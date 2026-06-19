@@ -1,0 +1,20 @@
+# Build outputs
+/amux
+/dist/
+/*.tar.gz
+/*.sha256
+
+# Go test artifacts
+*.test
+*.out
+/coverage.txt
+
+# Local/editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Temporary files
+/tmp/

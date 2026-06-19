@@ -1,0 +1,29 @@
+# Project-level Destructive Command Guard configuration.
+# Core git/filesystem protections are always active in dcg.
+
+[packs]
+enabled = []
+
+[scan]
+fail_on = "error"
+format = "pretty"
+redact = "quoted"
+truncate = 160
+
+[scan.paths]
+include = [
+  ".github/workflows/**",
+  "AGENTS.md",
+  "*.md",
+  "Makefile",
+  "scripts/**",
+  "**/*.sh",
+  "**/*.bash",
+  "**/*.zsh",
+]
+exclude = [
+  ".git/**",
+  "target/**",
+  "dist/**",
+  "node_modules/**",
+]
