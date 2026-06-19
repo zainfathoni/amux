@@ -34,6 +34,20 @@ Optional:
 
 - Omarchy/Alacritty, used only as fallback terminal launchers when `amux` is asked to attach but the caller is not an interactive terminal.
 
+## Install from a release
+
+Download the archive for your platform from the [latest release](https://github.com/zainfathoni/amux/releases/latest), verify its checksum, and install the binary somewhere on your `PATH`:
+
+```sh
+curl -LO https://github.com/zainfathoni/amux/releases/download/v0.1.0/amux-v0.1.0-linux-amd64.tar.gz
+curl -LO https://github.com/zainfathoni/amux/releases/download/v0.1.0/amux-v0.1.0-linux-amd64.tar.gz.sha256
+sha256sum -c amux-v0.1.0-linux-amd64.tar.gz.sha256
+tar -xzf amux-v0.1.0-linux-amd64.tar.gz
+install -m 0755 amux-v0.1.0-linux-amd64/amux ~/.local/bin/amux
+```
+
+Release archives are published for Linux and macOS on amd64 and arm64.
+
 ## Install from source
 
 Build and install the CLI from this repository:
