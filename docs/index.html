@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="en" class="antialiased">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>amux — restore Amp tmux workspaces</title>
+    <meta
+      name="description"
+      content="amux restores named Amp workspaces inside tmux from a simple TSV config, so long-running agent threads are easy to park, resume, and organize."
+    />
+    <meta property="og:title" content="amux — restore Amp tmux workspaces" />
+    <meta
+      property="og:description"
+      content="A small CLI for restoring, storing, and inspecting Amp tmux workspaces."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://amux.zainf.dev/" />
+    <meta name="theme-color" content="#18181b" />
+    <link rel="canonical" href="https://amux.zainf.dev/" />
+    <link rel="preconnect" href="https://rsms.me" />
+    <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #09090b;
+        --panel: #18181b;
+        --panel-soft: #111113;
+        --text: #fafafa;
+        --muted: #a1a1aa;
+        --subtle: #71717a;
+        --line: rgb(255 255 255 / 0.1);
+        --line-soft: rgb(255 255 255 / 0.06);
+        --accent: #34d399;
+        --accent-strong: #10b981;
+        --accent-soft: rgb(52 211 153 / 0.12);
+        --radius: 1.5rem;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        background:
+          radial-gradient(circle at top left, rgb(52 211 153 / 0.16), transparent 30rem),
+          radial-gradient(circle at 85% 5%, rgb(59 130 246 / 0.13), transparent 28rem), var(--bg);
+        color: var(--text);
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01", "ss03";
+      }
+
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      code,
+      pre {
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      }
+
+      .page {
+        isolation: isolate;
+        min-height: 100dvh;
+        overflow: hidden;
+      }
+
+      .container {
+        width: min(100% - 2rem, 72rem);
+        margin-inline: auto;
+      }
+
+      .header {
+        padding-block: 1.25rem;
+      }
+
+      .nav {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        font-size: 0.9375rem;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+
+      .mark {
+        display: grid;
+        width: 2rem;
+        height: 2rem;
+        place-items: center;
+        border: 1px solid var(--line);
+        border-radius: 0.75rem;
+        background: rgb(255 255 255 / 0.04);
+        color: var(--accent);
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 0.875rem;
+      }
+
+      .nav-links {
+        display: none;
+        align-items: center;
+        gap: 1.5rem;
+        color: var(--muted);
+        font-size: 0.875rem;
+      }
+
+      .nav-links a:hover {
+        color: var(--text);
+      }
+
+      .ghost-button,
+      .primary-button {
+        display: inline-flex;
+        min-height: 2.75rem;
+        align-items: center;
+        justify-content: center;
+        border-radius: 999px;
+        padding: 0.75rem 1rem;
+        font-size: 1rem;
+        font-weight: 600;
+        transition:
+          background-color 160ms ease,
+          color 160ms ease,
+          border-color 160ms ease,
+          transform 160ms ease;
+      }
+
+      .primary-button {
+        background: var(--accent);
+        color: #052e1b;
+        box-shadow: 0 0 0 1px var(--accent-strong);
+      }
+
+      .primary-button:hover {
+        transform: translateY(-1px);
+        background: #6ee7b7;
+      }
+
+      .primary-button:focus-visible,
+      .ghost-button:focus-visible {
+        outline: 2px solid #60a5fa;
+        outline-offset: 3px;
+      }
+
+      .ghost-button {
+        border: 1px solid var(--line);
+        color: var(--text);
+        background: rgb(255 255 255 / 0.03);
+      }
+
+      .ghost-button:hover {
+        border-color: rgb(255 255 255 / 0.2);
+        background: rgb(255 255 255 / 0.06);
+      }
+
+      .hero {
+        padding-block: 4rem 5rem;
+      }
+
+      .hero-grid {
+        display: grid;
+        align-items: center;
+        gap: 3rem;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        border: 1px solid rgb(52 211 153 / 0.24);
+        border-radius: 999px;
+        background: var(--accent-soft);
+        padding: 0.375rem 0.75rem;
+        color: #a7f3d0;
+        font-size: 0.875rem;
+        font-weight: 500;
+      }
+
+      .hero h1,
+      .section-heading h2,
+      .cta h2 {
+        margin: 0;
+        max-width: 13ch;
+        font-size: clamp(3rem, 8vw, 5.75rem);
+        font-weight: 600;
+        letter-spacing: -0.06em;
+        text-wrap: balance;
+      }
+
+      .hero-copy {
+        margin: 1.5rem 0 0;
+        max-width: 61ch;
+        color: #d4d4d8;
+        font-size: 1.125rem;
+        line-height: 1.75;
+        text-wrap: pretty;
+      }
+
+      .hero-actions {
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        margin-top: 2rem;
+      }
+
+      .terminal {
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: rgb(0 0 0 / 0.34);
+        box-shadow: 0 30px 80px rgb(0 0 0 / 0.35);
+      }
+
+      .terminal-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid var(--line-soft);
+        padding: 0.875rem 1rem;
+        color: var(--subtle);
+        font-size: 0.8125rem;
+      }
+
+      .dots {
+        display: flex;
+        gap: 0.375rem;
+      }
+
+      .dot {
+        width: 0.625rem;
+        height: 0.625rem;
+        border-radius: 999px;
+        background: var(--line);
+      }
+
+      .terminal pre {
+        margin: 0;
+        overflow-x: auto;
+        padding: 1.25rem;
+        color: #e4e4e7;
+        font-size: 0.9375rem;
+        line-height: 1.8;
+      }
+
+      .terminal-compact {
+        margin-top: 1rem;
+        box-shadow: none;
+      }
+
+      .prompt {
+        color: var(--accent);
+      }
+
+      .comment {
+        color: var(--subtle);
+      }
+
+      .section {
+        padding-block: 5rem;
+        border-top: 1px solid var(--line-soft);
+      }
+
+      .section-heading {
+        display: grid;
+        gap: 1rem;
+        margin-bottom: 2.5rem;
+      }
+
+      .section-heading h2,
+      .cta h2 {
+        max-width: 18ch;
+        font-size: clamp(2.25rem, 5vw, 3.75rem);
+      }
+
+      .section-heading p,
+      .cta p {
+        margin: 0;
+        max-width: 62ch;
+        color: var(--muted);
+        font-size: 1.0625rem;
+        line-height: 1.75;
+        text-wrap: pretty;
+      }
+
+      .feature-grid {
+        display: grid;
+        gap: 1.5rem;
+      }
+
+      .feature {
+        border-top: 1px solid var(--line);
+        padding-top: 1.5rem;
+      }
+
+      .feature dt {
+        color: var(--text);
+        font-size: 1.0625rem;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+      }
+
+      .feature dd {
+        margin: 0.625rem 0 0;
+        color: var(--muted);
+        font-size: 1rem;
+        line-height: 1.7;
+        text-wrap: pretty;
+      }
+
+      .split {
+        display: grid;
+        gap: 1.5rem;
+      }
+
+      .panel {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: rgb(255 255 255 / 0.03);
+        padding: 1.25rem;
+      }
+
+      .panel h3 {
+        margin: 0;
+        font-size: 1.125rem;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+      }
+
+      .panel p {
+        margin: 0.75rem 0 0;
+        color: var(--muted);
+        font-size: 1rem;
+        line-height: 1.7;
+      }
+
+      .steps {
+        display: grid;
+        gap: 1rem;
+        margin-top: 1.5rem;
+      }
+
+      .step {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 0.875rem;
+        align-items: start;
+      }
+
+      .step-number {
+        display: grid;
+        width: 1.75rem;
+        height: 1.75rem;
+        place-items: center;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: #a7f3d0;
+        font-size: 0.875rem;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .step strong {
+        display: block;
+        font-weight: 600;
+      }
+
+      .step-copy span {
+        display: block;
+        margin-top: 0.25rem;
+        color: var(--muted);
+        font-size: 1rem;
+        line-height: 1.6;
+      }
+
+      .cta {
+        padding-block: 5rem;
+        border-top: 1px solid var(--line-soft);
+      }
+
+      .cta-box {
+        display: grid;
+        gap: 2rem;
+        align-items: center;
+        border: 1px solid rgb(52 211 153 / 0.22);
+        border-radius: calc(var(--radius) + 0.5rem);
+        background:
+          linear-gradient(135deg, rgb(52 211 153 / 0.12), transparent 42%),
+          rgb(255 255 255 / 0.03);
+        padding: 1.5rem;
+      }
+
+      .footer {
+        border-top: 1px solid var(--line-soft);
+        padding-block: 2rem;
+        color: var(--subtle);
+        font-size: 0.875rem;
+      }
+
+      .footer-inner {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+      }
+
+      .footer-links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1rem;
+      }
+
+      .footer a:hover {
+        color: var(--text);
+      }
+
+      @media (min-width: 640px) {
+        .container {
+          width: min(100% - 3rem, 72rem);
+        }
+
+        .nav-links {
+          display: flex;
+        }
+
+        .hero-actions {
+          flex-direction: row;
+          align-items: center;
+        }
+
+        .primary-button,
+        .ghost-button {
+          min-height: 2.5rem;
+          padding: 0.625rem 1rem;
+          font-size: 0.9375rem;
+        }
+
+        .hero-copy,
+        .section-heading p,
+        .cta p {
+          font-size: 1rem;
+        }
+
+        .feature dd,
+        .panel p,
+        .step-copy span {
+          font-size: 0.9375rem;
+        }
+      }
+
+      @media (min-width: 900px) {
+        .hero {
+          padding-block: 6rem 7rem;
+        }
+
+        .hero-grid,
+        .split,
+        .cta-box {
+          grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+          gap: 3rem;
+        }
+
+        .feature-grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 3rem;
+        }
+
+        .cta-box {
+          padding: 2rem;
+        }
+
+        .footer-inner {
+          flex-direction: row;
+          align-items: center;
+          justify-content: space-between;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <header class="header">
+        <nav class="container nav" aria-label="Primary navigation">
+          <a class="brand" href="/" aria-label="Homepage">
+            <span class="mark">am</span>
+            <span>amux</span>
+          </a>
+          <div class="nav-links">
+            <a href="#features">Features</a>
+            <a href="#workflow">Workflow</a>
+            <a href="https://github.com/zainfathoni/amux/releases/latest">Download</a>
+            <a href="https://github.com/zainfathoni/amux">GitHub</a>
+          </div>
+        </nav>
+      </header>
+
+      <main>
+        <section class="hero">
+          <div class="container hero-grid">
+            <div>
+              <div class="eyebrow">Amp Multiplexer for tmux</div>
+              <h1>Restore agent workspaces without the ritual.</h1>
+              <p class="hero-copy">
+                <code>amux</code> is a small CLI that restores named Amp workspaces inside tmux from a simple TSV file. Keep long-running agent threads organized, resumable, and one command away.
+              </p>
+              <div class="hero-actions">
+                <a class="primary-button" href="https://github.com/zainfathoni/amux/releases/latest">Download v0.1.0</a>
+                <a class="ghost-button" href="https://github.com/zainfathoni/amux">View on GitHub</a>
+              </div>
+            </div>
+
+            <div class="terminal" aria-label="amux command example">
+              <div class="terminal-bar">
+                <div class="dots" aria-hidden="true">
+                  <span class="dot"></span>
+                  <span class="dot"></span>
+                  <span class="dot"></span>
+                </div>
+                <span>~/Code/amux</span>
+              </div>
+              <pre><code><span class="prompt">$</span> amux launch mac Amp --dry-run
+would create session Amp
+would open window my-project
+
+<span class="prompt">$</span> amux launch mac Amp
+restored mac/Amp
+
+<span class="prompt">$</span> amux doctor mac
+OK config rows: 3
+OK live tmux session matches config</code></pre>
+            </div>
+          </div>
+        </section>
+
+        <section class="section" id="features">
+          <div class="container">
+            <div class="section-heading">
+              <h2>Built for persistent agent work.</h2>
+              <p>
+                <code>amux</code> keeps the state you care about in boring text, then uses tmux and the Amp CLI to bring that state back when you need it.
+              </p>
+            </div>
+            <dl class="feature-grid">
+              <div class="feature">
+                <dt>Restore workspaces</dt>
+                <dd>Launch a named workspace into a tmux session with one window per configured Amp thread.</dd>
+              </div>
+              <div class="feature">
+                <dt>Store the current window</dt>
+                <dd>Pin or remove the tmux window you are already in without manually retyping its name or path.</dd>
+              </div>
+              <div class="feature">
+                <dt>Inspect drift</dt>
+                <dd>Use <code>doctor</code> to compare your TSV config with the live tmux session before trusting a restore.</dd>
+              </div>
+              <div class="feature">
+                <dt>Preview first</dt>
+                <dd><code>--dry-run</code> validates inputs and reports intended tmux actions without mutating your workspace.</dd>
+              </div>
+              <div class="feature">
+                <dt>Spawn fresh threads</dt>
+                <dd>Create a new Amp thread in a real interactive tmux window and add it to your restore config.</dd>
+              </div>
+              <div class="feature">
+                <dt>Plain-text config</dt>
+                <dd>The restore contract is a simple TSV file that is easy to read, diff, back up, and sync.</dd>
+              </div>
+            </dl>
+          </div>
+        </section>
+
+        <section class="section" id="workflow">
+          <div class="container split">
+            <div class="section-heading">
+              <h2>A tiny contract you can understand.</h2>
+              <p>
+                The default config lives at <code>~/.config/amp-tmux/workspaces.tsv</code>. Each row maps a workspace, a tmux window, a working directory, and an Amp thread.
+              </p>
+            </div>
+            <div class="panel">
+              <h3>Config format</h3>
+              <div class="terminal terminal-compact">
+                <pre><code>workspace   window       workdir             thread
+mac         my-project   ~/Code/my-project   T-example
+mac         docs         ~/Code/docs         T-docs</code></pre>
+              </div>
+              <div class="steps">
+                <div class="step">
+                  <span class="step-number">1</span>
+                  <span class="step-copy"><strong>Store</strong><span>Save the current tmux window with <code>amux store-current</code>.</span></span>
+                </div>
+                <div class="step">
+                  <span class="step-number">2</span>
+                  <span class="step-copy"><strong>Restore</strong><span>Run <code>amux launch</code> to recreate the workspace later.</span></span>
+                </div>
+                <div class="step">
+                  <span class="step-number">3</span>
+                  <span class="step-copy"><strong>Verify</strong><span>Run <code>amux doctor</code> when live tmux state and config may have drifted.</span></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="cta">
+          <div class="container cta-box">
+            <div>
+              <h2>Install it, try it, keep what works.</h2>
+              <p>
+                <code>amux</code> is intentionally small: a Go binary, tmux, Amp, and a text file. Start with a dry run, then let it restore the workspace you already use.
+              </p>
+            </div>
+            <div class="terminal">
+              <pre><code><span class="prompt">$</span> curl -LO https://github.com/zainfathoni/amux/releases/download/v0.1.0/amux-v0.1.0-linux-amd64.tar.gz
+<span class="prompt">$</span> tar -xzf amux-v0.1.0-linux-amd64.tar.gz
+<span class="prompt">$</span> install -m 0755 amux-v0.1.0-linux-amd64/amux ~/.local/bin/amux</code></pre>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <div class="container footer-inner">
+          <span>MIT licensed. Built by Zain Fathoni.</span>
+          <div class="footer-links">
+            <a href="https://github.com/zainfathoni/amux">GitHub</a>
+            <a href="https://github.com/zainfathoni/amux/releases/latest">Releases</a>
+            <a href="https://github.com/zainfathoni/amux/issues">Issues</a>
+          </div>
+        </div>
+      </footer>
+    </div>
+  </body>
+</html>

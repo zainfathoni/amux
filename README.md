@@ -4,6 +4,8 @@
 
 It is built for people who keep long-running Amp threads around while moving between projects. Instead of manually reopening tmux windows and continuing threads, you store the windows you care about and let `amux` restore them later.
 
+Website: [amux.zainf.dev](https://amux.zainf.dev)
+
 ## Status
 
 `amux` is currently a small personal workflow tool being prepared for broader open-source use. The core CLI is tested, but the defaults still reflect the author's setup:
