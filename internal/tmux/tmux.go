@@ -118,7 +118,7 @@ func (r Runner) SendLiteral(target, text string) error {
 }
 
 func (r Runner) SendEnter(target string) error {
-	args := []string{"send-keys", "-t", target, "C-m"}
+	args := []string{"send-keys", "-t", target, "Enter"}
 	if r.DryRun {
 		fmt.Printf("tmux %s\n", shellJoin(args))
 		return nil

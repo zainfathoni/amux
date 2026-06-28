@@ -281,7 +281,7 @@ exit 2
 	for _, want := range []string{
 		"new-session -d -P -F #{window_id} -s Amp -n new win cd '" + workdir + "' && exec amp threads continue 'T-new-thread'",
 		"send-keys -t @1 -l hello Amp",
-		"send-keys -t @1 C-m",
+		"send-keys -t @1 Enter",
 		"select-window -t @1",
 	} {
 		if !strings.Contains(log, want) {
@@ -465,7 +465,7 @@ exit 2
 	for _, want := range []string{
 		"new-window -P -F #{window_id} -t Amp -n fresh cd '" + workdir + "' && exec amp threads continue 'T-existing-session'",
 		"send-keys -t @7 -l hello",
-		"send-keys -t @7 C-m",
+		"send-keys -t @7 Enter",
 		"select-window -t @7",
 	} {
 		if !strings.Contains(log, want) {
