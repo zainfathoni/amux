@@ -35,12 +35,19 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          name="amux-${GITHUB_REF_NAME}-${GOOS}-${GOARCH}"
-          mkdir -p "$name"
-          ./scripts/build-amux.sh "$name/amux"
-          cp README.md "$name/README.md"
-          tar -czf "$name.tar.gz" "$name"
-          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          versioned="amux-${GITHUB_REF_NAME}-${GOOS}-${GOARCH}"
+          stable="amux-${GOOS}-${GOARCH}"
+
+          mkdir -p "$versioned" "$stable"
+          ./scripts/build-amux.sh "$versioned/amux"
+          cp README.md "$versioned/README.md"
+          cp "$versioned/amux" "$stable/amux"
+          cp README.md "$stable/README.md"
+
+          tar -czf "$versioned.tar.gz" "$versioned"
+          sha256sum "$versioned.tar.gz" > "$versioned.tar.gz.sha256"
+          tar -czf "$stable.tar.gz" "$stable"
+          sha256sum "$stable.tar.gz" > "$stable.tar.gz.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -48,6 +55,8 @@ jobs:
           path: |
             amux-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
             amux-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz.sha256
+            amux-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+            amux-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz.sha256
 
   publish:
     needs: build

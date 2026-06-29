@@ -41,11 +41,11 @@ Optional:
 Download the archive for your platform from the [latest release](https://github.com/zainfathoni/amux/releases/latest), verify its checksum, and install the binary somewhere on your `PATH`:
 
 ```sh
-curl -LO https://github.com/zainfathoni/amux/releases/download/v0.1.1/amux-v0.1.1-linux-amd64.tar.gz
-curl -LO https://github.com/zainfathoni/amux/releases/download/v0.1.1/amux-v0.1.1-linux-amd64.tar.gz.sha256
-sha256sum -c amux-v0.1.1-linux-amd64.tar.gz.sha256
-tar -xzf amux-v0.1.1-linux-amd64.tar.gz
-install -m 0755 amux-v0.1.1-linux-amd64/amux ~/.local/bin/amux
+curl -LO https://github.com/zainfathoni/amux/releases/latest/download/amux-linux-amd64.tar.gz
+curl -LO https://github.com/zainfathoni/amux/releases/latest/download/amux-linux-amd64.tar.gz.sha256
+sha256sum -c amux-linux-amd64.tar.gz.sha256
+tar -xzf amux-linux-amd64.tar.gz
+install -m 0755 amux-linux-amd64/amux ~/.local/bin/amux
 ```
 
 Release archives are published for Linux and macOS on amd64 and arm64.
@@ -211,6 +211,7 @@ git push origin v0.1.1
 ```
 
 The tag push starts the Release workflow. The workflow builds platform archives and injects the tag name as the `amux version` value.
+Each release publishes versioned artifacts such as `amux-v0.1.1-linux-amd64.tar.gz` and stable aliases such as `amux-linux-amd64.tar.gz` for `releases/latest/download` links.
 
 The standalone `amux` repository owns the installed `~/.local/bin/amux` binary. Dotfiles or machine-restore repositories should restore the workspace TSV, but should not track the compiled binary.
 
