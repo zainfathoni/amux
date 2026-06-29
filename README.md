@@ -41,11 +41,11 @@ Optional:
 Download the archive for your platform from the [latest release](https://github.com/zainfathoni/amux/releases/latest), verify its checksum, and install the binary somewhere on your `PATH`:
 
 ```sh
-curl -LO https://github.com/zainfathoni/amux/releases/download/v0.1.0/amux-v0.1.0-linux-amd64.tar.gz
-curl -LO https://github.com/zainfathoni/amux/releases/download/v0.1.0/amux-v0.1.0-linux-amd64.tar.gz.sha256
-sha256sum -c amux-v0.1.0-linux-amd64.tar.gz.sha256
-tar -xzf amux-v0.1.0-linux-amd64.tar.gz
-install -m 0755 amux-v0.1.0-linux-amd64/amux ~/.local/bin/amux
+curl -LO https://github.com/zainfathoni/amux/releases/download/v0.1.1/amux-v0.1.1-linux-amd64.tar.gz
+curl -LO https://github.com/zainfathoni/amux/releases/download/v0.1.1/amux-v0.1.1-linux-amd64.tar.gz.sha256
+sha256sum -c amux-v0.1.1-linux-amd64.tar.gz.sha256
+tar -xzf amux-v0.1.1-linux-amd64.tar.gz
+install -m 0755 amux-v0.1.1-linux-amd64/amux ~/.local/bin/amux
 ```
 
 Release archives are published for Linux and macOS on amd64 and arm64.
@@ -67,7 +67,7 @@ BUILD_OUTPUT=/tmp/amux make build
 
 Builds made through `make build` or `scripts/build-amux.sh` inject version metadata into `amux version`:
 
-- tag releases use the tag name, for example `v0.1.0`
+- tag releases use the tag name, for example `v0.1.1`
 - `main` branch CI builds use `main.<github-run-number>` so every main build has a unique version
 - pull request CI builds use `pr.<pull-request-number>.<github-run-number>`
 - local scripted builds use `dev.<short-sha>` unless `VERSION=...` is provided
@@ -206,8 +206,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
 GitHub publishes release artifacts when a pushed tag matches `v*`:
 
 ```sh
-git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
+git tag -a v0.1.1 -m "v0.1.1"
+git push origin v0.1.1
 ```
 
 The tag push starts the Release workflow. The workflow builds platform archives and injects the tag name as the `amux version` value.
