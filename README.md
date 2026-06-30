@@ -22,6 +22,7 @@ The project is public-source friendly, but not yet a polished cross-platform pro
 - Restore Amp threads into named tmux windows.
 - Store or remove the current tmux window from the restore config.
 - Spawn a fresh Amp thread in a new tmux window.
+- Tear down an `amux spawn` worker from its injected identity.
 - Validate planned restore actions with `--dry-run`.
 - Inspect config/live tmux drift with `doctor`.
 - Build versioned release artifacts through GitHub Actions.
@@ -143,6 +144,7 @@ amux remove <workspace> <window>
 amux remove-current [workspace]
 amux park-current [workspace]
 amux spawn [--mode <mode> | -m <mode>] <window> <workdir> <initial-message> [workspace] [session]
+amux teardown
 amux version
 amux self-update
 amux path
@@ -150,6 +152,8 @@ amux doctor
 ```
 
 `amux spawn --mode <mode>` (or `-m <mode>`) creates the new Amp thread with the selected Amp mode. Omitting `--mode` preserves the default Amp thread behavior.
+
+`amux spawn` injects a stable identity contract into the spawned Amp process: `AMUX_WORKSPACE`, `AMUX_SESSION`, `AMUX_WINDOW`, `AMUX_THREAD_ID`, and `AMUX_WORKDIR`. From that spawned process, no-arg `amux teardown` verifies the `AMUX_WORKSPACE`/`AMUX_SESSION`/`AMUX_WINDOW`/`AMUX_THREAD_ID` identity against the restore config and live tmux window, archives the matching Amp thread, removes the restore row, and stops the uniquely matched tmux window. If the identity, config row, or tmux window is missing, mismatched, or ambiguous, teardown refuses to archive or stop anything.
 
 `--dry-run` validates inputs and checks tmux window conflicts without mutating state. For `spawn`, dry-run does not create an Amp thread, create tmux windows, send keys, or update `workspaces.tsv`; it only prints the intended actions, including the selected mode when provided.
 

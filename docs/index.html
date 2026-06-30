@@ -569,7 +569,11 @@ OK live tmux session matches config</code></pre>
               </div>
               <div class="feature">
                 <dt>Spawn fresh threads</dt>
-                <dd>Create a new Amp thread in a real interactive tmux window and add it to your restore config.</dd>
+                <dd>Create a new Amp thread in a real interactive tmux window, add it to your restore config, and inject stable <code>AMUX_*</code> identity for lifecycle commands.</dd>
+              </div>
+              <div class="feature">
+                <dt>Teardown workers safely</dt>
+                <dd><code>amux teardown</code> verifies spawned identity against config and tmux before archiving the matching Amp thread, removing the row, and stopping the uniquely matched window.</dd>
               </div>
               <div class="feature">
                 <dt>Plain-text config</dt>

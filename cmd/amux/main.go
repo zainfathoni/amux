@@ -95,6 +95,8 @@ func (a app) run(args []string) error {
 		return a.parkCurrent(opts, args)
 	case "spawn":
 		return a.spawn(opts, args)
+	case "teardown":
+		return a.teardown(opts, args)
 	case "self-update":
 		return a.selfUpdate(opts, args)
 	case "version", "--version":
@@ -570,7 +572,13 @@ func (a app) spawn(opts options, args []string) error {
 		return err
 	}
 
-	command := tmux.ContinueCommand(expandedWorkdir, thread)
+	command := tmux.ContinueCommandWithEnv(expandedWorkdir, thread, map[string]string{
+		"AMUX_WORKSPACE": workspace,
+		"AMUX_SESSION":   session,
+		"AMUX_WINDOW":    window,
+		"AMUX_THREAD_ID": thread,
+		"AMUX_WORKDIR":   expandedWorkdir,
+	})
 	var windowID string
 	if sessionExists {
 		windowID, err = runner.NewWindowID(session, window, command)
@@ -601,6 +609,169 @@ func (a app) spawn(opts options, args []string) error {
 	}
 	fmt.Fprintln(a.stdout, thread)
 	return nil
+}
+
+type teardownIdentity struct {
+	Workspace string
+	Session   string
+	Window    string
+	Thread    string
+}
+
+func (a app) teardown(opts options, args []string) error {
+	if len(args) != 0 {
+		return errors.New("usage: amux teardown")
+	}
+	if opts.dryRun {
+		return errors.New("teardown does not support --dry-run")
+	}
+
+	identity, err := teardownIdentityFromEnv()
+	if err != nil {
+		return err
+	}
+	row, err := verifiedTeardownRow(opts.configPath, identity)
+	if err != nil {
+		return err
+	}
+	runner := tmux.Runner{}
+	pane, err := verifiedTeardownPane(runner, identity)
+	if err != nil {
+		return err
+	}
+
+	if err := archiveAmpThread(identity.Thread); err != nil {
+		return fmt.Errorf("archive Amp thread %s: %w", identity.Thread, err)
+	}
+	if err := a.removeRow(opts, identity.Workspace, identity.Window); err != nil {
+		return err
+	}
+	if err := runner.KillWindow(pane.WindowID); err != nil {
+		return fmt.Errorf("stop tmux window %s (%s): %w", identity.Window, pane.WindowID, err)
+	}
+	fmt.Fprintf(a.stdout, "Archived Amp thread %s\n", identity.Thread)
+	fmt.Fprintf(a.stdout, "Stopped tmux window %s/%s (%s)\n", identity.Session, identity.Window, pane.WindowID)
+	fmt.Fprintf(a.stdout, "Teardown complete for %s/%s in %s\n", row.Workspace, row.Window, opts.configPath)
+	return nil
+}
+
+func teardownIdentityFromEnv() (teardownIdentity, error) {
+	identity := teardownIdentity{
+		Workspace: os.Getenv("AMUX_WORKSPACE"),
+		Session:   os.Getenv("AMUX_SESSION"),
+		Window:    os.Getenv("AMUX_WINDOW"),
+		Thread:    os.Getenv("AMUX_THREAD_ID"),
+	}
+	missing := make([]string, 0, 4)
+	if identity.Workspace == "" {
+		missing = append(missing, "AMUX_WORKSPACE")
+	}
+	if identity.Session == "" {
+		missing = append(missing, "AMUX_SESSION")
+	}
+	if identity.Window == "" {
+		missing = append(missing, "AMUX_WINDOW")
+	}
+	if identity.Thread == "" {
+		missing = append(missing, "AMUX_THREAD_ID")
+	}
+	if len(missing) > 0 {
+		return identity, fmt.Errorf("teardown requires spawn-injected identity; missing %s", strings.Join(missing, ", "))
+	}
+	if err := config.ValidateField("AMUX_WORKSPACE", identity.Workspace); err != nil {
+		return identity, err
+	}
+	if err := config.ValidateField("AMUX_SESSION", identity.Session); err != nil {
+		return identity, err
+	}
+	if err := config.ValidateField("AMUX_WINDOW", identity.Window); err != nil {
+		return identity, err
+	}
+	if err := config.ValidateField("AMUX_THREAD_ID", identity.Thread); err != nil {
+		return identity, err
+	}
+	return identity, nil
+}
+
+func verifiedTeardownRow(path string, identity teardownIdentity) (config.Row, error) {
+	rows, err := config.Load(path)
+	if err != nil {
+		return config.Row{}, err
+	}
+	matches := make([]config.Row, 0, 1)
+	candidates := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if row.Workspace == identity.Workspace {
+			candidates = append(candidates, row.Window+" ("+row.Thread+")")
+		}
+		if row.Workspace == identity.Workspace && row.Window == identity.Window {
+			matches = append(matches, row)
+		}
+	}
+	if len(matches) == 0 {
+		return config.Row{}, fmt.Errorf("no restore row for %s/%s; candidates in workspace %q: %s", identity.Workspace, identity.Window, identity.Workspace, formatCandidates(candidates))
+	}
+	if len(matches) > 1 {
+		return config.Row{}, fmt.Errorf("ambiguous restore rows for %s/%s; refusing teardown", identity.Workspace, identity.Window)
+	}
+	row := matches[0]
+	if row.Thread != identity.Thread {
+		return config.Row{}, fmt.Errorf("restore row thread mismatch for %s/%s: AMUX_THREAD_ID=%s config=%s", identity.Workspace, identity.Window, identity.Thread, row.Thread)
+	}
+	return row, nil
+}
+
+func verifiedTeardownPane(runner tmux.Runner, identity teardownIdentity) (tmux.WindowPane, error) {
+	panes, err := runner.WindowPanes(identity.Session, identity.Window)
+	if err != nil {
+		return tmux.WindowPane{}, fmt.Errorf("find tmux window %s/%s: %w", identity.Session, identity.Window, err)
+	}
+	if len(panes) == 0 {
+		return tmux.WindowPane{}, fmt.Errorf("no live tmux window %q in session %q", identity.Window, identity.Session)
+	}
+	if len(panes) > 1 {
+		return tmux.WindowPane{}, fmt.Errorf("ambiguous tmux window %q in session %q: candidates %s; refusing teardown", identity.Window, identity.Session, formatPaneCandidates(panes))
+	}
+	pane := panes[0]
+	if pane.WindowID == "" {
+		return tmux.WindowPane{}, fmt.Errorf("tmux window %q in session %q has no window id", identity.Window, identity.Session)
+	}
+	if pane.StartCommand != "" && !strings.Contains(pane.StartCommand, identity.Thread) {
+		return tmux.WindowPane{}, fmt.Errorf("tmux window %q in session %q is not continuing AMUX_THREAD_ID=%s; start command: %s", identity.Window, identity.Session, identity.Thread, pane.StartCommand)
+	}
+	return pane, nil
+}
+
+func archiveAmpThread(thread string) error {
+	cmd := exec.Command("amp", "threads", "archive", thread)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(out))
+		if message == "" {
+			return err
+		}
+		return fmt.Errorf("%w: %s", err, message)
+	}
+	return nil
+}
+
+func formatCandidates(candidates []string) string {
+	if len(candidates) == 0 {
+		return "none"
+	}
+	return strings.Join(candidates, ", ")
+}
+
+func formatPaneCandidates(panes []tmux.WindowPane) string {
+	candidates := make([]string, 0, len(panes))
+	for _, pane := range panes {
+		if pane.WindowID == "" {
+			candidates = append(candidates, "unknown-window-id")
+			continue
+		}
+		candidates = append(candidates, pane.WindowID)
+	}
+	return formatCandidates(candidates)
 }
 
 type spawnOptions struct {
@@ -812,9 +983,16 @@ Commands:
   spawn [--mode <mode> | -m <mode>] <window> <workdir> <initial-message> [workspace] [session]
       Create an empty Amp thread, open it in an interactive tmux window,
       submit the initial message with tmux send-keys, and store the row.
+      The spawned Amp process receives AMUX_WORKSPACE, AMUX_SESSION,
+      AMUX_WINDOW, AMUX_THREAD_ID, and AMUX_WORKDIR identity variables.
       Use --mode or -m to create the thread with an Amp mode.
       With --dry-run, only validate and print intended actions; do not create
       an Amp thread, mutate tmux, send keys, or update the config.
+
+  teardown
+      From an amux-spawned Amp process, verify AMUX_* identity, archive the
+      matching Amp thread, remove the restore row, and stop the matched tmux
+      window. Refuses to run if identity or tmux/config state is ambiguous.
 
   self-update
       Download the latest GitHub release for this platform, verify its
