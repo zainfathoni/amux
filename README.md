@@ -50,6 +50,23 @@ install -m 0755 amux-linux-amd64/amux ~/.local/bin/amux
 
 Release archives are published for Linux and macOS on amd64 and arm64.
 
+To let `amux` manage future updates itself, install the binary to a user-owned
+path such as `~/.local/bin/amux` and keep that directory on your `PATH`.
+Package-managed locations such as the Nix store or Homebrew Cellar are treated
+as immutable; `amux self-update` refuses to replace binaries from those paths.
+
+Update a user-local release install with:
+
+```sh
+amux self-update
+```
+
+Preview the update without replacing the binary:
+
+```sh
+amux --dry-run self-update
+```
+
 ## Install from source
 
 Build and install the CLI from this repository:
@@ -127,6 +144,7 @@ amux remove-current [workspace]
 amux park-current [workspace]
 amux spawn <window> <workdir> <initial-message> [workspace] [session]
 amux version
+amux self-update
 amux path
 amux doctor
 ```
@@ -213,7 +231,11 @@ git push origin v0.1.1
 The tag push starts the Release workflow. The workflow builds platform archives and injects the tag name as the `amux version` value.
 Each release publishes versioned artifacts such as `amux-v0.1.1-linux-amd64.tar.gz` and stable aliases such as `amux-linux-amd64.tar.gz` for `releases/latest/download` links.
 
-The standalone `amux` repository owns the installed `~/.local/bin/amux` binary. Dotfiles or machine-restore repositories should restore the workspace TSV, but should not track the compiled binary.
+The standalone `amux` repository owns the installed `~/.local/bin/amux` binary.
+Dotfiles or machine-restore repositories should restore the workspace TSV and
+ensure `~/.local/bin` is on `PATH`, but should not track the compiled binary or
+install `amux` through an immutable package-manager store if self-update is the
+desired update flow.
 
 ## Roadmap
 

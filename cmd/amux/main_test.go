@@ -1,9 +1,16 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -53,6 +60,172 @@ func TestVersionStringIncludesBuildMetadata(t *testing.T) {
 
 	if got, want := versionString(), "amux v0.1.0 commit=abc1234 built=2026-06-13T11:20:06Z"; got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestSelfUpdateDryRunPlansLatestReleaseAsset(t *testing.T) {
+	tmp := t.TempDir()
+	exePath := filepath.Join(tmp, "amux")
+	if err := os.WriteFile(exePath, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	archiveName := fmt.Sprintf("amux-%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/latest" {
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+		}
+		fmt.Fprintf(w, `{"tag_name":"v9.9.9","assets":[{"name":%q,"browser_download_url":%q},{"name":%q,"browser_download_url":%q}]}`, archiveName, serverURL(r, "/archive"), archiveName+".sha256", serverURL(r, "/checksum"))
+	}))
+	defer server.Close()
+	withSelfUpdateTestState(t, exePath, server.URL+"/latest", server.Client())
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--dry-run", "self-update"}); err != nil {
+		t.Fatal(err)
+	}
+
+	resolvedExePath, err := filepath.EvalSymlinks(exePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "Would update "+resolvedExePath+" to v9.9.9 using "+archiveName) {
+		t.Fatalf("unexpected dry-run output: %q", got)
+	}
+	contents, err := os.ReadFile(exePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "old binary" {
+		t.Fatalf("dry-run changed executable to %q", contents)
+	}
+}
+
+func TestSelfUpdateDryRunDoesNotRequireWritableInstallDirOrDownloadArchive(t *testing.T) {
+	tmp := t.TempDir()
+	exePath := filepath.Join(tmp, "amux")
+	if err := os.WriteFile(exePath, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(tmp, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(tmp, 0o755) })
+	archiveName := fmt.Sprintf("amux-%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/latest":
+			fmt.Fprintf(w, `{"tag_name":"v9.9.9","assets":[{"name":%q,"browser_download_url":%q},{"name":%q,"browser_download_url":%q}]}`, archiveName, serverURL(r, "/archive"), archiveName+".sha256", serverURL(r, "/checksum"))
+		case "/archive", "/checksum":
+			t.Fatalf("dry-run downloaded %s", r.URL.Path)
+		default:
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	withSelfUpdateTestState(t, exePath, server.URL+"/latest", server.Client())
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--dry-run", "self-update"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "Would update ") {
+		t.Fatalf("unexpected dry-run output: %q", stdout.String())
+	}
+}
+
+func TestSelfUpdateReplacesCurrentBinary(t *testing.T) {
+	tmp := t.TempDir()
+	exePath := filepath.Join(tmp, "amux")
+	if err := os.WriteFile(exePath, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	archiveName := fmt.Sprintf("amux-%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	archiveBytes := testReleaseArchive(t, "new binary")
+	checksum := sha256.Sum256(archiveBytes)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/latest":
+			fmt.Fprintf(w, `{"tag_name":"v9.9.9","assets":[{"name":%q,"browser_download_url":%q},{"name":%q,"browser_download_url":%q}]}`, archiveName, serverURL(r, "/archive"), archiveName+".sha256", serverURL(r, "/checksum"))
+		case "/archive":
+			w.Write(archiveBytes)
+		case "/checksum":
+			fmt.Fprintf(w, "%x  %s\n", checksum, archiveName)
+		default:
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	withSelfUpdateTestState(t, exePath, server.URL+"/latest", server.Client())
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"self-update"}); err != nil {
+		t.Fatal(err)
+	}
+
+	contents, err := os.ReadFile(exePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "new binary" {
+		t.Fatalf("got executable contents %q, want updated binary", contents)
+	}
+	resolvedExePath, err := filepath.EvalSymlinks(exePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "Updated amux to v9.9.9 at "+resolvedExePath) {
+		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestSelfUpdateChecksumMismatchLeavesCurrentBinary(t *testing.T) {
+	tmp := t.TempDir()
+	exePath := filepath.Join(tmp, "amux")
+	if err := os.WriteFile(exePath, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	archiveName := fmt.Sprintf("amux-%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	archiveBytes := testReleaseArchive(t, "new binary")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/latest":
+			fmt.Fprintf(w, `{"tag_name":"v9.9.9","assets":[{"name":%q,"browser_download_url":%q},{"name":%q,"browser_download_url":%q}]}`, archiveName, serverURL(r, "/archive"), archiveName+".sha256", serverURL(r, "/checksum"))
+		case "/archive":
+			w.Write(archiveBytes)
+		case "/checksum":
+			fmt.Fprintf(w, "%064x  %s\n", 0, archiveName)
+		default:
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	withSelfUpdateTestState(t, exePath, server.URL+"/latest", server.Client())
+
+	err := (app{}).run([]string{"self-update"})
+	if err == nil {
+		t.Fatal("self-update succeeded with checksum mismatch, want error")
+	}
+	if !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("unexpected error: %q", err)
+	}
+	contents, readErr := os.ReadFile(exePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(contents) != "old binary" {
+		t.Fatalf("checksum failure changed executable to %q", contents)
+	}
+}
+
+func TestSelfUpdateRefusesPackageManagedInstall(t *testing.T) {
+	withSelfUpdateTestState(t, "/nix/store/example-amux/bin/amux", "http://127.0.0.1/should-not-fetch", http.DefaultClient)
+
+	err := (app{}).run([]string{"self-update"})
+	if err == nil {
+		t.Fatal("self-update succeeded for package-managed path, want error")
+	}
+	if !strings.Contains(err.Error(), "self-update refused for package-managed install") || !strings.Contains(err.Error(), "~/.local/bin/amux") {
+		t.Fatalf("unexpected error: %q", err)
 	}
 }
 
@@ -1051,6 +1224,46 @@ func runCapturingStdout(t *testing.T, args []string) (string, error) {
 	var stdout bytes.Buffer
 	runErr := (app{stdout: &stdout}).run(args)
 	return stdout.String(), runErr
+}
+
+func withSelfUpdateTestState(t *testing.T, exePath, releaseURL string, client *http.Client) {
+	t.Helper()
+	oldExecutablePath := executablePath
+	oldReleaseURL := selfUpdateReleaseURL
+	oldHTTPClient := selfUpdateHTTPClient
+	executablePath = func() (string, error) { return exePath, nil }
+	selfUpdateReleaseURL = releaseURL
+	selfUpdateHTTPClient = client
+	t.Cleanup(func() {
+		executablePath = oldExecutablePath
+		selfUpdateReleaseURL = oldReleaseURL
+		selfUpdateHTTPClient = oldHTTPClient
+	})
+}
+
+func serverURL(r *http.Request, path string) string {
+	return "http://" + r.Host + path
+}
+
+func testReleaseArchive(t *testing.T, binary string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	contents := []byte(binary)
+	if err := tw.WriteHeader(&tar.Header{Name: "amux-test/amux", Mode: 0o755, Size: int64(len(contents))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(contents); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }
 
 func writeExecutable(t *testing.T, path, contents string) {
