@@ -95,9 +95,9 @@ func (a app) run(args []string) error {
 		return a.parkCurrent(opts, args)
 	case "spawn":
 		return a.spawn(opts, args)
-	case "version":
+	case "version", "--version":
 		if len(args) != 0 {
-			return errors.New("usage: amux version")
+			return fmt.Errorf("usage: amux %s", command)
 		}
 		fmt.Fprintln(a.stdout, versionString())
 		return nil
@@ -770,7 +770,7 @@ Commands:
   doctor [workspace]
       Check dependencies, config readability, and configured workdirs.
 
-  version
+  version, --version
       Print the amux version and build metadata.
 
   path

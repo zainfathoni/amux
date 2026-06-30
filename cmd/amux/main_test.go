@@ -32,6 +32,16 @@ func TestVersionPrintsDefaultVersion(t *testing.T) {
 	}
 }
 
+func TestVersionFlagPrintsDefaultVersion(t *testing.T) {
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--version"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stdout.String(), "amux dev\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 func TestVersionStringIncludesBuildMetadata(t *testing.T) {
 	oldVersion, oldCommit, oldBuilt := version, commit, built
 	t.Cleanup(func() {
