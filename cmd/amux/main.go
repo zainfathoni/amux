@@ -95,6 +95,8 @@ func (a app) run(args []string) error {
 		return a.parkCurrent(opts, args)
 	case "spawn":
 		return a.spawn(opts, args)
+	case "self-update":
+		return a.selfUpdate(opts, args)
 	case "version", "--version":
 		if len(args) != 0 {
 			return fmt.Errorf("usage: amux %s", command)
@@ -766,6 +768,11 @@ Commands:
       submit the initial message with tmux send-keys, and store the row.
       With --dry-run, only validate and print intended actions; do not create
       an Amp thread, mutate tmux, send keys, or update the config.
+
+  self-update
+      Download the latest GitHub release for this platform, verify its
+      checksum, and replace the current binary. Refuses package-managed paths.
+      With --dry-run, only print the planned update.
 
   doctor [workspace]
       Check dependencies, config readability, and configured workdirs.
