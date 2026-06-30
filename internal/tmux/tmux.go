@@ -18,6 +18,12 @@ type Pane struct {
 	Path   string
 }
 
+type WindowPane struct {
+	Window       string
+	WindowID     string
+	StartCommand string
+}
+
 func (r Runner) HasSession(session string) bool {
 	if r.DryRun {
 		return false
@@ -60,6 +66,33 @@ func (r Runner) Panes(session string) ([]Pane, error) {
 			return nil, fmt.Errorf("unexpected tmux pane row %q", line)
 		}
 		panes = append(panes, Pane{Window: fields[0], Path: fields[1]})
+	}
+	return panes, nil
+}
+
+func (r Runner) WindowPanes(session, window string) ([]WindowPane, error) {
+	if r.DryRun {
+		return nil, nil
+	}
+	out, err := tmuxOutput("list-panes", "-s", "-t", session, "-F", "#{window_name}\t#{window_id}\t#{pane_start_command}")
+	if err != nil {
+		return nil, err
+	}
+	text := strings.TrimSuffix(string(out), "\n")
+	if text == "" {
+		return nil, nil
+	}
+	lines := strings.Split(text, "\n")
+	panes := make([]WindowPane, 0, len(lines))
+	for _, line := range lines {
+		fields := strings.SplitN(line, "\t", 3)
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("unexpected tmux pane row %q", line)
+		}
+		if fields[0] != window {
+			continue
+		}
+		panes = append(panes, WindowPane{Window: fields[0], WindowID: fields[1], StartCommand: fields[2]})
 	}
 	return panes, nil
 }
@@ -128,6 +161,15 @@ func (r Runner) SendEnter(target string) error {
 
 func (r Runner) SelectWindow(target string) error {
 	args := []string{"select-window", "-t", target}
+	if r.DryRun {
+		fmt.Printf("tmux %s\n", shellJoin(args))
+		return nil
+	}
+	return tmuxRun(args...)
+}
+
+func (r Runner) KillWindow(target string) error {
+	args := []string{"kill-window", "-t", target}
 	if r.DryRun {
 		fmt.Printf("tmux %s\n", shellJoin(args))
 		return nil
@@ -269,6 +311,17 @@ func WindowExists(names []string, window string) bool {
 
 func ContinueCommand(workdir, thread string) string {
 	return "cd " + shellQuote(workdir) + " && exec amp threads continue " + shellQuote(thread)
+}
+
+func ContinueCommandWithEnv(workdir, thread string, env map[string]string) string {
+	assignments := []string{
+		"AMUX_WORKSPACE=" + shellQuote(env["AMUX_WORKSPACE"]),
+		"AMUX_SESSION=" + shellQuote(env["AMUX_SESSION"]),
+		"AMUX_WINDOW=" + shellQuote(env["AMUX_WINDOW"]),
+		"AMUX_THREAD_ID=" + shellQuote(env["AMUX_THREAD_ID"]),
+		"AMUX_WORKDIR=" + shellQuote(env["AMUX_WORKDIR"]),
+	}
+	return "cd " + shellQuote(workdir) + " && " + strings.Join(assignments, " ") + " exec amp threads continue " + shellQuote(thread)
 }
 
 func shellJoin(args []string) string {

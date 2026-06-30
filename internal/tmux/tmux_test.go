@@ -16,6 +16,20 @@ func TestContinueCommandQuotesShellArgs(t *testing.T) {
 	}
 }
 
+func TestContinueCommandWithEnvInjectsAmuxIdentity(t *testing.T) {
+	got := ContinueCommandWithEnv("/tmp/work dir", "T-thread", map[string]string{
+		"AMUX_WORKSPACE": "mac",
+		"AMUX_SESSION":   "Amp",
+		"AMUX_WINDOW":    "worker one",
+		"AMUX_THREAD_ID": "T-thread",
+		"AMUX_WORKDIR":   "/tmp/work dir",
+	})
+	want := "cd '/tmp/work dir' && AMUX_WORKSPACE='mac' AMUX_SESSION='Amp' AMUX_WINDOW='worker one' AMUX_THREAD_ID='T-thread' AMUX_WORKDIR='/tmp/work dir' exec amp threads continue 'T-thread'"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 func TestTmuxErrorsIncludeCommandOutput(t *testing.T) {
 	tmp := t.TempDir()
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
