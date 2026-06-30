@@ -486,8 +486,12 @@ func (a app) removeRow(opts options, workspace, window string) error {
 }
 
 func (a app) spawn(opts options, args []string) error {
+	spawnOpts, args, err := parseSpawnOptions(args)
+	if err != nil {
+		return err
+	}
 	if len(args) < 3 || len(args) > 5 {
-		return errors.New("usage: amux spawn <window> <workdir> <initial-message> [workspace] [session]")
+		return errors.New("usage: amux spawn [--mode <mode> | -m <mode>] <window> <workdir> <initial-message> [workspace] [session]")
 	}
 	window := args[0]
 	workdir := args[1]
@@ -513,6 +517,11 @@ func (a app) spawn(opts options, args []string) error {
 	if err := config.ValidateField("initial-message", initialMessage); err != nil {
 		return err
 	}
+	if spawnOpts.mode != "" {
+		if err := config.ValidateField("mode", spawnOpts.mode); err != nil {
+			return err
+		}
+	}
 	row := config.Row{Workspace: workspace, Window: window, Workdir: workdir}
 	expandedWorkdir := config.ExpandHome(workdir)
 	if stat, err := os.Stat(expandedWorkdir); err != nil || !stat.IsDir() {
@@ -530,7 +539,11 @@ func (a app) spawn(opts options, args []string) error {
 		}
 	}
 	if opts.dryRun {
-		fmt.Fprintf(a.stdout, "Would create Amp thread for %s/%s\n", workspace, window)
+		if spawnOpts.mode == "" {
+			fmt.Fprintf(a.stdout, "Would create Amp thread for %s/%s\n", workspace, window)
+		} else {
+			fmt.Fprintf(a.stdout, "Would create Amp thread for %s/%s with mode %q\n", workspace, window, spawnOpts.mode)
+		}
 		if sessionExists {
 			fmt.Fprintf(a.stdout, "Would create tmux window %q in session %q\n", window, session)
 		} else {
@@ -541,7 +554,11 @@ func (a app) spawn(opts options, args []string) error {
 		return nil
 	}
 
-	threadBytes, err := exec.Command("amp", "threads", "new").Output()
+	ampArgs := []string{"threads", "new"}
+	if spawnOpts.mode != "" {
+		ampArgs = append(ampArgs, "--mode", spawnOpts.mode)
+	}
+	threadBytes, err := exec.Command("amp", ampArgs...).Output()
 	if err != nil {
 		return fmt.Errorf("create Amp thread: %w", err)
 	}
@@ -582,6 +599,35 @@ func (a app) spawn(opts options, args []string) error {
 	}
 	fmt.Fprintln(a.stdout, thread)
 	return nil
+}
+
+type spawnOptions struct {
+	mode string
+}
+
+func parseSpawnOptions(args []string) (spawnOptions, []string, error) {
+	var opts spawnOptions
+	remaining := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--mode", "-m":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return opts, nil, errors.New("--mode requires a mode")
+			}
+			opts.mode = args[i]
+		default:
+			if strings.HasPrefix(args[i], "--mode=") {
+				opts.mode = strings.TrimPrefix(args[i], "--mode=")
+				if opts.mode == "" {
+					return opts, nil, errors.New("--mode requires a mode")
+				}
+			} else {
+				remaining = append(remaining, args[i])
+			}
+		}
+	}
+	return opts, remaining, nil
 }
 
 func spawnDelay() time.Duration {
@@ -761,9 +807,10 @@ Commands:
       The delayed shutdown force-closes tmux only if graceful exit times out.
       Amp thread history is not deleted.
 
-  spawn <window> <workdir> <initial-message> [workspace] [session]
+  spawn [--mode <mode> | -m <mode>] <window> <workdir> <initial-message> [workspace] [session]
       Create an empty Amp thread, open it in an interactive tmux window,
       submit the initial message with tmux send-keys, and store the row.
+      Use --mode or -m to create the thread with an Amp mode.
       With --dry-run, only validate and print intended actions; do not create
       an Amp thread, mutate tmux, send keys, or update the config.
 

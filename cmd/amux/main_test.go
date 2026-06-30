@@ -290,6 +290,53 @@ exit 2
 	}
 }
 
+func TestSpawnLongModeFlagCreatesThreadWithMode(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = new ]; then
+  printf 'T-mode-thread\n'
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then
+  exit 1
+fi
+if [ "$1" = new-session ]; then
+  printf '@1\n'
+  exit 0
+fi
+if [ "$1" = send-keys ] || [ "$1" = select-window ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	if err := run([]string{"--config", configPath, "spawn", "--mode", "plan", "mode win", workdir, "hello Amp"}); err != nil {
+		t.Fatal(err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(logBytes), "threads new --mode plan\n"; got != want {
+		t.Fatalf("got amp call %q, want %q", got, want)
+	}
+}
+
 func TestSpawnDryRunDoesNotCreateThreadOrWriteConfig(t *testing.T) {
 	tmp := t.TempDir()
 	workdir := filepath.Join(tmp, "workdir")
@@ -325,6 +372,51 @@ exit 2
 	}
 	for _, want := range []string{
 		"Would create Amp thread for mac/dry",
+		"Would create tmux session \"Amp\" with window \"dry\"",
+		"Would start Amp in " + workdir + " and submit initial message",
+		"Would store mac/dry in " + configPath,
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("dry-run output missing %q\nstdout:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestSpawnDryRunShortModeFlagPrintsMode(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	ampCalledPath := filepath.Join(tmp, "amp-called")
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+touch "`+ampCalledPath+`"
+printf 'T-should-not-exist\n'
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then
+  exit 1
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "--dry-run", "spawn", "-m", "accept-edits", "dry", workdir, "hello"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(ampCalledPath); !os.IsNotExist(err) {
+		t.Fatalf("dry-run spawn called amp threads new")
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("dry-run spawn wrote config file")
+	}
+	for _, want := range []string{
+		"Would create Amp thread for mac/dry with mode \"accept-edits\"",
 		"Would create tmux session \"Amp\" with window \"dry\"",
 		"Would start Amp in " + workdir + " and submit initial message",
 		"Would store mac/dry in " + configPath,
