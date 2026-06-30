@@ -13,6 +13,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/zainfathoni/amux/internal/config"
 )
 
 func TestPathWritesToInjectedStdout(t *testing.T) {
@@ -1159,6 +1161,10 @@ func TestTeardownFromSpawnIdentityArchivesRemovesAndStopsWindow(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("mac\tworker\t/tmp/project\tT-worker\nmac\tother\t/tmp/other\tT-other\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	startCommand := teardownExpectedStartCommand(
+		teardownIdentity{Workspace: "mac", Session: "Amp", Window: "worker", Thread: "T-worker"},
+		config.Row{Workspace: "mac", Window: "worker", Workdir: "/tmp/project", Thread: "T-worker"},
+	)
 
 	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
 printf 'amp %s\n' "$*" >> "`+logPath+`"
@@ -1170,7 +1176,7 @@ exit 2
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 printf 'tmux %s\n' "$*" >> "`+logPath+`"
 if [ "$1" = list-panes ]; then
-  printf 'worker\t@7\tcd /tmp/project && AMUX_THREAD_ID=T-worker exec amp threads continue T-worker\n'
+  printf 'worker\t@7\t%s\n' `+shellSingleQuote(startCommand)+`
   printf 'other\t@8\tcd /tmp/other && AMUX_THREAD_ID=T-other exec amp threads continue T-other\n'
   exit 0
 fi
@@ -1225,6 +1231,72 @@ exit 2
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("teardown output missing %q\nstdout:\n%s", want, stdout.String())
 		}
+	}
+}
+
+func TestTeardownFailsClosedOnUnexpectedStartCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		startCommand string
+	}{
+		{name: "blank", startCommand: ""},
+		{name: "substring-thread", startCommand: "cd /tmp/project && AMUX_THREAD_ID=T-worker2 exec amp threads continue T-worker2"},
+		{name: "not-amux-spawn", startCommand: "echo about T-worker"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			configPath := filepath.Join(tmp, "workspaces.tsv")
+			logPath := filepath.Join(tmp, "calls.log")
+			if err := os.WriteFile(configPath, []byte("mac\tworker\t/tmp/project\tT-worker\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+exit 0
+`)
+			writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ]; then
+  printf 'worker\t@7\t%s\n' `+shellSingleQuote(tc.startCommand)+`
+  exit 0
+fi
+if [ "$1" = kill-window ]; then
+  exit 0
+fi
+exit 2
+`)
+
+			t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("AMUX_WORKSPACE", "mac")
+			t.Setenv("AMUX_SESSION", "Amp")
+			t.Setenv("AMUX_WINDOW", "worker")
+			t.Setenv("AMUX_THREAD_ID", "T-worker")
+
+			err := run([]string{"--config", configPath, "teardown"})
+			if err == nil {
+				t.Fatal("teardown succeeded, want start-command mismatch")
+			}
+			if !strings.Contains(err.Error(), "not the expected amux-spawned command") {
+				t.Fatalf("got error %q, want start-command mismatch", err)
+			}
+
+			logBytes, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			log := string(logBytes)
+			if strings.Contains(log, "amp threads archive") || strings.Contains(log, "tmux kill-window") {
+				t.Fatalf("teardown archived or killed despite start-command mismatch\nlog:\n%s", log)
+			}
+			configBytes, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(configBytes), "mac\tworker\t/tmp/project\tT-worker\n") {
+				t.Fatalf("teardown removed row despite start-command mismatch: %q", configBytes)
+			}
+		})
 	}
 }
 

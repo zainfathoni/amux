@@ -635,7 +635,7 @@ func (a app) teardown(opts options, args []string) error {
 		return err
 	}
 	runner := tmux.Runner{}
-	pane, err := verifiedTeardownPane(runner, identity)
+	pane, err := verifiedTeardownPane(runner, identity, row)
 	if err != nil {
 		return err
 	}
@@ -721,7 +721,7 @@ func verifiedTeardownRow(path string, identity teardownIdentity) (config.Row, er
 	return row, nil
 }
 
-func verifiedTeardownPane(runner tmux.Runner, identity teardownIdentity) (tmux.WindowPane, error) {
+func verifiedTeardownPane(runner tmux.Runner, identity teardownIdentity, row config.Row) (tmux.WindowPane, error) {
 	panes, err := runner.WindowPanes(identity.Session, identity.Window)
 	if err != nil {
 		return tmux.WindowPane{}, fmt.Errorf("find tmux window %s/%s: %w", identity.Session, identity.Window, err)
@@ -736,10 +736,22 @@ func verifiedTeardownPane(runner tmux.Runner, identity teardownIdentity) (tmux.W
 	if pane.WindowID == "" {
 		return tmux.WindowPane{}, fmt.Errorf("tmux window %q in session %q has no window id", identity.Window, identity.Session)
 	}
-	if pane.StartCommand != "" && !strings.Contains(pane.StartCommand, identity.Thread) {
-		return tmux.WindowPane{}, fmt.Errorf("tmux window %q in session %q is not continuing AMUX_THREAD_ID=%s; start command: %s", identity.Window, identity.Session, identity.Thread, pane.StartCommand)
+	expectedCommand := teardownExpectedStartCommand(identity, row)
+	if pane.StartCommand != expectedCommand {
+		return tmux.WindowPane{}, fmt.Errorf("tmux window %q in session %q is not the expected amux-spawned command for AMUX_THREAD_ID=%s; start command: %s", identity.Window, identity.Session, identity.Thread, pane.StartCommand)
 	}
 	return pane, nil
+}
+
+func teardownExpectedStartCommand(identity teardownIdentity, row config.Row) string {
+	expandedWorkdir := config.ExpandHome(row.Workdir)
+	return tmux.ContinueCommandWithEnv(expandedWorkdir, identity.Thread, map[string]string{
+		"AMUX_WORKSPACE": identity.Workspace,
+		"AMUX_SESSION":   identity.Session,
+		"AMUX_WINDOW":    identity.Window,
+		"AMUX_THREAD_ID": identity.Thread,
+		"AMUX_WORKDIR":   expandedWorkdir,
+	})
 }
 
 func archiveAmpThread(thread string) error {
