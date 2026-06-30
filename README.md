@@ -142,14 +142,16 @@ amux store-current <workspace> <thread-id-or-url> [window] [workdir]
 amux remove <workspace> <window>
 amux remove-current [workspace]
 amux park-current [workspace]
-amux spawn <window> <workdir> <initial-message> [workspace] [session]
+amux spawn [--mode <mode> | -m <mode>] <window> <workdir> <initial-message> [workspace] [session]
 amux version
 amux self-update
 amux path
 amux doctor
 ```
 
-`--dry-run` validates inputs and checks tmux window conflicts without mutating state. For `spawn`, dry-run does not create an Amp thread, create tmux windows, send keys, or update `workspaces.tsv`; it only prints the intended actions.
+`amux spawn --mode <mode>` (or `-m <mode>`) creates the new Amp thread with the selected Amp mode. Omitting `--mode` preserves the default Amp thread behavior.
+
+`--dry-run` validates inputs and checks tmux window conflicts without mutating state. For `spawn`, dry-run does not create an Amp thread, create tmux windows, send keys, or update `workspaces.tsv`; it only prints the intended actions, including the selected mode when provided.
 
 Launch uses auto-attach by default: cold restores create the tmux session and return, while an already-running session attaches only when its live window set and pane paths match the configured workspace. Use `--attach` to always attach after restoring, or `--no-attach` to never attach.
 
