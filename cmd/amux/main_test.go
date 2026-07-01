@@ -465,14 +465,16 @@ exit 2
 	log := string(logBytes)
 	for _, want := range []string{
 		"new-session -d -P -F #{window_id} -s Amp -n new win cd '" + workdir + "' && AMUX_WORKSPACE='mac' AMUX_SESSION='Amp' AMUX_WINDOW='new win' AMUX_THREAD_ID='T-new-thread' AMUX_WORKDIR='" + workdir + "' exec amp threads continue 'T-new-thread'",
+		"select-window -t @1",
 		"send-keys -t @1 -l hello Amp",
 		"send-keys -t @1 Enter",
-		"select-window -t @1",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("tmux log missing %q\nlog:\n%s", want, log)
 		}
 	}
+	assertLogOrder(t, log, "select-window -t @1", "send-keys -t @1 -l hello Amp")
+	assertLogOrder(t, log, "send-keys -t @1 -l hello Amp", "send-keys -t @1 Enter")
 }
 
 func TestSpawnLongModeFlagCreatesThreadWithMode(t *testing.T) {
@@ -741,14 +743,16 @@ exit 2
 	}
 	for _, want := range []string{
 		"new-window -P -F #{window_id} -t Amp -n fresh cd '" + workdir + "' && AMUX_WORKSPACE='mac' AMUX_SESSION='Amp' AMUX_WINDOW='fresh' AMUX_THREAD_ID='T-existing-session' AMUX_WORKDIR='" + workdir + "' exec amp threads continue 'T-existing-session'",
+		"select-window -t @7",
 		"send-keys -t @7 -l hello",
 		"send-keys -t @7 Enter",
-		"select-window -t @7",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("tmux log missing %q\nlog:\n%s", want, log)
 		}
 	}
+	assertLogOrder(t, log, "select-window -t @7", "send-keys -t @7 -l hello")
+	assertLogOrder(t, log, "send-keys -t @7 -l hello", "send-keys -t @7 Enter")
 
 	configBytes, err := os.ReadFile(configPath)
 	if err != nil {
@@ -1518,6 +1522,21 @@ func runCapturingStdout(t *testing.T, args []string) (string, error) {
 	var stdout bytes.Buffer
 	runErr := (app{stdout: &stdout}).run(args)
 	return stdout.String(), runErr
+}
+
+func assertLogOrder(t *testing.T, log, before, after string) {
+	t.Helper()
+	beforeIndex := strings.Index(log, before)
+	if beforeIndex < 0 {
+		t.Fatalf("log missing %q\nlog:\n%s", before, log)
+	}
+	afterIndex := strings.Index(log, after)
+	if afterIndex < 0 {
+		t.Fatalf("log missing %q\nlog:\n%s", after, log)
+	}
+	if beforeIndex > afterIndex {
+		t.Fatalf("log ordered %q after %q\nlog:\n%s", before, after, log)
+	}
 }
 
 func withSelfUpdateTestState(t *testing.T, exePath, releaseURL string, client *http.Client) {
