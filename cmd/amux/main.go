@@ -967,37 +967,47 @@ Commands:
   launch [workspace] [session]
       Launch or attach a tmux session. Defaults: workspace=mac session=Amp.
       Cold launches do not attach; existing config-matching sessions attach.
+      Side effects: reads restore config, may create live local tmux/Amp
+      windows, and does not create or archive remote Amp threads.
       Use --attach to always attach or --no-attach to never attach.
       If no command is given, launch is assumed.
 
   list [workspace]
       Print configured rows.
+      Side effects: none; reads restore config only.
 
   store <workspace> <window> <workdir> <thread-id-or-url>
       Add or replace one workspace row.
+      Side effects: mutates restore config only.
 
   store-current <thread-id-or-url>
   store-current <workspace> <thread-id-or-url> [window] [workdir]
       Add or replace a row using the current tmux window and pane path.
+      Side effects: mutates restore config only.
 
   remove <workspace> <window>
       Remove one configured window from a workspace.
+      Side effects: mutates restore config only.
 
   remove-current [workspace]
       Remove the current tmux window from a workspace.
+      Side effects: mutates restore config only.
 
   park-current [workspace]
       Remove the current tmux window from restore config, schedule delayed
       pane shutdown, and return before the local Amp process exits.
       The delayed shutdown force-closes tmux only if graceful exit times out.
-      Amp thread history is not deleted.
+      Side effects: mutates restore config and live local tmux/Amp only.
+      Amp thread history is not archived or deleted.
 
   spawn [--mode <mode> | -m <mode>] <window> <workdir> <initial-message> [workspace] [session]
       Create an empty Amp thread, open it in an interactive tmux window,
       submit the initial message with tmux send-keys, and store the row.
       The spawned Amp process receives AMUX_WORKSPACE, AMUX_SESSION,
       AMUX_WINDOW, AMUX_THREAD_ID, and AMUX_WORKDIR identity variables.
-      Use --mode or -m to create the thread with an Amp mode.
+      Use --mode or -m to create the remote Amp thread with an Amp mode.
+      Side effects: creates a remote Amp thread, mutates live local tmux/Amp,
+      and stores the restore-config row.
       With --dry-run, only validate and print intended actions; do not create
       an Amp thread, mutate tmux, send keys, or update the config.
 
@@ -1005,6 +1015,8 @@ Commands:
       From an amux-spawned Amp process, verify AMUX_* identity, archive the
       matching Amp thread, remove the restore row, and stop the matched tmux
       window. Refuses to run if identity or tmux/config state is ambiguous.
+      Side effects: mutates all three domains: remote Amp thread state,
+      restore config, and live local tmux/Amp.
 
   self-update
       Download the latest GitHub release for this platform, verify its
@@ -1013,6 +1025,7 @@ Commands:
 
   doctor [workspace]
       Check dependencies, config readability, and configured workdirs.
+      Side effects: none; inspects restore config and live local tmux only.
 
   version, --version
       Print the amux version and build metadata.

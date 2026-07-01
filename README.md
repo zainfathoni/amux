@@ -155,13 +155,31 @@ amux doctor
 
 `amux spawn` injects a stable identity contract into the spawned Amp process: `AMUX_WORKSPACE`, `AMUX_SESSION`, `AMUX_WINDOW`, `AMUX_THREAD_ID`, and `AMUX_WORKDIR`. From that spawned process, no-arg `amux teardown` verifies the `AMUX_WORKSPACE`/`AMUX_SESSION`/`AMUX_WINDOW`/`AMUX_THREAD_ID` identity against the restore config and live tmux window, archives the matching Amp thread, removes the restore row, and stops the uniquely matched tmux window. If the identity, config row, or tmux window is missing, mismatched, or ambiguous, teardown refuses to archive or stop anything.
 
+`amux` keeps three side-effect domains separate:
+
+- **Restore config**: rows in `workspaces.tsv` that describe what should be restored later.
+- **Live local tmux/Amp**: tmux sessions/windows and the local Amp CLI processes running inside them.
+- **Remote Amp thread state**: hosted Amp threads, including creation by `spawn` and archival by verified `teardown`.
+
+Command side effects:
+
+| Command | Restore config | Live local tmux/Amp | Remote Amp thread state |
+| --- | --- | --- | --- |
+| `launch` | Read only | Creates missing tmux windows/processes | Read/continue existing threads only |
+| `list`, `path`, `version`, `doctor` | Read only | Inspect only | No change |
+| `store`, `store-current` | Add or replace rows | No change | No change |
+| `remove`, `remove-current` | Remove rows | No change | No change |
+| `park-current` | Remove current-window row | Gracefully stop the current local tmux/Amp window | No change; Amp thread history is not archived or deleted |
+| `spawn` | Store the new row | Create/select a tmux window and submit the initial message | Create a new Amp thread, optionally with `--mode` |
+| `teardown` | Remove the verified spawned row | Stop the verified tmux window | Archive the verified `AMUX_THREAD_ID` |
+
 `--dry-run` validates inputs and checks tmux window conflicts without mutating state. For `spawn`, dry-run does not create an Amp thread, create tmux windows, send keys, or update `workspaces.tsv`; it only prints the intended actions, including the selected mode when provided.
 
 Launch uses auto-attach by default: cold restores create the tmux session and return, while an already-running session attaches only when its live window set and pane paths match the configured workspace. Use `--attach` to always attach after restoring, or `--no-attach` to never attach.
 
 When launch attaches from inside an existing tmux client, `amux` switches that client to the target session. From a normal interactive terminal, it attaches in-place. If tmux reports that the caller is not a terminal, `amux` opens the target session through Omarchy's terminal launcher, with direct Alacritty fallback.
 
-`park-current` removes the current window from restore config, schedules a delayed graceful terminal shutdown sequence for the target pane, then returns immediately. This gives Amp time to receive the command result and send a final response before the local process exits. The delayed shutdown only force-closes the tmux window if graceful stop times out.
+`park-current` removes the current window from restore config, schedules a delayed graceful terminal shutdown sequence for the target pane, then returns immediately. This gives Amp time to receive the command result and send a final response before the local process exits. The delayed shutdown only force-closes the tmux window if graceful stop times out. Parking is local cleanup only; use `teardown` from an `amux spawn` worker when you intentionally want to archive that verified remote Amp thread too.
 
 ## Configuration
 

@@ -565,11 +565,11 @@ OK live tmux session matches config</code></pre>
               </div>
               <div class="feature">
                 <dt>Preview first</dt>
-                <dd><code>--dry-run</code> validates inputs and reports intended tmux actions without mutating your workspace.</dd>
+                <dd><code>--dry-run</code> validates inputs and reports intended actions without mutating restore config, local tmux/Amp state, or remote Amp threads.</dd>
               </div>
               <div class="feature">
                 <dt>Spawn fresh threads</dt>
-                <dd>Create a new Amp thread in a real interactive tmux window, add it to your restore config, and inject stable <code>AMUX_*</code> identity for lifecycle commands.</dd>
+                <dd>Create a new Amp thread in a real interactive tmux window, optionally pass <code>--mode</code>, add it to your restore config, and inject stable <code>AMUX_*</code> identity for lifecycle commands.</dd>
               </div>
               <div class="feature">
                 <dt>Teardown workers safely</dt>
@@ -590,6 +590,9 @@ OK live tmux session matches config</code></pre>
               <p>
                 The default config lives at <code>~/.config/amp-tmux/workspaces.tsv</code>. Each row maps a workspace, a tmux window, a working directory, and an Amp thread.
               </p>
+              <p>
+                <code>amux</code> names three side-effect domains explicitly: restore-config rows, live local tmux/Amp sessions, and remote Amp thread state. Store/remove commands only change the restore config; <code>park-current</code> removes restore state and stops the local window without archiving the remote thread; <code>teardown</code> is the explicit full cleanup that archives the verified spawned thread, removes its row, and stops its verified local window.
+              </p>
             </div>
             <div class="panel">
               <h3>Config format</h3>
@@ -609,6 +612,10 @@ mac         docs         ~/Code/docs         T-docs</code></pre>
                 </div>
                 <div class="step">
                   <span class="step-number">3</span>
+                  <span class="step-copy"><strong>Spawn/teardown</strong><span>Use <code>amux spawn --mode</code> for mode-specific fresh threads; use no-arg <code>amux teardown</code> only from that spawned <code>AMUX_*</code> identity.</span></span>
+                </div>
+                <div class="step">
+                  <span class="step-number">4</span>
                   <span class="step-copy"><strong>Verify</strong><span>Run <code>amux doctor</code> when live tmux state and config may have drifted.</span></span>
                 </div>
               </div>
