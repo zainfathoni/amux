@@ -594,14 +594,14 @@ func (a app) spawn(opts options, args []string) error {
 	}
 
 	time.Sleep(spawnDelay())
-	if err := runner.SelectWindow(windowID); err != nil {
-		return fmt.Errorf("select spawned window: %w", err)
-	}
 	if err := runner.SendLiteral(windowID, initialMessage); err != nil {
 		return fmt.Errorf("send initial message: %w", err)
 	}
 	if err := runner.SendEnter(windowID); err != nil {
 		return fmt.Errorf("submit initial message: %w", err)
+	}
+	if err := runner.SelectWindow(windowID); err != nil {
+		return fmt.Errorf("select spawned window: %w", err)
 	}
 
 	if err := a.storeRow(opts, row); err != nil {
