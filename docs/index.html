@@ -535,7 +535,7 @@ would open window my-project
 <span class="prompt">$</span> amux launch mac Amp
 restored mac/Amp
 
-<span class="prompt">$</span> amux doctor mac
+<span class="prompt">$</span> amux doctor mac Amp
 OK config rows: 3
 OK live tmux session matches config</code></pre>
             </div>
@@ -561,7 +561,7 @@ OK live tmux session matches config</code></pre>
               </div>
               <div class="feature">
                 <dt>Inspect drift</dt>
-                <dd>Use <code>doctor</code> to compare your TSV config with the live tmux session before trusting a restore.</dd>
+                <dd>Use <code>doctor [workspace] [session]</code> to compare your TSV config with the intended live tmux session before trusting a restore.</dd>
               </div>
               <div class="feature">
                 <dt>Preview first</dt>
@@ -616,7 +616,7 @@ mac         docs         ~/Code/docs         T-docs</code></pre>
                 </div>
                 <div class="step">
                   <span class="step-number">4</span>
-                  <span class="step-copy"><strong>Verify</strong><span>Run <code>amux doctor</code> when live tmux state and config may have drifted.</span></span>
+                  <span class="step-copy"><strong>Verify</strong><span>Run <code>amux doctor [workspace] [session]</code> when live tmux state and config may have drifted.</span></span>
                 </div>
               </div>
             </div>

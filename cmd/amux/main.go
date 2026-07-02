@@ -112,14 +112,19 @@ func (a app) run(args []string) error {
 		fmt.Fprintln(a.stdout, opts.configPath)
 		return nil
 	case "doctor":
-		if len(args) > 1 {
-			return errors.New("usage: amux doctor [workspace]")
+		if len(args) > 2 {
+			return errors.New("usage: amux doctor [workspace] [session]")
 		}
 		workspace := defaultWorkspace
+		session := defaultSession
 		if len(args) == 1 {
 			workspace = args[0]
 		}
-		return a.doctor(opts, workspace)
+		if len(args) == 2 {
+			workspace = args[0]
+			session = args[1]
+		}
+		return a.doctor(opts, workspace, session)
 	case "help", "--help", "-h":
 		a.usage()
 		return nil
@@ -842,7 +847,7 @@ func versionString() string {
 	return strings.Join(parts, " ")
 }
 
-func (a app) doctor(opts options, workspace string) error {
+func (a app) doctor(opts options, workspace, session string) error {
 	failed := false
 	check := func(name string, err error) {
 		if err != nil {
@@ -858,8 +863,8 @@ func (a app) doctor(opts options, workspace string) error {
 	_, err = exec.LookPath("amp")
 	check("amp on PATH", err)
 
-	check("config path", ensureConfigWritable(opts.configPath))
-	rows, err := rowsForWorkspace(opts.configPath, workspace)
+	check("config path", ensureConfigReadable(opts.configPath))
+	rows, err := rowsForWorkspaceReadOnly(opts.configPath, workspace)
 	check("read workspace "+workspace, err)
 	if err == nil {
 		if len(rows) == 0 {
@@ -886,7 +891,7 @@ func (a app) doctor(opts options, workspace string) error {
 	}
 	if err == nil && len(rows) > 0 {
 		runner := tmux.Runner{}
-		checkWorkspaceDrift(check, runner, workspace, defaultSession, rows)
+		checkWorkspaceDrift(check, runner, workspace, session, rows)
 	}
 	if failed {
 		return errors.New("doctor found problems")
@@ -945,8 +950,35 @@ func ensureConfigWritable(path string) error {
 	return file.Close()
 }
 
+func ensureConfigReadable(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	return file.Close()
+}
+
 func rowsForWorkspace(path, workspace string) ([]config.Row, error) {
 	rows, err := config.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]config.Row, 0, len(rows))
+	for _, row := range rows {
+		if row.Workspace == workspace {
+			filtered = append(filtered, row)
+		}
+	}
+	return filtered, nil
+}
+
+func rowsForWorkspaceReadOnly(path, workspace string) ([]config.Row, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	rows, err := config.Parse(file)
 	if err != nil {
 		return nil, err
 	}
@@ -1023,8 +1055,10 @@ Commands:
       checksum, and replace the current binary. Refuses package-managed paths.
       With --dry-run, only print the planned update.
 
-  doctor [workspace]
-      Check dependencies, config readability, and configured workdirs.
+  doctor [workspace] [session]
+      Check dependencies, config readability, configured workdirs, and drift
+      between the selected workspace and tmux session. Defaults: workspace=mac
+      session=Amp.
       Side effects: none; inspects restore config and live local tmux only.
 
   version, --version

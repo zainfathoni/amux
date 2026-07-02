@@ -148,7 +148,7 @@ amux teardown
 amux version
 amux self-update
 amux path
-amux doctor
+amux doctor [workspace] [session]
 ```
 
 `amux spawn --mode <mode>` (or `-m <mode>`) creates the new Amp thread with the selected Amp mode. Omitting `--mode` preserves the default Amp thread behavior.
@@ -172,6 +172,8 @@ Command side effects:
 | `park-current` | Remove current-window row | Gracefully stop the current local tmux/Amp window | No change; Amp thread history is not archived or deleted |
 | `spawn` | Store the new row | Create/select a tmux window and submit the initial message | Create a new Amp thread, optionally with `--mode` |
 | `teardown` | Remove the verified spawned row | Stop the verified tmux window | Archive the verified `AMUX_THREAD_ID` |
+
+`amux doctor [workspace] [session]` is read-only and compares the selected workspace against the selected live tmux session. Omitting the session preserves the default `Amp` behavior, so `amux doctor mac` remains equivalent to `amux doctor mac Amp`.
 
 For `launch` and `spawn`, `--dry-run` validates inputs and checks tmux window conflicts without mutating state. For `spawn`, dry-run does not create an Amp thread, create tmux windows, send keys, or update `workspaces.tsv`; it only prints the intended actions, including the selected mode when provided.
 

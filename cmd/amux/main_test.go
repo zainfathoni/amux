@@ -1373,6 +1373,28 @@ func TestDoctorFailsWhenWorkspaceHasNoRows(t *testing.T) {
 	}
 }
 
+func TestDoctorDoesNotCreateMissingConfig(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "missing", "workspaces.tsv")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := runWithDiscardedStdout([]string{"--config", configPath, "doctor", "mac", "Amp"})
+	if err == nil {
+		t.Fatal("doctor succeeded with missing config, want error")
+	}
+	if !strings.Contains(err.Error(), "doctor found problems") {
+		t.Fatalf("got error %q, want doctor failure", err)
+	}
+	if _, statErr := os.Stat(configPath); !os.IsNotExist(statErr) {
+		t.Fatalf("doctor created or touched missing config path: stat err = %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Dir(configPath)); !os.IsNotExist(statErr) {
+		t.Fatalf("doctor created missing config directory: stat err = %v", statErr)
+	}
+}
+
 func TestDoctorFailsWhenInsideTmuxButTmuxCannotBeQueried(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
@@ -1506,6 +1528,48 @@ exit 0
 	}
 	if !strings.Contains(output, "FAIL pane path tycho") || !strings.Contains(output, liveWorkdir) {
 		t.Fatalf("doctor output did not report pane path mismatch\n%s", output)
+	}
+}
+
+func TestDoctorComparesWorkspaceAgainstExplicitSession(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("bta\tworker\t"+workdir+"\tT-thread\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "tmux.log")
+	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ]; then
+  if [ "$4" = BTA ]; then
+    printf 'worker\t`+workdir+`\n'
+    exit 0
+  fi
+  printf 'other\t/tmp\n'
+  exit 0
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := runWithDiscardedStdout([]string{"--config", configPath, "doctor", "bta", "BTA"}); err != nil {
+		t.Fatal(err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if !strings.Contains(log, "tmux list-panes -s -t BTA") {
+		t.Fatalf("doctor did not inspect explicit session BTA\nlog:\n%s", log)
+	}
+	if strings.Contains(log, "tmux list-panes -s -t Amp") {
+		t.Fatalf("doctor inspected default session despite explicit session\nlog:\n%s", log)
 	}
 }
 
