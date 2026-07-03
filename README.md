@@ -143,7 +143,7 @@ amux store-current <workspace> <thread-id-or-url> [window] [workdir]
 amux remove <workspace> <window>
 amux remove-current [workspace]
 amux park-current [workspace]
-amux spawn [--mode <mode> | -m <mode>] <window> <workdir> <initial-message> [workspace] [session]
+amux spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] <window> <workdir> <initial-message> [workspace] [session]
 amux teardown
 amux version
 amux self-update
@@ -152,6 +152,8 @@ amux doctor [workspace] [session]
 ```
 
 `amux spawn --mode <mode>` (or `-m <mode>`) creates the new Amp thread with the selected Amp mode. Omitting `--mode` preserves the default Amp thread behavior.
+
+`amux spawn --title-prefix <prefix>` renames only the newly created Amp thread, after `amp threads new` returns its thread ID, to `"<prefix> <window>"`. For issue-oriented work, use an explicit prefix such as `--title-prefix '#255'` to get a title like `#255 worker-window`. If the rename fails, `spawn` reports the Amp error and stops before creating the tmux worker or writing the restore row. Omitting `--title-prefix` preserves the existing spawn behavior and does not rename any Amp thread.
 
 `amux spawn` injects a stable identity contract into the spawned Amp process: `AMUX_WORKSPACE`, `AMUX_SESSION`, `AMUX_WINDOW`, `AMUX_THREAD_ID`, and `AMUX_WORKDIR`. From that spawned process, no-arg `amux teardown` verifies the `AMUX_WORKSPACE`/`AMUX_SESSION`/`AMUX_WINDOW`/`AMUX_THREAD_ID` identity against the restore config and live tmux window, archives the matching Amp thread, removes the restore row, and stops the uniquely matched tmux window. If the identity, config row, or tmux window is missing, mismatched, or ambiguous, teardown refuses to archive or stop anything.
 
@@ -170,12 +172,12 @@ Command side effects:
 | `store`, `store-current` | Add or replace rows | No change | No change |
 | `remove`, `remove-current` | Remove rows | No change | No change |
 | `park-current` | Remove current-window row | Gracefully stop the current local tmux/Amp window | No change; Amp thread history is not archived or deleted |
-| `spawn` | Store the new row | Create/select a tmux window and submit the initial message | Create a new Amp thread, optionally with `--mode` |
+| `spawn` | Store the new row | Create/select a tmux window and submit the initial message | Create a new Amp thread, optionally with `--mode`; optionally rename the new thread with `--title-prefix` |
 | `teardown` | Remove the verified spawned row | Stop the verified tmux window | Archive the verified `AMUX_THREAD_ID` |
 
 `amux doctor [workspace] [session]` is read-only and compares the selected workspace against the selected live tmux session. Omitting the session preserves the default `Amp` behavior, so `amux doctor mac` remains equivalent to `amux doctor mac Amp`.
 
-For `launch` and `spawn`, `--dry-run` validates inputs and checks tmux window conflicts without mutating state. For `spawn`, dry-run does not create an Amp thread, create tmux windows, send keys, or update `workspaces.tsv`; it only prints the intended actions, including the selected mode when provided.
+For `launch` and `spawn`, `--dry-run` validates inputs and checks tmux window conflicts without mutating state. For `spawn`, dry-run does not create or rename an Amp thread, create tmux windows, send keys, or update `workspaces.tsv`; it only prints the intended actions, including the selected mode and planned title rename when provided.
 
 Launch uses auto-attach by default: cold restores create the tmux session and return, while an already-running session attaches only when its live window set and pane paths match the configured workspace. Use `--attach` to always attach after restoring, or `--no-attach` to never attach.
 
