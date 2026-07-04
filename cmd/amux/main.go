@@ -638,23 +638,36 @@ type teardownIdentity struct {
 	Session   string
 	Window    string
 	Thread    string
+	FromEnv   bool
 }
 
 func (a app) teardown(opts options, args []string) error {
-	if len(args) != 0 {
-		return errors.New("usage: amux teardown")
+	if len(args) != 0 && len(args) != 2 && len(args) != 3 {
+		return errors.New("usage: amux teardown [<workspace> <window> [session]]")
 	}
 	if opts.dryRun {
 		return errors.New("teardown does not support --dry-run")
 	}
 
-	identity, err := teardownIdentityFromEnv()
-	if err != nil {
-		return err
+	var identity teardownIdentity
+	var err error
+	if len(args) == 0 {
+		identity, err = teardownIdentityFromEnv()
+		if err != nil {
+			return err
+		}
+	} else {
+		identity, err = teardownIdentityFromArgs(args)
+		if err != nil {
+			return err
+		}
 	}
 	row, err := verifiedTeardownRow(opts.configPath, identity)
 	if err != nil {
 		return err
+	}
+	if identity.Thread == "" {
+		identity.Thread = row.Thread
 	}
 	runner := tmux.Runner{}
 	pane, err := verifiedTeardownPane(runner, identity, row)
@@ -683,6 +696,7 @@ func teardownIdentityFromEnv() (teardownIdentity, error) {
 		Session:   os.Getenv("AMUX_SESSION"),
 		Window:    os.Getenv("AMUX_WINDOW"),
 		Thread:    os.Getenv("AMUX_THREAD_ID"),
+		FromEnv:   true,
 	}
 	missing := make([]string, 0, 4)
 	if identity.Workspace == "" {
@@ -715,6 +729,27 @@ func teardownIdentityFromEnv() (teardownIdentity, error) {
 	return identity, nil
 }
 
+func teardownIdentityFromArgs(args []string) (teardownIdentity, error) {
+	identity := teardownIdentity{
+		Workspace: args[0],
+		Window:    args[1],
+		Session:   defaultSession,
+	}
+	if len(args) == 3 {
+		identity.Session = args[2]
+	}
+	if err := config.ValidateField("workspace", identity.Workspace); err != nil {
+		return identity, err
+	}
+	if err := config.ValidateField("window", identity.Window); err != nil {
+		return identity, err
+	}
+	if err := config.ValidateField("session", identity.Session); err != nil {
+		return identity, err
+	}
+	return identity, nil
+}
+
 func verifiedTeardownRow(path string, identity teardownIdentity) (config.Row, error) {
 	rows, err := config.Load(path)
 	if err != nil {
@@ -737,7 +772,7 @@ func verifiedTeardownRow(path string, identity teardownIdentity) (config.Row, er
 		return config.Row{}, fmt.Errorf("ambiguous restore rows for %s/%s; refusing teardown", identity.Workspace, identity.Window)
 	}
 	row := matches[0]
-	if row.Thread != identity.Thread {
+	if identity.Thread != "" && row.Thread != identity.Thread {
 		return config.Row{}, fmt.Errorf("restore row thread mismatch for %s/%s: AMUX_THREAD_ID=%s config=%s", identity.Workspace, identity.Window, identity.Thread, row.Thread)
 	}
 	return row, nil
@@ -758,11 +793,21 @@ func verifiedTeardownPane(runner tmux.Runner, identity teardownIdentity, row con
 	if pane.WindowID == "" {
 		return tmux.WindowPane{}, fmt.Errorf("tmux window %q in session %q has no window id", identity.Window, identity.Session)
 	}
-	expectedCommand := teardownExpectedStartCommand(identity, row)
-	if pane.StartCommand != expectedCommand {
+	if identity.FromEnv && pane.StartCommand != teardownExpectedStartCommand(identity, row) {
 		return tmux.WindowPane{}, fmt.Errorf("tmux window %q in session %q is not the expected amux-spawned command for AMUX_THREAD_ID=%s; start command: %s", identity.Window, identity.Session, identity.Thread, pane.StartCommand)
 	}
+	if !identity.FromEnv && !explicitTeardownStartCommandMatches(identity, row, pane.StartCommand) {
+		return tmux.WindowPane{}, fmt.Errorf("tmux window %q in session %q start command does not match restore row thread %s; candidates %s; start command: %s", identity.Window, identity.Session, row.Thread, formatPaneCandidates(panes), pane.StartCommand)
+	}
 	return pane, nil
+}
+
+func explicitTeardownStartCommandMatches(identity teardownIdentity, row config.Row, startCommand string) bool {
+	expandedWorkdir := config.ExpandHome(row.Workdir)
+	if startCommand == tmux.ContinueCommand(expandedWorkdir, row.Thread) {
+		return true
+	}
+	return startCommand == teardownExpectedStartCommand(identity, row)
 }
 
 func teardownExpectedStartCommand(identity teardownIdentity, row config.Row) string {
@@ -1093,10 +1138,13 @@ Commands:
       With --dry-run, only validate and print intended actions; do not create
       or rename an Amp thread, mutate tmux, send keys, or update the config.
 
-  teardown
-      From an amux-spawned Amp process, verify AMUX_* identity, archive the
-      matching Amp thread, remove the restore row, and stop the matched tmux
-      window. Refuses to run if identity or tmux/config state is ambiguous.
+  teardown [<workspace> <window> [session]]
+      With no args, from an amux-spawned Amp process, verify AMUX_* identity,
+      archive the matching Amp thread, remove the restore row, and stop the
+      matched tmux window. With explicit workspace/window, verify the restore
+      row and live tmux window start command agree on the same thread before
+      archiving/removing/stopping. Refuses to run if identity or tmux/config
+      state is ambiguous.
       Side effects: mutates all three domains: remote Amp thread state,
       restore config, and live local tmux/Amp.
 

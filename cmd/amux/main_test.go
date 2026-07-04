@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/zainfathoni/amux/internal/config"
+	"github.com/zainfathoni/amux/internal/tmux"
 )
 
 func TestPathWritesToInjectedStdout(t *testing.T) {
@@ -1480,6 +1481,132 @@ exit 2
 	}
 }
 
+func TestTeardownExplicitWorkspaceWindowArchivesRemovesAndStopsWindow(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("bta\tpr-11840\t/tmp/project\tT-explicit\nbta\tother\t/tmp/other\tT-other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	startCommand := tmux.ContinueCommand("/tmp/project", "T-explicit")
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = archive ] && [ "$3" = T-explicit ]; then
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ]; then
+  printf 'pr-11840\t@11\t%s\n' `+shellSingleQuote(startCommand)+`
+  printf 'other\t@12\tcd /tmp/other && exec amp threads continue T-other\n'
+  exit 0
+fi
+if [ "$1" = kill-window ] && [ "$2" = -t ] && [ "$3" = @11 ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMUX_WORKSPACE", "")
+	t.Setenv("AMUX_SESSION", "")
+	t.Setenv("AMUX_WINDOW", "")
+	t.Setenv("AMUX_THREAD_ID", "")
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "teardown", "bta", "pr-11840", "BTA"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotConfig := string(configBytes)
+	if strings.Contains(gotConfig, "pr-11840") {
+		t.Fatalf("config still contains torn-down row: %q", gotConfig)
+	}
+	if !strings.Contains(gotConfig, "bta\tother\t/tmp/other\tT-other\n") {
+		t.Fatalf("config did not preserve other row: %q", gotConfig)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		"tmux list-panes -s -t BTA -F #{window_name}\t#{window_id}\t#{pane_start_command}",
+		"amp threads archive T-explicit",
+		"tmux kill-window -t @11",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("explicit teardown log missing %q\nlog:\n%s", want, log)
+		}
+	}
+	for _, want := range []string{
+		"Removed bta/pr-11840",
+		"Archived Amp thread T-explicit",
+		"Stopped tmux window BTA/pr-11840 (@11)",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("explicit teardown output missing %q\nstdout:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestTeardownExplicitWorkspaceWindowFailsClosedOnThreadMismatch(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("bta\tpr-11840\t/tmp/project\tT-config\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	startCommand := tmux.ContinueCommand("/tmp/project", "T-other")
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ]; then
+  printf 'pr-11840\t@11\t%s\n' `+shellSingleQuote(startCommand)+`
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := run([]string{"--config", configPath, "teardown", "bta", "pr-11840", "BTA"})
+	if err == nil {
+		t.Fatal("explicit teardown succeeded, want thread mismatch")
+	}
+	if !strings.Contains(err.Error(), "does not match restore row thread T-config") {
+		t.Fatalf("got error %q, want thread mismatch", err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if strings.Contains(log, "amp threads archive") || strings.Contains(log, "tmux kill-window") {
+		t.Fatalf("explicit teardown archived or killed despite mismatch\nlog:\n%s", log)
+	}
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(configBytes), "bta\tpr-11840\t/tmp/project\tT-config\n") {
+		t.Fatalf("explicit teardown removed row despite mismatch: %q", configBytes)
+	}
+}
+
 func TestTeardownFailsClosedOnUnexpectedStartCommand(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -1591,6 +1718,11 @@ exit 0
 
 func TestTeardownRequiresSpawnIdentity(t *testing.T) {
 	tmp := t.TempDir()
+	t.Setenv("AMUX_WORKSPACE", "")
+	t.Setenv("AMUX_SESSION", "")
+	t.Setenv("AMUX_WINDOW", "")
+	t.Setenv("AMUX_THREAD_ID", "")
+
 	err := run([]string{"--config", filepath.Join(tmp, "workspaces.tsv"), "teardown"})
 	if err == nil {
 		t.Fatal("teardown succeeded without AMUX identity")
