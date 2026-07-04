@@ -522,7 +522,7 @@ exit 2
 	}
 }
 
-func TestSpawnTitlePrefixRenamesNewThreadToPrefixedWindowTitle(t *testing.T) {
+func TestSpawnTitlePrefixRenamesNewThreadAfterSubmittingInitialMessage(t *testing.T) {
 	tmp := t.TempDir()
 	workdir := filepath.Join(tmp, "workdir")
 	if err := os.Mkdir(workdir, 0o755); err != nil {
@@ -574,13 +574,15 @@ exit 2
 		"amp threads rename T-prefixed-thread #255 prefixed win",
 		"tmux new-session -d -P -F #{window_id} -s Amp -n #255 prefixed win",
 		"AMUX_WINDOW='#255 prefixed win'",
+		"tmux send-keys -t @1 -l hello Amp",
+		"tmux send-keys -t @1 Enter",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("log missing %q\nlog:\n%s", want, log)
 		}
 	}
-	if strings.Index(log, "amp threads rename") < strings.Index(log, "amp threads new") || strings.Index(log, "amp threads rename") > strings.Index(log, "tmux new-session") {
-		t.Fatalf("rename did not happen after thread creation and before tmux mutation\nlog:\n%s", log)
+	if strings.Index(log, "amp threads rename") < strings.Index(log, "tmux send-keys -t @1 Enter") {
+		t.Fatalf("rename did not happen after initial message submission\nlog:\n%s", log)
 	}
 	configBytes, err := os.ReadFile(configPath)
 	if err != nil {
@@ -641,7 +643,7 @@ exit 2
 	}
 }
 
-func TestSpawnTitlePrefixRenameFailureStopsBeforeTmuxAndConfigMutation(t *testing.T) {
+func TestSpawnTitlePrefixRenameFailureKeepsSpawnedWorkerAndReportsRecovery(t *testing.T) {
 	tmp := t.TempDir()
 	workdir := filepath.Join(tmp, "workdir")
 	if err := os.Mkdir(workdir, 0o755); err != nil {
@@ -664,32 +666,60 @@ exit 2
 `)
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then
+  exit 1
+fi
+if [ "$1" = new-session ]; then
+  printf '@1\n'
+  exit 0
+fi
+if [ "$1" = send-keys ] || [ "$1" = select-window ]; then
+  exit 0
+fi
 exit 2
 `)
 
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
 
-	err := run([]string{"--config", configPath, "spawn", "--title-prefix", "#255", "prefixed win", workdir, "hello Amp"})
-	if err == nil {
-		t.Fatal("spawn succeeded, want rename failure")
+	var stderr bytes.Buffer
+	if err := (app{stderr: &stderr}).run([]string{"--config", configPath, "spawn", "--title-prefix", "#255", "prefixed win", workdir, "hello Amp"}); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "rename Amp thread T-rename-fails") || !strings.Contains(err.Error(), "rename unavailable") {
-		t.Fatalf("got error %q, want rename failure with amp output", err)
+	for _, want := range []string{
+		"warning: rename Amp thread T-rename-fails failed",
+		"rename unavailable",
+		"spawned worker was created and stored as mac/#255 prefixed win",
+		"retry with `amp threads rename T-rename-fails \"#255 prefixed win\"`",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr missing %q\nstderr:\n%s", want, stderr.String())
+		}
 	}
-	if !strings.Contains(err.Error(), "thread was created but not stored") {
-		t.Fatalf("got error %q, want recovery hint", err)
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
-		t.Fatalf("rename failure wrote config file")
+	if got, want := string(configBytes), "mac\t#255 prefixed win\t"+workdir+"\tT-rename-fails\n"; !strings.Contains(got, want) {
+		t.Fatalf("config did not contain spawned row after rename failure\ngot:  %q\nwant: %q", got, want)
 	}
 	logBytes, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	log := string(logBytes)
-	if strings.Contains(log, "tmux new-session") || strings.Contains(log, "tmux new-window") || strings.Contains(log, "tmux send-keys") || strings.Contains(log, "tmux select-window") {
-		t.Fatalf("rename failure mutated tmux window\nlog:\n%s", log)
+	for _, want := range []string{
+		"tmux new-session -d -P -F #{window_id} -s Amp -n #255 prefixed win",
+		"tmux send-keys -t @1 -l hello Amp",
+		"tmux send-keys -t @1 Enter",
+		"amp threads rename T-rename-fails #255 prefixed win",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("log missing %q\nlog:\n%s", want, log)
+		}
+	}
+	if strings.Index(log, "amp threads rename") < strings.Index(log, "tmux send-keys -t @1 Enter") {
+		t.Fatalf("rename failure happened before initial message submission\nlog:\n%s", log)
 	}
 }
 

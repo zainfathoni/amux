@@ -588,11 +588,6 @@ func (a app) spawn(opts options, args []string) error {
 	if err := row.Validate(); err != nil {
 		return err
 	}
-	if spawnOpts.titlePrefix != "" {
-		if err := renameAmpThread(thread, window); err != nil {
-			return fmt.Errorf("rename Amp thread %s: %w; thread was created but not stored, continue it with `amp threads continue %s` or archive it with `amp threads archive %s`", thread, err, thread, thread)
-		}
-	}
 
 	command := tmux.ContinueCommandWithEnv(expandedWorkdir, thread, map[string]string{
 		"AMUX_WORKSPACE": workspace,
@@ -628,6 +623,11 @@ func (a app) spawn(opts options, args []string) error {
 
 	if err := a.storeRow(opts, row); err != nil {
 		return err
+	}
+	if spawnOpts.titlePrefix != "" {
+		if err := renameAmpThread(thread, window); err != nil {
+			fmt.Fprintf(a.stderr, "warning: rename Amp thread %s failed: %v; spawned worker was created and stored as %s/%s; retry with `amp threads rename %s %q`\n", thread, err, workspace, window, thread, window)
+		}
 	}
 	fmt.Fprintln(a.stdout, thread)
 	return nil
@@ -1085,8 +1085,10 @@ Commands:
       AMUX_WINDOW, AMUX_THREAD_ID, and AMUX_WORKDIR identity variables.
       Use --mode or -m to create the remote Amp thread with an Amp mode.
       Use --title-prefix to name the spawned tmux window "<prefix> <window>"
-      and rename only the newly created Amp thread to that same name after its
-      thread ID is known, for example "#255 worker".
+      and rename only the newly created Amp thread to that same name after the
+      initial message is submitted, for example "#255 worker".
+      If the Amp thread rename fails after the worker is created, spawn reports
+      a warning with a retry command and leaves the created/stored worker intact.
       Side effects: creates a remote Amp thread, mutates live local tmux/Amp,
       may rename the new remote Amp thread, and stores the restore-config row
       under the final window name.
