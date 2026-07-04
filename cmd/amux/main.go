@@ -18,6 +18,7 @@ import (
 const (
 	defaultWorkspace = "mac"
 	defaultSession   = "Amp"
+	spawnSubmitTries = 10
 )
 
 var (
@@ -612,11 +613,12 @@ func (a app) spawn(opts options, args []string) error {
 	}
 
 	time.Sleep(spawnDelay())
-	if err := runner.SendLiteral(windowID, initialMessage); err != nil {
-		return fmt.Errorf("send initial message: %w", err)
+	submitted, err := submitInitialMessage(runner, submissionTarget(runner, windowID), initialMessage)
+	if err != nil {
+		return err
 	}
-	if err := runner.SendEnter(windowID); err != nil {
-		return fmt.Errorf("submit initial message: %w", err)
+	if !submitted {
+		fmt.Fprintf(a.stderr, "warning: initial message may not have been submitted; check tmux window %s/%s or send Enter manually\n", session, window)
 	}
 	if err := runner.SelectWindow(windowID); err != nil {
 		return fmt.Errorf("select spawned window: %w", err)
@@ -632,6 +634,103 @@ func (a app) spawn(opts options, args []string) error {
 	}
 	fmt.Fprintln(a.stdout, thread)
 	return nil
+}
+
+func submissionTarget(runner tmux.Runner, windowID string) string {
+	paneID, err := runner.PaneID(windowID)
+	if err != nil || paneID == "" {
+		return windowID
+	}
+	return paneID
+}
+
+func submitInitialMessage(runner tmux.Runner, target, message string) (bool, error) {
+	waitForComposerReady(runner, target)
+	if err := runner.SendLiteral(target, message); err != nil {
+		return false, fmt.Errorf("send initial message: %w", err)
+	}
+	if !waitForComposerMessage(runner, target, message) {
+		if err := runner.SendLiteral(target, message); err != nil {
+			return false, fmt.Errorf("send initial message: %w", err)
+		}
+		if !waitForComposerMessage(runner, target, message) {
+			if err := runner.SendEnter(target); err != nil {
+				return false, fmt.Errorf("submit initial message: %w", err)
+			}
+			return false, nil
+		}
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := runner.SendEnter(target); err != nil {
+			return false, fmt.Errorf("submit initial message: %w", err)
+		}
+		time.Sleep(spawnDelay())
+		if !composerContainsMessage(runner, target, message) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func waitForComposerReady(runner tmux.Runner, target string) {
+	for attempt := 0; attempt < spawnSubmitTries; attempt++ {
+		if composerReady(runner, target) {
+			return
+		}
+		time.Sleep(spawnDelay())
+	}
+}
+
+func waitForComposerMessage(runner tmux.Runner, target, message string) bool {
+	for attempt := 0; attempt < spawnSubmitTries; attempt++ {
+		if composerContainsMessage(runner, target, message) {
+			return true
+		}
+		time.Sleep(spawnDelay())
+	}
+	return false
+}
+
+func composerReady(runner tmux.Runner, target string) bool {
+	contents, err := runner.CapturePane(target)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(contents, "╭") && strings.Contains(contents, "╰")
+}
+
+func composerContainsMessage(runner tmux.Runner, target, message string) bool {
+	contents, err := runner.CapturePane(target)
+	if err != nil {
+		return false
+	}
+	return textContainsComposerMessage(contents, message)
+}
+
+func textContainsComposerMessage(contents, message string) bool {
+	lines := strings.Split(contents, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.Contains(lines[i], "╭") {
+			return containsCollapsedWhitespace(strings.Join(lines[i:], "\n"), message)
+		}
+	}
+	return containsCollapsedWhitespace(contents, message)
+}
+
+func containsCollapsedWhitespace(contents, message string) bool {
+	return strings.Contains(collapsePaneText(contents), strings.Join(strings.Fields(message), " "))
+}
+
+func collapsePaneText(text string) string {
+	text = strings.Map(func(r rune) rune {
+		switch r {
+		case '│', '┃', '╭', '╮', '╰', '╯', '─':
+			return ' '
+		default:
+			return r
+		}
+	}, text)
+	return strings.Join(strings.Fields(text), " ")
 }
 
 type teardownIdentity struct {
