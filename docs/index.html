@@ -573,7 +573,7 @@ OK live tmux session matches config</code></pre>
               </div>
               <div class="feature">
                 <dt>Teardown workers safely</dt>
-                <dd><code>amux teardown</code> verifies spawned identity against config and tmux before archiving the matching Amp thread, removing the row, and stopping the uniquely matched window.</dd>
+                <dd><code>amux teardown</code> verifies spawned identity against config and tmux before archiving the matching Amp thread, removing the row, and stopping the uniquely matched window. From outside a spawned <code>AMUX_*</code> environment, use <code>amux teardown &lt;workspace&gt; &lt;window&gt; [session]</code>; it cross-checks the restore row and live tmux start command agree on the same thread before mutating anything.</dd>
               </div>
               <div class="feature">
                 <dt>Plain-text config</dt>
@@ -591,7 +591,7 @@ OK live tmux session matches config</code></pre>
                 The default config lives at <code>~/.config/amp-tmux/workspaces.tsv</code>. Each row maps a workspace, a tmux window, a working directory, and an Amp thread.
               </p>
               <p>
-                <code>amux</code> names three side-effect domains explicitly: restore-config rows, live local tmux/Amp sessions, and remote Amp thread state. Store/remove commands only change the restore config; <code>park-current</code> removes restore state and stops the local window without archiving the remote thread; <code>teardown</code> is the explicit full cleanup that archives the verified spawned thread, removes its row, and stops its verified local window.
+                <code>amux</code> names three side-effect domains explicitly: restore-config rows, live local tmux/Amp sessions, and remote Amp thread state. Store/remove commands only change the restore config; <code>park-current</code> removes restore state and stops the local window without archiving the remote thread; <code>teardown</code> is the explicit full cleanup that archives the verified thread, removes its row, and stops its verified local window.
               </p>
             </div>
             <div class="panel">
@@ -612,7 +612,7 @@ mac         docs         ~/Code/docs         T-docs</code></pre>
                 </div>
                 <div class="step">
                   <span class="step-number">3</span>
-                  <span class="step-copy"><strong>Spawn/teardown</strong><span>Use <code>amux spawn --mode</code> for mode-specific fresh threads or <code>--title-prefix '#255'</code> for issue-prefixed titles; use no-arg <code>amux teardown</code> only from that spawned <code>AMUX_*</code> identity.</span></span>
+                  <span class="step-copy"><strong>Spawn/teardown</strong><span>Use <code>amux spawn --mode</code> for mode-specific fresh threads or <code>--title-prefix '#255'</code> for issue-prefixed titles; use no-arg <code>amux teardown</code> only from that spawned <code>AMUX_*</code> identity, or <code>amux teardown &lt;workspace&gt; &lt;window&gt; [session]</code> when targeting a verified row from outside the worker.</span></span>
                 </div>
                 <div class="step">
                   <span class="step-number">4</span>

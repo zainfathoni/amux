@@ -173,7 +173,7 @@ Command side effects:
 | `remove`, `remove-current` | Remove rows | No change | No change |
 | `park-current` | Remove current-window row | Gracefully stop the current local tmux/Amp window | No change; Amp thread history is not archived or deleted |
 | `spawn` | Store the new row under the final window name | Create/select a tmux window and submit the initial message | Create a new Amp thread, optionally with `--mode`; optionally rename the new thread with `--title-prefix` |
-| `teardown` | Remove the verified spawned row | Stop the verified tmux window | Archive the verified `AMUX_THREAD_ID` |
+| `teardown` | Remove the verified row | Stop the verified tmux window | Archive the verified thread |
 
 `amux doctor [workspace] [session]` is read-only and compares the selected workspace against the selected live tmux session. Omitting the session preserves the default `Amp` behavior, so `amux doctor mac` remains equivalent to `amux doctor mac Amp`.
 
@@ -183,7 +183,9 @@ Launch uses auto-attach by default: cold restores create the tmux session and re
 
 When launch attaches from inside an existing tmux client, `amux` switches that client to the target session. From a normal interactive terminal, it attaches in-place. If tmux reports that the caller is not a terminal, `amux` opens the target session through Omarchy's terminal launcher, with direct Alacritty fallback.
 
-`park-current` removes the current window from restore config, schedules a delayed graceful terminal shutdown sequence for the target pane, then returns immediately. This gives Amp time to receive the command result and send a final response before the local process exits. The delayed shutdown only force-closes the tmux window if graceful stop times out. Parking is local cleanup only; use `teardown` from an `amux spawn` worker when you intentionally want to archive that verified remote Amp thread too.
+`park-current` removes the current window from restore config, schedules a delayed graceful terminal shutdown sequence for the target pane, then returns immediately. This gives Amp time to receive the command result and send a final response before the local process exits. The delayed shutdown only force-closes the tmux window if graceful stop times out. Parking is local cleanup only; use `teardown` when you intentionally want to archive the verified remote Amp thread too.
+
+`teardown` is explicit full lifecycle cleanup: archive the verified Amp thread, remove the restore row, and stop the uniquely verified local tmux window. With no args it only runs from an `amux spawn` worker that has matching `AMUX_*` identity. From outside that environment, use `amux teardown <workspace> <window> [session]`; it cross-checks the restore row and live tmux window start command agree on the same thread before mutating anything, and fails closed if the target is missing, mismatched, or ambiguous.
 
 ## Configuration
 
