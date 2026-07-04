@@ -500,7 +500,7 @@ func (a app) spawn(opts options, args []string) error {
 		return err
 	}
 	if len(args) < 3 || len(args) > 5 {
-		return errors.New("usage: amux spawn [--mode <mode> | -m <mode>] <window> <workdir> <initial-message> [workspace] [session]")
+		return errors.New("usage: amux spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] <window> <workdir> <initial-message> [workspace] [session]")
 	}
 	window := args[0]
 	workdir := args[1]
@@ -531,6 +531,15 @@ func (a app) spawn(opts options, args []string) error {
 			return err
 		}
 	}
+	if spawnOpts.titlePrefix != "" {
+		if err := config.ValidateField("title-prefix", spawnOpts.titlePrefix); err != nil {
+			return err
+		}
+		if strings.TrimSpace(spawnOpts.titlePrefix) == "" {
+			return errors.New("title-prefix must not be blank")
+		}
+		window = spawnOpts.prefixedName(window)
+	}
 	row := config.Row{Workspace: workspace, Window: window, Workdir: workdir}
 	expandedWorkdir := config.ExpandHome(workdir)
 	if stat, err := os.Stat(expandedWorkdir); err != nil || !stat.IsDir() {
@@ -552,6 +561,9 @@ func (a app) spawn(opts options, args []string) error {
 			fmt.Fprintf(a.stdout, "Would create Amp thread for %s/%s\n", workspace, window)
 		} else {
 			fmt.Fprintf(a.stdout, "Would create Amp thread for %s/%s with mode %q\n", workspace, window, spawnOpts.mode)
+		}
+		if spawnOpts.titlePrefix != "" {
+			fmt.Fprintf(a.stdout, "Would rename new Amp thread to %q\n", window)
 		}
 		if sessionExists {
 			fmt.Fprintf(a.stdout, "Would create tmux window %q in session %q\n", window, session)
@@ -575,6 +587,11 @@ func (a app) spawn(opts options, args []string) error {
 	row.Thread = thread
 	if err := row.Validate(); err != nil {
 		return err
+	}
+	if spawnOpts.titlePrefix != "" {
+		if err := renameAmpThread(thread, window); err != nil {
+			return fmt.Errorf("rename Amp thread %s: %w; thread was created but not stored, continue it with `amp threads continue %s` or archive it with `amp threads archive %s`", thread, err, thread, thread)
+		}
 	}
 
 	command := tmux.ContinueCommandWithEnv(expandedWorkdir, thread, map[string]string{
@@ -792,7 +809,8 @@ func formatPaneCandidates(panes []tmux.WindowPane) string {
 }
 
 type spawnOptions struct {
-	mode string
+	mode        string
+	titlePrefix string
 }
 
 func parseSpawnOptions(args []string) (spawnOptions, []string, error) {
@@ -806,11 +824,22 @@ func parseSpawnOptions(args []string) (spawnOptions, []string, error) {
 				return opts, nil, errors.New("--mode requires a mode")
 			}
 			opts.mode = args[i]
+		case "--title-prefix":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return opts, nil, errors.New("--title-prefix requires a prefix")
+			}
+			opts.titlePrefix = args[i]
 		default:
 			if strings.HasPrefix(args[i], "--mode=") {
 				opts.mode = strings.TrimPrefix(args[i], "--mode=")
 				if opts.mode == "" {
 					return opts, nil, errors.New("--mode requires a mode")
+				}
+			} else if strings.HasPrefix(args[i], "--title-prefix=") {
+				opts.titlePrefix = strings.TrimPrefix(args[i], "--title-prefix=")
+				if opts.titlePrefix == "" {
+					return opts, nil, errors.New("--title-prefix requires a prefix")
 				}
 			} else {
 				remaining = append(remaining, args[i])
@@ -818,6 +847,23 @@ func parseSpawnOptions(args []string) (spawnOptions, []string, error) {
 		}
 	}
 	return opts, remaining, nil
+}
+
+func (opts spawnOptions) prefixedName(window string) string {
+	return strings.TrimSpace(strings.TrimSpace(opts.titlePrefix) + " " + window)
+}
+
+func renameAmpThread(thread, title string) error {
+	cmd := exec.Command("amp", "threads", "rename", thread, title)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(out))
+		if message == "" {
+			return err
+		}
+		return fmt.Errorf("%w: %s", err, message)
+	}
+	return nil
 }
 
 func spawnDelay() time.Duration {
@@ -1032,16 +1078,20 @@ Commands:
       Side effects: mutates restore config and live local tmux/Amp only.
       Amp thread history is not archived or deleted.
 
-  spawn [--mode <mode> | -m <mode>] <window> <workdir> <initial-message> [workspace] [session]
+  spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] <window> <workdir> <initial-message> [workspace] [session]
       Create an empty Amp thread, open it in an interactive tmux window,
       submit the initial message with tmux send-keys, and store the row.
       The spawned Amp process receives AMUX_WORKSPACE, AMUX_SESSION,
       AMUX_WINDOW, AMUX_THREAD_ID, and AMUX_WORKDIR identity variables.
       Use --mode or -m to create the remote Amp thread with an Amp mode.
+      Use --title-prefix to name the spawned tmux window "<prefix> <window>"
+      and rename only the newly created Amp thread to that same name after its
+      thread ID is known, for example "#255 worker".
       Side effects: creates a remote Amp thread, mutates live local tmux/Amp,
-      and stores the restore-config row.
+      may rename the new remote Amp thread, and stores the restore-config row
+      under the final window name.
       With --dry-run, only validate and print intended actions; do not create
-      an Amp thread, mutate tmux, send keys, or update the config.
+      or rename an Amp thread, mutate tmux, send keys, or update the config.
 
   teardown
       From an amux-spawned Amp process, verify AMUX_* identity, archive the

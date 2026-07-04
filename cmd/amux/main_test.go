@@ -522,6 +522,207 @@ exit 2
 	}
 }
 
+func TestSpawnTitlePrefixRenamesNewThreadToPrefixedWindowTitle(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = new ]; then
+  printf 'T-prefixed-thread\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = rename ] && [ "$3" = T-prefixed-thread ] && [ "$4" = '#255 prefixed win' ]; then
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then
+  exit 1
+fi
+if [ "$1" = new-session ]; then
+  printf '@1\n'
+  exit 0
+fi
+if [ "$1" = send-keys ] || [ "$1" = select-window ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	if err := run([]string{"--config", configPath, "spawn", "--title-prefix", "#255", "prefixed win", workdir, "hello Amp"}); err != nil {
+		t.Fatal(err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		"amp threads new",
+		"amp threads rename T-prefixed-thread #255 prefixed win",
+		"tmux new-session -d -P -F #{window_id} -s Amp -n #255 prefixed win",
+		"AMUX_WINDOW='#255 prefixed win'",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("log missing %q\nlog:\n%s", want, log)
+		}
+	}
+	if strings.Index(log, "amp threads rename") < strings.Index(log, "amp threads new") || strings.Index(log, "amp threads rename") > strings.Index(log, "tmux new-session") {
+		t.Fatalf("rename did not happen after thread creation and before tmux mutation\nlog:\n%s", log)
+	}
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(configBytes), "mac\t#255 prefixed win\t"+workdir+"\tT-prefixed-thread\n"; !strings.Contains(got, want) {
+		t.Fatalf("config did not contain prefixed spawned row\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestSpawnTitlePrefixEqualsFlagRenamesNewThread(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = new ]; then
+  printf 'T-prefixed-thread\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = rename ] && [ "$3" = T-prefixed-thread ] && [ "$4" = '#255 equals win' ]; then
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then
+  exit 1
+fi
+if [ "$1" = new-session ]; then
+  printf '@1\n'
+  exit 0
+fi
+if [ "$1" = send-keys ] || [ "$1" = select-window ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	if err := run([]string{"--config", configPath, "spawn", "--title-prefix=#255", "equals win", workdir, "hello Amp"}); err != nil {
+		t.Fatal(err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(logBytes); !strings.Contains(got, "amp threads rename T-prefixed-thread #255 equals win") {
+		t.Fatalf("log missing equals-form rename\nlog:\n%s", got)
+	}
+}
+
+func TestSpawnTitlePrefixRenameFailureStopsBeforeTmuxAndConfigMutation(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = new ]; then
+  printf 'T-rename-fails\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = rename ]; then
+  printf 'rename unavailable\n' >&2
+  exit 3
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	err := run([]string{"--config", configPath, "spawn", "--title-prefix", "#255", "prefixed win", workdir, "hello Amp"})
+	if err == nil {
+		t.Fatal("spawn succeeded, want rename failure")
+	}
+	if !strings.Contains(err.Error(), "rename Amp thread T-rename-fails") || !strings.Contains(err.Error(), "rename unavailable") {
+		t.Fatalf("got error %q, want rename failure with amp output", err)
+	}
+	if !strings.Contains(err.Error(), "thread was created but not stored") {
+		t.Fatalf("got error %q, want recovery hint", err)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("rename failure wrote config file")
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if strings.Contains(log, "tmux new-session") || strings.Contains(log, "tmux new-window") || strings.Contains(log, "tmux send-keys") || strings.Contains(log, "tmux select-window") {
+		t.Fatalf("rename failure mutated tmux window\nlog:\n%s", log)
+	}
+}
+
+func TestSpawnRejectsBlankTitlePrefixBeforeCreatingThread(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ampCalledPath := filepath.Join(tmp, "amp-called")
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+touch "`+ampCalledPath+`"
+printf 'T-should-not-exist\n'
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := run([]string{"--config", filepath.Join(tmp, "workspaces.tsv"), "spawn", "--title-prefix", "   ", "fresh", workdir, "hello"})
+	if err == nil {
+		t.Fatal("spawn succeeded, want blank title-prefix error")
+	}
+	if !strings.Contains(err.Error(), "title-prefix must not be blank") {
+		t.Fatalf("got error %q, want blank title-prefix error", err)
+	}
+	if _, err := os.Stat(ampCalledPath); !os.IsNotExist(err) {
+		t.Fatalf("amp threads new was called before title-prefix validation")
+	}
+}
+
 func TestSpawnDryRunDoesNotCreateThreadOrWriteConfig(t *testing.T) {
 	tmp := t.TempDir()
 	workdir := filepath.Join(tmp, "workdir")
@@ -605,6 +806,51 @@ exit 2
 		"Would create tmux session \"Amp\" with window \"dry\"",
 		"Would start Amp in " + workdir + " and submit initial message",
 		"Would store mac/dry in " + configPath,
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("dry-run output missing %q\nstdout:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestSpawnDryRunTitlePrefixPrintsPlannedRenameWithoutCallingAmp(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	ampCalledPath := filepath.Join(tmp, "amp-called")
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+touch "`+ampCalledPath+`"
+printf 'T-should-not-exist\n'
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then
+  exit 1
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "--dry-run", "spawn", "--title-prefix", "#255", "dry", workdir, "hello"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(ampCalledPath); !os.IsNotExist(err) {
+		t.Fatalf("dry-run spawn called amp")
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("dry-run spawn wrote config file")
+	}
+	for _, want := range []string{
+		"Would create Amp thread for mac/#255 dry",
+		"Would rename new Amp thread to \"#255 dry\"",
+		"Would create tmux session \"Amp\" with window \"#255 dry\"",
+		"Would store mac/#255 dry in " + configPath,
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("dry-run output missing %q\nstdout:\n%s", want, stdout.String())
