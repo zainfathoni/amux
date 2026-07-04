@@ -1581,6 +1581,10 @@ exit 2
 `)
 
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMUX_WORKSPACE", "")
+	t.Setenv("AMUX_SESSION", "")
+	t.Setenv("AMUX_WINDOW", "")
+	t.Setenv("AMUX_THREAD_ID", "")
 
 	err := run([]string{"--config", configPath, "teardown", "bta", "pr-11840", "BTA"})
 	if err == nil {

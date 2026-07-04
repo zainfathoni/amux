@@ -667,6 +667,7 @@ func (a app) teardown(opts options, args []string) error {
 		return err
 	}
 	if identity.Thread == "" {
+		// Explicit teardown uses the verified restore row as the thread authority.
 		identity.Thread = row.Thread
 	}
 	runner := tmux.Runner{}
