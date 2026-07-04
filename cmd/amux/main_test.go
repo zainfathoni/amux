@@ -1523,7 +1523,7 @@ exit 2
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 printf 'tmux %s\n' "$*" >> "`+logPath+`"
 if [ "$1" = list-panes ]; then
-  printf 'worker\t@7\t%s\n' `+shellSingleQuote(startCommand)+`
+  printf 'worker\t@7\t%s\n' `+shellSingleQuote(fmt.Sprintf("%q", startCommand))+`
   printf 'other\t@8\tcd /tmp/other && AMUX_THREAD_ID=T-other exec amp threads continue T-other\n'
   exit 0
 fi
@@ -1655,6 +1655,66 @@ exit 2
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("explicit teardown output missing %q\nstdout:\n%s", want, stdout.String())
 		}
+	}
+}
+
+func TestTeardownExplicitWorkspaceWindowAcceptsQuotedSpawnCommand(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("amux\tworker\t/tmp/project\tT-worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	startCommand := teardownExpectedStartCommand(
+		teardownIdentity{Workspace: "amux", Session: "Amux", Window: "worker", Thread: "T-worker"},
+		config.Row{Workspace: "amux", Window: "worker", Workdir: "/tmp/project", Thread: "T-worker"},
+	)
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = archive ] && [ "$3" = T-worker ]; then
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ]; then
+  printf 'worker\t@14\t%s\n' `+shellSingleQuote(fmt.Sprintf("%q", startCommand))+`
+  exit 0
+fi
+if [ "$1" = kill-window ] && [ "$2" = -t ] && [ "$3" = @14 ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMUX_WORKSPACE", "")
+	t.Setenv("AMUX_SESSION", "")
+	t.Setenv("AMUX_WINDOW", "")
+	t.Setenv("AMUX_THREAD_ID", "")
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "teardown", "amux", "worker", "Amux"}); err != nil {
+		t.Fatal(err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		"amp threads archive T-worker",
+		"tmux kill-window -t @14",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("explicit teardown log missing %q\nlog:\n%s", want, log)
+		}
+	}
+	if !strings.Contains(stdout.String(), "Stopped tmux window Amux/worker (@14)") {
+		t.Fatalf("explicit teardown output missing stopped window\nstdout:\n%s", stdout.String())
 	}
 }
 

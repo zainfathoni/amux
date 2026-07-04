@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -794,13 +795,24 @@ func verifiedTeardownPane(runner tmux.Runner, identity teardownIdentity, row con
 	if pane.WindowID == "" {
 		return tmux.WindowPane{}, fmt.Errorf("tmux window %q in session %q has no window id", identity.Window, identity.Session)
 	}
-	if identity.FromEnv && pane.StartCommand != teardownExpectedStartCommand(identity, row) {
+	startCommand := normalizedTmuxStartCommand(pane.StartCommand)
+	if identity.FromEnv && startCommand != teardownExpectedStartCommand(identity, row) {
 		return tmux.WindowPane{}, fmt.Errorf("tmux window %q in session %q is not the expected amux-spawned command for AMUX_THREAD_ID=%s; start command: %s", identity.Window, identity.Session, identity.Thread, pane.StartCommand)
 	}
-	if !identity.FromEnv && !explicitTeardownStartCommandMatches(identity, row, pane.StartCommand) {
+	if !identity.FromEnv && !explicitTeardownStartCommandMatches(identity, row, startCommand) {
 		return tmux.WindowPane{}, fmt.Errorf("tmux window %q in session %q start command does not match restore row thread %s; candidates %s; start command: %s", identity.Window, identity.Session, row.Thread, formatPaneCandidates(panes), pane.StartCommand)
 	}
 	return pane, nil
+}
+
+func normalizedTmuxStartCommand(startCommand string) string {
+	if strings.HasPrefix(startCommand, "\"") && strings.HasSuffix(startCommand, "\"") {
+		unquoted, err := strconv.Unquote(startCommand)
+		if err == nil {
+			return unquoted
+		}
+	}
+	return startCommand
 }
 
 func explicitTeardownStartCommandMatches(identity teardownIdentity, row config.Row, startCommand string) bool {
