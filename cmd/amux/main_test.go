@@ -572,7 +572,8 @@ exit 2
 	for _, want := range []string{
 		"amp threads new",
 		"amp threads rename T-prefixed-thread #255 prefixed win",
-		"tmux new-session",
+		"tmux new-session -d -P -F #{window_id} -s Amp -n #255 prefixed win",
+		"AMUX_WINDOW='#255 prefixed win'",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("log missing %q\nlog:\n%s", want, log)
@@ -580,6 +581,13 @@ exit 2
 	}
 	if strings.Index(log, "amp threads rename") < strings.Index(log, "amp threads new") || strings.Index(log, "amp threads rename") > strings.Index(log, "tmux new-session") {
 		t.Fatalf("rename did not happen after thread creation and before tmux mutation\nlog:\n%s", log)
+	}
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(configBytes), "mac\t#255 prefixed win\t"+workdir+"\tT-prefixed-thread\n"; !strings.Contains(got, want) {
+		t.Fatalf("config did not contain prefixed spawned row\ngot:  %q\nwant: %q", got, want)
 	}
 }
 
@@ -839,10 +847,10 @@ exit 2
 		t.Fatalf("dry-run spawn wrote config file")
 	}
 	for _, want := range []string{
-		"Would create Amp thread for mac/dry",
+		"Would create Amp thread for mac/#255 dry",
 		"Would rename new Amp thread to \"#255 dry\"",
-		"Would create tmux session \"Amp\" with window \"dry\"",
-		"Would store mac/dry in " + configPath,
+		"Would create tmux session \"Amp\" with window \"#255 dry\"",
+		"Would store mac/#255 dry in " + configPath,
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("dry-run output missing %q\nstdout:\n%s", want, stdout.String())
