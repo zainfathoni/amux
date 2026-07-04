@@ -643,6 +643,72 @@ exit 2
 	}
 }
 
+func TestSpawnTitlePrefixRetriesRenameWhileThreadIsEmpty(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	renameCountPath := filepath.Join(tmp, "rename-count")
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = new ]; then
+  printf 'T-eventually-non-empty\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = rename ]; then
+  count=0
+  if [ -f "`+renameCountPath+`" ]; then
+    count=$(cat "`+renameCountPath+`")
+  fi
+  count=$((count + 1))
+  printf '%s' "$count" > "`+renameCountPath+`"
+  if [ "$count" -lt 3 ]; then
+    printf 'Error: Cannot rename an empty thread.\n' >&2
+    exit 1
+  fi
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then
+  exit 1
+fi
+if [ "$1" = new-session ]; then
+  printf '@1\n'
+  exit 0
+fi
+if [ "$1" = send-keys ] || [ "$1" = select-window ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	if err := run([]string{"--config", configPath, "spawn", "--title-prefix", "#255", "retry win", workdir, "hello Amp"}); err != nil {
+		t.Fatal(err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if got := strings.Count(log, "amp threads rename T-eventually-non-empty #255 retry win"); got != 3 {
+		t.Fatalf("got %d rename attempts, want 3\nlog:\n%s", got, log)
+	}
+	if strings.Index(log, "amp threads rename") < strings.Index(log, "tmux send-keys -t @1 Enter") {
+		t.Fatalf("rename retry happened before initial message submission\nlog:\n%s", log)
+	}
+}
+
 func TestSpawnTitlePrefixRenameFailureKeepsSpawnedWorkerAndReportsRecovery(t *testing.T) {
 	tmp := t.TempDir()
 	workdir := filepath.Join(tmp, "workdir")
@@ -880,11 +946,15 @@ exit 2
 		"Would create Amp thread for mac/#255 dry",
 		"Would rename new Amp thread to \"#255 dry\"",
 		"Would create tmux session \"Amp\" with window \"#255 dry\"",
+		"Would start Amp in " + workdir + " and submit initial message",
 		"Would store mac/#255 dry in " + configPath,
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("dry-run output missing %q\nstdout:\n%s", want, stdout.String())
 		}
+	}
+	if strings.Index(stdout.String(), "Would rename new Amp thread") < strings.Index(stdout.String(), "Would start Amp") {
+		t.Fatalf("dry-run rename appeared before initial message submission\nstdout:\n%s", stdout.String())
 	}
 }
 
