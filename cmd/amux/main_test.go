@@ -1756,7 +1756,7 @@ func TestPinCurrentAndUnpinCurrentAreConfigOnlyAliases(t *testing.T) {
 	}
 
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
-if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = '#W' ]; then
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "%42" ] && [ "$5" = '#W' ]; then
   printf 'pinned-current\n'
   exit 0
 fi
@@ -1764,7 +1764,7 @@ exit 2
 `)
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX", "fake-tmux-socket")
-	t.Setenv("TMUX_PANE", "")
+	t.Setenv("TMUX_PANE", "%42")
 
 	if err := run([]string{"--config", configPath, "unpin-current"}); err != nil {
 		t.Fatal(err)
