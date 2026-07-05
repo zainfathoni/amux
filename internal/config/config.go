@@ -233,6 +233,7 @@ const defaultConfig = `# workspace	window	workdir	thread-id-or-url
 #   amux
 #   amux launch mac
 #
-# Add/remove rows with amux store/store-current/remove/remove-current/spawn.
+# Add/remove rows with amux pin/pin-current/unpin/unpin-current/spawn.
+# Compatibility aliases: store/store-current/remove/remove-current.
 # Use either Amp thread IDs or full https://ampcode.com/threads/... URLs.
 `

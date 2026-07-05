@@ -19,6 +19,26 @@ func TestParseRows(t *testing.T) {
 	}
 }
 
+func TestEnsureWritesDefaultConfigWithPinUnpinGuidance(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/workspaces.tsv"
+
+	if err := Ensure(path); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "amux pin/pin-current/unpin/unpin-current/spawn"; !strings.Contains(string(got), want) {
+		t.Fatalf("default config does not prefer pin/unpin guidance\ngot: %q\nwant substring: %q", got, want)
+	}
+	if strings.Contains(string(got), "amux store/store-current/remove/remove-current/spawn") {
+		t.Fatalf("default config still prefers legacy store/remove guidance: %q", got)
+	}
+}
+
 func TestParseRejectsMalformedRows(t *testing.T) {
 	cases := []string{
 		"mac\twin\tdir\n",

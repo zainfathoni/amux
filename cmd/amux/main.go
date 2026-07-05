@@ -357,7 +357,7 @@ func (a app) storeRow(opts options, row config.Row) error {
 	if replaced {
 		fmt.Fprintf(a.stdout, "Updated %s/%s in %s\n", row.Workspace, row.Window, opts.configPath)
 	} else {
-		fmt.Fprintf(a.stdout, "Stored %s/%s in %s\n", row.Workspace, row.Window, opts.configPath)
+		fmt.Fprintf(a.stdout, "Pinned %s/%s in %s\n", row.Workspace, row.Window, opts.configPath)
 	}
 	return nil
 }
@@ -489,7 +489,7 @@ func (a app) removeRow(opts options, workspace, window string) error {
 		return err
 	}
 	if removed {
-		fmt.Fprintf(a.stdout, "Removed %s/%s from %s\n", workspace, window, opts.configPath)
+		fmt.Fprintf(a.stdout, "Unpinned %s/%s from %s\n", workspace, window, opts.configPath)
 	} else {
 		fmt.Fprintf(a.stdout, "No row found for %s/%s in %s\n", workspace, window, opts.configPath)
 	}

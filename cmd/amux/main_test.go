@@ -1687,9 +1687,13 @@ func TestStoreCurrentWithExplicitWindowAndWorkdirDoesNotRequireTmux(t *testing.T
 func TestPinAndUnpinAreConfigOnlyAliases(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
+	var stdout bytes.Buffer
 
-	if err := run([]string{"--config", configPath, "pin", "mac", "pinned", "/tmp/pinned", "T-pinned"}); err != nil {
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "pin", "mac", "pinned", "/tmp/pinned", "T-pinned"}); err != nil {
 		t.Fatal(err)
+	}
+	if got, want := stdout.String(), "Pinned mac/pinned"; !strings.Contains(got, want) {
+		t.Fatalf("pin output missing %q\nstdout: %s", want, got)
 	}
 
 	configBytes, err := os.ReadFile(configPath)
@@ -1700,8 +1704,12 @@ func TestPinAndUnpinAreConfigOnlyAliases(t *testing.T) {
 		t.Fatalf("config did not contain pinned row\ngot:  %q\nwant: %q", got, want)
 	}
 
-	if err := run([]string{"--config", configPath, "unpin", "mac", "pinned"}); err != nil {
+	stdout.Reset()
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "unpin", "mac", "pinned"}); err != nil {
 		t.Fatal(err)
+	}
+	if got, want := stdout.String(), "Unpinned mac/pinned"; !strings.Contains(got, want) {
+		t.Fatalf("unpin output missing %q\nstdout: %s", want, got)
 	}
 
 	configBytes, err = os.ReadFile(configPath)
@@ -2103,7 +2111,7 @@ exit 2
 		}
 	}
 	for _, want := range []string{
-		"Removed mac/worker",
+		"Unpinned mac/worker",
 		"Archived Amp thread T-worker",
 		"Stopped tmux window Amp/worker (@7)",
 	} {
@@ -2180,7 +2188,7 @@ exit 2
 		}
 	}
 	for _, want := range []string{
-		"Removed bta/pr-11840",
+		"Unpinned bta/pr-11840",
 		"Archived Amp thread T-explicit",
 		"Stopped tmux window BTA/pr-11840 (@11)",
 	} {
@@ -2321,7 +2329,7 @@ exit 2
 		}
 	}
 	for _, want := range []string{
-		"Removed kelas/mailgun-258-failures",
+		"Unpinned kelas/mailgun-258-failures",
 		"Archived Amp thread T-worker",
 		"Stopped tmux window Kelas/mailgun-258-failures (@21)",
 	} {
