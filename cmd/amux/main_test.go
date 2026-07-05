@@ -2831,13 +2831,14 @@ func TestDoctorFailsWhenInsideTmuxButTmuxCannotBeQueried(t *testing.T) {
 	}
 	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 0\n")
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
-if [ "$1" = display-message ]; then
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "%42" ]; then
   exit 2
 fi
 exit 0
 `)
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX", "fake-tmux-socket")
+	t.Setenv("TMUX_PANE", "%42")
 
 	err := runWithDiscardedStdout([]string{"--config", configPath, "doctor", "mac"})
 	if err == nil {
@@ -2856,8 +2857,8 @@ func TestDoctorPassesWhenInsideTmuxCanBeQueried(t *testing.T) {
 	}
 	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 0\n")
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
-if [ "$1" = display-message ] && [ "$2" = -p ]; then
-  case "$3" in
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "%42" ]; then
+  case "$5" in
     '#W') printf 'win\n'; exit 0 ;;
     '#{pane_current_path}') printf '/tmp\n'; exit 0 ;;
   esac
@@ -2870,6 +2871,7 @@ exit 0
 `)
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX", "fake-tmux-socket")
+	t.Setenv("TMUX_PANE", "%42")
 
 	if err := runWithDiscardedStdout([]string{"--config", configPath, "doctor", "mac"}); err != nil {
 		t.Fatal(err)

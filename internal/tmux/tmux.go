@@ -310,14 +310,6 @@ func displayCurrentMessage(format string) (string, error) {
 	return "", fmt.Errorf("TMUX_PANE is unavailable; run amux from the pane you want to target instead of relying on tmux's active client")
 }
 
-func displayMessage(format string) (string, error) {
-	out, err := tmuxOutput("display-message", "-p", format)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimRight(string(out), "\r\n"), nil
-}
-
 func displayMessageForTarget(target, format string) (string, error) {
 	out, err := tmuxOutput("display-message", "-p", "-t", target, format)
 	if err != nil {
