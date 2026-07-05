@@ -29,13 +29,14 @@ amux remove-current [workspace]
 amux park-current [workspace]
 amux spawn [--mode <mode> | -m <mode>] <window> <workdir> <initial-message> [workspace] [session]
 amux teardown
+amux teardown --thread <thread-id-or-url> [--session <session>]
 ```
 
 Use `store-current` from inside a tmux/Amp thread when possible. It defaults to workspace `mac` plus the invoking pane's tmux window name and pane path, using `$TMUX_PANE` when available rather than the currently focused tmux client.
 Use `remove-current` from inside tmux when the invoking pane's window should no longer be restored.
 Use `spawn` for a fresh interactive Amp session. It must use `amp threads new` plus `amp threads continue` inside tmux; do not use `amp -x` or piped stdin for this workflow. Use `spawn --mode <mode>` or `spawn -m <mode>` when the user wants the new remote Amp thread created with a specific Amp mode.
 Use `spawn --dry-run` to inspect a new-session plan safely. It validates inputs and checks live tmux window conflicts, but must not create an Amp thread, mutate tmux, send keys, or update the restore config.
-Use no-arg `teardown` only from inside an `amux spawn` worker with injected `AMUX_*` identity. It verifies the identity against restore config and live tmux before archiving the matching remote Amp thread, removing the restore row, and stopping the matched local tmux window.
+Use no-arg `teardown` only from inside an `amux spawn` worker with injected `AMUX_*` identity. It verifies the identity against restore config and live tmux before archiving the matching remote Amp thread, removing the restore row, and stopping the matched local tmux window. If a restored worker lacks `AMUX_*` but its thread is in `amux list` and live in tmux, use `amux teardown --thread <thread-id-or-url> [--session <session>]` instead; it resolves and verifies the row and tmux window by thread before cleanup.
 Use `doctor` before or after suspicious restore changes to verify dependencies, configured workdirs, selected workspace rows, and live tmux drift in the default `Amp` session. It compares config rows with `tmux list-panes`, reports configured windows that are not running, live windows that are not stored, and pane paths that differ from configured workdirs.
 Launch auto-attaches by default only when the tmux session already existed, no restore work was needed, and its live window set plus pane paths match the configured workspace. Cold restores and partial restores do not auto-attach. Use `launch --dry-run` to inspect restore actions without creating windows, `--attach launch` to force attach, or `--no-attach launch` to suppress auto-attach. If attach is requested from inside tmux, `amux` switches the current client to the target session; if tmux reports there is no terminal, `amux` opens the session through Omarchy's terminal launcher with direct Alacritty fallback.
 
@@ -47,7 +48,7 @@ Launch auto-attaches by default only when the tmux session already existed, no r
 - `remove` and `remove-current`: mutate restore config only; they do not stop local tmux/Amp windows and do not archive remote Amp threads.
 - `park-current`: removes the current-window restore row and stops the current local tmux/Amp window after a delay; it does not archive or delete the remote Amp thread.
 - `spawn`: creates a remote Amp thread, creates/selects a live local tmux window, submits the initial message, injects `AMUX_WORKSPACE`, `AMUX_SESSION`, `AMUX_WINDOW`, `AMUX_THREAD_ID`, and `AMUX_WORKDIR`, and stores the restore row.
-- `teardown`: verifies `AMUX_*` identity, restore config, and live tmux, then archives the verified remote Amp thread, removes the restore row, and stops the verified local tmux window.
+- `teardown`: verifies `AMUX_*` identity, explicit workspace/window, or `--thread` restore/live-tmux agreement, then archives the verified remote Amp thread, removes the restore row, and stops the verified local tmux window.
 
 ## Trigger phrases
 
@@ -94,7 +95,13 @@ Use this only inside an Amp process that was created by `amux spawn` and has the
 amux teardown
 ```
 
-`teardown` is the explicit full-lifecycle cleanup command. It archives the verified `AMUX_THREAD_ID`, removes the matching restore-config row, and stops the verified local tmux window. If any identity, config, or tmux check is missing, mismatched, or ambiguous, it fails closed and should not archive or stop anything.
+If the worker was restored later and does not have `AMUX_WORKSPACE`, `AMUX_SESSION`, `AMUX_WINDOW`, or `AMUX_THREAD_ID`, but you know its Amp thread ID/URL and the row is stored, use:
+
+```sh
+amux teardown --thread <thread-id-or-url> [--session <session>]
+```
+
+`teardown` is the explicit full-lifecycle cleanup command. It archives the verified thread, removes the matching restore-config row, and stops the verified local tmux window. If any identity, config, or tmux check is missing, mismatched, or ambiguous, it fails closed and should not archive or stop anything. Do not use `park-current` when the desired outcome is remote Amp thread archival; parking intentionally leaves remote thread history alone.
 
 ## Current-session workflow
 

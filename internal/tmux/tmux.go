@@ -19,6 +19,7 @@ type Pane struct {
 }
 
 type WindowPane struct {
+	Session      string
 	Window       string
 	WindowID     string
 	StartCommand string
@@ -92,7 +93,31 @@ func (r Runner) WindowPanes(session, window string) ([]WindowPane, error) {
 		if fields[0] != window {
 			continue
 		}
-		panes = append(panes, WindowPane{Window: fields[0], WindowID: fields[1], StartCommand: fields[2]})
+		panes = append(panes, WindowPane{Session: session, Window: fields[0], WindowID: fields[1], StartCommand: fields[2]})
+	}
+	return panes, nil
+}
+
+func (r Runner) AllWindowPanes() ([]WindowPane, error) {
+	if r.DryRun {
+		return nil, nil
+	}
+	out, err := tmuxOutput("list-panes", "-a", "-F", "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_start_command}")
+	if err != nil {
+		return nil, err
+	}
+	text := strings.TrimSuffix(string(out), "\n")
+	if text == "" {
+		return nil, nil
+	}
+	lines := strings.Split(text, "\n")
+	panes := make([]WindowPane, 0, len(lines))
+	for _, line := range lines {
+		fields := strings.SplitN(line, "\t", 4)
+		if len(fields) != 4 {
+			return nil, fmt.Errorf("unexpected tmux pane row %q", line)
+		}
+		panes = append(panes, WindowPane{Session: fields[0], Window: fields[1], WindowID: fields[2], StartCommand: fields[3]})
 	}
 	return panes, nil
 }

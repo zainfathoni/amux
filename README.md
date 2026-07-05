@@ -145,6 +145,7 @@ amux remove-current [workspace]
 amux park-current [workspace]
 amux spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] <window> <workdir> <initial-message> [workspace] [session]
 amux teardown
+amux teardown --thread <thread-id-or-url> [--session <session>]
 amux version
 amux self-update
 amux path
@@ -185,7 +186,7 @@ When launch attaches from inside an existing tmux client, `amux` switches that c
 
 `park-current` removes the current window from restore config, schedules a delayed graceful terminal shutdown sequence for the target pane, then returns immediately. This gives Amp time to receive the command result and send a final response before the local process exits. The delayed shutdown only force-closes the tmux window if graceful stop times out. Parking is local cleanup only; use `teardown` when you intentionally want to archive the verified remote Amp thread too.
 
-`teardown` is explicit full lifecycle cleanup: archive the verified Amp thread, remove the restore row, and stop the uniquely verified local tmux window. With no args it only runs from an `amux spawn` worker that has matching `AMUX_*` identity. From outside that environment, use `amux teardown <workspace> <window> [session]`; it cross-checks the restore row and live tmux window start command agree on the same thread before mutating anything, and fails closed if the target is missing, mismatched, or ambiguous.
+`teardown` is explicit full lifecycle cleanup: archive the verified Amp thread, remove the restore row, and stop the uniquely verified local tmux window. With no args it only runs from an `amux spawn` worker that has matching `AMUX_*` identity. From a restored worker that does not have `AMUX_*` but whose thread is stored and live, use `amux teardown --thread <thread-id-or-url> [--session <session>]`; it resolves the restore row by thread, then cross-checks the live tmux start command before mutating anything. From outside the worker when you know the row, use `amux teardown <workspace> <window> [session]`. All teardown forms fail closed if the target is missing, mismatched, or ambiguous.
 
 ## Configuration
 
