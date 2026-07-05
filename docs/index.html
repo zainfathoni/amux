@@ -556,8 +556,8 @@ OK live tmux session matches config</code></pre>
                 <dd>Launch a named workspace into a tmux session with one window per configured Amp thread.</dd>
               </div>
               <div class="feature">
-                <dt>Store the current window</dt>
-                <dd>Pin or remove the tmux window you are already in without manually retyping its name or path.</dd>
+                <dt>Pin the current window</dt>
+                <dd>Pin or unpin the tmux window you are already in without manually retyping its name or path. These commands only mutate restore config.</dd>
               </div>
               <div class="feature">
                 <dt>Inspect drift</dt>
@@ -591,7 +591,7 @@ OK live tmux session matches config</code></pre>
                 The default config lives at <code>~/.config/amp-tmux/workspaces.tsv</code>. Each row maps a workspace, a tmux window, a working directory, and an Amp thread.
               </p>
               <p>
-                <code>amux</code> names three side-effect domains explicitly: restore-config rows, live local tmux/Amp sessions, and remote Amp thread state. Store/remove commands only change the restore config; <code>park-current</code> removes restore state and stops the local window without archiving the remote thread; <code>teardown</code> is the explicit full cleanup that archives the verified thread, removes its row, and stops its verified local window.
+                <code>amux</code> names three side-effect domains explicitly: restore-config rows, live local tmux/Amp sessions, and remote Amp thread state. Pin/unpin commands only change the restore config (<code>store</code>/<code>remove</code> remain compatibility aliases); <code>park-current</code> removes restore state and stops the local window without archiving the remote thread; <code>teardown</code> is the explicit full cleanup that archives the verified thread, removes its row, and stops its verified local window.
               </p>
             </div>
             <div class="panel">
@@ -604,7 +604,7 @@ mac         docs         ~/Code/docs         T-docs</code></pre>
               <div class="steps">
                 <div class="step">
                   <span class="step-number">1</span>
-                  <span class="step-copy"><strong>Store</strong><span>Save the current tmux window with <code>amux store-current</code>.</span></span>
+                  <span class="step-copy"><strong>Pin</strong><span>Save the current tmux window in restore config with <code>amux pin-current</code>.</span></span>
                 </div>
                 <div class="step">
                   <span class="step-number">2</span>

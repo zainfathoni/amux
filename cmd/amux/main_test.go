@@ -1684,6 +1684,76 @@ func TestStoreCurrentWithExplicitWindowAndWorkdirDoesNotRequireTmux(t *testing.T
 	}
 }
 
+func TestPinAndUnpinAreConfigOnlyAliases(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+
+	if err := run([]string{"--config", configPath, "pin", "mac", "pinned", "/tmp/pinned", "T-pinned"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(configBytes), "mac\tpinned\t/tmp/pinned\tT-pinned\n"; !strings.Contains(got, want) {
+		t.Fatalf("config did not contain pinned row\ngot:  %q\nwant: %q", got, want)
+	}
+
+	if err := run([]string{"--config", configPath, "unpin", "mac", "pinned"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err = os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(configBytes), "pinned") {
+		t.Fatalf("config still contains unpinned row: %q", configBytes)
+	}
+}
+
+func TestPinCurrentAndUnpinCurrentAreConfigOnlyAliases(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	t.Setenv("TMUX", "")
+
+	if err := run([]string{"--config", configPath, "pin-current", "mac", "T-current", "pinned-current", "/tmp/pinned-current"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(configBytes), "mac\tpinned-current\t/tmp/pinned-current\tT-current\n"; !strings.Contains(got, want) {
+		t.Fatalf("config did not contain pinned current row\ngot:  %q\nwant: %q", got, want)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = '#W' ]; then
+  printf 'pinned-current\n'
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "fake-tmux-socket")
+	t.Setenv("TMUX_PANE", "")
+
+	if err := run([]string{"--config", configPath, "unpin-current"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err = os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(configBytes), "pinned-current") {
+		t.Fatalf("config still contains unpinned current row: %q", configBytes)
+	}
+}
+
 func TestRemoveCurrentInfersWindowFromTmux(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")

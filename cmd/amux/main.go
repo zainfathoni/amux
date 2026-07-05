@@ -85,13 +85,13 @@ func (a app) run(args []string) error {
 		return launch(opts, args)
 	case "list":
 		return a.list(opts, args)
-	case "store":
+	case "pin", "store":
 		return a.store(opts, args)
-	case "store-current":
+	case "pin-current", "store-current":
 		return a.storeCurrent(opts, args)
-	case "remove":
+	case "unpin", "remove":
 		return a.remove(opts, args)
-	case "remove-current":
+	case "unpin-current", "remove-current":
 		return a.removeCurrent(opts, args)
 	case "park-current":
 		return a.parkCurrent(opts, args)
@@ -298,7 +298,7 @@ func (a app) list(opts options, args []string) error {
 
 func (a app) store(opts options, args []string) error {
 	if len(args) != 4 {
-		return errors.New("usage: amux store <workspace> <window> <workdir> <thread-id-or-url>")
+		return errors.New("usage: amux pin <workspace> <window> <workdir> <thread-id-or-url> (compatibility alias: store)")
 	}
 	row := config.Row{Workspace: args[0], Window: args[1], Workdir: args[2], Thread: args[3]}
 	return a.storeRow(opts, row)
@@ -306,7 +306,7 @@ func (a app) store(opts options, args []string) error {
 
 func (a app) storeCurrent(opts options, args []string) error {
 	if len(args) < 1 || len(args) > 4 {
-		return errors.New("usage: amux store-current <thread-id-or-url> OR amux store-current <workspace> <thread-id-or-url> [window] [workdir]")
+		return errors.New("usage: amux pin-current <thread-id-or-url> OR amux pin-current <workspace> <thread-id-or-url> [window] [workdir] (compatibility alias: store-current)")
 	}
 
 	workspace := defaultWorkspace
@@ -364,14 +364,14 @@ func (a app) storeRow(opts options, row config.Row) error {
 
 func (a app) remove(opts options, args []string) error {
 	if len(args) != 2 {
-		return errors.New("usage: amux remove <workspace> <window>")
+		return errors.New("usage: amux unpin <workspace> <window> (compatibility alias: remove)")
 	}
 	return a.removeRow(opts, args[0], args[1])
 }
 
 func (a app) removeCurrent(opts options, args []string) error {
 	if len(args) > 1 {
-		return errors.New("usage: amux remove-current [workspace]")
+		return errors.New("usage: amux unpin-current [workspace] (compatibility alias: remove-current)")
 	}
 	workspace := defaultWorkspace
 	if len(args) == 1 {
@@ -1513,22 +1513,26 @@ Commands:
       Print configured rows.
       Side effects: none; reads restore config only.
 
-  store <workspace> <window> <workdir> <thread-id-or-url>
-      Add or replace one workspace row.
+  pin <workspace> <window> <workdir> <thread-id-or-url>
+      Add or replace one restore-config row.
       Side effects: mutates restore config only.
+      Compatibility alias: store.
 
-  store-current <thread-id-or-url>
-  store-current <workspace> <thread-id-or-url> [window] [workdir]
-      Add or replace a row using the current tmux window and pane path.
+  pin-current <thread-id-or-url>
+  pin-current <workspace> <thread-id-or-url> [window] [workdir]
+      Add or replace a restore-config row using the current tmux window and pane path.
       Side effects: mutates restore config only.
+      Compatibility alias: store-current.
 
-  remove <workspace> <window>
-      Remove one configured window from a workspace.
+  unpin <workspace> <window>
+      Remove one restore-config row from a workspace.
       Side effects: mutates restore config only.
+      Compatibility alias: remove.
 
-  remove-current [workspace]
-      Remove the current tmux window from a workspace.
+  unpin-current [workspace]
+      Remove the current tmux window from a workspace's restore config.
       Side effects: mutates restore config only.
+      Compatibility alias: remove-current.
 
   park-current [workspace]
       Remove the current tmux window from restore config, schedule delayed
