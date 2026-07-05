@@ -20,7 +20,7 @@ The project is public-source friendly, but not yet a polished cross-platform pro
 ## Features
 
 - Restore Amp threads into named tmux windows.
-- Store or remove the current tmux window from the restore config.
+- Pin or unpin the current tmux window in the restore config.
 - Spawn a fresh Amp thread in a new tmux window.
 - Tear down an `amux spawn` worker from its injected identity.
 - Validate planned restore actions with `--dry-run`.
@@ -116,16 +116,16 @@ Restore the workspace:
 amux launch mac Amp
 ```
 
-Store the current tmux window for future restores:
+Pin the current tmux window in the restore config for future restores:
 
 ```sh
-amux store-current https://ampcode.com/threads/T-example
+amux pin-current https://ampcode.com/threads/T-example
 ```
 
-Remove the current tmux window from future restores:
+Unpin the current tmux window from the restore config without stopping it:
 
 ```sh
-amux remove-current
+amux unpin-current
 ```
 
 ## Commands
@@ -137,11 +137,11 @@ amux --attach launch mac Amp
 amux --no-attach launch mac Amp
 amux launch mac Amp --dry-run
 amux list [workspace]
-amux store <workspace> <window> <workdir> <thread-id-or-url>
-amux store-current <thread-id-or-url>
-amux store-current <workspace> <thread-id-or-url> [window] [workdir]
-amux remove <workspace> <window>
-amux remove-current [workspace]
+amux pin <workspace> <window> <workdir> <thread-id-or-url>
+amux pin-current <thread-id-or-url>
+amux pin-current <workspace> <thread-id-or-url> [window] [workdir]
+amux unpin <workspace> <window>
+amux unpin-current [workspace]
 amux park-current [workspace]
 amux spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] <window> <workdir> <initial-message> [workspace] [session]
 amux teardown
@@ -151,6 +151,8 @@ amux self-update
 amux path
 amux doctor [workspace] [session]
 ```
+
+Compatibility aliases remain available: `store` for `pin`, `store-current` for `pin-current`, `remove` for `unpin`, and `remove-current` for `unpin-current`.
 
 `amux spawn --mode <mode>` (or `-m <mode>`) creates the new Amp thread with the selected Amp mode. Omitting `--mode` preserves the default Amp thread behavior.
 
@@ -170,8 +172,8 @@ Command side effects:
 | --- | --- | --- | --- |
 | `launch` | Read only | Creates missing tmux windows/processes | Read/continue existing threads only |
 | `list`, `path`, `version`, `doctor` | Read only | Inspect only | No change |
-| `store`, `store-current` | Add or replace rows | No change | No change |
-| `remove`, `remove-current` | Remove rows | No change | No change |
+| `pin`, `pin-current` (`store`, `store-current`) | Add or replace rows | No change | No change |
+| `unpin`, `unpin-current` (`remove`, `remove-current`) | Remove rows | No change | No change |
 | `park-current` | Remove current-window row | Gracefully stop the current local tmux/Amp window | No change; Amp thread history is not archived or deleted |
 | `spawn` | Store the new row under the final window name | Create/select a tmux window and submit the initial message | Create a new Amp thread, optionally with `--mode`; optionally rename the new thread with `--title-prefix` |
 | `teardown` | Remove the verified row | Stop the verified tmux window | Archive the verified thread |

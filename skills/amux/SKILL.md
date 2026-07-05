@@ -1,6 +1,6 @@
 ---
 name: amux
-description: "Manages Amp tmux workspace sessions with amux: spawn fresh interactive Amp threads, store/remove current windows, tear down spawned workers, and update restore config. Use when the user asks to add, store, save, remember, restore, remove, spawn, tear down, or reset Amp/tmux sessions, current Amp sessions, thread IDs, or restored sessions. Also use for trigger phrases: 'Park it' means remove the current window from amux restore and close the local tmux/Amp session; 'Pin it' means store the current window for restore."
+description: "Manages Amp tmux workspace sessions with amux: spawn fresh interactive Amp threads, pin/unpin current windows in restore config, tear down spawned workers, and update restore config. Use when the user asks to add, pin, store, save, remember, restore, unpin, remove, spawn, tear down, or reset Amp/tmux sessions, current Amp sessions, thread IDs, or restored sessions. Also use for trigger phrases: 'Park it' means remove the current window from amux restore and close the local tmux/Amp session; 'Pin it' means pin the current window for restore."
 ---
 
 # amux
@@ -21,19 +21,19 @@ amux doctor mac
 amux launch mac Amp --dry-run
 amux --attach launch mac Amp
 amux --no-attach launch mac Amp
-amux store mac <window> <workdir> <thread-id-or-url>
-amux store-current <thread-id-or-url>
-amux store-current mac <thread-id-or-url> [window] [workdir]
-amux remove mac <window>
-amux remove-current [workspace]
+amux pin mac <window> <workdir> <thread-id-or-url>
+amux pin-current <thread-id-or-url>
+amux pin-current mac <thread-id-or-url> [window] [workdir]
+amux unpin mac <window>
+amux unpin-current [workspace]
 amux park-current [workspace]
 amux spawn [--mode <mode> | -m <mode>] <window> <workdir> <initial-message> [workspace] [session]
 amux teardown
 amux teardown --thread <thread-id-or-url> [--session <session>]
 ```
 
-Use `store-current` from inside a tmux/Amp thread when possible. It defaults to workspace `mac` plus the invoking pane's tmux window name and pane path, using `$TMUX_PANE` when available rather than the currently focused tmux client.
-Use `remove-current` from inside tmux when the invoking pane's window should no longer be restored.
+Use `pin-current` from inside a tmux/Amp thread when possible. It defaults to workspace `mac` plus the invoking pane's tmux window name and pane path, using `$TMUX_PANE` when available rather than the currently focused tmux client. `store-current` remains a compatibility alias.
+Use `unpin-current` from inside tmux when the invoking pane's window should no longer be restored. `remove-current` remains a compatibility alias.
 Use `spawn` for a fresh interactive Amp session. It must use `amp threads new` plus `amp threads continue` inside tmux; do not use `amp -x` or piped stdin for this workflow. Use `spawn --mode <mode>` or `spawn -m <mode>` when the user wants the new remote Amp thread created with a specific Amp mode.
 Use `spawn --dry-run` to inspect a new-session plan safely. It validates inputs and checks live tmux window conflicts, but must not create an Amp thread, mutate tmux, send keys, or update the restore config.
 Use no-arg `teardown` only from inside an `amux spawn` worker with injected `AMUX_*` identity. It verifies the identity against restore config and live tmux before archiving the matching remote Amp thread, removing the restore row, and stopping the matched local tmux window. If a restored worker lacks `AMUX_*` but its thread is in `amux list` and live in tmux, use `amux teardown --thread <thread-id-or-url> [--session <session>]` instead; it resolves and verifies the row and tmux window by thread before cleanup.
@@ -44,8 +44,8 @@ Launch auto-attaches by default only when the tmux session already existed, no r
 
 - `list`, `path`, `version`, and `doctor`: inspect only; no restore-config, live-local, or remote-thread mutation.
 - `launch`: reads restore config and may create live local tmux/Amp windows; it does not create or archive remote Amp threads.
-- `store` and `store-current`: mutate restore config only.
-- `remove` and `remove-current`: mutate restore config only; they do not stop local tmux/Amp windows and do not archive remote Amp threads.
+- `pin` and `pin-current` (`store` and `store-current` aliases): mutate restore config only.
+- `unpin` and `unpin-current` (`remove` and `remove-current` aliases): mutate restore config only; they do not stop local tmux/Amp windows and do not archive remote Amp threads.
 - `park-current`: removes the current-window restore row and stops the current local tmux/Amp window after a delay; it does not archive or delete the remote Amp thread.
 - `spawn`: creates a remote Amp thread, creates/selects a live local tmux window, submits the initial message, injects `AMUX_WORKSPACE`, `AMUX_SESSION`, `AMUX_WINDOW`, `AMUX_THREAD_ID`, and `AMUX_WORKDIR`, and stores the restore row.
 - `teardown`: verifies `AMUX_*` identity, explicit workspace/window, or `--thread` restore/live-tmux agreement, then archives the verified remote Amp thread, removes the restore row, and stops the verified local tmux window.
@@ -55,7 +55,7 @@ Launch auto-attaches by default only when the tmux session already existed, no r
 These phrases are user-level shorthand and should work from any project when this global skill is available.
 
 - **Park it**: remove the current tmux window from amux restore config, then gracefully stop the current local tmux/Amp window/process. This does not archive or delete the remote Amp thread; it only stops the local tmux/Amp session and prevents restore. `amux park-current` schedules a delayed interrupt/EOF for the target pane, returns so the agent can send its final response, then force-closes the tmux window only if the graceful stop times out.
-- **Pin it**: store the current tmux window in amux restore config. Ask for the thread ID/URL if it is not available in context.
+- **Pin it**: pin the current tmux window in amux restore config. Ask for the thread ID/URL if it is not available in context.
 
 For **Park it**, use the atomic command, then verify it disappeared locally:
 
@@ -71,7 +71,7 @@ If the thread still appears in Amp history after parking, that is expected. Park
 For **Pin it**, prefer:
 
 ```sh
-amux store-current <thread-id-or-url>
+amux pin-current <thread-id-or-url>
 ```
 
 ## Spawn a fresh interactive session
@@ -105,7 +105,7 @@ amux teardown --thread <thread-id-or-url> [--session <session>]
 
 ## Current-session workflow
 
-Use this when the user asks to remember, save, store, remove, or stop restoring the current Amp/tmux session.
+Use this when the user asks to remember, save, pin, store, unpin, remove, or stop restoring the current Amp/tmux session.
 
 1. Confirm the current tmux context:
 
@@ -113,16 +113,16 @@ Use this when the user asks to remember, save, store, remove, or stop restoring 
    tmux display-message -p -t "$TMUX_PANE" 'window=#{window_name} path=#{pane_current_path}'
    ```
 
-2. Store the current window with the current Amp thread ID or URL:
+2. Pin the current window with the current Amp thread ID or URL:
 
    ```sh
-   amux store-current <thread-id-or-url>
+   amux pin-current <thread-id-or-url>
    ```
 
-3. Or remove the current window from restore config:
+3. Or unpin the current window from restore config without stopping it:
 
    ```sh
-   amux remove-current
+   amux unpin-current
    ```
 
 4. Verify the row state and remind the user to sync intentional config changes into their dotfiles or machine-restore repository if they use one:
@@ -140,11 +140,11 @@ Use this when the user asks to remember, save, store, remove, or stop restoring 
    amux list mac
    ```
 
-2. Store or remove a non-current window explicitly:
+2. Pin or unpin a non-current window explicitly:
 
    ```sh
-   amux store mac <window> <workdir> <thread-id-or-url>
-   amux remove mac <window>
+   amux pin mac <window> <workdir> <thread-id-or-url>
+   amux unpin mac <window>
    ```
 
 3. Verify and remind the user to sync intentional config changes into their dotfiles or machine-restore repository if they use one:
@@ -162,5 +162,5 @@ Use this when the user asks to remember, save, store, remove, or stop restoring 
 - Prefer thread IDs or `https://ampcode.com/threads/...` URLs only.
 - Do not edit `workspaces.tsv` manually unless the helper cannot express the needed change.
 - Before testing mutations, prefer a temp config with `--config "$tmp/workspaces.tsv"` so live restore rows are not changed accidentally.
-- Do not run live `amux spawn`, `teardown`, `park-current`, `store-current`, or `remove-current` against the default config unless the user asked to change that side-effect domain.
+- Do not run live `amux spawn`, `teardown`, `park-current`, `pin-current`/`store-current`, or `unpin-current`/`remove-current` against the default config unless the user asked to change that side-effect domain.
 - If a thread/window looks missing, start with `amux doctor mac` and `amux list mac`. Prefer tmux window/pane metadata over `ps`; do not treat the tmux server command line as proof of a live Amp thread.
