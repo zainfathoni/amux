@@ -90,6 +90,60 @@ exit 2
 	}
 }
 
+func TestClearLineUsesTmuxControlU(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "calls.log")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = send-keys ]; then
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := (Runner{}).ClearLine("%1"); err != nil {
+		t.Fatal(err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(string(logBytes)), "send-keys -t %1 C-u"; got != want {
+		t.Fatalf("ClearLine sent %q, want %q", got, want)
+	}
+}
+
+func TestCapturePaneJoinsWrappedLines(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "calls.log")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = capture-pane ]; then
+  printf 'pane text\n'
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	contents, err := (Runner{}).CapturePane("%1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := contents, "pane text"; got != want {
+		t.Fatalf("CapturePane returned %q, want %q", got, want)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(string(logBytes)), "capture-pane -J -p -t %1"; got != want {
+		t.Fatalf("CapturePane sent %q, want %q", got, want)
+	}
+}
+
 func TestSelectAndAttachInvokesAttachAfterSelectingWindow(t *testing.T) {
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "calls.log")

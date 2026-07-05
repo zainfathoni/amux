@@ -565,7 +565,7 @@ exit 2
 	if !strings.Contains(log, "display-message -p -t @1 #{pane_id}") {
 		t.Fatalf("spawn did not resolve the spawned window to a pane id before submitting\nlog:\n%s", log)
 	}
-	readyCheck := "capture-pane -p -t %1"
+	readyCheck := "capture-pane -J -p -t %1"
 	literalSend := "send-keys -t %1 -l hello Amp"
 	if strings.Index(log, readyCheck) == -1 || strings.Index(log, literalSend) == -1 || strings.Index(log, readyCheck) > strings.Index(log, literalSend) {
 		t.Fatalf("spawn did not wait for composer readiness before typing\nlog:\n%s", log)
@@ -573,7 +573,7 @@ exit 2
 	if got, want := strings.Count(log, "send-keys -t %1 Enter"), 2; got != want {
 		t.Fatalf("spawn sent Enter %d times, want %d\nlog:\n%s", got, want, log)
 	}
-	if !strings.Contains(log, "capture-pane -p -t %1") {
+	if !strings.Contains(log, "capture-pane -J -p -t %1") {
 		t.Fatalf("spawn did not verify pane contents after submitting\nlog:\n%s", log)
 	}
 }
@@ -607,6 +607,9 @@ if [ "$1" = new-session ]; then
 fi
 if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = @1 ] && [ "$5" = '#{pane_id}' ]; then
   printf '%%1\n'
+  exit 0
+fi
+if [ "$1" = send-keys ] && [ "$4" = C-u ]; then
   exit 0
 fi
 if [ "$1" = send-keys ] && [ "$4" = -l ]; then
@@ -662,6 +665,9 @@ exit 2
 	log := string(logBytes)
 	if got, want := strings.Count(log, "send-keys -t %1 -l hello Amp"), 2; got != want {
 		t.Fatalf("spawn sent literal %d times, want %d\nlog:\n%s", got, want, log)
+	}
+	if got, want := strings.Count(log, "send-keys -t %1 C-u"), 1; got != want {
+		t.Fatalf("spawn cleared composer %d times, want %d\nlog:\n%s", got, want, log)
 	}
 	if got, want := strings.Count(log, "send-keys -t %1 Enter"), 1; got != want {
 		t.Fatalf("spawn sent Enter %d times, want %d\nlog:\n%s", got, want, log)
@@ -723,6 +729,160 @@ exit 2
 	}
 }
 
+func TestSpawnWarnsWhenPaneCannotBeCapturedAfterEnter(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	enterCountPath := filepath.Join(tmp, "enter-count")
+	var stderr bytes.Buffer
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+if [ "$1" = threads ] && [ "$2" = new ]; then
+  printf 'T-capture-fails-after-enter\n'
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then
+  exit 1
+fi
+if [ "$1" = new-session ]; then
+  printf '@1\n'
+  exit 0
+fi
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = @1 ] && [ "$5" = '#{pane_id}' ]; then
+  printf '%%1\n'
+  exit 0
+fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then
+  printf '1\n' > "`+enterCountPath+`"
+  exit 0
+fi
+if [ "$1" = send-keys ]; then
+  exit 0
+fi
+if [ "$1" = capture-pane ]; then
+  if [ -f "`+enterCountPath+`" ]; then
+    printf 'pane disappeared\n' >&2
+    exit 1
+  fi
+  printf '╭ composer ─╮\n│ hello Amp │\n╰────────────╯\n'
+  exit 0
+fi
+if [ "$1" = select-window ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	if err := (app{stderr: &stderr}).run([]string{"--config", configPath, "spawn", "capture-fails", workdir, "hello Amp"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := stderr.String(); !strings.Contains(got, "warning: initial message may not have been submitted") || !strings.Contains(got, "capture-fails") {
+		t.Fatalf("stderr missing initial message warning, got %q", got)
+	}
+}
+
+func TestSpawnRetypesWhenEnterClearsComposerWithoutTranscriptEcho(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	literalCountPath := filepath.Join(tmp, "literal-count")
+	enterCountPath := filepath.Join(tmp, "enter-count")
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+if [ "$1" = threads ] && [ "$2" = new ]; then
+  printf 'T-lost-after-enter\n'
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then
+  exit 1
+fi
+if [ "$1" = new-session ]; then
+  printf '@1\n'
+  exit 0
+fi
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = @1 ] && [ "$5" = '#{pane_id}' ]; then
+  printf '%%1\n'
+  exit 0
+fi
+if [ "$1" = send-keys ] && [ "$4" = -l ]; then
+  count=0
+  if [ -f "`+literalCountPath+`" ]; then count=$(cat "`+literalCountPath+`"); fi
+  count=$((count + 1))
+  printf '%s\n' "$count" > "`+literalCountPath+`"
+  exit 0
+fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then
+  count=0
+  if [ -f "`+enterCountPath+`" ]; then count=$(cat "`+enterCountPath+`"); fi
+  count=$((count + 1))
+  printf '%s\n' "$count" > "`+enterCountPath+`"
+  exit 0
+fi
+if [ "$1" = send-keys ]; then
+  exit 0
+fi
+if [ "$1" = capture-pane ]; then
+  literal_count=0
+  if [ -f "`+literalCountPath+`" ]; then literal_count=$(cat "`+literalCountPath+`"); fi
+  enter_count=0
+  if [ -f "`+enterCountPath+`" ]; then enter_count=$(cat "`+enterCountPath+`"); fi
+  if [ "$literal_count" -gt 1 ] && [ "$enter_count" -eq 1 ]; then
+    printf '╭ composer ─╮\n│ hello Amp │\n╰────────────╯\n'
+  elif [ "$enter_count" -eq 0 ]; then
+    printf '╭ composer ─╮\n│ hello Amp │\n╰────────────╯\n'
+  elif [ "$enter_count" -eq 1 ]; then
+    printf '╭ composer ─╮\n│           │\n╰────────────╯\n'
+  elif [ "$literal_count" -gt 1 ]; then
+    printf ' ┃ hello Amp\n╭ composer ─╮\n│           │\n╰────────────╯\n'
+  else
+    printf '╭ composer ─╮\n│           │\n╰────────────╯\n'
+  fi
+  exit 0
+fi
+if [ "$1" = select-window ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	if err := run([]string{"--config", configPath, "spawn", "lost-after-enter", workdir, "hello Amp"}); err != nil {
+		t.Fatal(err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if got, want := strings.Count(log, "send-keys -t %1 -l hello Amp"), 2; got != want {
+		t.Fatalf("spawn sent literal %d times, want %d\nlog:\n%s", got, want, log)
+	}
+	if got, want := strings.Count(log, "send-keys -t %1 Enter"), 2; got != want {
+		t.Fatalf("spawn sent Enter %d times, want %d\nlog:\n%s", got, want, log)
+	}
+}
+
 func TestTextContainsComposerMessage(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -752,13 +912,26 @@ func TestTextContainsComposerMessage(t *testing.T) {
 			name:     "fallback without composer frame",
 			pane:     "hello Amp\n",
 			message:  "hello Amp",
+			contains: false,
+		},
+		{
+			name:     "box drawing characters are normalized in message",
+			pane:     "╭ composer ─╮\n│ add separator │\n╰────────────╯\n",
+			message:  "add ─ separator",
 			contains: true,
+		},
+		{
+			name:     "blank message never matches vacuously",
+			pane:     "╭ composer ─╮\n│           │\n╰────────────╯\n",
+			message:  "   ",
+			contains: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := textContainsComposerMessage(tt.pane, tt.message); got != tt.contains {
+			got, _ := textContainsComposerMessage(tt.pane, tt.message)
+			if got != tt.contains {
 				t.Fatalf("got %v, want %v", got, tt.contains)
 			}
 		})

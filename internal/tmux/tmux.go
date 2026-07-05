@@ -184,8 +184,17 @@ func (r Runner) SendEnter(target string) error {
 	return tmuxRun(args...)
 }
 
+func (r Runner) ClearLine(target string) error {
+	args := []string{"send-keys", "-t", target, "C-u"}
+	if r.DryRun {
+		fmt.Printf("tmux %s\n", shellJoin(args))
+		return nil
+	}
+	return tmuxRun(args...)
+}
+
 func (r Runner) CapturePane(target string) (string, error) {
-	args := []string{"capture-pane", "-p", "-t", target}
+	args := []string{"capture-pane", "-J", "-p", "-t", target}
 	if r.DryRun {
 		fmt.Printf("tmux %s\n", shellJoin(args))
 		return "", nil
