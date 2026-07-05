@@ -427,6 +427,10 @@ if [ "$1" = threads ] && [ "$2" = new ]; then
   printf 'T-new-thread\n'
   exit 0
 fi
+if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-new-thread ]; then
+  printf '{"id":"T-new-thread","messages":[{"role":"user","content":"hello Amp"}]}\n'
+  exit 0
+fi
 exit 2
 `)
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
@@ -491,6 +495,10 @@ func TestSpawnRetriesEnterWhenInitialMessageRemainsInPane(t *testing.T) {
 	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
 if [ "$1" = threads ] && [ "$2" = new ]; then
   printf 'T-retry-enter\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-retry-enter ]; then
+  printf '{"id":"T-retry-enter","messages":[{"role":"user","content":"hello Amp"}]}\n'
   exit 0
 fi
 exit 2
@@ -594,6 +602,10 @@ if [ "$1" = threads ] && [ "$2" = new ]; then
   printf 'T-retype\n'
   exit 0
 fi
+if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-retype ]; then
+  printf '{"id":"T-retype","messages":[{"role":"user","content":"hello Amp"}]}\n'
+  exit 0
+fi
 exit 2
 `)
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
@@ -674,7 +686,7 @@ exit 2
 	}
 }
 
-func TestSpawnWarnsWhenInitialMessageRemainsInComposer(t *testing.T) {
+func TestSpawnRefusesToStoreWhenInitialMessageRemainsInComposer(t *testing.T) {
 	tmp := t.TempDir()
 	workdir := filepath.Join(tmp, "workdir")
 	if err := os.Mkdir(workdir, 0o755); err != nil {
@@ -687,6 +699,10 @@ func TestSpawnWarnsWhenInitialMessageRemainsInComposer(t *testing.T) {
 	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
 if [ "$1" = threads ] && [ "$2" = new ]; then
   printf 'T-still-composer\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-still-composer ]; then
+  printf '{"id":"T-still-composer","messages":[]}\n'
   exit 0
 fi
 exit 2
@@ -720,16 +736,16 @@ exit 2
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
 
-	if err := (app{stderr: &stderr}).run([]string{"--config", configPath, "spawn", "warn", workdir, "hello Amp"}); err != nil {
-		t.Fatal(err)
+	err := (app{stderr: &stderr}).run([]string{"--config", configPath, "spawn", "warn", workdir, "hello Amp"})
+	if err == nil {
+		t.Fatal("spawn succeeded, want composer verification failure")
 	}
-
-	if got := stderr.String(); !strings.Contains(got, "warning: initial message may not have been submitted") || !strings.Contains(got, "warn") {
-		t.Fatalf("stderr missing initial message warning, got %q", got)
+	if !strings.Contains(err.Error(), "initial message is still visible in the tmux composer") {
+		t.Fatalf("got error %q, want composer diagnostic", err)
 	}
 }
 
-func TestSpawnWarnsWhenPaneCannotBeCapturedAfterEnter(t *testing.T) {
+func TestSpawnRefusesToStoreWhenPaneCannotBeCapturedAfterEnter(t *testing.T) {
 	tmp := t.TempDir()
 	workdir := filepath.Join(tmp, "workdir")
 	if err := os.Mkdir(workdir, 0o755); err != nil {
@@ -742,6 +758,14 @@ func TestSpawnWarnsWhenPaneCannotBeCapturedAfterEnter(t *testing.T) {
 	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
 if [ "$1" = threads ] && [ "$2" = new ]; then
   printf 'T-capture-fails-after-enter\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-capture-fails-after-enter ]; then
+  printf '{"id":"T-capture-fails-after-enter","messages":[]}\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = search ]; then
+  printf '[]\n'
   exit 0
 fi
 exit 2
@@ -782,12 +806,12 @@ exit 2
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
 
-	if err := (app{stderr: &stderr}).run([]string{"--config", configPath, "spawn", "capture-fails", workdir, "hello Amp"}); err != nil {
-		t.Fatal(err)
+	err := (app{stderr: &stderr}).run([]string{"--config", configPath, "spawn", "capture-fails", workdir, "hello Amp"})
+	if err == nil {
+		t.Fatal("spawn succeeded, want unverified delivery failure")
 	}
-
-	if got := stderr.String(); !strings.Contains(got, "warning: initial message may not have been submitted") || !strings.Contains(got, "capture-fails") {
-		t.Fatalf("stderr missing initial message warning, got %q", got)
+	if !strings.Contains(err.Error(), "stored thread is empty or missing the initial message") {
+		t.Fatalf("got error %q, want lost/empty diagnostic", err)
 	}
 }
 
@@ -805,6 +829,10 @@ func TestSpawnRetypesWhenEnterClearsComposerWithoutTranscriptEcho(t *testing.T) 
 	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
 if [ "$1" = threads ] && [ "$2" = new ]; then
   printf 'T-lost-after-enter\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-lost-after-enter ]; then
+  printf '{"id":"T-lost-after-enter","messages":[{"role":"user","content":"hello Amp"}]}\n'
   exit 0
 fi
 exit 2
@@ -883,6 +911,184 @@ exit 2
 	}
 }
 
+func TestSpawnRefusesToStoreWhenInitialMessageStillInComposer(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	exportCountPath := filepath.Join(tmp, "export-count")
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = new ]; then
+  printf 'T-typed-only\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-typed-only ]; then
+  count=0
+  if [ -f "`+exportCountPath+`" ]; then count=$(cat "`+exportCountPath+`"); fi
+  count=$((count + 1))
+  printf '%s\n' "$count" > "`+exportCountPath+`"
+  if [ "$count" -eq 1 ]; then
+    printf 'temporary export error\n' >&2
+    exit 1
+  fi
+  printf '{"id":"T-typed-only","messages":[]}\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = archive ] && [ "$3" = T-typed-only ]; then
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then
+  exit 1
+fi
+if [ "$1" = new-session ]; then
+  printf '@1\n'
+  exit 0
+fi
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = @1 ] && [ "$5" = '#{pane_id}' ]; then
+  printf '%%1\n'
+  exit 0
+fi
+if [ "$1" = send-keys ]; then
+  exit 0
+fi
+if [ "$1" = capture-pane ]; then
+  printf '╭ composer ─╮\n│ hello Amp │\n╰────────────╯\n'
+  exit 0
+fi
+if [ "$1" = select-window ]; then
+  exit 0
+fi
+if [ "$1" = kill-window ] && [ "$2" = -t ] && [ "$3" = @1 ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	err := run([]string{"--config", configPath, "spawn", "typed-only", workdir, "hello Amp"})
+	if err == nil {
+		t.Fatal("spawn succeeded, want typed-only verification failure")
+	}
+	if !strings.Contains(err.Error(), "initial message is still visible in the tmux composer") {
+		t.Fatalf("got error %q, want composer diagnostic", err)
+	}
+	if configBytes, readErr := os.ReadFile(configPath); readErr == nil && strings.Contains(string(configBytes), "T-typed-only") {
+		t.Fatalf("spawn stored unverified thread row: %q", configBytes)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		"amp threads archive T-typed-only",
+		"tmux kill-window -t @1",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("log missing cleanup call %q\nlog:\n%s", want, log)
+		}
+	}
+}
+
+func TestSpawnRefusesToStoreWhenInitialMessageLandsInDifferentThread(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	literalSentPath := filepath.Join(tmp, "literal-sent")
+	enterCountPath := filepath.Join(tmp, "enter-count")
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+if [ "$1" = threads ] && [ "$2" = new ]; then
+  printf 'T-stored-empty\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-stored-empty ]; then
+  printf '{"id":"T-stored-empty","messages":[]}\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-actual-recipient ]; then
+  printf '{"id":"T-actual-recipient","messages":[{"role":"user","content":"hello Amp"}]}\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = search ]; then
+  printf '[{"id":"T-actual-recipient","title":"worker"}]\n'
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then
+  exit 1
+fi
+if [ "$1" = new-session ]; then
+  printf '@1\n'
+  exit 0
+fi
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = @1 ] && [ "$5" = '#{pane_id}' ]; then
+  printf '%%1\n'
+  exit 0
+fi
+if [ "$1" = send-keys ] && [ "$4" = -l ]; then
+  printf 'sent\n' > "`+literalSentPath+`"
+  exit 0
+fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then
+  count=0
+  if [ -f "`+enterCountPath+`" ]; then count=$(cat "`+enterCountPath+`"); fi
+  count=$((count + 1))
+  printf '%s\n' "$count" > "`+enterCountPath+`"
+  exit 0
+fi
+if [ "$1" = send-keys ]; then
+  exit 0
+fi
+if [ "$1" = capture-pane ]; then
+  enter_count=0
+  if [ -f "`+enterCountPath+`" ]; then enter_count=$(cat "`+enterCountPath+`"); fi
+  if [ ! -f "`+literalSentPath+`" ]; then
+    printf '╭ composer ─╮\n│           │\n╰────────────╯\n'
+  elif [ "$enter_count" -eq 0 ]; then
+    printf '╭ composer ─╮\n│ hello Amp │\n╰────────────╯\n'
+  else
+    printf ' ┃ hello Amp\n╭ composer ─╮\n│           │\n╰────────────╯\n'
+  fi
+  exit 0
+fi
+if [ "$1" = select-window ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	err := run([]string{"--config", configPath, "spawn", "wrong-thread", workdir, "hello Amp"})
+	if err == nil {
+		t.Fatal("spawn succeeded, want different-thread verification failure")
+	}
+	if !strings.Contains(err.Error(), "initial message appears in thread T-actual-recipient instead") {
+		t.Fatalf("got error %q, want different-thread diagnostic", err)
+	}
+	if configBytes, readErr := os.ReadFile(configPath); readErr == nil && strings.Contains(string(configBytes), "T-stored-empty") {
+		t.Fatalf("spawn stored wrong thread row: %q", configBytes)
+	}
+}
+
 func TestTextContainsComposerMessage(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -953,6 +1159,10 @@ if [ "$1" = threads ] && [ "$2" = new ]; then
   printf 'T-mode-thread\n'
   exit 0
 fi
+if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-mode-thread ]; then
+  printf '{"id":"T-mode-thread","messages":[{"role":"user","content":"hello Amp"}]}\n'
+  exit 0
+fi
 exit 2
 `)
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
@@ -980,8 +1190,8 @@ exit 2
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(logBytes), "threads new --mode plan\n"; got != want {
-		t.Fatalf("got amp call %q, want %q", got, want)
+	if got := string(logBytes); !strings.Contains(got, "threads new --mode plan\n") {
+		t.Fatalf("got amp calls %q, want mode thread creation", got)
 	}
 }
 
@@ -998,6 +1208,10 @@ func TestSpawnTitlePrefixRenamesNewThreadAfterSubmittingInitialMessage(t *testin
 printf 'amp %s\n' "$*" >> "`+logPath+`"
 if [ "$1" = threads ] && [ "$2" = new ]; then
   printf 'T-prefixed-thread\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-prefixed-thread ]; then
+  printf '{"id":"T-prefixed-thread","messages":[{"role":"user","content":"hello Amp"}]}\n'
   exit 0
 fi
 if [ "$1" = threads ] && [ "$2" = rename ] && [ "$3" = T-prefixed-thread ] && [ "$4" = '#255 prefixed win' ]; then
@@ -1071,6 +1285,10 @@ if [ "$1" = threads ] && [ "$2" = new ]; then
   printf 'T-prefixed-thread\n'
   exit 0
 fi
+if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-prefixed-thread ]; then
+  printf '{"id":"T-prefixed-thread","messages":[{"role":"user","content":"hello Amp"}]}\n'
+  exit 0
+fi
 if [ "$1" = threads ] && [ "$2" = rename ] && [ "$3" = T-prefixed-thread ] && [ "$4" = '#255 equals win' ]; then
   exit 0
 fi
@@ -1120,6 +1338,10 @@ func TestSpawnTitlePrefixRetriesRenameWhileThreadIsEmpty(t *testing.T) {
 printf 'amp %s\n' "$*" >> "`+logPath+`"
 if [ "$1" = threads ] && [ "$2" = new ]; then
   printf 'T-eventually-non-empty\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-eventually-non-empty ]; then
+  printf '{"id":"T-eventually-non-empty","messages":[{"role":"user","content":"hello Amp"}]}\n'
   exit 0
 fi
 if [ "$1" = threads ] && [ "$2" = rename ]; then
@@ -1185,6 +1407,10 @@ func TestSpawnTitlePrefixRenameFailureKeepsSpawnedWorkerAndReportsRecovery(t *te
 printf 'amp %s\n' "$*" >> "`+logPath+`"
 if [ "$1" = threads ] && [ "$2" = new ]; then
   printf 'T-rename-fails\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-rename-fails ]; then
+  printf '{"id":"T-rename-fails","messages":[{"role":"user","content":"hello Amp"}]}\n'
   exit 0
 fi
 if [ "$1" = threads ] && [ "$2" = rename ]; then
@@ -1510,6 +1736,10 @@ func TestSpawnAddsWindowToExistingSession(t *testing.T) {
 	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
 if [ "$1" = threads ] && [ "$2" = new ]; then
   printf 'T-existing-session\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-existing-session ]; then
+  printf '{"id":"T-existing-session","messages":[{"role":"user","content":"hello"}]}\n'
   exit 0
 fi
 exit 2

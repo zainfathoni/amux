@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -612,12 +614,25 @@ func (a app) spawn(opts options, args []string) error {
 		}
 	}
 
-	submitted, err := submitInitialMessage(runner, submissionTarget(runner, windowID), initialMessage)
+	target := submissionTarget(runner, windowID)
+	submitted, err := submitInitialMessage(runner, target, initialMessage)
 	if err != nil {
 		return err
 	}
 	if !submitted {
 		fmt.Fprintf(a.stderr, "warning: initial message may not have been submitted; check tmux window %s/%s or send Enter manually\n", session, window)
+	}
+	delivery, err := verifyInitialMessageDelivery(runner, target, thread, initialMessage)
+	if err != nil {
+		return err
+	}
+	if delivery.status != initialMessageDelivered {
+		cleanup := cleanupUnverifiedSpawn(runner, windowID, thread)
+		message := fmt.Sprintf("initial message was not verified in stored thread %s: %s; removed unverified tmux window and archived unstored thread; refusing to store restore row for %s/%s", thread, delivery.description, workspace, window)
+		if cleanup != "" {
+			message += "; cleanup warning: " + cleanup
+		}
+		return errors.New(message)
 	}
 	if err := runner.SelectWindow(windowID); err != nil {
 		return fmt.Errorf("select spawned window: %w", err)
@@ -641,6 +656,17 @@ func submissionTarget(runner tmux.Runner, windowID string) string {
 		return windowID
 	}
 	return paneID
+}
+
+func cleanupUnverifiedSpawn(runner tmux.Runner, windowID, thread string) string {
+	var failures []string
+	if err := archiveAmpThread(canonicalThreadID(thread)); err != nil {
+		failures = append(failures, "archive Amp thread "+thread+": "+err.Error())
+	}
+	if err := runner.KillWindow(windowID); err != nil {
+		failures = append(failures, "kill tmux window "+windowID+": "+err.Error())
+	}
+	return strings.Join(failures, "; ")
 }
 
 func submitInitialMessage(runner tmux.Runner, target, message string) (bool, error) {
@@ -789,6 +815,154 @@ func hasComposerFrame(contents string) bool {
 		}
 	}
 	return false
+}
+
+type initialMessageDeliveryStatus string
+
+const (
+	initialMessageDelivered       initialMessageDeliveryStatus = "delivered"
+	initialMessageTypedOnly       initialMessageDeliveryStatus = "typed-only"
+	initialMessageDifferentThread initialMessageDeliveryStatus = "different-thread"
+	initialMessageLostOrEmpty     initialMessageDeliveryStatus = "lost-or-empty"
+	initialMessageDeliveryUnknown initialMessageDeliveryStatus = "unknown"
+)
+
+type initialMessageDelivery struct {
+	status      initialMessageDeliveryStatus
+	description string
+}
+
+func verifyInitialMessageDelivery(runner tmux.Runner, target, thread, message string) (initialMessageDelivery, error) {
+	deadline := time.Now().Add(spawnSubmitTimeout())
+	var lastErr error
+	for {
+		contains, _, err := ampThreadContainsMessage(thread, message)
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = nil
+		}
+		if contains {
+			return initialMessageDelivery{status: initialMessageDelivered, description: "stored thread contains initial message"}, nil
+		}
+		if !sleepUntilNextSpawnPoll(deadline) {
+			break
+		}
+	}
+	if lastErr != nil {
+		return initialMessageDelivery{status: initialMessageDeliveryUnknown, description: lastErr.Error()}, nil
+	}
+
+	contains, available := composerContainsMessage(runner, target, message)
+	if available && contains {
+		return initialMessageDelivery{status: initialMessageTypedOnly, description: "initial message is still visible in the tmux composer and was not submitted to the stored thread"}, nil
+	}
+
+	otherThread, err := findDifferentThreadWithMessage(thread, message)
+	if err != nil {
+		return initialMessageDelivery{status: initialMessageLostOrEmpty, description: "stored thread is empty or missing the initial message; could not search for another receiving thread: " + err.Error()}, nil
+	}
+	if otherThread != "" {
+		return initialMessageDelivery{status: initialMessageDifferentThread, description: "initial message appears in thread " + otherThread + " instead"}, nil
+	}
+	return initialMessageDelivery{status: initialMessageLostOrEmpty, description: "stored thread is empty or missing the initial message, tmux composer is empty, and no different receiving thread was found"}, nil
+}
+
+func ampThreadContainsMessage(thread, message string) (bool, bool, error) {
+	cmd := exec.Command("amp", "threads", "export", thread)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		text := strings.TrimSpace(stderr.String())
+		if text == "" {
+			return false, false, err
+		}
+		return false, false, fmt.Errorf("%w: %s", err, text)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return false, false, fmt.Errorf("parse amp threads export for %s: %w", thread, err)
+	}
+	return jsonValueContainsMessage(payload["messages"], message), true, nil
+}
+
+func findDifferentThreadWithMessage(storedThread, message string) (string, error) {
+	query := `"` + strings.ReplaceAll(message, `"`, `\"`) + `"`
+	cmd := exec.Command("amp", "threads", "search", "--json", "--limit", "5", query)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		text := strings.TrimSpace(stderr.String())
+		if text == "" {
+			return "", err
+		}
+		return "", fmt.Errorf("%w: %s", err, text)
+	}
+	var payload any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return "", fmt.Errorf("parse amp threads search: %w", err)
+	}
+	storedID := canonicalThreadID(storedThread)
+	for _, id := range collectThreadIDs(payload) {
+		if id == "" || canonicalThreadID(id) == storedID {
+			continue
+		}
+		contains, _, err := ampThreadContainsMessage(id, message)
+		if err != nil {
+			continue
+		}
+		if contains {
+			return id, nil
+		}
+	}
+	return "", nil
+}
+
+func jsonValueContainsMessage(value any, message string) bool {
+	switch v := value.(type) {
+	case string:
+		return containsCollapsedWhitespace(v, message)
+	case []any:
+		for _, item := range v {
+			if jsonValueContainsMessage(item, message) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, item := range v {
+			if jsonValueContainsMessage(item, message) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func collectThreadIDs(value any) []string {
+	var ids []string
+	var walk func(any)
+	walk = func(value any) {
+		switch v := value.(type) {
+		case []any:
+			for _, item := range v {
+				walk(item)
+			}
+		case map[string]any:
+			if id, ok := v["id"].(string); ok {
+				ids = append(ids, id)
+			}
+			if id, ok := v["threadID"].(string); ok {
+				ids = append(ids, id)
+			}
+			for _, item := range v {
+				walk(item)
+			}
+		}
+	}
+	walk(value)
+	return ids
 }
 
 func spawnSubmitTimeout() time.Duration {
