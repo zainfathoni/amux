@@ -1718,6 +1718,376 @@ exit 2
 	}
 }
 
+func TestTeardownByThreadArchivesRemovesAndStopsVerifiedWindow(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	threadURL := "https://ampcode.com/threads/T-worker"
+	if err := os.WriteFile(configPath, []byte("kelas\tmailgun-258-failures\t/tmp/project\t"+threadURL+"\nkelas\tother\t/tmp/other\tT-other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	startCommand := teardownExpectedStartCommand(
+		teardownIdentity{Workspace: "kelas", Session: "Kelas", Window: "mailgun-258-failures", Thread: threadURL},
+		config.Row{Workspace: "kelas", Window: "mailgun-258-failures", Workdir: "/tmp/project", Thread: threadURL},
+	)
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = archive ] && [ "$3" = T-worker ]; then
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ]; then
+  printf 'mailgun-258-failures\t@21\t%s\n' `+shellSingleQuote(fmt.Sprintf("%q", startCommand))+`
+  printf 'other\t@22\tcd /tmp/other && exec amp threads continue T-other\n'
+  exit 0
+fi
+if [ "$1" = kill-window ] && [ "$2" = -t ] && [ "$3" = @21 ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMUX_WORKSPACE", "")
+	t.Setenv("AMUX_SESSION", "")
+	t.Setenv("AMUX_WINDOW", "")
+	t.Setenv("AMUX_THREAD_ID", "")
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "teardown", "--thread", "T-worker", "--session", "Kelas"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotConfig := string(configBytes)
+	if strings.Contains(gotConfig, "mailgun-258-failures") {
+		t.Fatalf("config still contains torn-down row: %q", gotConfig)
+	}
+	if !strings.Contains(gotConfig, "kelas\tother\t/tmp/other\tT-other\n") {
+		t.Fatalf("config did not preserve other row: %q", gotConfig)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		"tmux list-panes -s -t Kelas -F #{window_name}\t#{window_id}\t#{pane_start_command}",
+		"amp threads archive T-worker",
+		"tmux kill-window -t @21",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("thread teardown log missing %q\nlog:\n%s", want, log)
+		}
+	}
+	for _, want := range []string{
+		"Removed kelas/mailgun-258-failures",
+		"Archived Amp thread T-worker",
+		"Stopped tmux window Kelas/mailgun-258-failures (@21)",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("thread teardown output missing %q\nstdout:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestTeardownByThreadWithoutSessionFindsUniqueVerifiedWindow(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("kelas\tmailgun-258-failures\t/tmp/project\tT-worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	startCommand := teardownExpectedStartCommand(
+		teardownIdentity{Workspace: "kelas", Session: "Kelas", Window: "mailgun-258-failures", Thread: "T-worker"},
+		config.Row{Workspace: "kelas", Window: "mailgun-258-failures", Workdir: "/tmp/project", Thread: "T-worker"},
+	)
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ] && [ "$2" = -a ]; then
+  printf 'Kelas\tmailgun-258-failures\t@21\t%s\n' `+shellSingleQuote(fmt.Sprintf("%q", startCommand))+`
+  printf 'Other\tmailgun-258-failures\t@22\tcd /tmp/other && exec amp threads continue T-other\n'
+  exit 0
+fi
+if [ "$1" = list-panes ] && [ "$2" = -s ]; then
+  printf 'mailgun-258-failures\t@21\t%s\n' `+shellSingleQuote(fmt.Sprintf("%q", startCommand))+`
+  exit 0
+fi
+if [ "$1" = kill-window ] && [ "$2" = -t ] && [ "$3" = @21 ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMUX_WORKSPACE", "")
+	t.Setenv("AMUX_SESSION", "")
+	t.Setenv("AMUX_WINDOW", "")
+	t.Setenv("AMUX_THREAD_ID", "")
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "teardown", "--thread", "T-worker"}); err != nil {
+		t.Fatal(err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		"tmux list-panes -a -F #{session_name}\t#{window_name}\t#{window_id}\t#{pane_start_command}",
+		"amp threads archive T-worker",
+		"tmux kill-window -t @21",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("thread teardown log missing %q\nlog:\n%s", want, log)
+		}
+	}
+	if !strings.Contains(stdout.String(), "Stopped tmux window Kelas/mailgun-258-failures (@21)") {
+		t.Fatalf("thread teardown output missing resolved session\nstdout:\n%s", stdout.String())
+	}
+}
+
+func TestTeardownByThreadFailsClosedOnStartCommandMismatch(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("kelas\tmailgun-258-failures\t/tmp/project\tT-worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ]; then
+  printf 'mailgun-258-failures\t@21\tcd /tmp/other && exec amp threads continue T-other\n'
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := run([]string{"--config", configPath, "teardown", "--thread", "T-worker", "--session", "Kelas"})
+	if err == nil {
+		t.Fatal("thread teardown succeeded, want start-command mismatch")
+	}
+	if !strings.Contains(err.Error(), "does not match restore row thread T-worker") {
+		t.Fatalf("got error %q, want start-command mismatch", err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if strings.Contains(log, "amp threads archive") || strings.Contains(log, "tmux kill-window") {
+		t.Fatalf("thread teardown archived or killed despite mismatch\nlog:\n%s", log)
+	}
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(configBytes), "kelas\tmailgun-258-failures\t/tmp/project\tT-worker\n") {
+		t.Fatalf("thread teardown removed row despite mismatch: %q", configBytes)
+	}
+}
+
+func TestTeardownByThreadFailsClosedWhenNoRestoreRowMatches(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("kelas\tmailgun-258-failures\t/tmp/project\tT-other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := run([]string{"--config", configPath, "teardown", "--thread", "T-worker", "--session", "Kelas"})
+	if err == nil {
+		t.Fatal("thread teardown succeeded, want missing row")
+	}
+	if !strings.Contains(err.Error(), "no restore row for thread T-worker") {
+		t.Fatalf("got error %q, want missing row", err)
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		logBytes, _ := os.ReadFile(logPath)
+		t.Fatalf("thread teardown called amp or tmux despite missing row\nlog:\n%s", logBytes)
+	}
+}
+
+func TestTeardownByThreadFailsClosedWhenRestoreRowsAreAmbiguous(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("kelas\tone\t/tmp/one\tT-worker\nother\ttwo\t/tmp/two\thttps://ampcode.com/threads/T-worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := run([]string{"--config", configPath, "teardown", "--thread", "T-worker"})
+	if err == nil {
+		t.Fatal("thread teardown succeeded, want ambiguous rows")
+	}
+	if !strings.Contains(err.Error(), "ambiguous restore rows for thread T-worker") {
+		t.Fatalf("got error %q, want ambiguous rows", err)
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		logBytes, _ := os.ReadFile(logPath)
+		t.Fatalf("thread teardown called amp or tmux despite ambiguous rows\nlog:\n%s", logBytes)
+	}
+}
+
+func TestTeardownByThreadWithoutSessionFailsClosedWhenNoLiveWindowVerifies(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("kelas\tmailgun-258-failures\t/tmp/project\tT-worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ] && [ "$2" = -a ]; then
+  printf 'Kelas\tmailgun-258-failures\t@21\tcd /tmp/other && exec amp threads continue T-other\n'
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := run([]string{"--config", configPath, "teardown", "--thread", "T-worker"})
+	if err == nil {
+		t.Fatal("thread teardown succeeded, want no verified live window")
+	}
+	if !strings.Contains(err.Error(), "no live tmux window for thread T-worker matches restore row kelas/mailgun-258-failures") {
+		t.Fatalf("got error %q, want no verified live window", err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if strings.Contains(log, "amp threads archive") || strings.Contains(log, "tmux kill-window") {
+		t.Fatalf("thread teardown archived or killed despite no verified live window\nlog:\n%s", log)
+	}
+}
+
+func TestTeardownByThreadWithoutSessionFailsClosedWhenLiveWindowsAreAmbiguous(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("kelas\tmailgun-258-failures\t/tmp/project\tT-worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	startCommand := teardownExpectedStartCommand(
+		teardownIdentity{Workspace: "kelas", Session: "Kelas", Window: "mailgun-258-failures", Thread: "T-worker"},
+		config.Row{Workspace: "kelas", Window: "mailgun-258-failures", Workdir: "/tmp/project", Thread: "T-worker"},
+	)
+	otherStartCommand := teardownExpectedStartCommand(
+		teardownIdentity{Workspace: "kelas", Session: "Other", Window: "mailgun-258-failures", Thread: "T-worker"},
+		config.Row{Workspace: "kelas", Window: "mailgun-258-failures", Workdir: "/tmp/project", Thread: "T-worker"},
+	)
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ] && [ "$2" = -a ]; then
+  printf 'Kelas\tmailgun-258-failures\t@21\t%s\n' `+shellSingleQuote(fmt.Sprintf("%q", startCommand))+`
+  printf 'Other\tmailgun-258-failures\t@22\t%s\n' `+shellSingleQuote(fmt.Sprintf("%q", otherStartCommand))+`
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := run([]string{"--config", configPath, "teardown", "--thread", "T-worker"})
+	if err == nil {
+		t.Fatal("thread teardown succeeded, want ambiguous live windows")
+	}
+	for _, want := range []string{
+		"ambiguous live tmux windows for thread T-worker",
+		"Kelas/@21",
+		"Other/@22",
+		"pass --session",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("got error %q, want %q", err, want)
+		}
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if strings.Contains(log, "amp threads archive") || strings.Contains(log, "tmux kill-window") {
+		t.Fatalf("thread teardown archived or killed despite ambiguous live windows\nlog:\n%s", log)
+	}
+}
+
+func TestTeardownRejectsInvalidThreadOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "session-without-thread", args: []string{"teardown", "--session", "Kelas"}, want: "--session requires --thread"},
+		{name: "unknown-option", args: []string{"teardown", "--Thread", "T-worker"}, want: "unknown teardown option --Thread"},
+		{name: "thread-with-extra-positional", args: []string{"teardown", "--thread", "T-worker", "extra"}, want: "usage: amux teardown --thread <thread-id-or-url> [--session <session>]"},
+		{name: "thread-empty-equals", args: []string{"teardown", "--thread="}, want: "--thread requires a thread id or URL"},
+		{name: "session-empty-equals", args: []string{"teardown", "--thread", "T-worker", "--session="}, want: "--session requires a tmux session name"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"--config", filepath.Join(t.TempDir(), "workspaces.tsv")}, tc.args...)
+			err := run(args)
+			if err == nil {
+				t.Fatal("teardown succeeded, want option error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got error %q, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestTeardownExplicitWorkspaceWindowFailsClosedOnThreadMismatch(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
@@ -1893,6 +2263,9 @@ func TestTeardownRequiresSpawnIdentity(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "teardown requires spawn-injected identity") {
 		t.Fatalf("got error %q, want missing identity guidance", err)
+	}
+	if !strings.Contains(err.Error(), "amux teardown --thread <thread-id-or-url> [--session <session>]") {
+		t.Fatalf("got error %q, want --thread guidance", err)
 	}
 }
 
