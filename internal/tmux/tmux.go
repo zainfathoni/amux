@@ -307,7 +307,7 @@ func displayCurrentMessage(format string) (string, error) {
 	if pane := os.Getenv("TMUX_PANE"); pane != "" {
 		return displayMessageForTarget(pane, format)
 	}
-	return displayMessage(format)
+	return "", fmt.Errorf("TMUX_PANE is unavailable; run amux from the pane you want to target instead of relying on tmux's active client")
 }
 
 func displayMessage(format string) (string, error) {

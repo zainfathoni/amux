@@ -1600,8 +1600,8 @@ func TestStoreCurrentInfersWindowAndWorkdirFromTmux(t *testing.T) {
 	configPath := filepath.Join(tmp, "workspaces.tsv")
 
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
-if [ "$1" = display-message ] && [ "$2" = -p ]; then
-  case "$3" in
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "%42" ]; then
+  case "$5" in
     '#W') printf 'current-window\n'; exit 0 ;;
     '#{pane_current_path}') printf '/tmp/current workdir\n'; exit 0 ;;
   esac
@@ -1611,7 +1611,7 @@ exit 2
 
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX", "fake-tmux-socket")
-	t.Setenv("TMUX_PANE", "")
+	t.Setenv("TMUX_PANE", "%42")
 
 	if err := run([]string{"--config", configPath, "store-current", "T-current"}); err != nil {
 		t.Fatal(err)
@@ -1623,6 +1623,23 @@ exit 2
 	}
 	if got, want := string(configBytes), "mac\tcurrent-window\t/tmp/current workdir\tT-current\n"; !strings.Contains(got, want) {
 		t.Fatalf("config did not contain inferred current row\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestStoreCurrentRequiresInvokingPaneWhenInsideTmux(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMUX", "fake-tmux-socket")
+	t.Setenv("TMUX_PANE", "")
+
+	err := run([]string{"--config", filepath.Join(tmp, "workspaces.tsv"), "store-current", "T-current"})
+	if err == nil {
+		t.Fatal("store-current succeeded without TMUX_PANE, want error")
+	}
+	if !strings.Contains(err.Error(), "TMUX_PANE is unavailable") {
+		t.Fatalf("got error %q, want missing TMUX_PANE guidance", err)
+	}
+	if !strings.Contains(err.Error(), "run amux from the pane you want to target") {
+		t.Fatalf("got error %q, want actionable target guidance", err)
 	}
 }
 
@@ -1692,7 +1709,7 @@ func TestRemoveCurrentInfersWindowFromTmux(t *testing.T) {
 	}
 
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
-if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = '#W' ]; then
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "%42" ] && [ "$5" = '#W' ]; then
   printf 'current-window\n'
   exit 0
 fi
@@ -1701,7 +1718,7 @@ exit 2
 
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX", "fake-tmux-socket")
-	t.Setenv("TMUX_PANE", "")
+	t.Setenv("TMUX_PANE", "%42")
 
 	if err := run([]string{"--config", configPath, "remove-current"}); err != nil {
 		t.Fatal(err)
@@ -1773,6 +1790,23 @@ func TestRemoveCurrentRequiresTmux(t *testing.T) {
 	}
 }
 
+func TestRemoveCurrentRequiresInvokingPaneWhenInsideTmux(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMUX", "fake-tmux-socket")
+	t.Setenv("TMUX_PANE", "")
+
+	err := run([]string{"--config", filepath.Join(tmp, "workspaces.tsv"), "remove-current"})
+	if err == nil {
+		t.Fatal("remove-current succeeded without TMUX_PANE, want error")
+	}
+	if !strings.Contains(err.Error(), "TMUX_PANE is unavailable") {
+		t.Fatalf("got error %q, want missing TMUX_PANE guidance", err)
+	}
+	if !strings.Contains(err.Error(), "run amux from the pane you want to target") {
+		t.Fatalf("got error %q, want actionable target guidance", err)
+	}
+}
+
 func TestParkCurrentRemovesRestoreRowAndKillsCapturedWindow(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
@@ -1783,8 +1817,8 @@ func TestParkCurrentRemovesRestoreRowAndKillsCapturedWindow(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 printf '%s\n' "$*" >> "`+logPath+`"
-if [ "$1" = display-message ] && [ "$2" = -p ]; then
-  case "$3" in
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "%42" ]; then
+  case "$5" in
     '#S:#I') printf 'Amp:7\n'; exit 0 ;;
     '#W') printf 'current window\n'; exit 0 ;;
   esac
@@ -1797,7 +1831,7 @@ exit 2
 
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX", "fake-tmux-socket")
-	t.Setenv("TMUX_PANE", "")
+	t.Setenv("TMUX_PANE", "%42")
 	t.Setenv("AMUX_PARK_GRACE_PERIOD", "0")
 	t.Setenv("AMUX_PARK_SHUTDOWN_DELAY", "0")
 
@@ -1831,6 +1865,23 @@ exit 2
 	}
 }
 
+func TestParkCurrentRequiresInvokingPaneWhenInsideTmux(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMUX", "fake-tmux-socket")
+	t.Setenv("TMUX_PANE", "")
+
+	err := run([]string{"--config", filepath.Join(tmp, "workspaces.tsv"), "park-current"})
+	if err == nil {
+		t.Fatal("park-current succeeded without TMUX_PANE, want error")
+	}
+	if !strings.Contains(err.Error(), "TMUX_PANE is unavailable") {
+		t.Fatalf("got error %q, want missing TMUX_PANE guidance", err)
+	}
+	if !strings.Contains(err.Error(), "run amux from the pane you want to target") {
+		t.Fatalf("got error %q, want actionable target guidance", err)
+	}
+}
+
 func TestParkCurrentGracefullyStopsPaneBeforeKillingWindow(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
@@ -1841,11 +1892,11 @@ func TestParkCurrentGracefullyStopsPaneBeforeKillingWindow(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 printf '%s\n' "$*" >> "`+logPath+`"
-if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = '#S:#I' ]; then
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "%42" ] && [ "$5" = '#S:#I' ]; then
   printf 'Amp:7\n'
   exit 0
 fi
-if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = '#W' ]; then
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "%42" ] && [ "$5" = '#W' ]; then
   printf 'current window\n'
   exit 0
 fi
@@ -1857,7 +1908,7 @@ exit 2
 
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX", "fake-tmux-socket")
-	t.Setenv("TMUX_PANE", "")
+	t.Setenv("TMUX_PANE", "%42")
 	t.Setenv("AMUX_PARK_SHUTDOWN_DELAY", "0")
 
 	var stdout bytes.Buffer
