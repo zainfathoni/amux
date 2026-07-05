@@ -648,6 +648,12 @@ type teardownArgs struct {
 	session    string
 }
 
+type teardownThreadTarget struct {
+	identity teardownIdentity
+	row      config.Row
+	pane     *tmux.WindowPane
+}
+
 func (a app) teardown(opts options, args []string) error {
 	if opts.dryRun {
 		return errors.New("teardown does not support --dry-run")
@@ -658,11 +664,16 @@ func (a app) teardown(opts options, args []string) error {
 	}
 
 	var identity teardownIdentity
+	var row config.Row
+	var verifiedPane *tmux.WindowPane
 	if teardownArgs.thread != "" {
-		identity, err = teardownIdentityFromThread(opts.configPath, teardownArgs.thread, teardownArgs.session)
+		target, err := teardownTargetFromThread(opts.configPath, teardownArgs.thread, teardownArgs.session)
 		if err != nil {
 			return err
 		}
+		identity = target.identity
+		row = target.row
+		verifiedPane = target.pane
 	} else if len(teardownArgs.positional) == 0 {
 		identity, err = teardownIdentityFromEnv()
 		if err != nil {
@@ -674,22 +685,30 @@ func (a app) teardown(opts options, args []string) error {
 			return err
 		}
 	}
-	row, err := verifiedTeardownRow(opts.configPath, identity)
-	if err != nil {
-		return err
+	if row.Workspace == "" {
+		row, err = verifiedTeardownRow(opts.configPath, identity)
+		if err != nil {
+			return err
+		}
 	}
 	if identity.Thread == "" {
 		// Explicit teardown uses the verified restore row as the thread authority.
 		identity.Thread = row.Thread
 	}
 	runner := tmux.Runner{}
-	pane, err := verifiedTeardownPane(runner, identity, row)
-	if err != nil {
-		return err
+	var pane tmux.WindowPane
+	if verifiedPane != nil {
+		pane = *verifiedPane
+	} else {
+		pane, err = verifiedTeardownPane(runner, identity, row)
+		if err != nil {
+			return err
+		}
 	}
 
-	if err := archiveAmpThread(identity.Thread); err != nil {
-		return fmt.Errorf("archive Amp thread %s: %w", identity.Thread, err)
+	archiveThread := canonicalThreadID(identity.Thread)
+	if err := archiveAmpThread(archiveThread); err != nil {
+		return fmt.Errorf("archive Amp thread %s: %w", archiveThread, err)
 	}
 	if err := a.removeRow(opts, identity.Workspace, identity.Window); err != nil {
 		return err
@@ -697,7 +716,7 @@ func (a app) teardown(opts options, args []string) error {
 	if err := runner.KillWindow(pane.WindowID); err != nil {
 		return fmt.Errorf("stop tmux window %s (%s): %w", identity.Window, pane.WindowID, err)
 	}
-	fmt.Fprintf(a.stdout, "Archived Amp thread %s\n", identity.Thread)
+	fmt.Fprintf(a.stdout, "Archived Amp thread %s\n", archiveThread)
 	fmt.Fprintf(a.stdout, "Stopped tmux window %s/%s (%s)\n", identity.Session, identity.Window, pane.WindowID)
 	fmt.Fprintf(a.stdout, "Teardown complete for %s/%s in %s\n", row.Workspace, row.Window, opts.configPath)
 	return nil
@@ -730,6 +749,8 @@ func parseTeardownArgs(args []string) (teardownArgs, error) {
 				if parsed.session == "" {
 					return parsed, errors.New("--session requires a tmux session name")
 				}
+			} else if strings.HasPrefix(args[i], "--") {
+				return parsed, fmt.Errorf("unknown teardown option %s", args[i])
 			} else {
 				parsed.positional = append(parsed.positional, args[i])
 			}
@@ -818,10 +839,10 @@ func teardownIdentityFromArgs(args []string) (teardownIdentity, error) {
 	return identity, nil
 }
 
-func teardownIdentityFromThread(path, thread, session string) (teardownIdentity, error) {
+func teardownTargetFromThread(path, thread, session string) (teardownThreadTarget, error) {
 	row, err := verifiedTeardownRowByThread(path, thread)
 	if err != nil {
-		return teardownIdentity{}, err
+		return teardownThreadTarget{}, err
 	}
 	identity := teardownIdentity{
 		Workspace: row.Workspace,
@@ -830,11 +851,11 @@ func teardownIdentityFromThread(path, thread, session string) (teardownIdentity,
 		Session:   session,
 	}
 	if identity.Session != "" {
-		return identity, nil
+		return teardownThreadTarget{identity: identity, row: row}, nil
 	}
 	panes, err := livePanesForTeardown(tmux.Runner{}, identity)
 	if err != nil {
-		return teardownIdentity{}, err
+		return teardownThreadTarget{}, err
 	}
 	verified := make([]tmux.WindowPane, 0, 1)
 	for _, pane := range panes {
@@ -846,13 +867,13 @@ func teardownIdentityFromThread(path, thread, session string) (teardownIdentity,
 		}
 	}
 	if len(verified) == 0 {
-		return teardownIdentity{}, fmt.Errorf("no live tmux window for thread %s matches restore row %s/%s; pass --session if it is in a specific tmux session", thread, row.Workspace, row.Window)
+		return teardownThreadTarget{}, fmt.Errorf("no live tmux window for thread %s matches restore row %s/%s; pass --session if it is in a specific tmux session", thread, row.Workspace, row.Window)
 	}
 	if len(verified) > 1 {
-		return teardownIdentity{}, fmt.Errorf("ambiguous live tmux windows for thread %s: candidates %s; pass --session to choose one", thread, formatPaneCandidates(verified))
+		return teardownThreadTarget{}, fmt.Errorf("ambiguous live tmux windows for thread %s: candidates %s; pass --session to choose one", thread, formatSessionPaneCandidates(verified))
 	}
 	identity.Session = verified[0].Session
-	return identity, nil
+	return teardownThreadTarget{identity: identity, row: row, pane: &verified[0]}, nil
 }
 
 func verifiedTeardownRowByThread(path, thread string) (config.Row, error) {
@@ -1020,6 +1041,22 @@ func formatPaneCandidates(panes []tmux.WindowPane) string {
 			continue
 		}
 		candidates = append(candidates, pane.WindowID)
+	}
+	return formatCandidates(candidates)
+}
+
+func formatSessionPaneCandidates(panes []tmux.WindowPane) string {
+	candidates := make([]string, 0, len(panes))
+	for _, pane := range panes {
+		windowID := pane.WindowID
+		if windowID == "" {
+			windowID = "unknown-window-id"
+		}
+		if pane.Session == "" {
+			candidates = append(candidates, windowID)
+			continue
+		}
+		candidates = append(candidates, pane.Session+"/"+windowID)
 	}
 	return formatCandidates(candidates)
 }
