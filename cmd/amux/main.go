@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	defaultWorkspace = "mac"
-	defaultSession   = "Amp"
+	defaultWorkspace  = "mac"
+	defaultSession    = "Amp"
+	spawnPollInterval = 100 * time.Millisecond
 )
 
 var (
@@ -611,12 +612,12 @@ func (a app) spawn(opts options, args []string) error {
 		}
 	}
 
-	time.Sleep(spawnDelay())
-	if err := runner.SendLiteral(windowID, initialMessage); err != nil {
-		return fmt.Errorf("send initial message: %w", err)
+	submitted, err := submitInitialMessage(runner, submissionTarget(runner, windowID), initialMessage)
+	if err != nil {
+		return err
 	}
-	if err := runner.SendEnter(windowID); err != nil {
-		return fmt.Errorf("submit initial message: %w", err)
+	if !submitted {
+		fmt.Fprintf(a.stderr, "warning: initial message may not have been submitted; check tmux window %s/%s or send Enter manually\n", session, window)
 	}
 	if err := runner.SelectWindow(windowID); err != nil {
 		return fmt.Errorf("select spawned window: %w", err)
@@ -632,6 +633,190 @@ func (a app) spawn(opts options, args []string) error {
 	}
 	fmt.Fprintln(a.stdout, thread)
 	return nil
+}
+
+func submissionTarget(runner tmux.Runner, windowID string) string {
+	paneID, err := runner.PaneID(windowID)
+	if err != nil || paneID == "" {
+		return windowID
+	}
+	return paneID
+}
+
+func submitInitialMessage(runner tmux.Runner, target, message string) (bool, error) {
+	_, captureAvailable := waitForComposerReady(runner, target)
+	if !captureAvailable {
+		if err := runner.SendLiteral(target, message); err != nil {
+			return false, fmt.Errorf("send initial message: %w", err)
+		}
+		if err := runner.SendEnter(target); err != nil {
+			return false, fmt.Errorf("submit initial message: %w", err)
+		}
+		return false, nil
+	}
+	if err := runner.SendLiteral(target, message); err != nil {
+		return false, fmt.Errorf("send initial message: %w", err)
+	}
+	if !waitForComposerMessage(runner, target, message) {
+		if err := runner.ClearLine(target); err != nil {
+			return false, fmt.Errorf("clear initial message: %w", err)
+		}
+		if err := runner.SendLiteral(target, message); err != nil {
+			return false, fmt.Errorf("send initial message: %w", err)
+		}
+		if !waitForComposerMessage(runner, target, message) {
+			return false, nil
+		}
+	}
+	time.Sleep(spawnInputSettleDelay())
+	retypedAfterLostPrompt := false
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := runner.SendEnter(target); err != nil {
+			return false, fmt.Errorf("submit initial message: %w", err)
+		}
+		time.Sleep(spawnPollInterval)
+		contains, available, visible := paneMessageState(runner, target, message)
+		if !available {
+			return false, nil
+		}
+		if contains {
+			continue
+		}
+		if visible {
+			return true, nil
+		}
+		if retypedAfterLostPrompt {
+			return false, nil
+		}
+		if err := runner.SendLiteral(target, message); err != nil {
+			return false, fmt.Errorf("send initial message: %w", err)
+		}
+		if !waitForComposerMessage(runner, target, message) {
+			return false, nil
+		}
+		time.Sleep(spawnInputSettleDelay())
+		retypedAfterLostPrompt = true
+	}
+	return false, nil
+}
+
+func waitForComposerReady(runner tmux.Runner, target string) (bool, bool) {
+	deadline := time.Now().Add(spawnSubmitTimeout())
+	captureAvailable := false
+	for {
+		ready, available := composerReady(runner, target)
+		captureAvailable = captureAvailable || available
+		if ready {
+			return true, captureAvailable
+		}
+		if !sleepUntilNextSpawnPoll(deadline) {
+			return false, captureAvailable
+		}
+	}
+}
+
+func waitForComposerMessage(runner tmux.Runner, target, message string) bool {
+	deadline := time.Now().Add(spawnSubmitTimeout())
+	for {
+		contains, _ := composerContainsMessage(runner, target, message)
+		if contains {
+			return true
+		}
+		if !sleepUntilNextSpawnPoll(deadline) {
+			return false
+		}
+	}
+}
+
+func composerReady(runner tmux.Runner, target string) (bool, bool) {
+	contents, err := runner.CapturePane(target)
+	if err != nil {
+		return false, false
+	}
+	return hasComposerFrame(contents), true
+}
+
+func composerContainsMessage(runner tmux.Runner, target, message string) (bool, bool) {
+	contents, err := runner.CapturePane(target)
+	if err != nil {
+		return false, false
+	}
+	contains, available := textContainsComposerMessage(contents, message)
+	return contains, available
+}
+
+func paneMessageState(runner tmux.Runner, target, message string) (bool, bool, bool) {
+	contents, err := runner.CapturePane(target)
+	if err != nil {
+		return false, false, false
+	}
+	contains, available := textContainsComposerMessage(contents, message)
+	return contains, available, containsCollapsedWhitespace(contents, message)
+}
+
+func textContainsComposerMessage(contents, message string) (bool, bool) {
+	lines := strings.Split(contents, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.Contains(lines[i], "╭") {
+			return containsCollapsedWhitespace(strings.Join(lines[i:], "\n"), message), true
+		}
+	}
+	return false, false
+}
+
+func containsCollapsedWhitespace(contents, message string) bool {
+	needle := collapsePaneText(message)
+	return needle != "" && strings.Contains(collapsePaneText(contents), needle)
+}
+
+func collapsePaneText(text string) string {
+	text = strings.Map(func(r rune) rune {
+		switch r {
+		case '│', '┃', '╭', '╮', '╰', '╯', '─':
+			return ' '
+		default:
+			return r
+		}
+	}, text)
+	return strings.Join(strings.Fields(text), " ")
+}
+
+func hasComposerFrame(contents string) bool {
+	lines := strings.Split(contents, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.Contains(lines[i], "╭") {
+			return strings.Contains(strings.Join(lines[i:], "\n"), "╰")
+		}
+	}
+	return false
+}
+
+func spawnSubmitTimeout() time.Duration {
+	timeout := 10 * spawnDelay()
+	if timeout <= 0 {
+		return spawnPollInterval
+	}
+	return timeout
+}
+
+func spawnInputSettleDelay() time.Duration {
+	delay := spawnDelay()
+	if delay <= 0 {
+		return spawnPollInterval
+	}
+	return delay
+}
+
+func sleepUntilNextSpawnPoll(deadline time.Time) bool {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return false
+	}
+	if remaining > spawnPollInterval {
+		remaining = spawnPollInterval
+	}
+	time.Sleep(remaining)
+	return true
 }
 
 type teardownIdentity struct {
