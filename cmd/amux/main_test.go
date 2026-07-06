@@ -694,7 +694,9 @@ func TestSpawnSubmitsWhenLongInitialMessageIsNotFullyVisibleInComposer(t *testin
 	}
 	configPath := filepath.Join(tmp, "workspaces.tsv")
 	logPath := filepath.Join(tmp, "calls.log")
+	enterCountPath := filepath.Join(tmp, "enter-count")
 	longMessage := "Inventory CSB setup paths, compare product variant handling, and report only the smallest spawn reliability fix with test evidence for issue nineteen"
+	var stderr bytes.Buffer
 
 	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
 printf 'amp %s\n' "$*" >> "`+logPath+`"
@@ -703,6 +705,10 @@ if [ "$1" = threads ] && [ "$2" = new ]; then
   exit 0
 fi
 if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-long-prompt ]; then
+  if [ ! -f "`+enterCountPath+`" ]; then
+    printf '{"id":"T-long-prompt","messages":[]}\n'
+    exit 0
+  fi
   printf '{"id":"T-long-prompt","messages":[{"role":"user","content":"`+longMessage+`"}]}\n'
   exit 0
 fi
@@ -725,6 +731,12 @@ if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = @1 ]
   exit 0
 fi
 if [ "$1" = send-keys ]; then
+  if [ "$4" = Enter ]; then
+    count=0
+    if [ -f "`+enterCountPath+`" ]; then count=$(cat "`+enterCountPath+`"); fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "`+enterCountPath+`"
+  fi
   exit 0
 fi
 if [ "$1" = capture-pane ]; then
@@ -740,8 +752,11 @@ exit 2
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
 
-	if err := run([]string{"--config", configPath, "spawn", "--title-prefix", "#19", "long prompt", workdir, longMessage}); err != nil {
+	if err := (app{stderr: &stderr}).run([]string{"--config", configPath, "spawn", "--title-prefix", "#19", "long prompt", workdir, longMessage}); err != nil {
 		t.Fatal(err)
+	}
+	if strings.Contains(stderr.String(), "initial message may not have been submitted") {
+		t.Fatalf("spawn printed manual-submit warning after pressing Enter and verifying delivery:\n%s", stderr.String())
 	}
 
 	logBytes, err := os.ReadFile(logPath)

@@ -695,7 +695,7 @@ func submitInitialMessage(runner tmux.Runner, target, message string) (bool, err
 			if err := runner.SendEnter(target); err != nil {
 				return false, fmt.Errorf("submit initial message: %w", err)
 			}
-			return false, nil
+			return true, nil
 		}
 	}
 	time.Sleep(spawnInputSettleDelay())
