@@ -691,6 +691,10 @@ func submitInitialMessage(runner tmux.Runner, target, message string) (bool, err
 			return false, fmt.Errorf("send initial message: %w", err)
 		}
 		if !waitForComposerMessage(runner, target, message) {
+			time.Sleep(spawnInputSettleDelay())
+			if err := runner.SendEnter(target); err != nil {
+				return false, fmt.Errorf("submit initial message: %w", err)
+			}
 			return false, nil
 		}
 	}

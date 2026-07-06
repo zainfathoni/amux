@@ -686,6 +686,93 @@ exit 2
 	}
 }
 
+func TestSpawnSubmitsWhenLongInitialMessageIsNotFullyVisibleInComposer(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	longMessage := "Inventory CSB setup paths, compare product variant handling, and report only the smallest spawn reliability fix with test evidence for issue nineteen"
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = new ]; then
+  printf 'T-long-prompt\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-long-prompt ]; then
+  printf '{"id":"T-long-prompt","messages":[{"role":"user","content":"`+longMessage+`"}]}\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = rename ] && [ "$3" = T-long-prompt ] && [ "$4" = '#19 long prompt' ]; then
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then
+  exit 1
+fi
+if [ "$1" = new-session ]; then
+  printf '@1\n'
+  exit 0
+fi
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = @1 ] && [ "$5" = '#{pane_id}' ]; then
+  printf '%%1\n'
+  exit 0
+fi
+if [ "$1" = send-keys ]; then
+  exit 0
+fi
+if [ "$1" = capture-pane ]; then
+  printf '╭ composer ─╮\n│ Inventory CSB setup paths, compare product variant handling │\n╰────────────╯\n'
+  exit 0
+fi
+if [ "$1" = select-window ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	if err := run([]string{"--config", configPath, "spawn", "--title-prefix", "#19", "long prompt", workdir, longMessage}); err != nil {
+		t.Fatal(err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if got, want := strings.Count(log, "tmux send-keys -t %1 Enter"), 1; got != want {
+		t.Fatalf("spawn sent Enter %d times, want %d\nlog:\n%s", got, want, log)
+	}
+	for _, want := range []string{
+		"tmux send-keys -t %1 -l " + longMessage,
+		"amp threads export T-long-prompt",
+		"amp threads rename T-long-prompt #19 long prompt",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("log missing %q\nlog:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "amp threads search") {
+		t.Fatalf("spawn searched for a different thread despite verified delivery\nlog:\n%s", log)
+	}
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(configBytes), "mac\t#19 long prompt\t"+workdir+"\tT-long-prompt\n"; !strings.Contains(got, want) {
+		t.Fatalf("config did not contain spawned row\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
 func TestSpawnRefusesToStoreWhenInitialMessageRemainsInComposer(t *testing.T) {
 	tmp := t.TempDir()
 	workdir := filepath.Join(tmp, "workdir")
