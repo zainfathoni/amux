@@ -3192,6 +3192,100 @@ func TestTeardownRequiresSpawnIdentity(t *testing.T) {
 	}
 }
 
+func TestPruneArchivedRemovesOnlyConfirmedArchivedRows(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	archivedURL := "https://ampcode.com/threads/T-archived"
+	if err := os.WriteFile(configPath, []byte("mac\told\t/tmp/old\t"+archivedURL+"\nmac\tactive\t/tmp/active\tT-active\nother\told\t/tmp/other\tT-other-archived\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeAmpListExecutable(t, filepath.Join(tmp, "amp"), []string{"T-active"}, []string{"T-active", "T-archived", "T-other-archived"})
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "prune-archived", "mac"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotConfig := string(configBytes)
+	if strings.Contains(gotConfig, "mac\told\t") {
+		t.Fatalf("config still contains archived row: %q", gotConfig)
+	}
+	for _, want := range []string{
+		"mac\tactive\t/tmp/active\tT-active\n",
+		"other\told\t/tmp/other\tT-other-archived\n",
+	} {
+		if !strings.Contains(gotConfig, want) {
+			t.Fatalf("config did not preserve %q: %q", want, gotConfig)
+		}
+	}
+	if !strings.Contains(stdout.String(), "Unpinned archived thread row mac/old (T-archived)") {
+		t.Fatalf("prune output did not mention archived URL row\nstdout:\n%s", stdout.String())
+	}
+}
+
+func TestPruneArchivedFailsClosedOnMissingThread(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	original := "mac\told\t/tmp/old\tT-archived\nmac\tmissing\t/tmp/missing\tT-missing\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeAmpListExecutable(t, filepath.Join(tmp, "amp"), nil, []string{"T-archived"})
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := (app{}).run([]string{"--config", configPath, "prune-archived", "mac"})
+	if err == nil {
+		t.Fatal("prune-archived succeeded with missing thread, want fail-closed error")
+	}
+	if !strings.Contains(err.Error(), "cannot confirm archive state") || !strings.Contains(err.Error(), "T-missing: missing") {
+		t.Fatalf("got error %q, want missing-thread fail-closed diagnostic", err)
+	}
+	configBytes, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(configBytes) != original {
+		t.Fatalf("prune changed config despite missing thread: %q", configBytes)
+	}
+}
+
+func TestPruneArchivedFailsClosedWhenAmpThreadListUnavailable(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	original := "mac\told\t/tmp/old\tT-archived\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+if [ "$1" = threads ] && [ "$2" = list ]; then
+  printf 'offline\n' >&2
+  exit 2
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := (app{}).run([]string{"--config", configPath, "prune-archived", "mac"})
+	if err == nil {
+		t.Fatal("prune-archived succeeded when Amp thread list was unavailable")
+	}
+	if !strings.Contains(err.Error(), "confirm archived Amp threads") || !strings.Contains(err.Error(), "offline") {
+		t.Fatalf("got error %q, want unavailable-thread-list diagnostic", err)
+	}
+	configBytes, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(configBytes) != original {
+		t.Fatalf("prune changed config despite unavailable Amp list: %q", configBytes)
+	}
+}
+
 func TestDoctorFailsWhenWorkspaceHasNoRows(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
@@ -3199,7 +3293,7 @@ func TestDoctorFailsWhenWorkspaceHasNoRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeExecutable(t, filepath.Join(tmp, "tmux"), "#!/bin/sh\nexit 0\n")
-	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 0\n")
+	writeAmpListExecutable(t, filepath.Join(tmp, "amp"), nil, nil)
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	err := runWithDiscardedStdout([]string{"--config", configPath, "doctor", "missing"})
@@ -3215,7 +3309,7 @@ func TestDoctorDoesNotCreateMissingConfig(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "missing", "workspaces.tsv")
 	writeExecutable(t, filepath.Join(tmp, "tmux"), "#!/bin/sh\nexit 0\n")
-	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 0\n")
+	writeAmpListExecutable(t, filepath.Join(tmp, "amp"), nil, nil)
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	err := runWithDiscardedStdout([]string{"--config", configPath, "doctor", "mac", "Amp"})
@@ -3239,7 +3333,7 @@ func TestDoctorFailsWhenInsideTmuxButTmuxCannotBeQueried(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("mac\twin\t/tmp\tT-thread\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 0\n")
+	writeAmpListExecutable(t, filepath.Join(tmp, "amp"), []string{"T-thread"}, []string{"T-thread"})
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "%42" ]; then
   exit 2
@@ -3265,7 +3359,7 @@ func TestDoctorPassesWhenInsideTmuxCanBeQueried(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("mac\twin\t/tmp\tT-thread\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 0\n")
+	writeAmpListExecutable(t, filepath.Join(tmp, "amp"), []string{"T-thread"}, []string{"T-thread"})
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "%42" ]; then
   case "$5" in
@@ -3294,7 +3388,7 @@ func TestDoctorReportsLiveWindowNotStoredInWorkspace(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("mac\tamux\t/tmp\tT-thread\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 0\n")
+	writeAmpListExecutable(t, filepath.Join(tmp, "amp"), []string{"T-thread"}, []string{"T-thread"})
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 if [ "$1" = list-panes ]; then
   printf 'amux\t/tmp\nextra\t/tmp\n'
@@ -3319,7 +3413,7 @@ func TestDoctorReportsConfiguredWindowNotRunning(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("mac\tmissing\t/tmp\tT-thread\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 0\n")
+	writeAmpListExecutable(t, filepath.Join(tmp, "amp"), []string{"T-thread"}, []string{"T-thread"})
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 if [ "$1" = list-panes ]; then
   printf 'other\t/tmp\n'
@@ -3338,6 +3432,31 @@ exit 0
 	}
 }
 
+func TestDoctorReportsArchivedThreadRow(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("mac\tarchived\t/tmp\tT-archived\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeAmpListExecutable(t, filepath.Join(tmp, "amp"), nil, []string{"T-archived"})
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = list-panes ]; then
+  printf 'archived\t/tmp\n'
+  exit 0
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	output, err := runCapturingStdout(t, []string{"--config", configPath, "doctor", "mac"})
+	if err == nil {
+		t.Fatal("doctor succeeded despite archived thread row, want error")
+	}
+	if !strings.Contains(output, "FAIL thread archived") || !strings.Contains(output, "run amux prune-archived mac") {
+		t.Fatalf("doctor output did not report archived thread row\n%s", output)
+	}
+}
+
 func TestDoctorReportsPanePathMismatch(t *testing.T) {
 	tmp := t.TempDir()
 	configuredWorkdir := filepath.Join(tmp, "configured")
@@ -3352,7 +3471,7 @@ func TestDoctorReportsPanePathMismatch(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("mac\ttycho\t"+configuredWorkdir+"\tT-thread\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 0\n")
+	writeAmpListExecutable(t, filepath.Join(tmp, "amp"), []string{"T-thread"}, []string{"T-thread"})
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 if [ "$1" = list-panes ]; then
   printf 'tycho\t`+liveWorkdir+`\n'
@@ -3382,7 +3501,7 @@ func TestDoctorComparesWorkspaceAgainstExplicitSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	logPath := filepath.Join(tmp, "tmux.log")
-	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 0\n")
+	writeAmpListExecutable(t, filepath.Join(tmp, "amp"), []string{"T-thread"}, []string{"T-thread"})
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 printf 'tmux %s\n' "$*" >> "`+logPath+`"
 if [ "$1" = list-panes ]; then
@@ -3469,4 +3588,32 @@ func writeExecutable(t *testing.T, path, contents string) {
 	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func writeAmpListExecutable(t *testing.T, path string, activeIDs, allIDs []string) {
+	t.Helper()
+	activeJSON := threadListJSON(activeIDs)
+	allJSON := threadListJSON(allIDs)
+	writeExecutable(t, path, `#!/bin/sh
+if [ "$1" = threads ] && [ "$2" = list ]; then
+  case " $* " in
+    *" --include-archived "*) printf '%s\n' '`+allJSON+`'; exit 0 ;;
+    *) printf '%s\n' '`+activeJSON+`'; exit 0 ;;
+  esac
+fi
+exit 0
+`)
+}
+
+func threadListJSON(ids []string) string {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i, id := range ids {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"id":%q}`, id)
+	}
+	b.WriteByte(']')
+	return b.String()
 }

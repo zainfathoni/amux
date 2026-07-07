@@ -139,6 +139,38 @@ func Remove(path, workspace, window string) (bool, error) {
 	return removed, writeLinesAtomic(path, kept)
 }
 
+func RemoveRows(path string, shouldRemove func(Row) bool) (int, error) {
+	if err := Ensure(path); err != nil {
+		return 0, err
+	}
+	lines, err := readLines(path)
+	if err != nil {
+		return 0, err
+	}
+	kept := lines[:0]
+	removed := 0
+	for _, line := range lines {
+		if line == "" || strings.HasPrefix(line, "#") {
+			kept = append(kept, line)
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) != 4 {
+			return 0, fmt.Errorf("invalid row: expected 4 tab-separated fields")
+		}
+		row := Row{Workspace: fields[0], Window: fields[1], Workdir: fields[2], Thread: fields[3]}
+		if err := row.Validate(); err != nil {
+			return 0, err
+		}
+		if shouldRemove(row) {
+			removed++
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return removed, writeLinesAtomic(path, kept)
+}
+
 func (r Row) String() string {
 	return strings.Join([]string{r.Workspace, r.Window, r.Workdir, r.Thread}, "\t")
 }

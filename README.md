@@ -146,6 +146,7 @@ amux park-current [workspace]
 amux spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] <window> <workdir> <initial-message> [workspace] [session]
 amux teardown
 amux teardown --thread <thread-id-or-url> [--session <session>]
+amux prune-archived [workspace]
 amux version
 amux self-update
 amux path
@@ -177,8 +178,9 @@ Command side effects:
 | `park-current` | Remove current-window row | Gracefully stop the current local tmux/Amp window | No change; Amp thread history is not archived or deleted |
 | `spawn` | Store the new row under the final window name | Create/select a tmux window and submit the initial message | Create a new Amp thread, optionally with `--mode`; optionally rename the new thread with `--title-prefix` |
 | `teardown` | Remove the verified row | Stop the verified tmux window | Archive the verified thread |
+| `prune-archived` | Remove rows whose threads are confirmed archived | No change | Inspect only; does not archive/delete threads |
 
-`amux doctor [workspace] [session]` is read-only and compares the selected workspace against the selected live tmux session. Omitting the session preserves the default `Amp` behavior, so `amux doctor mac` remains equivalent to `amux doctor mac Amp`.
+`amux doctor [workspace] [session]` is read-only and compares the selected workspace against the selected live tmux session. It also reports restore rows whose Amp threads are confirmed archived or missing. Omitting the session preserves the default `Amp` behavior, so `amux doctor mac` remains equivalent to `amux doctor mac Amp`.
 
 For `launch` and `spawn`, `--dry-run` validates inputs and checks tmux window conflicts without mutating state. For `spawn`, dry-run does not create or rename an Amp thread, create tmux windows, send keys, or update `workspaces.tsv`; it only prints the intended actions, including the selected mode and planned title rename when provided.
 
@@ -189,6 +191,8 @@ When launch attaches from inside an existing tmux client, `amux` switches that c
 `park-current` removes the current window from restore config, schedules a delayed graceful terminal shutdown sequence for the target pane, then returns immediately. This gives Amp time to receive the command result and send a final response before the local process exits. The delayed shutdown only force-closes the tmux window if graceful stop times out. Parking is local cleanup only; use `teardown` when you intentionally want to archive the verified remote Amp thread too.
 
 `teardown` is explicit full lifecycle cleanup: archive the verified Amp thread, remove the restore row, and stop the uniquely verified local tmux window. With no args it only runs from an `amux spawn` worker that has matching `AMUX_*` identity. From a restored worker that does not have `AMUX_*` but whose thread is stored and live, use `amux teardown --thread <thread-id-or-url> [--session <session>]`; it resolves the restore row by thread, then cross-checks the live tmux start command before mutating anything. From outside the worker when you know the row, use `amux teardown <workspace> <window> [session]`. All teardown forms fail closed if the target is missing, mismatched, or ambiguous.
+
+`prune-archived [workspace]` is explicit stale-restore cleanup. It only removes rows whose thread ID or URL is confirmed archived by Amp's thread list. Active rows are kept; missing threads, Amp CLI failures, or unreadable thread-list output fail closed without changing config. Unlike `teardown`, it does not archive/delete remote threads or stop live tmux windows.
 
 ## Configuration
 

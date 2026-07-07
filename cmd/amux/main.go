@@ -101,6 +101,8 @@ func (a app) run(args []string) error {
 		return a.spawn(opts, args)
 	case "teardown":
 		return a.teardown(opts, args)
+	case "prune-archived":
+		return a.pruneArchived(opts, args)
 	case "self-update":
 		return a.selfUpdate(opts, args)
 	case "version", "--version":
@@ -495,6 +497,69 @@ func (a app) removeRow(opts options, workspace, window string) error {
 	} else {
 		fmt.Fprintf(a.stdout, "No row found for %s/%s in %s\n", workspace, window, opts.configPath)
 	}
+	return nil
+}
+
+func (a app) pruneArchived(opts options, args []string) error {
+	if len(args) > 1 {
+		return errors.New("usage: amux prune-archived [workspace]")
+	}
+	workspace := defaultWorkspace
+	if len(args) == 1 {
+		workspace = args[0]
+	}
+	rows, err := rowsForWorkspaceReadOnly(opts.configPath, workspace)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		fmt.Fprintf(a.stdout, "No rows found for workspace %s in %s\n", workspace, opts.configPath)
+		return nil
+	}
+	statuses, err := threadArchiveStatuses(rows)
+	if err != nil {
+		return fmt.Errorf("confirm archived Amp threads: %w", err)
+	}
+	archived := make(map[string]bool)
+	unconfirmed := make([]string, 0)
+	for _, row := range rows {
+		status := statuses[canonicalThreadID(row.Thread)]
+		switch status {
+		case threadStatusArchived:
+			archived[row.Workspace+"\x00"+row.Window+"\x00"+row.Thread] = true
+		case threadStatusActive:
+			// Active rows are confirmed non-archived and are kept.
+		default:
+			unconfirmed = append(unconfirmed, row.Window+" ("+row.Thread+": "+string(status)+")")
+		}
+	}
+	if len(unconfirmed) > 0 {
+		return fmt.Errorf("cannot confirm archive state for %s; refusing to prune", formatCandidates(unconfirmed))
+	}
+	if len(archived) == 0 {
+		fmt.Fprintf(a.stdout, "No archived-thread rows found for workspace %s\n", workspace)
+		return nil
+	}
+	if opts.dryRun {
+		for _, row := range rows {
+			if archived[row.Workspace+"\x00"+row.Window+"\x00"+row.Thread] {
+				fmt.Fprintf(a.stdout, "Would unpin archived thread row %s/%s (%s)\n", row.Workspace, row.Window, canonicalThreadID(row.Thread))
+			}
+		}
+		return nil
+	}
+	removed, err := config.RemoveRows(opts.configPath, func(row config.Row) bool {
+		return archived[row.Workspace+"\x00"+row.Window+"\x00"+row.Thread]
+	})
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if archived[row.Workspace+"\x00"+row.Window+"\x00"+row.Thread] {
+			fmt.Fprintf(a.stdout, "Unpinned archived thread row %s/%s (%s)\n", row.Workspace, row.Window, canonicalThreadID(row.Thread))
+		}
+	}
+	fmt.Fprintf(a.stdout, "Pruned %d archived-thread row(s) from %s\n", removed, opts.configPath)
 	return nil
 }
 
@@ -1381,6 +1446,67 @@ func archiveAmpThread(thread string) error {
 	return nil
 }
 
+type threadStatus string
+
+const (
+	threadStatusActive   threadStatus = "active"
+	threadStatusArchived threadStatus = "archived"
+	threadStatusMissing  threadStatus = "missing"
+)
+
+func threadArchiveStatuses(rows []config.Row) (map[string]threadStatus, error) {
+	active, err := ampThreadIDSet(false)
+	if err != nil {
+		return nil, err
+	}
+	includingArchived, err := ampThreadIDSet(true)
+	if err != nil {
+		return nil, err
+	}
+	statuses := make(map[string]threadStatus, len(rows))
+	for _, row := range rows {
+		id := canonicalThreadID(row.Thread)
+		switch {
+		case active[id]:
+			statuses[id] = threadStatusActive
+		case includingArchived[id]:
+			statuses[id] = threadStatusArchived
+		default:
+			statuses[id] = threadStatusMissing
+		}
+	}
+	return statuses, nil
+}
+
+func ampThreadIDSet(includeArchived bool) (map[string]bool, error) {
+	args := []string{"threads", "list", "--json"}
+	if includeArchived {
+		args = append(args, "--include-archived")
+	}
+	args = append(args, "--limit", "1000")
+	cmd := exec.Command("amp", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(out))
+		if message == "" {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %s", err, message)
+	}
+	var payload any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return nil, fmt.Errorf("parse amp threads list: %w", err)
+	}
+	ids := make(map[string]bool)
+	for _, id := range collectThreadIDs(payload) {
+		id = canonicalThreadID(id)
+		if id != "" {
+			ids[id] = true
+		}
+	}
+	return ids, nil
+}
+
 func formatCandidates(candidates []string) string {
 	if len(candidates) == 0 {
 		return "none"
@@ -1573,6 +1699,7 @@ func (a app) doctor(opts options, workspace, session string) error {
 		check("current tmux pane path", workdirErr)
 	}
 	if err == nil && len(rows) > 0 {
+		checkArchivedThreadRows(check, rows)
 		runner := tmux.Runner{}
 		checkWorkspaceDrift(check, runner, workspace, session, rows)
 	}
@@ -1618,6 +1745,26 @@ func checkWorkspaceDrift(check func(string, error), runner tmux.Runner, workspac
 	for _, pane := range panes {
 		if _, ok := configured[pane.Window]; !ok {
 			check("stored window "+pane.Window, fmt.Errorf("running in tmux session %s but not configured in workspace %s", session, workspace))
+		}
+	}
+}
+
+func checkArchivedThreadRows(check func(string, error), rows []config.Row) {
+	statuses, err := threadArchiveStatuses(rows)
+	if err != nil {
+		check("Amp thread archive state", err)
+		return
+	}
+	check("Amp thread archive state", nil)
+	for _, row := range rows {
+		status := statuses[canonicalThreadID(row.Thread)]
+		switch status {
+		case threadStatusArchived:
+			check("thread "+row.Window, fmt.Errorf("restore row points at archived Amp thread %s; run amux prune-archived %s to unpin confirmed archived rows", canonicalThreadID(row.Thread), row.Workspace))
+		case threadStatusMissing:
+			check("thread "+row.Window, fmt.Errorf("Amp thread %s was not found in active or archived thread lists", canonicalThreadID(row.Thread)))
+		default:
+			check("thread "+row.Window, nil)
 		}
 	}
 }
@@ -1749,6 +1896,14 @@ Commands:
       Side effects: mutates all three domains: remote Amp thread state,
       restore config, and live local tmux/Amp.
 
+  prune-archived [workspace]
+      Remove restore-config rows whose Amp thread is confirmed archived.
+      Active rows are kept. Missing threads, Amp CLI failures, or unreadable
+      thread-list output are unconfirmed states and make the command fail
+      without changing config. Defaults: workspace=mac.
+      Side effects: mutates restore config only; does not archive/delete remote
+      Amp threads and does not stop live local tmux/Amp windows.
+
   self-update
       Download the latest GitHub release for this platform, verify its
       checksum, and replace the current binary. Refuses package-managed paths.
@@ -1756,9 +1911,11 @@ Commands:
 
   doctor [workspace] [session]
       Check dependencies, config readability, configured workdirs, and drift
-      between the selected workspace and tmux session. Defaults: workspace=mac
-      session=Amp.
-      Side effects: none; inspects restore config and live local tmux only.
+      between the selected workspace and tmux session. Also reports restore
+      rows whose Amp threads are confirmed archived or missing. Defaults:
+      workspace=mac session=Amp.
+      Side effects: none; inspects restore config, live local tmux, and remote
+      Amp thread state.
 
   version, --version
       Print the amux version and build metadata.
