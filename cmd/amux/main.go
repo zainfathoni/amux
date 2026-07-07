@@ -1332,7 +1332,7 @@ func teardownTargetFromThread(path, thread, session string) (teardownThreadTarge
 		candidate.Session = pane.Session
 		startCommand := normalizedTmuxStartCommand(pane.StartCommand)
 		if explicitTeardownStartCommandMatches(candidate, row, startCommand) {
-			verified = append(verified, pane)
+			verified = appendUniqueTeardownWindow(verified, pane)
 		}
 	}
 	if len(verified) == 0 {
@@ -1411,21 +1411,51 @@ func verifiedTeardownPane(runner tmux.Runner, identity teardownIdentity, row con
 	if len(panes) == 0 {
 		return tmux.WindowPane{}, fmt.Errorf("no live tmux window %q in session %q", identity.Window, identity.Session)
 	}
-	if len(panes) > 1 {
+	windows := uniqueTeardownWindows(panes)
+	if len(windows) > 1 {
 		return tmux.WindowPane{}, fmt.Errorf("ambiguous tmux window %q in session %q: candidates %s; refusing teardown", identity.Window, identity.Session, formatPaneCandidates(panes))
 	}
-	pane := panes[0]
+	pane := windows[0]
 	if pane.WindowID == "" {
 		return tmux.WindowPane{}, fmt.Errorf("tmux window %q in session %q has no window id", identity.Window, identity.Session)
 	}
-	startCommand := normalizedTmuxStartCommand(pane.StartCommand)
-	if identity.FromEnv && startCommand != teardownExpectedStartCommand(identity, row) {
-		return tmux.WindowPane{}, fmt.Errorf("tmux window %q in session %q is not the expected amux-spawned command for AMUX_THREAD_ID=%s; start command: %s", identity.Window, identity.Session, identity.Thread, pane.StartCommand)
+	if identity.FromEnv && !anyTeardownPaneStartCommandMatches(panes, func(startCommand string) bool {
+		return startCommand == teardownExpectedStartCommand(identity, row)
+	}) {
+		return tmux.WindowPane{}, fmt.Errorf("tmux window %q in session %q is not the expected amux-spawned command for AMUX_THREAD_ID=%s; candidates %s", identity.Window, identity.Session, identity.Thread, formatPaneCandidates(panes))
 	}
-	if !identity.FromEnv && !explicitTeardownStartCommandMatches(identity, row, startCommand) {
-		return tmux.WindowPane{}, fmt.Errorf("tmux window %q in session %q start command does not match restore row thread %s; candidates %s; start command: %s", identity.Window, identity.Session, row.Thread, formatPaneCandidates(panes), pane.StartCommand)
+	if !identity.FromEnv && !anyTeardownPaneStartCommandMatches(panes, func(startCommand string) bool {
+		return explicitTeardownStartCommandMatches(identity, row, startCommand)
+	}) {
+		return tmux.WindowPane{}, fmt.Errorf("tmux window %q in session %q start command does not match restore row thread %s; candidates %s", identity.Window, identity.Session, row.Thread, formatPaneCandidates(panes))
 	}
 	return pane, nil
+}
+
+func uniqueTeardownWindows(panes []tmux.WindowPane) []tmux.WindowPane {
+	windows := make([]tmux.WindowPane, 0, len(panes))
+	for _, pane := range panes {
+		windows = appendUniqueTeardownWindow(windows, pane)
+	}
+	return windows
+}
+
+func appendUniqueTeardownWindow(windows []tmux.WindowPane, pane tmux.WindowPane) []tmux.WindowPane {
+	for _, window := range windows {
+		if window.Session == pane.Session && window.WindowID == pane.WindowID {
+			return windows
+		}
+	}
+	return append(windows, pane)
+}
+
+func anyTeardownPaneStartCommandMatches(panes []tmux.WindowPane, matches func(string) bool) bool {
+	for _, pane := range panes {
+		if matches(normalizedTmuxStartCommand(pane.StartCommand)) {
+			return true
+		}
+	}
+	return false
 }
 
 func livePanesForTeardown(runner tmux.Runner, identity teardownIdentity) ([]tmux.WindowPane, error) {

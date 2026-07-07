@@ -2585,6 +2585,137 @@ exit 2
 	}
 }
 
+func TestTeardownFromSpawnIdentityAllowsMultiplePanesInOneWindow(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("mac\tworker\t/tmp/project\tT-worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	startCommand := teardownExpectedStartCommand(
+		teardownIdentity{Workspace: "mac", Session: "Amp", Window: "worker", Thread: "T-worker"},
+		config.Row{Workspace: "mac", Window: "worker", Workdir: "/tmp/project", Thread: "T-worker"},
+	)
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = archive ] && [ "$3" = T-worker ]; then
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ]; then
+  printf 'worker\t@7\t%s\n' `+shellSingleQuote(fmt.Sprintf("%q", startCommand))+`
+  printf 'worker\t@7\t/bin/zsh\n'
+  exit 0
+fi
+if [ "$1" = kill-window ] && [ "$2" = -t ] && [ "$3" = @7 ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMUX_WORKSPACE", "mac")
+	t.Setenv("AMUX_SESSION", "Amp")
+	t.Setenv("AMUX_WINDOW", "worker")
+	t.Setenv("AMUX_THREAD_ID", "T-worker")
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "teardown"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(configBytes), "worker") {
+		t.Fatalf("config still contains torn-down row: %q", configBytes)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		"amp threads archive T-worker",
+		"tmux kill-window -t @7",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("teardown log missing %q\nlog:\n%s", want, log)
+		}
+	}
+	if !strings.Contains(stdout.String(), "Stopped tmux window Amp/worker (@7)") {
+		t.Fatalf("teardown output missing stopped window\nstdout:\n%s", stdout.String())
+	}
+}
+
+func TestTeardownFailsClosedOnMultipleWindowsWithSameName(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("mac\tworker\t/tmp/project\tT-worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	startCommand := teardownExpectedStartCommand(
+		teardownIdentity{Workspace: "mac", Session: "Amp", Window: "worker", Thread: "T-worker"},
+		config.Row{Workspace: "mac", Window: "worker", Workdir: "/tmp/project", Thread: "T-worker"},
+	)
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ]; then
+  printf 'worker\t@7\t%s\n' `+shellSingleQuote(fmt.Sprintf("%q", startCommand))+`
+  printf 'worker\t@8\t%s\n' `+shellSingleQuote(fmt.Sprintf("%q", startCommand))+`
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMUX_WORKSPACE", "mac")
+	t.Setenv("AMUX_SESSION", "Amp")
+	t.Setenv("AMUX_WINDOW", "worker")
+	t.Setenv("AMUX_THREAD_ID", "T-worker")
+
+	err := run([]string{"--config", configPath, "teardown"})
+	if err == nil {
+		t.Fatal("teardown succeeded, want ambiguous same-name windows")
+	}
+	for _, want := range []string{
+		"ambiguous tmux window \"worker\" in session \"Amp\"",
+		"@7",
+		"@8",
+		"refusing teardown",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("got error %q, want %q", err, want)
+		}
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if strings.Contains(log, "amp threads archive") || strings.Contains(log, "tmux kill-window") {
+		t.Fatalf("teardown archived or killed despite ambiguous windows\nlog:\n%s", log)
+	}
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(configBytes), "mac\tworker\t/tmp/project\tT-worker\n") {
+		t.Fatalf("teardown removed row despite ambiguous windows: %q", configBytes)
+	}
+}
+
 func TestTeardownExplicitWorkspaceWindowArchivesRemovesAndStopsWindow(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
