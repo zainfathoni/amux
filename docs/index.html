@@ -560,6 +560,10 @@ OK live tmux session matches config</code></pre>
                 <dd>Pin or unpin the tmux window you are already in without manually retyping its name or path. These commands only mutate restore config.</dd>
               </div>
               <div class="feature">
+                <dt>Park live sessions</dt>
+                <dd><code>park</code> and <code>park-current</code> stop only the resolved local tmux/Amp window while preserving the restore row and leaving remote Amp thread history untouched.</dd>
+              </div>
+              <div class="feature">
                 <dt>Inspect drift</dt>
                 <dd>Use <code>doctor [workspace] [session]</code> to compare your TSV config with the intended live tmux session before trusting a restore.</dd>
               </div>
@@ -591,7 +595,7 @@ OK live tmux session matches config</code></pre>
                 The default config lives at <code>~/.config/amp-tmux/workspaces.tsv</code>. Each row maps a workspace, a tmux window, a working directory, and an Amp thread.
               </p>
               <p>
-                <code>amux</code> names three side-effect domains explicitly: restore-config rows, live local tmux/Amp sessions, and remote Amp thread state. Pin/unpin commands only change the restore config (<code>store</code>/<code>remove</code> remain compatibility aliases); <code>park-current</code> removes restore state and stops the local window without archiving the remote thread; <code>teardown</code> is the explicit full cleanup that archives the verified thread, removes its row, and stops its verified local window.
+                <code>amux</code> names three side-effect domains explicitly: restore-config rows, live local tmux/Amp sessions, and remote Amp thread state. Pin/unpin commands only change the restore config (<code>store</code>/<code>remove</code> remain compatibility aliases); <code>park</code> and <code>park-current</code> only stop the resolved live local window while preserving restore state and remote thread history; <code>teardown</code> is the explicit full cleanup that archives the verified thread, removes its row, and stops its verified local window.
               </p>
             </div>
             <div class="panel">

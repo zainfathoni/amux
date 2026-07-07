@@ -2217,7 +2217,7 @@ func TestRemoveCurrentRequiresInvokingPaneWhenInsideTmux(t *testing.T) {
 	}
 }
 
-func TestParkCurrentRemovesRestoreRowAndKillsCapturedWindow(t *testing.T) {
+func TestParkCurrentPreservesRestoreRowAndKillsCapturedWindow(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
 	logPath := filepath.Join(tmp, "calls.log")
@@ -2225,6 +2225,10 @@ func TestParkCurrentRemovesRestoreRowAndKillsCapturedWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+exit 2
+`)
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 printf '%s\n' "$*" >> "`+logPath+`"
 if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "%42" ]; then
@@ -2255,8 +2259,8 @@ exit 2
 		t.Fatal(err)
 	}
 	gotConfig := string(configBytes)
-	if strings.Contains(gotConfig, "current window") {
-		t.Fatalf("config still contains parked window: %q", gotConfig)
+	if want := "mac\tcurrent window\t/tmp\tT-current\n"; !strings.Contains(gotConfig, want) {
+		t.Fatalf("config did not preserve parked window row\ngot:  %q\nwant: %q", gotConfig, want)
 	}
 	if want := "mac\tother\t/tmp\tT-other\n"; !strings.Contains(gotConfig, want) {
 		t.Fatalf("config did not preserve other row\ngot:  %q\nwant: %q", gotConfig, want)
@@ -2270,8 +2274,84 @@ exit 2
 	if !strings.Contains(log, "run-shell -b") {
 		t.Fatalf("tmux log did not schedule captured target shutdown\nlog:\n%s", log)
 	}
+	if strings.Contains(log, "amp threads archive") {
+		t.Fatalf("park-current archived remote Amp thread\nlog:\n%s", log)
+	}
+	if !strings.Contains(stdout.String(), "Restore config row mac/current window is preserved") {
+		t.Fatalf("stdout did not explain restore-row preservation: %q", stdout.String())
+	}
 	if !strings.Contains(stdout.String(), "Amp thread history is not deleted") {
 		t.Fatalf("stdout did not explain Amp history semantics: %q", stdout.String())
+	}
+}
+
+func TestParkPreservesRestoreRowTargetsResolvedLiveWindowAndDoesNotArchive(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("mac\tworker\t/tmp/worker\tT-worker\nmac\tother\t/tmp/other\tT-other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ]; then
+  printf 'worker\t@7\tcd /tmp/worker && exec amp threads continue T-worker\n'
+  printf 'other\t@8\tcd /tmp/other && exec amp threads continue T-other\n'
+  exit 0
+fi
+if [ "$1" = run-shell ] && [ "$2" = -b ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMUX_PARK_GRACE_PERIOD", "0")
+	t.Setenv("AMUX_PARK_SHUTDOWN_DELAY", "0")
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "park", "mac", "worker"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotConfig, want := string(configBytes), "mac\tworker\t/tmp/worker\tT-worker\n"; !strings.Contains(gotConfig, want) {
+		t.Fatalf("park did not preserve restore row\ngot:  %q\nwant: %q", gotConfig, want)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		"tmux list-panes -s -t Amp -F #{window_name}\t#{window_id}\t#{pane_start_command}",
+		"target='@7'",
+		"tmux kill-window -t \"$target\"",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("park log missing %q\nlog:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "amp threads archive") {
+		t.Fatalf("park archived remote Amp thread\nlog:\n%s", log)
+	}
+	for _, want := range []string{
+		"Scheduling tmux window Amp/worker (@7) to stop",
+		"Restore config row mac/worker is preserved",
+		"Amp thread history is not deleted",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("park stdout missing %q\nstdout:\n%s", want, stdout.String())
+		}
 	}
 }
 
@@ -2337,6 +2417,7 @@ exit 2
 		"tmux send-keys -t \"$target\" C-c",
 		"tmux send-keys -t \"$target\" C-d",
 		"tmux kill-window -t \"$target\"",
+		"amux warning: tmux target $target is still live after park shutdown",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("tmux log missing deferred shutdown command %q\nlog:\n%s", want, log)
@@ -2391,8 +2472,8 @@ exit 2
 		t.Fatal(err)
 	}
 	gotConfig := string(configBytes)
-	if strings.Contains(gotConfig, "pane-window") {
-		t.Fatalf("config still contains invoking pane window: %q", gotConfig)
+	if !strings.Contains(gotConfig, "mac\tpane-window\t/tmp/pane\tT-pane\n") {
+		t.Fatalf("config did not preserve invoking pane window: %q", gotConfig)
 	}
 	if !strings.Contains(gotConfig, "mac\tfocused-window\t/tmp/focused\tT-focused\n") {
 		t.Fatalf("config did not preserve focused-client window\ngot: %q", gotConfig)

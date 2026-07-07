@@ -142,6 +142,7 @@ amux pin-current <thread-id-or-url>
 amux pin-current <workspace> <thread-id-or-url> [window] [workdir]
 amux unpin <workspace> <window>
 amux unpin-current [workspace]
+amux park [workspace] <window>
 amux park-current [workspace]
 amux spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] <window> <workdir> <initial-message> [workspace] [session]
 amux teardown
@@ -175,7 +176,7 @@ Command side effects:
 | `list`, `path`, `version`, `doctor` | Read only | Inspect only | No change |
 | `pin`, `pin-current` (`store`, `store-current`) | Add or replace rows | No change | No change |
 | `unpin`, `unpin-current` (`remove`, `remove-current`) | Remove rows | No change | No change |
-| `park-current` | Remove current-window row | Gracefully stop the current local tmux/Amp window | No change; Amp thread history is not archived or deleted |
+| `park`, `park-current` | No change; rows are preserved for future restore | Gracefully stop the resolved local tmux/Amp window | No change; Amp thread history is not archived or deleted |
 | `spawn` | Store the new row under the final window name | Create/select a tmux window and submit the initial message | Create a new Amp thread, optionally with `--mode`; optionally rename the new thread with `--title-prefix` |
 | `teardown` | Remove the verified row | Stop the verified tmux window | Archive the verified thread |
 | `prune-archived` | Remove rows whose threads are confirmed archived | No change | Inspect only; does not archive/delete threads |
@@ -188,7 +189,7 @@ Launch uses auto-attach by default: cold restores create the tmux session and re
 
 When launch attaches from inside an existing tmux client, `amux` switches that client to the target session. From a normal interactive terminal, it attaches in-place. If tmux reports that the caller is not a terminal, `amux` opens the target session through Omarchy's terminal launcher, with direct Alacritty fallback.
 
-`park-current` removes the current window from restore config, schedules a delayed graceful terminal shutdown sequence for the target pane, then returns immediately. This gives Amp time to receive the command result and send a final response before the local process exits. The delayed shutdown only force-closes the tmux window if graceful stop times out. Parking is local cleanup only; use `teardown` when you intentionally want to archive the verified remote Amp thread too.
+`park [workspace] <window>` and `park-current [workspace]` are live-local-only. They resolve the intended live tmux window, schedule a delayed graceful terminal shutdown sequence for the target pane, then return immediately. This gives Amp time to receive the command result and send a final response before the local process exits. The delayed shutdown only force-closes the tmux window if graceful stop times out. Parking preserves restore config rows and never archives the remote Amp thread. Use `unpin`/`unpin-current` when you only want to stop restoring a row, and use `teardown` when you intentionally want to archive the verified remote Amp thread, remove the row, and stop the local window.
 
 `teardown` is explicit full lifecycle cleanup: archive the verified Amp thread, remove the restore row, and stop the uniquely verified local tmux window. With no args it only runs from an `amux spawn` worker that has matching `AMUX_*` identity. From a restored worker that does not have `AMUX_*` but whose thread is stored and live, use `amux teardown --thread <thread-id-or-url> [--session <session>]`; it resolves the restore row by thread, then cross-checks the live tmux start command before mutating anything. From outside the worker when you know the row, use `amux teardown <workspace> <window> [session]`. All teardown forms fail closed if the target is missing, mismatched, or ambiguous.
 

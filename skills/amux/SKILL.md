@@ -1,6 +1,6 @@
 ---
 name: amux
-description: "Manages Amp tmux workspace sessions with amux: spawn fresh interactive Amp threads, pin/unpin current windows in restore config, tear down spawned workers, and update restore config. Use when the user asks to add, pin, store, save, remember, restore, unpin, remove, spawn, tear down, or reset Amp/tmux sessions, current Amp sessions, thread IDs, or restored sessions. Also use for trigger phrases: 'Park it' means remove the current window from amux restore and close the local tmux/Amp session; 'Pin it' means pin the current window for restore."
+description: "Manages Amp tmux workspace sessions with amux: spawn fresh interactive Amp threads, pin/unpin current windows in restore config, park live local sessions, tear down spawned workers, and update restore config. Use when the user asks to add, pin, store, save, remember, restore, unpin, remove, park, spawn, tear down, or reset Amp/tmux sessions, current Amp sessions, thread IDs, or restored sessions. Also use for trigger phrases: 'Park it' means close the current local tmux/Amp session while keeping it restorable; 'Pin it' means pin the current window for restore."
 ---
 
 # amux
@@ -26,6 +26,7 @@ amux pin-current <thread-id-or-url>
 amux pin-current mac <thread-id-or-url> [window] [workdir]
 amux unpin mac <window>
 amux unpin-current [workspace]
+amux park [workspace] <window>
 amux park-current [workspace]
 amux spawn [--mode <mode> | -m <mode>] <window> <workdir> <initial-message> [workspace] [session]
 amux teardown
@@ -48,7 +49,7 @@ Launch auto-attaches by default only when the tmux session already existed, no r
 - `launch`: reads restore config and may create live local tmux/Amp windows; it does not create or archive remote Amp threads.
 - `pin` and `pin-current` (`store` and `store-current` aliases): mutate restore config only.
 - `unpin` and `unpin-current` (`remove` and `remove-current` aliases): mutate restore config only; they do not stop local tmux/Amp windows and do not archive remote Amp threads.
-- `park-current`: removes the current-window restore row and stops the current local tmux/Amp window after a delay; it does not archive or delete the remote Amp thread.
+- `park` and `park-current`: stop only the resolved live local tmux/Amp window after a delay; they preserve restore config rows and do not archive or delete the remote Amp thread.
 - `spawn`: creates a remote Amp thread, creates/selects a live local tmux window, submits the initial message, injects `AMUX_WORKSPACE`, `AMUX_SESSION`, `AMUX_WINDOW`, `AMUX_THREAD_ID`, and `AMUX_WORKDIR`, and stores the restore row.
 - `teardown`: verifies `AMUX_*` identity, explicit workspace/window, or `--thread` restore/live-tmux agreement, then archives the verified remote Amp thread, removes the restore row, and stops the verified local tmux window.
 - `prune-archived`: mutates restore config only, removing rows for already-archived Amp threads; it never archives/deletes threads and never stops tmux windows.
@@ -57,7 +58,7 @@ Launch auto-attaches by default only when the tmux session already existed, no r
 
 These phrases are user-level shorthand and should work from any project when this global skill is available.
 
-- **Park it**: remove the current tmux window from amux restore config, then gracefully stop the current local tmux/Amp window/process. This does not archive or delete the remote Amp thread; it only stops the local tmux/Amp session and prevents restore. `amux park-current` schedules a delayed interrupt/EOF for the target pane, returns so the agent can send its final response, then force-closes the tmux window only if the graceful stop times out.
+- **Park it**: gracefully stop the current local tmux/Amp window/process while keeping its restore config row. This does not archive or delete the remote Amp thread, and it does not prevent future restore. `amux park-current` schedules a delayed interrupt/EOF for the target pane, returns so the agent can send its final response, then force-closes the tmux window only if the graceful stop times out. Use `unpin-current` for config-only cleanup, or `teardown` for archive+unpin+stop cleanup.
 - **Pin it**: pin the current tmux window in amux restore config. Ask for the thread ID/URL if it is not available in context.
 
 For **Park it**, use the atomic command, then verify it disappeared locally:
@@ -69,7 +70,7 @@ tmux list-windows -t Amp
 ps -eo pid,ppid,stat,args | rg 'amp threads continue T-' || true
 ```
 
-If the thread still appears in Amp history after parking, that is expected. Parking is not remote thread archival or deletion.
+If the row still appears in `amux list` and the thread still appears in Amp history after parking, that is expected. Parking is not restore-config cleanup or remote thread archival/deletion.
 
 For **Pin it**, prefer:
 
@@ -104,7 +105,7 @@ If the worker was restored later and does not have `AMUX_WORKSPACE`, `AMUX_SESSI
 amux teardown --thread <thread-id-or-url> [--session <session>]
 ```
 
-`teardown` is the explicit full-lifecycle cleanup command. It archives the verified thread, removes the matching restore-config row, and stops the verified local tmux window. If any identity, config, or tmux check is missing, mismatched, or ambiguous, it fails closed and should not archive or stop anything. Do not use `park-current` when the desired outcome is remote Amp thread archival; parking intentionally leaves remote thread history alone.
+`teardown` is the explicit full-lifecycle cleanup command. It archives the verified thread, removes the matching restore-config row, and stops the verified local tmux window. If any identity, config, or tmux check is missing, mismatched, or ambiguous, it fails closed and should not archive or stop anything. Do not use `park-current` when the desired outcome is remote Amp thread archival or restore-config cleanup; parking intentionally leaves both remote thread history and restore config alone.
 
 ## Current-session workflow
 

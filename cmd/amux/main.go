@@ -95,6 +95,8 @@ func (a app) run(args []string) error {
 		return a.remove(opts, args)
 	case "unpin-current", "remove-current":
 		return a.removeCurrent(opts, args)
+	case "park":
+		return a.park(opts, args)
 	case "park-current":
 		return a.parkCurrent(opts, args)
 	case "spawn":
@@ -391,6 +393,40 @@ func (a app) removeCurrent(opts options, args []string) error {
 	return a.removeRow(opts, workspace, window)
 }
 
+func (a app) park(opts options, args []string) error {
+	if len(args) == 0 || len(args) > 2 {
+		return errors.New("usage: amux park [workspace] <window>")
+	}
+	workspace := defaultWorkspace
+	window := args[0]
+	if len(args) == 2 {
+		workspace = args[0]
+		window = args[1]
+	}
+	if err := config.ValidateField("workspace", workspace); err != nil {
+		return err
+	}
+	if err := config.ValidateField("window", window); err != nil {
+		return err
+	}
+
+	runner := tmux.Runner{DryRun: opts.dryRun}
+	panes, err := runner.WindowPanes(defaultSession, window)
+	if err != nil {
+		return fmt.Errorf("find tmux window %s/%s: %w", defaultSession, window, err)
+	}
+	if len(panes) == 0 {
+		return fmt.Errorf("no live tmux window %q in session %q", window, defaultSession)
+	}
+	if len(panes) > 1 {
+		return fmt.Errorf("ambiguous tmux window %q in session %q: candidates %s; refusing park", window, defaultSession, formatPaneCandidates(panes))
+	}
+	if panes[0].WindowID == "" {
+		return fmt.Errorf("tmux window %q in session %q has no window id", window, defaultSession)
+	}
+	return a.schedulePark(runner, defaultSession, window, panes[0].WindowID, workspace)
+}
+
 func (a app) parkCurrent(opts options, args []string) error {
 	if len(args) > 1 {
 		return errors.New("usage: amux park-current [workspace]")
@@ -413,11 +449,13 @@ func (a app) parkCurrent(opts options, args []string) error {
 		return fmt.Errorf("current tmux window is unavailable: %w", err)
 	}
 
-	if err := a.removeRow(opts, workspace, window); err != nil {
-		return err
-	}
-	fmt.Fprintf(a.stdout, "Scheduling tmux window %s (%s) to stop\n", target, window)
-	fmt.Fprintln(a.stdout, "Amp thread history is not deleted; parking only removes restore state and stops the local tmux/Amp session.")
+	return a.schedulePark(runner, target, window, target, workspace)
+}
+
+func (a app) schedulePark(runner tmux.Runner, session, window, target, workspace string) error {
+	fmt.Fprintf(a.stdout, "Scheduling tmux window %s/%s (%s) to stop\n", session, window, target)
+	fmt.Fprintf(a.stdout, "Restore config row %s/%s is preserved; use amux unpin %s %s to remove it.\n", workspace, window, workspace, window)
+	fmt.Fprintln(a.stdout, "Amp thread history is not deleted; parking only stops the local tmux/Amp session.")
 	if err := runner.RunShell(parkShutdownScript(target, parkShutdownDelay(), parkGracePeriod())); err != nil {
 		return fmt.Errorf("schedule tmux window %s shutdown: %w", target, err)
 	}
@@ -437,6 +475,9 @@ func parkShutdownScript(target string, delay, grace time.Duration) string {
 		"while tmux display-message -p -t \"$target\" '#{pane_id}' >/dev/null 2>&1; do",
 		"  if [ \"$(date +%s)\" -ge \"$deadline\" ]; then",
 		"    tmux kill-window -t \"$target\" >/dev/null 2>&1 || true",
+		"    if tmux display-message -p -t \"$target\" '#{pane_id}' >/dev/null 2>&1; then",
+		"      tmux display-message \"amux warning: tmux target $target is still live after park shutdown\" >/dev/null 2>&1 || true",
+		"    fi",
 		"    exit 0",
 		"  fi",
 		"  sleep 0.100",
@@ -1859,11 +1900,20 @@ Commands:
       Side effects: mutates restore config only.
       Compatibility alias: remove-current.
 
-  park-current [workspace]
-      Remove the current tmux window from restore config, schedule delayed
+  park [workspace] <window>
+      Resolve a live tmux window in the default Amp session, schedule delayed
       pane shutdown, and return before the local Amp process exits.
       The delayed shutdown force-closes tmux only if graceful exit times out.
-      Side effects: mutates restore config and live local tmux/Amp only.
+      Side effects: mutates live local tmux/Amp only. Restore config rows are
+      preserved; use unpin for config-only cleanup or teardown for full cleanup.
+      Amp thread history is not archived or deleted.
+
+  park-current [workspace]
+      Resolve the invoking pane's live tmux window, schedule delayed pane
+      shutdown, and return before the local Amp process exits.
+      The delayed shutdown force-closes tmux only if graceful exit times out.
+      Side effects: mutates live local tmux/Amp only. Restore config rows are
+      preserved; use unpin-current for config-only cleanup or teardown for full cleanup.
       Amp thread history is not archived or deleted.
 
   spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] <window> <workdir> <initial-message> [workspace] [session]
