@@ -71,6 +71,9 @@ func (a app) selfUpdate(opts options, args []string) error {
 	}
 	if version == release.TagName {
 		fmt.Fprintf(a.stdout, "amux is already up to date (%s)\n", version)
+		if warning := selfUpdateShadowWarning(installPath); warning != "" {
+			fmt.Fprintln(a.stdout, warning)
+		}
 		return nil
 	}
 	archiveName := fmt.Sprintf("amux-%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH)

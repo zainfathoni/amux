@@ -145,6 +145,50 @@ func TestSelfUpdateDryRunWarnsWhenInstallIsShadowedOnPath(t *testing.T) {
 	}
 }
 
+func TestSelfUpdateWarnsWhenUpToDateInstallIsShadowedOnPath(t *testing.T) {
+	tmp := t.TempDir()
+	installDir := filepath.Join(tmp, "install")
+	shadowDir := filepath.Join(tmp, "shadow")
+	if err := os.Mkdir(installDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(shadowDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exePath := filepath.Join(installDir, "amux")
+	shadowPath := filepath.Join(shadowDir, "amux")
+	if err := os.WriteFile(exePath, []byte("current binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(shadowPath, []byte("old shadow binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shadowDir+string(os.PathListSeparator)+installDir)
+	oldVersion := version
+	version = "v9.9.9"
+	t.Cleanup(func() { version = oldVersion })
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/latest" {
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+		}
+		fmt.Fprint(w, `{"tag_name":"v9.9.9","assets":[]}`)
+	}))
+	defer server.Close()
+	withSelfUpdateTestState(t, exePath, server.URL+"/latest", server.Client())
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"self-update"}); err != nil {
+		t.Fatal(err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "amux is already up to date (v9.9.9)") {
+		t.Fatalf("unexpected self-update output: %q", out)
+	}
+	if !strings.Contains(out, "Warning: updated "+exePath+", but `amux` on PATH resolves to "+shadowPath) {
+		t.Fatalf("missing shadowed PATH warning: %q", out)
+	}
+}
+
 func TestSelfUpdateDryRunDoesNotRequireWritableInstallDirOrDownloadArchive(t *testing.T) {
 	tmp := t.TempDir()
 	exePath := filepath.Join(tmp, "amux")
