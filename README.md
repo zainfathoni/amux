@@ -1,8 +1,8 @@
 # amux
 
-`amux` is an [Amp](https://ampcode.com/) session manager for tmux. It restores named Amp workspaces from a small TSV config file, and gives agents safe commands for pinning, parking, spawning, and tearing down work.
+`amux` is the local tmux workspace and lifecycle layer for [Amp](https://ampcode.com/). It restores named Amp workspaces from a small TSV config file, and gives agents safe commands for pinning, parking, spawning, and tearing down work.
 
-It is built for people who keep long-running Amp threads around while moving between projects. Instead of manually reopening tmux windows and continuing threads, you store the windows you care about and let `amux` restore them later.
+It is built for people who keep long-running Amp threads and local Amp processes around while moving between projects. Instead of manually reopening tmux windows and continuing threads, you store the windows you care about and let `amux` restore them later.
 
 Website: [amux.zainf.dev](https://amux.zainf.dev)
 
@@ -19,6 +19,7 @@ If you already use Amp in tmux, the main workflow is ready to try. Start with `-
 
 ## Features
 
+- Complement Amp Agents Anywhere with a local tmux workspace layer.
 - Restore Amp threads into named tmux windows.
 - Pin or unpin the current tmux window in the restore config.
 - Spawn a fresh Amp thread in a new tmux window.
@@ -26,6 +27,12 @@ If you already use Amp in tmux, the main workflow is ready to try. Start with `-
 - Validate planned restore actions with `--dry-run`.
 - Inspect config/live tmux drift with `doctor`.
 - Build versioned release artifacts through GitHub Actions.
+
+## Amp Agents Anywhere
+
+Amp's [Agents Anywhere](https://ampcode.com/news/agents-anywhere) gives Amp first-party remote thread creation and per-directory runner mode with `amp --no-tui`. `amux` does not replace that. It manages the local tmux side of an Amp workflow: named windows, restore config, live-local parking, verified teardown, and an agent skill that keeps those side effects explicit.
+
+Today, `amux launch` restores known Amp threads with `amp threads continue <thread-id-or-url>`, and `amux spawn` creates an interactive tmux-backed worker with a known thread identity. First-class `amp --no-tui` runner lifecycle is planned separately so runner intent is not confused with thread restore rows.
 
 ## Requirements
 

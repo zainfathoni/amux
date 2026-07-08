@@ -3,15 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>amux — Amp session manager for tmux</title>
+    <title>amux — local tmux workspaces for Amp</title>
     <meta
       name="description"
-      content="amux is an Amp session manager for tmux: restore workspaces, pin sessions, park live windows, spawn workers, and keep agents using the right lifecycle commands."
+      content="amux is the local tmux workspace and lifecycle layer for Amp: restore workspaces, pin sessions, park live windows, spawn workers, and keep agents using the right commands."
     />
-    <meta property="og:title" content="amux — Amp session manager for tmux" />
+    <meta property="og:title" content="amux — local tmux workspaces for Amp" />
     <meta
       property="og:description"
-      content="Restore Amp workspaces, pin sessions, park live windows, spawn workers, and give agents a safe /amux vocabulary."
+      content="The local tmux workspace layer that complements Amp Agents Anywhere with restorable, inspectable, agent-operated Amp sessions."
     />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://amux.zainf.dev/" />
@@ -20,8 +20,8 @@
     <meta property="og:image:height" content="630" />
     <meta property="og:image:alt" content="amux — Amp session manager for tmux" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="amux — Amp session manager for tmux" />
-    <meta name="twitter:description" content="Restore Amp workspaces, pin sessions, park live windows, spawn workers, and give agents a safe /amux vocabulary." />
+    <meta name="twitter:title" content="amux — local tmux workspaces for Amp" />
+    <meta name="twitter:description" content="The local tmux workspace layer that complements Amp Agents Anywhere with restorable, inspectable, agent-operated Amp sessions." />
     <meta name="twitter:image" content="https://amux.zainf.dev/og-image.png" />
     <meta name="theme-color" content="#18181b" />
     <link rel="canonical" href="https://amux.zainf.dev/" />
@@ -516,10 +516,10 @@
         <section class="hero">
           <div class="container hero-grid">
             <div>
-              <div class="eyebrow">Amp session manager for tmux</div>
+              <div class="eyebrow">Local tmux workspaces for Amp</div>
               <h1>Restore agent workspaces without the ritual.</h1>
               <p class="hero-copy">
-                <code>amux</code> is a small CLI and bundled <code>/amux</code> agent skill for restoring named Amp workspaces inside tmux from a simple TSV file. Keep long-running agent threads organized, resumable, and one command away.
+                Amp can now start agents anywhere you run a runner. <code>amux</code> complements that with a small CLI and bundled <code>/amux</code> skill for keeping local Amp/tmux workspaces restorable, inspectable, and safe for agents to operate.
               </p>
               <div class="hero-actions">
                 <a class="primary-button" href="https://github.com/zainfathoni/amux/releases/latest">Download latest</a>
@@ -553,12 +553,16 @@ OK live tmux session matches config</code></pre>
         <section class="section" id="features">
           <div class="container">
             <div class="section-heading">
-              <h2>Built for persistent agent work.</h2>
+              <h2>Built for persistent local agent work.</h2>
               <p>
-                <code>amux</code> keeps the state you care about in boring text, then uses tmux and the Amp CLI to bring that state back when you need it.
+                Amp Agents Anywhere provides first-party remote thread creation and per-directory runners. <code>amux</code> manages the local tmux workspace around the Amp sessions you want to keep organized.
               </p>
             </div>
             <dl class="feature-grid">
+              <div class="feature">
+                <dt>Complement Agents Anywhere</dt>
+                <dd>Use Amp-native remote creation for new agents, and use <code>amux</code> for the local tmux workspace lifecycle: restore, inspect, park, spawn, and verified cleanup.</dd>
+              </div>
               <div class="feature">
                 <dt>Restore workspaces</dt>
                 <dd>Launch a named workspace into a tmux session with one window per configured Amp thread.</dd>
@@ -607,6 +611,9 @@ OK live tmux session matches config</code></pre>
                 The default config lives at <code>~/.config/amp-tmux/workspaces.tsv</code>. Each row maps a workspace, a tmux window, a working directory, and an Amp thread.
               </p>
               <p>
+                <code>amp --no-tui</code> runners are per working directory. First-class runner lifecycle belongs in a separate runner model, not fake thread rows; until then, <code>amux</code> focuses on restoring known Amp threads and managing the local tmux windows around them.
+              </p>
+              <p>
                 <code>amux</code> names three side-effect domains explicitly: restore-config rows, live local tmux/Amp sessions, and remote Amp thread state. Pin/unpin commands only change the restore config (<code>store</code>/<code>remove</code> remain compatibility aliases); <code>park</code> and <code>park-current</code> only stop the resolved live local window while preserving restore state and remote thread history; <code>teardown</code> is the explicit full cleanup that archives the verified thread, removes its row, and stops its verified local window.
               </p>
             </div>
@@ -648,7 +655,7 @@ mac         docs         ~/Code/docs         T-docs</code></pre>
             <div>
               <h2>Install it, try it, keep what works.</h2>
               <p>
-                <code>amux</code> is intentionally small: a Go binary, tmux, Amp, and a text file. Start with a dry run, then let it restore the workspace you already use.
+                <code>amux</code> is intentionally small: a Go binary, tmux, Amp, and a text file. Start with a dry run, then let it restore the local Amp workspace you already use.
               </p>
             </div>
             <div class="terminal">
