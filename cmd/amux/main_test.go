@@ -3440,6 +3440,39 @@ func TestPruneArchivedRemovesOnlyConfirmedArchivedRows(t *testing.T) {
 	}
 }
 
+func TestPruneArchivedUsesAmpSupportedThreadListLimit(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("mac\tactive\t/tmp/active\tT-active\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "amp.log")
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = list ]; then
+  printf '[{"id":"T-active"}]\n'
+  exit 0
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := (app{}).run([]string{"--config", configPath, "prune-archived", "mac"}); err != nil {
+		t.Fatal(err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if strings.Contains(log, "--limit 1000") {
+		t.Fatalf("used Amp thread list limit above current CLI maximum\nlog:\n%s", log)
+	}
+	if !strings.Contains(log, "--limit 500") {
+		t.Fatalf("did not use expected Amp thread list limit\nlog:\n%s", log)
+	}
+}
+
 func TestPruneArchivedFailsClosedOnMissingThread(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")

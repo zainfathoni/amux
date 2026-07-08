@@ -1554,7 +1554,7 @@ func ampThreadIDSet(includeArchived bool) (map[string]bool, error) {
 	if includeArchived {
 		args = append(args, "--include-archived")
 	}
-	args = append(args, "--limit", "1000")
+	args = append(args, "--limit", "500")
 	cmd := exec.Command("amp", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
