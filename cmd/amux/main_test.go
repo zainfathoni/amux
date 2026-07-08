@@ -3863,6 +3863,142 @@ exit 0
 	}
 }
 
+func TestRunnerPinListUnpinUsesSeparateRegistry(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	workdir := filepath.Join(tmp, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "runner", "pin", "mac", "amux-runner", workdir}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("runner pin touched thread workspace config: %v", err)
+	}
+	runnerConfigPath := filepath.Join(tmp, "runners.tsv")
+	contents, err := os.ReadFile(runnerConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(contents), "mac\tamux-runner\t"+workdir+"\n"; !strings.Contains(got, want) {
+		t.Fatalf("runner config missing row\ngot: %q\nwant substring: %q", got, want)
+	}
+
+	stdout.Reset()
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "runner", "list", "mac"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "workspace\twindow\tworkdir\nmac\tamux-runner\t"+workdir) {
+		t.Fatalf("runner list output missing row:\n%s", got)
+	}
+
+	stdout.Reset()
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "runner", "unpin", "mac", "amux-runner"}); err != nil {
+		t.Fatal(err)
+	}
+	contents, err = os.ReadFile(runnerConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(contents), "amux-runner") {
+		t.Fatalf("runner config still contains unpinned row: %q", contents)
+	}
+}
+
+func TestRunnerLaunchStartsNoTUIWindowsAndRefusesExistingWindow(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	workdir := filepath.Join(tmp, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte("mac\tamux-runner\t"+workdir+"\nmac\tother-runner\t"+workdir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "tmux.log")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then
+  exit 1
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := runWithDiscardedStdout([]string{"--config", configPath, "runner", "launch", "mac", "Amp"}); err != nil {
+		t.Fatal(err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if !strings.Contains(log, "tmux new-session -d -s Amp -n amux-runner cd '"+workdir+"' && exec amp --no-tui") {
+		t.Fatalf("runner launch did not create first no-tui session\nlog:\n%s", log)
+	}
+	if !strings.Contains(log, "tmux new-window -t Amp -n other-runner cd '"+workdir+"' && exec amp --no-tui") {
+		t.Fatalf("runner launch did not create second no-tui window\nlog:\n%s", log)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then exit 0; fi
+if [ "$1" = list-windows ]; then printf 'amux-runner\n'; exit 0; fi
+exit 0
+`)
+	err = runWithDiscardedStdout([]string{"--config", configPath, "runner", "launch", "mac", "Amp"})
+	if err == nil {
+		t.Fatal("runner launch succeeded despite existing live window")
+	}
+	if !strings.Contains(err.Error(), "refusing to reuse an ambiguous live process") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDoctorReportsRunnerDriftSeparately(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	workdir := filepath.Join(tmp, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("mac\tthread\t"+workdir+"\tT-thread\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte("mac\tamux-runner\t"+workdir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeAmpListExecutable(t, filepath.Join(tmp, "amp"), []string{"T-thread"}, []string{"T-thread"})
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = list-panes ] && [ "$2" = -s ]; then
+  printf 'thread\t`+workdir+`\nrogue-runner\t`+workdir+`\n'
+  exit 0
+fi
+if [ "$1" = list-panes ] && [ "$2" = -a ]; then
+  printf 'Amp\tthread\t@1\tcd `+workdir+` && exec amp threads continue T-thread\nAmp\trogue-runner\t@2\tcd `+workdir+` && exec amp --no-tui\n'
+  exit 0
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	output, err := runCapturingStdout(t, []string{"--config", configPath, "doctor", "mac", "Amp"})
+	if err == nil {
+		t.Fatal("doctor succeeded despite runner drift")
+	}
+	if !strings.Contains(output, "FAIL runner live window amux-runner") {
+		t.Fatalf("doctor output did not report missing configured runner\n%s", output)
+	}
+	if !strings.Contains(output, "FAIL runner stored window rogue-runner") {
+		t.Fatalf("doctor output did not report unstored live runner\n%s", output)
+	}
+	if strings.Contains(output, "FAIL stored window rogue-runner") {
+		t.Fatalf("doctor reported live runner as thread restore drift instead of runner drift\n%s", output)
+	}
+}
+
 func runWithDiscardedStdout(args []string) error {
 	return (app{}).run(args)
 }

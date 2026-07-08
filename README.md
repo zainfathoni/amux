@@ -21,6 +21,7 @@ If you already use Amp in tmux, the main workflow is ready to try. Start with `-
 
 - Complement Amp Agents Anywhere with a local tmux workspace layer.
 - Restore Amp threads into named tmux windows.
+- Store and launch per-directory `amp --no-tui` runner intent separately from thread rows.
 - Pin or unpin the current tmux window in the restore config.
 - Spawn a fresh Amp thread in a new tmux window.
 - Tear down an `amux spawn` worker from its injected identity.
@@ -32,7 +33,7 @@ If you already use Amp in tmux, the main workflow is ready to try. Start with `-
 
 Amp's [Agents Anywhere](https://ampcode.com/news/agents-anywhere) gives Amp first-party remote thread creation and per-directory runner mode with `amp --no-tui`. `amux` does not replace that. It manages the local tmux side of an Amp workflow: named windows, restore config, live-local parking, verified teardown, and an agent skill that keeps those side effects explicit.
 
-Today, `amux launch` restores known Amp threads with `amp threads continue <thread-id-or-url>`, and `amux spawn` creates an interactive tmux-backed worker with a known thread identity. First-class `amp --no-tui` runner lifecycle is planned separately so runner intent is not confused with thread restore rows.
+`amux launch` restores known Amp threads with `amp threads continue <thread-id-or-url>`, and `amux spawn` creates an interactive tmux-backed worker with a known thread identity. `amux runner ...` commands manage first-class `amp --no-tui` runner intent separately in `runners.tsv` so runner rows are not confused with thread restore rows.
 
 ## Requirements
 
@@ -161,6 +162,11 @@ amux spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] <window> <workd
 amux teardown
 amux teardown --thread <thread-id-or-url> [--session <session>]
 amux prune-archived [workspace]
+amux runner list [workspace]
+amux runner pin <workspace> <window> <workdir>
+amux runner unpin <workspace> <window>
+amux runner launch [workspace] [session]
+amux runner park [workspace] <window>
 amux version
 amux self-update
 amux path
@@ -175,26 +181,31 @@ Compatibility aliases remain available: `store` for `pin`, `store-current` for `
 
 `amux spawn` injects a stable identity contract into the spawned Amp process: `AMUX_WORKSPACE`, `AMUX_SESSION`, `AMUX_WINDOW`, `AMUX_THREAD_ID`, and `AMUX_WORKDIR`. From that spawned process, no-arg `amux teardown` verifies the `AMUX_WORKSPACE`/`AMUX_SESSION`/`AMUX_WINDOW`/`AMUX_THREAD_ID` identity against the restore config and live tmux window, archives the matching Amp thread, removes the restore row, and stops the uniquely matched tmux window. If the identity, config row, or tmux window is missing, mismatched, or ambiguous, teardown refuses to archive or stop anything.
 
-`amux` keeps three side-effect domains separate:
+`amux` keeps four side-effect domains separate:
 
 - **Restore config**: rows in `workspaces.tsv` that describe what should be restored later.
+- **Runner config**: rows in `runners.tsv` that describe local `amp --no-tui` runners to keep restorable by workspace/window/workdir.
 - **Live local tmux/Amp**: tmux sessions/windows and the local Amp CLI processes running inside them.
 - **Remote Amp thread state**: hosted Amp threads, including creation by `spawn` and archival by verified `teardown`.
 
 Command side effects:
 
-| Command | Restore config | Live local tmux/Amp | Remote Amp thread state |
-| --- | --- | --- | --- |
-| `launch` | Read only | Creates missing tmux windows/processes | Read/continue existing threads only |
-| `list`, `path`, `version`, `doctor` | Read only | Inspect only | No change |
-| `pin`, `pin-current` (`store`, `store-current`) | Add or replace rows | No change | No change |
-| `unpin`, `unpin-current` (`remove`, `remove-current`) | Remove rows | No change | No change |
-| `park`, `park-current` | No change; rows are preserved for future restore | Gracefully stop the resolved local tmux/Amp window | No change; Amp thread history is not archived or deleted |
-| `spawn` | Store the new row under the final window name | Create/select a tmux window and submit the initial message | Create a new Amp thread, optionally with `--mode`; optionally rename the new thread with `--title-prefix` |
-| `teardown` | Remove the verified row | Stop the verified tmux window | Archive the verified thread |
-| `prune-archived` | Remove rows whose threads are confirmed archived | No change | Inspect only; does not archive/delete threads |
+| Command | Restore config | Runner config | Live local tmux/Amp | Remote Amp thread state |
+| --- | --- | --- | --- | --- |
+| `launch` | Read only | No change | Creates missing thread tmux windows/processes | Read/continue existing threads only |
+| `list`, `path`, `version` | Read only | No change | Inspect only | No change |
+| `doctor` | Read only | Read only | Inspect only | Inspect only |
+| `pin`, `pin-current` (`store`, `store-current`) | Add or replace rows | No change | No change | No change |
+| `unpin`, `unpin-current` (`remove`, `remove-current`) | Remove rows | No change | No change | No change |
+| `park`, `park-current` | No change; rows are preserved for future restore | No change | Gracefully stop the resolved local tmux/Amp window | No change; Amp thread history is not archived or deleted |
+| `spawn` | Store the new row under the final window name | No change | Create/select a tmux window and submit the initial message | Create a new Amp thread, optionally with `--mode`; optionally rename the new thread with `--title-prefix` |
+| `teardown` | Remove the verified row | No change | Stop the verified tmux window | Archive the verified thread |
+| `prune-archived` | Remove rows whose threads are confirmed archived | No change | No change | Inspect only; does not archive/delete threads |
+| `runner pin`, `runner unpin` | No change | Add/replace/remove runner rows | No change | No change |
+| `runner launch` | No change | Read only | Creates missing `amp --no-tui` runner windows | No change |
+| `runner park` | No change | No change; rows are preserved for future restore | Gracefully stop the resolved local runner window | No change |
 
-`amux doctor [workspace] [session]` is read-only and compares the selected workspace against the selected live tmux session. It also reports restore rows whose Amp threads are confirmed archived or missing. Omitting the session preserves the default `Amp` behavior, so `amux doctor mac` remains equivalent to `amux doctor mac Amp`.
+`amux doctor [workspace] [session]` is read-only and compares the selected workspace against the selected live tmux session. It also reports restore rows whose Amp threads are confirmed archived or missing, and runner registry drift when `runners.tsv` is present. Omitting the session preserves the default `Amp` behavior, so `amux doctor mac` remains equivalent to `amux doctor mac Amp`.
 
 For `launch` and `spawn`, `--dry-run` validates inputs and checks tmux window conflicts without mutating state. For `spawn`, dry-run does not create or rename an Amp thread, create tmux windows, send keys, or update `workspaces.tsv`; it only prints the intended actions, including the selected mode and planned title rename when provided.
 
@@ -208,6 +219,8 @@ When launch attaches from inside an existing tmux client, `amux` switches that c
 
 `prune-archived [workspace]` is explicit stale-restore cleanup. It only removes rows whose thread ID or URL is confirmed archived by Amp's thread list. Active rows are kept; missing threads, Amp CLI failures, or unreadable thread-list output fail closed without changing config. Unlike `teardown`, it does not archive/delete remote threads or stop live tmux windows.
 
+`amux runner ...` commands manage local runner intent for Amp Agents Anywhere. Runner rows live in `runners.tsv` next to `workspaces.tsv` and use `workspace<TAB>window<TAB>workdir`; they intentionally contain no thread ID. `amux runner launch [workspace] [session]` starts configured runners with `amp --no-tui` inside tmux windows and refuses to reuse an existing same-name window. `amux runner park [workspace] <window>` stops only the live local runner window while preserving runner config. Runner commands never create, continue, archive, or list remote Amp threads.
+
 ## Configuration
 
 Defaults:
@@ -215,6 +228,7 @@ Defaults:
 - workspace: `mac`
 - session: `Amp`
 - config: `~/.config/amp-tmux/workspaces.tsv`
+- runner config: `~/.config/amp-tmux/runners.tsv`
 
 Override the config path with either `--config <path>` or `AMP_TMUX_WORKSPACES`.
 
@@ -224,12 +238,25 @@ The TSV format is:
 workspace<TAB>window<TAB>workdir<TAB>thread-id-or-url
 ```
 
+Runner TSV format is separate:
+
+```text
+workspace<TAB>window<TAB>workdir
+```
+
 Example:
 
 ```text
 # workspace	window	workdir	thread-id-or-url
 mac	my-project	~/Code/my-project	https://ampcode.com/threads/T-example
 mac	docs	~/Code/docs	T-docs-example
+```
+
+Example runner config:
+
+```text
+# workspace	window	workdir
+mac	my-project-runner	~/Code/my-project
 ```
 
 Do not store secrets in workspace names, window names, workdirs, or thread identifiers. Treat the config as shareable operational metadata, not a secret store.

@@ -105,6 +105,8 @@ func (a app) run(args []string) error {
 		return a.teardown(opts, args)
 	case "prune-archived":
 		return a.pruneArchived(opts, args)
+	case "runner":
+		return a.runner(opts, args)
 	case "self-update":
 		return a.selfUpdate(opts, args)
 	case "version", "--version":
@@ -300,6 +302,168 @@ func (a app) list(opts options, args []string) error {
 		}
 	}
 	return nil
+}
+
+func (a app) runner(opts options, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: amux runner <list|pin|unpin|launch|park> [args]")
+	}
+	switch args[0] {
+	case "list":
+		return a.runnerList(opts, args[1:])
+	case "pin":
+		return a.runnerPin(opts, args[1:])
+	case "unpin":
+		return a.runnerUnpin(opts, args[1:])
+	case "launch":
+		return a.runnerLaunch(opts, args[1:])
+	case "park":
+		return a.runnerPark(opts, args[1:])
+	default:
+		return fmt.Errorf("unknown runner command: %s", args[0])
+	}
+}
+
+func (a app) runnerList(opts options, args []string) error {
+	if len(args) > 1 {
+		return errors.New("usage: amux runner list [workspace]")
+	}
+	workspace := ""
+	if len(args) == 1 {
+		workspace = args[0]
+	}
+	rows, err := config.LoadRunners(config.RunnerPath(opts.configPath))
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(a.stdout, "workspace\twindow\tworkdir")
+	for _, row := range rows {
+		if workspace == "" || row.Workspace == workspace {
+			fmt.Fprintf(a.stdout, "%s\t%s\t%s\n", row.Workspace, row.Window, row.Workdir)
+		}
+	}
+	return nil
+}
+
+func (a app) runnerPin(opts options, args []string) error {
+	if len(args) != 3 {
+		return errors.New("usage: amux runner pin <workspace> <window> <workdir>")
+	}
+	row := config.RunnerRow{Workspace: args[0], Window: args[1], Workdir: args[2]}
+	replaced, err := config.StoreRunner(config.RunnerPath(opts.configPath), row)
+	if err != nil {
+		return err
+	}
+	if replaced {
+		fmt.Fprintf(a.stdout, "Updated runner %s/%s in %s\n", row.Workspace, row.Window, config.RunnerPath(opts.configPath))
+	} else {
+		fmt.Fprintf(a.stdout, "Pinned runner %s/%s in %s\n", row.Workspace, row.Window, config.RunnerPath(opts.configPath))
+	}
+	return nil
+}
+
+func (a app) runnerUnpin(opts options, args []string) error {
+	if len(args) != 2 {
+		return errors.New("usage: amux runner unpin <workspace> <window>")
+	}
+	removed, err := config.RemoveRunner(config.RunnerPath(opts.configPath), args[0], args[1])
+	if err != nil {
+		return err
+	}
+	if removed {
+		fmt.Fprintf(a.stdout, "Unpinned runner %s/%s from %s\n", args[0], args[1], config.RunnerPath(opts.configPath))
+	} else {
+		fmt.Fprintf(a.stdout, "No runner found for %s/%s in %s\n", args[0], args[1], config.RunnerPath(opts.configPath))
+	}
+	return nil
+}
+
+func (a app) runnerLaunch(opts options, args []string) error {
+	if len(args) > 2 {
+		return errors.New("usage: amux runner launch [workspace] [session]")
+	}
+	workspace := defaultWorkspace
+	session := defaultSession
+	if len(args) >= 1 {
+		workspace = args[0]
+	}
+	if len(args) == 2 {
+		session = args[1]
+	}
+	rows, err := runnerRowsForWorkspace(config.RunnerPath(opts.configPath), workspace)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return fmt.Errorf("no runner rows found for workspace %q in %s", workspace, config.RunnerPath(opts.configPath))
+	}
+	runner := tmux.Runner{DryRun: opts.dryRun}
+	sessionExists := runner.HasSession(session)
+	windowNames, err := runner.WindowNames(session)
+	if sessionExists && err != nil {
+		return fmt.Errorf("list tmux windows for session %q: %w", session, err)
+	}
+	first := !sessionExists
+	for _, row := range rows {
+		workdir := config.ExpandHome(row.Workdir)
+		if stat, err := os.Stat(workdir); err != nil || !stat.IsDir() {
+			return fmt.Errorf("missing runner workdir for window %q: %s", row.Window, workdir)
+		}
+		command := tmux.RunnerCommand(workdir)
+		if first {
+			if err := runner.NewSession(session, row.Window, command); err != nil {
+				return fmt.Errorf("create tmux session %q: %w", session, err)
+			}
+			first = false
+			continue
+		}
+		if tmux.WindowExists(windowNames, row.Window) {
+			return fmt.Errorf("runner window %q already exists in tmux session %s; refusing to reuse an ambiguous live process", row.Window, session)
+		}
+		if err := runner.NewWindow(session, row.Window, command); err != nil {
+			return fmt.Errorf("create runner tmux window %q: %w", row.Window, err)
+		}
+	}
+	return nil
+}
+
+func (a app) runnerPark(opts options, args []string) error {
+	if len(args) < 1 || len(args) > 2 {
+		return errors.New("usage: amux runner park [workspace] <window>")
+	}
+	workspace := defaultWorkspace
+	window := args[0]
+	if len(args) == 2 {
+		workspace = args[0]
+		window = args[1]
+	}
+	rows, err := runnerRowsForWorkspace(config.RunnerPath(opts.configPath), workspace)
+	if err != nil {
+		return err
+	}
+	var row config.RunnerRow
+	found := false
+	for _, candidate := range rows {
+		if candidate.Window == window {
+			row = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("no runner row for %s/%s in %s", workspace, window, config.RunnerPath(opts.configPath))
+	}
+	panes, err := tmux.Runner{DryRun: opts.dryRun}.WindowPanes(defaultSession, row.Window)
+	if err != nil {
+		return err
+	}
+	if len(panes) == 0 {
+		return fmt.Errorf("runner window %q is not running in tmux session %s", row.Window, defaultSession)
+	}
+	if len(panes) > 1 {
+		return fmt.Errorf("ambiguous runner window %q in tmux session %s", row.Window, defaultSession)
+	}
+	return a.schedulePark(tmux.Runner{DryRun: opts.dryRun}, defaultSession, row.Window, panes[0].WindowID, workspace)
 }
 
 func (a app) store(opts options, args []string) error {
@@ -1746,8 +1910,10 @@ func (a app) doctor(opts options, workspace, session string) error {
 	check("config path", ensureConfigReadable(opts.configPath))
 	rows, err := rowsForWorkspaceReadOnly(opts.configPath, workspace)
 	check("read workspace "+workspace, err)
+	runnerRows, runnerErr := runnerRowsForWorkspaceReadOnly(config.RunnerPath(opts.configPath), workspace)
+	check("read runner workspace "+workspace, runnerErr)
 	if err == nil {
-		if len(rows) == 0 {
+		if len(rows) == 0 && len(runnerRows) == 0 {
 			check("workspace "+workspace+" rows", fmt.Errorf("no rows found in %s", opts.configPath))
 		}
 		for _, row := range rows {
@@ -1762,6 +1928,19 @@ func (a app) doctor(opts options, workspace, session string) error {
 			}
 		}
 	}
+	if runnerErr == nil {
+		for _, row := range runnerRows {
+			workdir := config.ExpandHome(row.Workdir)
+			stat, statErr := os.Stat(workdir)
+			if statErr != nil {
+				check("runner workdir "+row.Window, fmt.Errorf("%s: %w", workdir, statErr))
+			} else if !stat.IsDir() {
+				check("runner workdir "+row.Window, fmt.Errorf("%s is not a directory", workdir))
+			} else {
+				check("runner workdir "+row.Window, nil)
+			}
+		}
+	}
 	if os.Getenv("TMUX") != "" {
 		runner := tmux.Runner{}
 		_, windowErr := runner.CurrentWindow()
@@ -1772,7 +1951,11 @@ func (a app) doctor(opts options, workspace, session string) error {
 	if err == nil && len(rows) > 0 {
 		checkArchivedThreadRows(check, rows)
 		runner := tmux.Runner{}
-		checkWorkspaceDrift(check, runner, workspace, session, rows)
+		checkWorkspaceDrift(check, runner, workspace, session, rows, runnerRows)
+	}
+	if runnerErr == nil && len(runnerRows) > 0 {
+		runner := tmux.Runner{}
+		checkRunnerDrift(check, runner, workspace, session, rows, runnerRows)
 	}
 	if failed {
 		return errors.New("doctor found problems")
@@ -1780,7 +1963,7 @@ func (a app) doctor(opts options, workspace, session string) error {
 	return nil
 }
 
-func checkWorkspaceDrift(check func(string, error), runner tmux.Runner, workspace, session string, rows []config.Row) {
+func checkWorkspaceDrift(check func(string, error), runner tmux.Runner, workspace, session string, rows []config.Row, runnerRows []config.RunnerRow) {
 	panes, err := runner.Panes(session)
 	if err != nil {
 		check("tmux session "+session+" panes", err)
@@ -1792,6 +1975,11 @@ func checkWorkspaceDrift(check func(string, error), runner tmux.Runner, workspac
 	for _, row := range rows {
 		configured[row.Window] = row
 	}
+	configuredRunner := make(map[string]config.RunnerRow, len(runnerRows))
+	for _, row := range runnerRows {
+		configuredRunner[row.Window] = row
+	}
+	liveRunnerWindows := liveRunnerWindowNames(runner, session)
 	live := make(map[string]tmux.Pane, len(panes))
 	for _, pane := range panes {
 		if _, ok := live[pane.Window]; !ok {
@@ -1814,10 +2002,109 @@ func checkWorkspaceDrift(check func(string, error), runner tmux.Runner, workspac
 	}
 
 	for _, pane := range panes {
-		if _, ok := configured[pane.Window]; !ok {
+		_, threadConfigured := configured[pane.Window]
+		_, runnerConfigured := configuredRunner[pane.Window]
+		_, liveRunner := liveRunnerWindows[pane.Window]
+		if !threadConfigured && !runnerConfigured && !liveRunner {
 			check("stored window "+pane.Window, fmt.Errorf("running in tmux session %s but not configured in workspace %s", session, workspace))
 		}
 	}
+}
+
+func liveRunnerWindowNames(runner tmux.Runner, session string) map[string]bool {
+	windowPanes, err := runnerWindowPanesByName(runner, session)
+	if err != nil {
+		return nil
+	}
+	windows := make(map[string]bool)
+	for window, panes := range windowPanes {
+		if strings.Contains(strings.Join(windowPaneCommands(panes), "\n"), "amp --no-tui") {
+			windows[window] = true
+		}
+	}
+	return windows
+}
+
+func checkRunnerDrift(check func(string, error), runner tmux.Runner, workspace, session string, rows []config.Row, runnerRows []config.RunnerRow) {
+	panes, err := runner.Panes(session)
+	if err != nil {
+		check("runner tmux session "+session+" panes", err)
+		return
+	}
+	check("runner tmux session "+session+" panes", nil)
+	windowPanes, err := runnerWindowPanesByName(runner, session)
+	if err != nil {
+		check("runner tmux session "+session+" start commands", err)
+		return
+	}
+	check("runner tmux session "+session+" start commands", nil)
+
+	threadWindows := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		threadWindows[row.Window] = true
+	}
+	live := make(map[string]tmux.Pane, len(panes))
+	for _, pane := range panes {
+		if _, ok := live[pane.Window]; !ok {
+			live[pane.Window] = pane
+		}
+	}
+	configuredRunner := make(map[string]config.RunnerRow, len(runnerRows))
+	for _, row := range runnerRows {
+		configuredRunner[row.Window] = row
+		if threadWindows[row.Window] {
+			check("runner conflict "+row.Window, fmt.Errorf("runner window also exists as a thread restore row in workspace %s", workspace))
+		}
+		pane, ok := live[row.Window]
+		if !ok {
+			check("runner live window "+row.Window, fmt.Errorf("configured in runner workspace %s but not running in tmux session %s; run amux runner launch %s %s", workspace, session, workspace, session))
+			continue
+		}
+		configuredWorkdir := config.ExpandHome(row.Workdir)
+		if pane.Path != configuredWorkdir {
+			check("runner pane path "+row.Window, fmt.Errorf("configured %s but live pane path is %s", configuredWorkdir, pane.Path))
+		} else {
+			check("runner pane path "+row.Window, nil)
+		}
+		if panes := windowPanes[row.Window]; len(panes) == 0 {
+			check("runner start command "+row.Window, fmt.Errorf("no tmux pane start command found for runner window"))
+		} else if len(panes) > 1 {
+			check("runner start command "+row.Window, fmt.Errorf("ambiguous runner window panes: candidates %s", formatPaneCandidates(panes)))
+		} else if panes[0].StartCommand != tmux.RunnerCommand(configuredWorkdir) && !strings.Contains(panes[0].StartCommand, "amp --no-tui") {
+			check("runner start command "+row.Window, fmt.Errorf("expected amp --no-tui for %s but live start command is %s", configuredWorkdir, panes[0].StartCommand))
+		} else {
+			check("runner start command "+row.Window, nil)
+		}
+	}
+	for _, pane := range panes {
+		if strings.Contains(strings.Join(windowPaneCommands(windowPanes[pane.Window]), "\n"), "amp --no-tui") {
+			if _, ok := configuredRunner[pane.Window]; !ok {
+				check("runner stored window "+pane.Window, fmt.Errorf("runner is live in tmux session %s but not configured in runner workspace %s; run amux runner pin %s %s %s", session, workspace, workspace, pane.Window, pane.Path))
+			}
+		}
+	}
+}
+
+func runnerWindowPanesByName(runner tmux.Runner, session string) (map[string][]tmux.WindowPane, error) {
+	panes, err := runner.AllWindowPanes()
+	if err != nil {
+		return nil, err
+	}
+	byName := make(map[string][]tmux.WindowPane)
+	for _, pane := range panes {
+		if pane.Session == session {
+			byName[pane.Window] = append(byName[pane.Window], pane)
+		}
+	}
+	return byName, nil
+}
+
+func windowPaneCommands(panes []tmux.WindowPane) []string {
+	commands := make([]string, 0, len(panes))
+	for _, pane := range panes {
+		commands = append(commands, pane.StartCommand)
+	}
+	return commands
 }
 
 func checkArchivedThreadRows(check func(string, error), rows []config.Row) {
@@ -1890,6 +2177,32 @@ func rowsForWorkspaceReadOnly(path, workspace string) ([]config.Row, error) {
 		}
 	}
 	return filtered, nil
+}
+
+func runnerRowsForWorkspace(path, workspace string) ([]config.RunnerRow, error) {
+	rows, err := config.LoadRunners(path)
+	if err != nil {
+		return nil, err
+	}
+	return filterRunnerRows(rows, workspace), nil
+}
+
+func runnerRowsForWorkspaceReadOnly(path, workspace string) ([]config.RunnerRow, error) {
+	rows, err := config.LoadRunnersReadOnly(path)
+	if err != nil {
+		return nil, err
+	}
+	return filterRunnerRows(rows, workspace), nil
+}
+
+func filterRunnerRows(rows []config.RunnerRow, workspace string) []config.RunnerRow {
+	filtered := make([]config.RunnerRow, 0, len(rows))
+	for _, row := range rows {
+		if row.Workspace == workspace {
+			filtered = append(filtered, row)
+		}
+	}
+	return filtered
 }
 
 func (a app) usage() {
@@ -1984,6 +2297,30 @@ Commands:
       Side effects: mutates restore config only; does not archive/delete remote
       Amp threads and does not stop live local tmux/Amp windows.
 
+  runner list [workspace]
+      Print configured amp --no-tui runner rows from runners.tsv.
+      Side effects: none; reads runner config only.
+
+  runner pin <workspace> <window> <workdir>
+      Add or replace one runner row. Runner rows contain no thread ID and are
+      stored separately from thread restore rows.
+      Side effects: mutates runner config only.
+
+  runner unpin <workspace> <window>
+      Remove one runner row from runners.tsv.
+      Side effects: mutates runner config only.
+
+  runner launch [workspace] [session]
+      Start configured local amp --no-tui runners inside tmux windows. Refuses
+      to reuse an existing live window with the same name. Defaults:
+      workspace=mac session=Amp.
+      Side effects: reads runner config and may create live local tmux/Amp
+      runner windows; it does not create, continue, archive, or list Amp threads.
+
+  runner park [workspace] <window>
+      Stop a live local runner tmux window while preserving runner config.
+      Side effects: mutates live local tmux/Amp only; no remote Amp thread state.
+
   self-update
       Download the latest GitHub release for this platform, verify its
       checksum, and replace the current binary. Refuses package-managed paths.
@@ -1992,8 +2329,9 @@ Commands:
   doctor [workspace] [session]
       Check dependencies, config readability, configured workdirs, and drift
       between the selected workspace and tmux session. Also reports restore
-      rows whose Amp threads are confirmed archived or missing. Defaults:
-      workspace=mac session=Amp.
+      rows whose Amp threads are confirmed archived or missing, plus runner
+      registry drift when runners.tsv is present. Defaults: workspace=mac
+      session=Amp.
       Side effects: none; inspects restore config, live local tmux, and remote
       Amp thread state.
 

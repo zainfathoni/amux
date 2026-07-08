@@ -561,7 +561,7 @@ OK live tmux session matches config</code></pre>
             <dl class="feature-grid">
               <div class="feature">
                 <dt>Complement Agents Anywhere</dt>
-                <dd>Use Amp-native remote creation for new agents, and use <code>amux</code> for the local tmux workspace lifecycle: restore, inspect, park, spawn, and verified cleanup.</dd>
+                <dd>Use Amp-native remote creation for new agents, and use <code>amux</code> for the local tmux workspace lifecycle: restore known threads, store runner intent, inspect drift, park, spawn, and verified cleanup.</dd>
               </div>
               <div class="feature">
                 <dt>Restore workspaces</dt>
@@ -577,7 +577,11 @@ OK live tmux session matches config</code></pre>
               </div>
               <div class="feature">
                 <dt>Inspect drift</dt>
-                <dd>Use <code>doctor [workspace] [session]</code> to compare your TSV config with the intended live tmux session before trusting a restore.</dd>
+                <dd>Use <code>doctor [workspace] [session]</code> to compare thread restore rows and runner rows with the intended live tmux session before trusting a restore.</dd>
+              </div>
+              <div class="feature">
+                <dt>Manage runners separately</dt>
+                <dd><code>runner pin</code>, <code>runner launch</code>, and <code>runner park</code> manage local <code>amp --no-tui</code> runner windows from <code>runners.tsv</code>, without faking thread IDs or touching remote Amp thread state.</dd>
               </div>
               <div class="feature">
                 <dt>Preview first</dt>
@@ -611,10 +615,10 @@ OK live tmux session matches config</code></pre>
                 The default config lives at <code>~/.config/amp-tmux/workspaces.tsv</code>. Each row maps a workspace, a tmux window, a working directory, and an Amp thread.
               </p>
               <p>
-                <code>amp --no-tui</code> runners are per working directory. First-class runner lifecycle belongs in a separate runner model, not fake thread rows; until then, <code>amux</code> focuses on restoring known Amp threads and managing the local tmux windows around them.
+                <code>amp --no-tui</code> runners are per working directory. Runner intent lives separately in <code>~/.config/amp-tmux/runners.tsv</code>, so <code>amux runner launch</code> can restore local runner windows without mixing them into thread restore rows.
               </p>
               <p>
-                <code>amux</code> names three side-effect domains explicitly: restore-config rows, live local tmux/Amp sessions, and remote Amp thread state. Pin/unpin commands only change the restore config (<code>store</code>/<code>remove</code> remain compatibility aliases); <code>park</code> and <code>park-current</code> only stop the resolved live local window while preserving restore state and remote thread history; <code>teardown</code> is the explicit full cleanup that archives the verified thread, removes its row, and stops its verified local window.
+                <code>amux</code> names four side-effect domains explicitly: restore-config rows, runner-config rows, live local tmux/Amp sessions, and remote Amp thread state. Pin/unpin commands only change the restore config (<code>store</code>/<code>remove</code> remain compatibility aliases); <code>runner pin</code>/<code>runner unpin</code> only change runner config; <code>park</code> and <code>runner park</code> only stop resolved live local windows while preserving config; <code>teardown</code> is the explicit full cleanup that archives the verified thread, removes its row, and stops its verified local window.
               </p>
             </div>
             <div class="panel">
@@ -622,7 +626,11 @@ OK live tmux session matches config</code></pre>
               <div class="terminal terminal-compact">
                 <pre><code>workspace   window       workdir             thread
 mac         my-project   ~/Code/my-project   T-example
-mac         docs         ~/Code/docs         T-docs</code></pre>
+mac         docs         ~/Code/docs         T-docs
+
+# runners.tsv
+workspace   window             workdir
+mac         project-runner     ~/Code/my-project</code></pre>
               </div>
               <div class="steps">
                 <div class="step">

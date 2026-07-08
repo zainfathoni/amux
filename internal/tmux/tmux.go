@@ -360,6 +360,10 @@ func ContinueCommand(workdir, thread string) string {
 	return "cd " + shellQuote(workdir) + " && exec amp threads continue " + shellQuote(thread)
 }
 
+func RunnerCommand(workdir string) string {
+	return "cd " + shellQuote(workdir) + " && exec amp --no-tui"
+}
+
 func ContinueCommandWithEnv(workdir, thread string, env map[string]string) string {
 	assignments := []string{
 		"AMUX_WORKSPACE=" + shellQuote(env["AMUX_WORKSPACE"]),
