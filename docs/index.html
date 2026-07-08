@@ -3,15 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>amux — restore Amp tmux workspaces</title>
+    <title>amux — Amp session manager for tmux</title>
     <meta
       name="description"
-      content="amux restores named Amp workspaces inside tmux from a simple TSV config, so long-running agent threads are easy to park, resume, and organize."
+      content="amux is an Amp session manager for tmux: restore workspaces, pin sessions, park live windows, spawn workers, and keep agents using the right lifecycle commands."
     />
-    <meta property="og:title" content="amux — restore Amp tmux workspaces" />
+    <meta property="og:title" content="amux — Amp session manager for tmux" />
     <meta
       property="og:description"
-      content="A small CLI for restoring, storing, and inspecting Amp tmux workspaces."
+      content="Restore Amp workspaces, pin sessions, park live windows, spawn workers, and give agents a safe /amux vocabulary."
     />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://amux.zainf.dev/" />
@@ -508,10 +508,10 @@
         <section class="hero">
           <div class="container hero-grid">
             <div>
-              <div class="eyebrow">Amp Multiplexer for tmux</div>
+              <div class="eyebrow">Amp session manager for tmux</div>
               <h1>Restore agent workspaces without the ritual.</h1>
               <p class="hero-copy">
-                <code>amux</code> is a small CLI that restores named Amp workspaces inside tmux from a simple TSV file. Keep long-running agent threads organized, resumable, and one command away.
+                <code>amux</code> is a small CLI and bundled <code>/amux</code> agent skill for restoring named Amp workspaces inside tmux from a simple TSV file. Keep long-running agent threads organized, resumable, and one command away.
               </p>
               <div class="hero-actions">
                 <a class="primary-button" href="https://github.com/zainfathoni/amux/releases/latest">Download latest</a>
@@ -585,7 +585,7 @@ OK live tmux session matches config</code></pre>
               </div>
               <div class="feature">
                 <dt>Agent skill included</dt>
-                <dd>The bundled <code>/amux</code> skill teaches Amp agents the safe vocabulary: <code>pin</code> for restore config, <code>park</code> for live-local shutdown, <code>teardown</code> for verified full cleanup, and <code>doctor</code> before guessing.</dd>
+                <dd>The repository includes a <code>/amux</code> skill that teaches Amp agents the safe vocabulary: <code>pin</code> for restore config, <code>park</code> for live-local shutdown, <code>teardown</code> for verified full cleanup, and <code>doctor</code> before guessing.</dd>
               </div>
             </dl>
           </div>
@@ -645,6 +645,8 @@ mac         docs         ~/Code/docs         T-docs</code></pre>
             </div>
             <div class="terminal">
               <pre><code><span class="prompt">$</span> curl -LO https://github.com/zainfathoni/amux/releases/latest/download/amux-linux-amd64.tar.gz
+<span class="prompt">$</span> curl -LO https://github.com/zainfathoni/amux/releases/latest/download/amux-linux-amd64.tar.gz.sha256
+<span class="prompt">$</span> sha256sum -c amux-linux-amd64.tar.gz.sha256
 <span class="prompt">$</span> tar -xzf amux-linux-amd64.tar.gz
 <span class="prompt">$</span> install -m 0755 amux-linux-amd64/amux ~/.local/bin/amux</code></pre>
             </div>

@@ -1,6 +1,6 @@
 # amux
 
-`amux` restores named [Amp](https://ampcode.com/) workspaces inside tmux from a small TSV config file.
+`amux` is an [Amp](https://ampcode.com/) session manager for tmux. It restores named Amp workspaces from a small TSV config file, and gives agents safe commands for pinning, parking, spawning, and tearing down work.
 
 It is built for people who keep long-running Amp threads around while moving between projects. Instead of manually reopening tmux windows and continuing threads, you store the windows you care about and let `amux` restore them later.
 
@@ -8,14 +8,14 @@ Website: [amux.zainf.dev](https://amux.zainf.dev)
 
 ## Status
 
-`amux` is currently a small personal workflow tool being prepared for broader open-source use. The core CLI is tested, but the defaults still reflect the author's setup:
+`amux` is an early public release. The core CLI is tested and used daily, but a few defaults still reflect the author's setup:
 
 - default workspace: `mac`
 - default tmux session: `Amp`
 - default config path: `~/.config/amp-tmux/workspaces.tsv`
 - fallback terminal launching is tuned for Omarchy/Alacritty environments
 
-The project is public-source friendly, but not yet a polished cross-platform product.
+If you already use Amp in tmux, the main workflow is ready to try. Start with `--dry-run`, keep the bundled `/amux` skill installed for agent operation, and file issues for rough edges.
 
 ## Features
 
@@ -29,9 +29,10 @@ The project is public-source friendly, but not yet a polished cross-platform pro
 
 ## Requirements
 
-- Go, for building from source.
 - `tmux`, for workspace/session management.
 - Amp CLI, for continuing and creating Amp threads.
+
+For building from source, you also need Go.
 
 Optional:
 
@@ -55,6 +56,8 @@ To let `amux` manage future updates itself, install the binary to a user-owned
 path such as `~/.local/bin/amux` and keep that directory on your `PATH`.
 Package-managed locations such as the Nix store or Homebrew Cellar are treated
 as immutable; `amux self-update` refuses to replace binaries from those paths.
+If multiple `amux` binaries exist on `PATH`, self-update warns when the binary
+it updates is shadowed by another install.
 
 Update a user-local release install with:
 
@@ -103,6 +106,9 @@ cat > ~/.config/amp-tmux/workspaces.tsv <<'EOF'
 mac	my-project	~/Code/my-project	https://ampcode.com/threads/T-example
 EOF
 ```
+
+Use a real Amp thread ID or thread URL from your own Amp history in place of
+`https://ampcode.com/threads/T-example`.
 
 Preview the restore plan:
 
@@ -223,13 +229,18 @@ Do not store secrets in workspace names, window names, workdirs, or thread ident
 
 ## Agent skill
 
-`amux` is designed to be agent-operated. The optional Amp skill teaches agents the safe command vocabulary: when to **pin** restore config, **park** only a live local tmux/Amp session, **teardown** a verified worker, and run `doctor` before guessing.
+`amux` is designed to be agent-operated. For best results, install the bundled Amp skill before asking agents to manage sessions. The skill teaches agents the safe command vocabulary: when to **pin** restore config, **park** only a live local tmux/Amp session, **teardown** a verified worker, and run `doctor` before guessing.
 
 Install or refresh the skill globally:
 
 ```sh
 ln -sfn "$PWD/skills/amux" ~/.agents/skills/amux
 ```
+
+Run that command from a checkout of this repository. If you installed only a
+release archive, clone the repo or copy the `skills/amux` directory first.
+
+Then reload or restart Amp if needed so the skill index picks up the new skill.
 
 After installing it, ask Amp for the `/amux` skill or use natural trigger phrases:
 
