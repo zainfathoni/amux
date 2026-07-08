@@ -223,17 +223,27 @@ Do not store secrets in workspace names, window names, workdirs, or thread ident
 
 ## Agent skill
 
-The optional Amp skill source lives in this repository at:
+`amux` is designed to be agent-operated. The optional Amp skill teaches agents the safe command vocabulary: when to **pin** restore config, **park** only a live local tmux/Amp session, **teardown** a verified worker, and run `doctor` before guessing.
 
-```text
-skills/amux/SKILL.md
-```
-
-Install or refresh the local skill symlink with:
+Install or refresh the skill globally:
 
 ```sh
 ln -sfn "$PWD/skills/amux" ~/.agents/skills/amux
 ```
+
+After installing it, ask Amp for the `/amux` skill or use natural trigger phrases:
+
+```text
+Pin it                 -> amux pin-current <thread-id-or-url>
+Unpin it               -> amux unpin-current
+Park it                -> amux park-current
+Restore my workspace   -> amux launch mac Amp
+Spawn a worker for ... -> amux spawn [--mode <mode>] [--title-prefix <prefix>] ...
+Teardown this worker   -> amux teardown / teardown --thread / teardown <workspace> <window>
+Doctor amux            -> amux doctor mac Amp
+```
+
+The skill source lives at [`skills/amux/SKILL.md`](skills/amux/SKILL.md). Keep it in sync with command semantics when adding new lifecycle behavior; for agent use, the skill is part of the product surface, not just documentation.
 
 ## Development
 

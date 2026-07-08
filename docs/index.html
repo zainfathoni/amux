@@ -583,6 +583,10 @@ OK live tmux session matches config</code></pre>
                 <dt>Plain-text config</dt>
                 <dd>The restore contract is a simple TSV file that is easy to read, diff, back up, and sync.</dd>
               </div>
+              <div class="feature">
+                <dt>Agent skill included</dt>
+                <dd>The bundled <code>/amux</code> skill teaches Amp agents the safe vocabulary: <code>pin</code> for restore config, <code>park</code> for live-local shutdown, <code>teardown</code> for verified full cleanup, and <code>doctor</code> before guessing.</dd>
+              </div>
             </dl>
           </div>
         </section>
@@ -621,6 +625,10 @@ mac         docs         ~/Code/docs         T-docs</code></pre>
                 <div class="step">
                   <span class="step-number">4</span>
                   <span class="step-copy"><strong>Verify</strong><span>Run <code>amux doctor [workspace] [session]</code> when live tmux state and config may have drifted.</span></span>
+                </div>
+                <div class="step">
+                  <span class="step-number">5</span>
+                  <span class="step-copy"><strong>Agent skill</strong><span>Install <code>skills/amux</code> as <code>~/.agents/skills/amux</code> so agents can respond reliably to phrases like “pin it”, “park it”, “teardown this worker”, and “doctor amux”.</span></span>
                 </div>
               </div>
             </div>

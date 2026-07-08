@@ -18,6 +18,7 @@ Keep the three side-effect domains distinct:
 ```sh
 amux list mac
 amux doctor mac
+amux doctor mac Amp
 amux launch mac Amp --dry-run
 amux --attach launch mac Amp
 amux --no-attach launch mac Amp
@@ -29,15 +30,17 @@ amux unpin-current [workspace]
 amux park [workspace] <window>
 amux park-current [workspace]
 amux spawn [--mode <mode> | -m <mode>] <window> <workdir> <initial-message> [workspace] [session]
+amux spawn --title-prefix <prefix> <window> <workdir> <initial-message> [workspace] [session]
 amux teardown
 amux teardown --thread <thread-id-or-url> [--session <session>]
+amux teardown <workspace> <window> [session]
 amux prune-archived [workspace]
 ```
 
 Use `pin-current` from inside a tmux/Amp thread when possible. It defaults to workspace `mac` plus the invoking pane's tmux window name and pane path, using `$TMUX_PANE` when available rather than the currently focused tmux client. `store-current` remains a compatibility alias.
 Use `unpin-current` from inside tmux when the invoking pane's window should no longer be restored. `remove-current` remains a compatibility alias.
-Use `spawn` for a fresh interactive Amp session. It must use `amp threads new` plus `amp threads continue` inside tmux; do not use `amp -x` or piped stdin for this workflow. Use `spawn --mode <mode>` or `spawn -m <mode>` when the user wants the new remote Amp thread created with a specific Amp mode.
-Use `spawn --dry-run` to inspect a new-session plan safely. It validates inputs and checks live tmux window conflicts, but must not create an Amp thread, mutate tmux, send keys, or update the restore config.
+Use `spawn` for a fresh interactive Amp session. It must use `amp threads new` plus `amp threads continue` inside tmux; do not use `amp -x` or piped stdin for this workflow. Use `spawn --mode <mode>` or `spawn -m <mode>` when the user wants the new remote Amp thread created with a specific Amp mode. Use `spawn --title-prefix <prefix>` when the user wants the tmux window and new Amp thread renamed with an issue/task prefix such as `#255 worker`.
+Use `spawn --dry-run` to inspect a new-session plan safely. It validates inputs and checks live tmux window conflicts, but must not create or rename an Amp thread, mutate tmux, send keys, or update the restore config.
 Use no-arg `teardown` only from inside an `amux spawn` worker with injected `AMUX_*` identity. It verifies the identity against restore config and live tmux before archiving the matching remote Amp thread, removing the restore row, and stopping the matched local tmux window. If a restored worker lacks `AMUX_*` but its thread is in `amux list` and live in tmux, use `amux teardown --thread <thread-id-or-url> [--session <session>]` instead; it resolves and verifies the row and tmux window by thread before cleanup.
 Use `doctor` before or after suspicious restore changes to verify dependencies, configured workdirs, selected workspace rows, live tmux drift in the default `Amp` session, and restore rows whose remote Amp threads are confirmed archived or missing.
 Use `prune-archived [workspace]` when stale restore rows point at Amp threads that were already archived elsewhere. It removes only restore-config rows whose thread ID or URL is confirmed archived; it does not archive/delete remote threads or stop live tmux windows. If Amp cannot confirm archive state, or a thread is missing from both active and archived lists, it fails closed without changing config.
@@ -60,6 +63,10 @@ These phrases are user-level shorthand and should work from any project when thi
 
 - **Park it**: gracefully stop the current local tmux/Amp window/process while keeping its restore config row. This does not archive or delete the remote Amp thread, and it does not prevent future restore. `amux park-current` schedules a delayed interrupt/EOF for the target pane, returns so the agent can send its final response, then force-closes the tmux window only if the graceful stop times out. Use `unpin-current` for config-only cleanup, or `teardown` for archive+unpin+stop cleanup.
 - **Pin it**: pin the current tmux window in amux restore config. Ask for the thread ID/URL if it is not available in context.
+- **Unpin it** / **forget this on restore**: remove only the current restore-config row with `amux unpin-current`; do not stop tmux and do not archive the Amp thread.
+- **Teardown this worker** / **archive and clean this up**: use `amux teardown` only when the user explicitly wants full cleanup of the verified worker/thread. This archives the remote Amp thread, removes the row, and stops the local tmux window.
+- **Restore my workspace**: use `amux launch mac Amp`, or `amux launch <workspace> <session>` if the user names a workspace/session.
+- **Check amux** / **doctor amux**: use `amux doctor mac Amp` unless the user names another workspace/session.
 
 For **Park it**, use the atomic command, then verify it disappeared locally:
 
@@ -83,7 +90,7 @@ amux pin-current <thread-id-or-url>
 Use this when the user wants a fresh context window, a remote-started session, or an interactive reset.
 
 ```sh
-amux spawn [--mode <mode> | -m <mode>] <window> <workdir> "<initial-message>"
+amux spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] <window> <workdir> "<initial-message>"
 amux list mac
 ```
 
