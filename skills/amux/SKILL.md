@@ -1,6 +1,6 @@
 ---
 name: amux
-description: "Manages Amp tmux workspace sessions with amux: spawn fresh interactive Amp threads, pin/unpin current windows in restore config, park live local sessions, tear down spawned workers, and update restore config. Use when the user asks to add, pin, store, save, remember, restore, unpin, remove, park, spawn, tear down, or reset Amp/tmux sessions, current Amp sessions, thread IDs, or restored sessions. Also use for trigger phrases: 'Park it' means close the current local tmux/Amp session while keeping it restorable; 'Pin it' means pin the current window for restore."
+description: "Manages Amp tmux workspace sessions with amux: restore/inspect/park tmux workspaces, spawn fresh interactive Amp threads, pin/unpin current windows in restore config, and tear down spawned workers. Use for local tmux/Amp lifecycle and restore config, not as a replacement for Amp-native Agents Anywhere remote creation. Trigger phrases: 'Park it' closes the current local tmux/Amp session while keeping it restorable; 'Pin it' pins the current window for restore."
 ---
 
 # amux
@@ -12,6 +12,13 @@ Keep the three side-effect domains distinct:
 - **Restore config**: rows in `workspaces.tsv` that describe what should be restored later.
 - **Live local tmux/Amp**: tmux sessions/windows and local Amp CLI processes running inside them.
 - **Remote Amp thread state**: hosted Amp threads; `spawn` creates one and verified `teardown` archives one.
+
+## Agents Anywhere decision rules
+
+- If the user wants to create or control a new remote agent from ampcode.com, prefer Amp-native Agents Anywhere once a runner exists for the target machine and workdir.
+- Use `amux` when the request is about local tmux workspace restore/lifecycle: list, doctor, launch, pin/unpin, park, spawn a local interactive worker, teardown, or prune stale restore rows.
+- A runner is per machine and workdir. If the user asks whether remote creation is available for a repo, inspect/check for a live runner in that workdir; start one only when the user explicitly asks.
+- Do not treat runner mode as an `amux` side-effect domain. Keep restore-config, live-local tmux/Amp, and remote-thread mutations separate, and choose the command whose side effects exactly match the request.
 
 ## Commands
 
