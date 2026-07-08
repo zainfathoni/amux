@@ -103,6 +103,48 @@ func TestSelfUpdateDryRunPlansLatestReleaseAsset(t *testing.T) {
 	}
 }
 
+func TestSelfUpdateDryRunWarnsWhenInstallIsShadowedOnPath(t *testing.T) {
+	tmp := t.TempDir()
+	installDir := filepath.Join(tmp, "install")
+	shadowDir := filepath.Join(tmp, "shadow")
+	if err := os.Mkdir(installDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(shadowDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exePath := filepath.Join(installDir, "amux")
+	shadowPath := filepath.Join(shadowDir, "amux")
+	if err := os.WriteFile(exePath, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(shadowPath, []byte("shadow binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shadowDir+string(os.PathListSeparator)+installDir)
+	archiveName := fmt.Sprintf("amux-%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/latest" {
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+		}
+		fmt.Fprintf(w, `{"tag_name":"v9.9.9","assets":[{"name":%q,"browser_download_url":%q},{"name":%q,"browser_download_url":%q}]}`, archiveName, serverURL(r, "/archive"), archiveName+".sha256", serverURL(r, "/checksum"))
+	}))
+	defer server.Close()
+	withSelfUpdateTestState(t, exePath, server.URL+"/latest", server.Client())
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--dry-run", "self-update"}); err != nil {
+		t.Fatal(err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Would update "+exePath+" to v9.9.9 using "+archiveName) {
+		t.Fatalf("unexpected dry-run output: %q", out)
+	}
+	if !strings.Contains(out, "Warning: updated "+exePath+", but `amux` on PATH resolves to "+shadowPath) {
+		t.Fatalf("missing shadowed PATH warning: %q", out)
+	}
+}
+
 func TestSelfUpdateDryRunDoesNotRequireWritableInstallDirOrDownloadArchive(t *testing.T) {
 	tmp := t.TempDir()
 	exePath := filepath.Join(tmp, "amux")

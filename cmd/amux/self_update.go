@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -80,6 +81,9 @@ func (a app) selfUpdate(opts options, args []string) error {
 
 	if opts.dryRun {
 		fmt.Fprintf(a.stdout, "Would update %s to %s using %s\n", installPath, release.TagName, archiveAsset.Name)
+		if warning := selfUpdateShadowWarning(installPath); warning != "" {
+			fmt.Fprintln(a.stdout, warning)
+		}
 		return nil
 	}
 	if err := ensureDirectoryWritable(filepath.Dir(installPath)); err != nil {
@@ -105,7 +109,37 @@ func (a app) selfUpdate(opts options, args []string) error {
 		return err
 	}
 	fmt.Fprintf(a.stdout, "Updated amux to %s at %s\n", release.TagName, installPath)
+	if warning := selfUpdateShadowWarning(installPath); warning != "" {
+		fmt.Fprintln(a.stdout, warning)
+	}
 	return nil
+}
+
+func selfUpdateShadowWarning(installPath string) string {
+	pathTarget, err := exec.LookPath("amux")
+	if err != nil || pathTarget == "" {
+		return ""
+	}
+	pathTarget, err = filepath.Abs(pathTarget)
+	if err != nil {
+		return ""
+	}
+	pathTarget = resolvePathForComparison(pathTarget)
+	installPath = resolvePathForComparison(installPath)
+	if pathTarget == installPath {
+		return ""
+	}
+	return fmt.Sprintf("Warning: updated %s, but `amux` on PATH resolves to %s. Update or remove the shadowing binary so `amux version` uses the updated install.", installPath, pathTarget)
+}
+
+func resolvePathForComparison(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	return filepath.Clean(path)
 }
 
 func resolveSelfUpdateTarget(path string) (string, error) {
