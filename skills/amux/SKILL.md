@@ -99,6 +99,7 @@ These phrases are user-level shorthand and should work from any project when thi
 - **Show shelved work** / **list deferred work**: use `amux shelved [workspace]` or `amux list --shelved [workspace]`; use `amux list --active [workspace]` to show only launchable rows.
 - **Unshelve this** / **resume deferred work**: use `amux unshelve` with the same target shape as `shelve`, then `amux launch <workspace> [session]` if live tmux windows should be restored. Do not rely on `launch` alone to unarchive shelved threads.
 - **Teardown this worker** / **archive and clean this up**: use `amux teardown` only when the user explicitly wants full cleanup of the verified worker/thread. This archives the remote Amp thread, removes the row, and stops the local tmux window.
+- **Finish this worker after merge** / **post-merge cleanup**: do the GitHub/git lifecycle first, then use `amux teardown` last. This is not the same as park or shelve: parking preserves the restore row and active remote thread; shelving archives the remote thread but preserves the restore row for later; post-merge finish verifies merge/release/worktree/branch cleanup before final amux teardown.
 - **Restore my workspace**: use `amux launch` for the legacy default workspace/session, `amux launch <workspace>` for the same-named tmux session, or `amux launch <workspace> <session>` for an older shared-session layout.
 - **Check amux** / **doctor amux**: use `amux doctor` for the legacy default workspace/session, `amux doctor <workspace>` for the same-named tmux session, or `amux doctor <workspace> <session>` for an older shared-session layout.
 
@@ -203,6 +204,94 @@ amux teardown --thread <thread-id-or-url> [--session <session>]
 ```
 
 `teardown` is the explicit full-lifecycle cleanup command. It archives the verified thread, removes the matching restore-config row, and stops the verified local tmux window. If any identity, config, or tmux check is missing, mismatched, or ambiguous, it fails closed and should not archive or stop anything. Do not use `park-current` when the desired outcome is remote Amp thread archival or restore-config cleanup; parking intentionally leaves both remote thread history and restore config alone.
+
+## Finish a merged worker
+
+Use this when an `amux spawn` worker has opened a PR and the user wants the worker fully cleaned up after merge. Keep the ownership boundary explicit: GitHub merge state, release tags, git worktrees, and branch deletion are outside `amux teardown`. Do those checks first, then run `amux teardown` as the final Amp/tmux cleanup step.
+
+Do not skip directly to `amux teardown` unless the user only asked to archive the worker thread, remove its restore row, and stop its local tmux window. For unfinished or paused work, use the right smaller lifecycle instead:
+
+- **Park** (`amux park-current`): stop only the live local tmux/Amp process; keep the restore row and active remote Amp thread.
+- **Shelve** (`amux shelve ...`): archive/hide deferred remote Amp thread(s), stop verified local windows, and keep restore rows for explicit `unshelve` later.
+- **Teardown** (`amux teardown ...`): archive the verified remote thread, remove the restore row, and stop the verified local window; it does not merge PRs, release, remove worktrees, or delete branches.
+
+Recommended post-merge sequence:
+
+1. Identify the worker PR, branch, worktree, and thread from the worker worktree:
+
+   ```sh
+   gh pr status
+   gh pr view <pr-number> --json number,state,merged,mergeCommit,headRefName,headRepositoryOwner,url
+   git status --short --branch
+   git rev-parse --show-toplevel
+   git branch --show-current
+   amux list <workspace>
+   ```
+
+2. Merge only when requested and after normal review/tests are complete. Prefer the repository's usual merge button or `gh pr merge <pr-number> --squash --delete-branch`/`--merge`/`--rebase` as appropriate. Afterward, verify `merged: true`:
+
+   ```sh
+   gh pr view <pr-number> --json merged,mergeCommit,headRefName,url
+   ```
+
+3. If a release is expected, make it an explicit choice (`patch`, `minor`, a concrete tag, or `none`). Before tagging, verify the release source and that the tag does not already exist:
+
+   ```sh
+   git -C <main-worktree> fetch --tags origin
+   git -C <main-worktree> switch main
+   git -C <main-worktree> pull --ff-only origin main
+   git -C <main-worktree> status --short --branch
+   git -C <main-worktree> tag --list 'v*'
+   git -C <main-worktree> rev-parse <new-tag> >/dev/null 2>&1 && echo "tag exists" || true
+   ```
+
+   Create and push a release tag only after the user confirms the version/tag:
+
+   ```sh
+   git -C <main-worktree> tag -a <new-tag> -m "<new-tag>"
+   git -C <main-worktree> push origin <new-tag>
+   gh run list --workflow Release --limit 5
+   ```
+
+   If no release is needed, record that decision and continue.
+
+4. Remove the worker worktree only after all checks are true: the PR is merged, `git status --short` in the worker worktree is empty, the worker branch is not currently checked out anywhere else, and the main worktree is updated. Inspect first, then remove the exact path:
+
+   ```sh
+   git worktree list
+   git -C <worker-worktree> status --short --branch
+   git -C <main-worktree> branch --contains <worker-branch>
+   git worktree remove <worker-worktree>
+   git worktree list
+   ```
+
+   If the worker worktree is dirty, has unpushed commits, or the PR is not merged, stop and ask the user. Do not force-remove a worktree as routine cleanup.
+
+5. Delete branches only when they are confirmed merged, confirmed merged by the PR, or already deleted by the PR merge. Check both local and remote state first:
+
+   ```sh
+   git -C <main-worktree> fetch --prune origin
+   gh pr view <pr-number> --json merged,mergeCommit,headRefName,url
+   git -C <main-worktree> branch --merged main | rg '^[ *]*<worker-branch>$' || true
+   git -C <main-worktree> branch -d <worker-branch>
+   git -C <main-worktree> ls-remote --exit-code --heads origin <worker-branch> >/dev/null && git -C <main-worktree> push origin --delete <worker-branch> || true
+   ```
+
+   Use `git branch -d`, not `-D`, for normal cleanup. If the PR was squash-merged and `branch -d` refuses because the exact commits are not ancestors of `main`, do not force-delete automatically; first verify the PR is merged, the branch has no unpushed work that must be preserved, and the user explicitly wants the local branch removed. Delete the remote branch only if it belongs to the worker PR and the user/repo policy allows it; `gh pr merge --delete-branch` may have already handled it.
+
+6. Run `amux teardown` last, from inside the spawned worker when possible:
+
+   ```sh
+   amux teardown
+   ```
+
+   If the worker was restored without `AMUX_*`, use the verified thread form instead:
+
+   ```sh
+   amux teardown --thread <thread-id-or-url> [--session <session>]
+   ```
+
+7. Report the PR URL, merge status, release decision/result, worktree path removed, branch deletion result, and the `amux teardown` result back to the originating thread. If release, worktree removal, or branch deletion was intentionally skipped, say why.
 
 ## Current-session workflow
 
