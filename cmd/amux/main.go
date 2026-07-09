@@ -18,10 +18,11 @@ import (
 )
 
 const (
-	defaultWorkspace    = "mac"
-	defaultSession      = "Amp"
-	terminalLauncherEnv = "AMUX_TERMINAL_LAUNCHER"
-	spawnPollInterval   = 100 * time.Millisecond
+	defaultWorkspace     = "mac"
+	defaultSession       = "Amp"
+	terminalLauncherEnv  = "AMUX_TERMINAL_LAUNCHER"
+	spawnPollInterval    = 100 * time.Millisecond
+	maxSpawnMessageBytes = 1 << 20
 )
 
 var (
@@ -46,12 +47,13 @@ const (
 )
 
 type app struct {
+	stdin  io.Reader
 	stdout io.Writer
 	stderr io.Writer
 }
 
 func main() {
-	a := app{stdout: os.Stdout, stderr: os.Stderr}
+	a := app{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr}
 	if err := a.run(os.Args[1:]); err != nil {
 		fmt.Fprintln(a.stderr, err)
 		os.Exit(1)
@@ -59,10 +61,13 @@ func main() {
 }
 
 func run(args []string) error {
-	return app{stdout: os.Stdout, stderr: os.Stderr}.run(args)
+	return app{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr}.run(args)
 }
 
 func (a app) run(args []string) error {
+	if a.stdin == nil {
+		a.stdin = os.Stdin
+	}
 	if a.stdout == nil {
 		a.stdout = io.Discard
 	}
@@ -1363,13 +1368,20 @@ func (a app) spawn(opts options, args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(args) < 3 || len(args) > 5 {
-		return errors.New("usage: amux spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] <window> <workdir> <initial-message> [workspace] [session]")
+	if spawnOpts.messageFile != "" || spawnOpts.messageStdin {
+		if len(args) < 2 {
+			return errors.New(spawnUsage())
+		}
+	} else if len(args) < 3 || len(args) > 5 {
+		return errors.New(spawnUsage())
 	}
 	window := args[0]
 	workdir := args[1]
-	initialMessage := args[2]
-	workspace, session := workspaceSessionFromArgs(args[3:])
+	initialMessage, workspaceArgs, err := a.spawnInitialMessage(spawnOpts, args[2:])
+	if err != nil {
+		return err
+	}
+	workspace, session := workspaceSessionFromArgs(workspaceArgs)
 
 	if err := config.ValidateField("workspace", workspace); err != nil {
 		return err
@@ -1380,7 +1392,11 @@ func (a app) spawn(opts options, args []string) error {
 	if err := config.ValidateField("workdir", workdir); err != nil {
 		return err
 	}
-	if err := config.ValidateField("initial-message", initialMessage); err != nil {
+	if spawnOpts.messageFile == "" && !spawnOpts.messageStdin {
+		if err := config.ValidateField("initial-message", initialMessage); err != nil {
+			return err
+		}
+	} else if err := validateSpawnMessage("initial-message", initialMessage); err != nil {
 		return err
 	}
 	if spawnOpts.mode != "" {
@@ -1524,10 +1540,56 @@ func cleanupUnverifiedSpawn(runner tmux.Runner, windowID, thread string) string 
 	return strings.Join(failures, "; ")
 }
 
+func (a app) spawnInitialMessage(opts spawnOptions, args []string) (string, []string, error) {
+	if opts.messageFile != "" && opts.messageStdin {
+		return "", nil, errors.New("--message-file and --message-stdin are mutually exclusive")
+	}
+	if opts.messageFile == "" && !opts.messageStdin {
+		return args[0], args[1:], nil
+	}
+	if len(args) > 2 {
+		return "", nil, errors.New("--message-file and --message-stdin are mutually exclusive with positional <initial-message>")
+	}
+	var reader io.Reader
+	if opts.messageFile != "" {
+		file, err := os.Open(opts.messageFile)
+		if err != nil {
+			return "", nil, fmt.Errorf("read --message-file: %w", err)
+		}
+		defer file.Close()
+		reader = file
+	} else {
+		reader = a.stdin
+	}
+	message, err := readSpawnMessage(reader)
+	if err != nil {
+		return "", nil, err
+	}
+	return message, args, nil
+}
+
+func readSpawnMessage(reader io.Reader) (string, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, maxSpawnMessageBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if len(data) > maxSpawnMessageBytes {
+		return "", fmt.Errorf("initial-message exceeds %d bytes", maxSpawnMessageBytes)
+	}
+	return string(data), nil
+}
+
+func validateSpawnMessage(name, value string) error {
+	if value == "" {
+		return fmt.Errorf("missing %s", name)
+	}
+	return nil
+}
+
 func submitInitialMessage(runner tmux.Runner, target, message string) (bool, error) {
 	_, captureAvailable := waitForComposerReady(runner, target)
 	if !captureAvailable {
-		if err := runner.SendLiteral(target, message); err != nil {
+		if err := sendInitialMessageText(runner, target, message); err != nil {
 			return false, fmt.Errorf("send initial message: %w", err)
 		}
 		if err := runner.SendEnter(target); err != nil {
@@ -1535,14 +1597,14 @@ func submitInitialMessage(runner tmux.Runner, target, message string) (bool, err
 		}
 		return false, nil
 	}
-	if err := runner.SendLiteral(target, message); err != nil {
+	if err := sendInitialMessageText(runner, target, message); err != nil {
 		return false, fmt.Errorf("send initial message: %w", err)
 	}
 	if !waitForComposerMessage(runner, target, message) {
 		if err := runner.ClearLine(target); err != nil {
 			return false, fmt.Errorf("clear initial message: %w", err)
 		}
-		if err := runner.SendLiteral(target, message); err != nil {
+		if err := sendInitialMessageText(runner, target, message); err != nil {
 			return false, fmt.Errorf("send initial message: %w", err)
 		}
 		if !waitForComposerMessage(runner, target, message) {
@@ -1573,7 +1635,7 @@ func submitInitialMessage(runner tmux.Runner, target, message string) (bool, err
 		if retypedAfterLostPrompt {
 			return false, nil
 		}
-		if err := runner.SendLiteral(target, message); err != nil {
+		if err := sendInitialMessageText(runner, target, message); err != nil {
 			return false, fmt.Errorf("send initial message: %w", err)
 		}
 		if !waitForComposerMessage(runner, target, message) {
@@ -1583,6 +1645,13 @@ func submitInitialMessage(runner tmux.Runner, target, message string) (bool, err
 		retypedAfterLostPrompt = true
 	}
 	return false, nil
+}
+
+func sendInitialMessageText(runner tmux.Runner, target, message string) error {
+	if strings.ContainsAny(message, "\r\n") {
+		return runner.PasteLiteral(target, message)
+	}
+	return runner.SendLiteral(target, message)
 }
 
 func waitForComposerReady(runner tmux.Runner, target string) (bool, bool) {
@@ -2407,8 +2476,10 @@ func formatSessionPaneCandidates(panes []tmux.WindowPane) string {
 }
 
 type spawnOptions struct {
-	mode        string
-	titlePrefix string
+	mode         string
+	titlePrefix  string
+	messageFile  string
+	messageStdin bool
 }
 
 func parseSpawnOptions(args []string) (spawnOptions, []string, error) {
@@ -2428,6 +2499,14 @@ func parseSpawnOptions(args []string) (spawnOptions, []string, error) {
 				return opts, nil, errors.New("--title-prefix requires a prefix")
 			}
 			opts.titlePrefix = args[i]
+		case "--message-file":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return opts, nil, errors.New("--message-file requires a path")
+			}
+			opts.messageFile = args[i]
+		case "--message-stdin":
+			opts.messageStdin = true
 		default:
 			if strings.HasPrefix(args[i], "--mode=") {
 				opts.mode = strings.TrimPrefix(args[i], "--mode=")
@@ -2439,6 +2518,11 @@ func parseSpawnOptions(args []string) (spawnOptions, []string, error) {
 				if opts.titlePrefix == "" {
 					return opts, nil, errors.New("--title-prefix requires a prefix")
 				}
+			} else if strings.HasPrefix(args[i], "--message-file=") {
+				opts.messageFile = strings.TrimPrefix(args[i], "--message-file=")
+				if opts.messageFile == "" {
+					return opts, nil, errors.New("--message-file requires a path")
+				}
 			} else {
 				remaining = append(remaining, args[i])
 			}
@@ -2449,6 +2533,10 @@ func parseSpawnOptions(args []string) (spawnOptions, []string, error) {
 
 func (opts spawnOptions) prefixedName(window string) string {
 	return strings.TrimSpace(strings.TrimSpace(opts.titlePrefix) + " " + window)
+}
+
+func spawnUsage() string {
+	return "usage: amux spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] [--message-file <path> | --message-stdin] <window> <workdir> [<initial-message>] [workspace] [session]"
 }
 
 func renameAmpThread(thread, title string) error {
@@ -2961,9 +3049,12 @@ Commands:
       row(s). Run launch afterwards to restore live tmux/Amp windows.
       Side effects: unarchives remote Amp thread(s) only.
 
-  spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] <window> <workdir> <initial-message> [workspace] [session]
+  spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] [--message-file <path> | --message-stdin] <window> <workdir> [<initial-message>] [workspace] [session]
       Create an empty Amp thread, open it in an interactive tmux window,
-      submit the initial message with tmux send-keys, and store the row.
+      submit the initial message through tmux, and store the row.
+      Positional <initial-message> is single-line only. Use --message-file or
+      --message-stdin for explicit multi-line prompts; these options are
+      mutually exclusive with positional <initial-message> and each other.
       With one workspace arg, session defaults to the workspace name; with no
       workspace arg, defaults remain workspace=mac session=Amp.
       The spawned Amp process receives AMUX_WORKSPACE, AMUX_SESSION,

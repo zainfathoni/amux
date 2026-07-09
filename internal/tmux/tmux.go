@@ -177,6 +177,22 @@ func (r Runner) SendLiteral(target, text string) error {
 	return tmuxRun(args...)
 }
 
+func (r Runner) PasteLiteral(target, text string) error {
+	bufferName := fmt.Sprintf("amux-spawn-message-%d", os.Getpid())
+	loadArgs := []string{"load-buffer", "-b", bufferName, "-"}
+	if r.DryRun {
+		fmt.Printf("tmux %s\n", shellJoin(loadArgs))
+	} else if err := tmuxRunInput(text, loadArgs...); err != nil {
+		return err
+	}
+	pasteArgs := []string{"paste-buffer", "-dpr", "-b", bufferName, "-t", target}
+	if r.DryRun {
+		fmt.Printf("tmux %s\n", shellJoin(pasteArgs))
+		return nil
+	}
+	return tmuxRun(pasteArgs...)
+}
+
 func (r Runner) SendEnter(target string) error {
 	args := []string{"send-keys", "-t", target, "Enter"}
 	if r.DryRun {
@@ -404,6 +420,20 @@ func displayMessageForTarget(target, format string) (string, error) {
 func tmuxRun(args ...string) error {
 	_, err := tmuxOutput(args...)
 	return err
+}
+
+func tmuxRunInput(input string, args ...string) error {
+	cmd := exec.Command("tmux", args...)
+	cmd.Stdin = strings.NewReader(input)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		return commandError(args, stdout.Bytes(), stderr.Bytes(), err)
+	}
+	return nil
 }
 
 func tmuxOutput(args ...string) ([]byte, error) {

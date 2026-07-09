@@ -2566,6 +2566,250 @@ printf 'T-should-not-exist\n'
 	}
 }
 
+func TestSpawnSubmitsMultilineMessageFileWithTmuxPasteBuffer(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	messagePath := filepath.Join(tmp, "prompt.md")
+	bufferPath := filepath.Join(tmp, "tmux-buffer")
+	enterPath := filepath.Join(tmp, "entered")
+	logPath := filepath.Join(tmp, "calls.log")
+	message := "line one\nline two"
+	if err := os.WriteFile(messagePath, []byte(message), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = new ]; then
+  printf 'T-multiline-file\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-multiline-file ]; then
+  if [ -f "`+enterPath+`" ]; then
+    printf '%s\n' '{"id":"T-multiline-file","messages":[{"role":"user","content":"line one\nline two"}]}'
+  else
+    printf '%s\n' '{"id":"T-multiline-file","messages":[]}'
+  fi
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then
+  exit 1
+fi
+if [ "$1" = new-session ]; then
+  printf '@1\n'
+  exit 0
+fi
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = @1 ] && [ "$5" = '#{pane_id}' ]; then
+  printf '%%1\n'
+  exit 0
+fi
+if [ "$1" = load-buffer ] && [ "$2" = -b ] && [ "$4" = - ]; then
+  cat > "`+bufferPath+`"
+  exit 0
+fi
+if [ "$1" = paste-buffer ]; then
+  exit 0
+fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then
+  printf entered > "`+enterPath+`"
+  exit 0
+fi
+if [ "$1" = send-keys ]; then
+  exit 0
+fi
+if [ "$1" = capture-pane ]; then
+  if [ -f "`+bufferPath+`" ] && [ ! -f "`+enterPath+`" ]; then
+    printf '╭ composer ─╮\n│ line one │\n│ line two │\n╰────────────╯\n'
+  else
+    printf '╭ composer ─╮\n│           │\n╰────────────╯\n'
+  fi
+  exit 0
+fi
+if [ "$1" = select-window ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	if err := run([]string{"--config", configPath, "spawn", "--message-file", messagePath, "multi", workdir}); err != nil {
+		t.Fatal(err)
+	}
+
+	bufferBytes, err := os.ReadFile(bufferPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(bufferBytes); got != message {
+		t.Fatalf("tmux buffer got %q, want %q", got, message)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		"tmux load-buffer -b amux-spawn-message-",
+		"tmux paste-buffer -dpr -b amux-spawn-message-",
+		"tmux send-keys -t %1 Enter",
+		"amp threads export T-multiline-file",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("log missing %q\nlog:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "send-keys -t %1 -l line one") {
+		t.Fatalf("multiline prompt used send-keys -l instead of paste-buffer\nlog:\n%s", log)
+	}
+}
+
+func TestSpawnReadsMultilineMessageFromStdin(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	bufferPath := filepath.Join(tmp, "tmux-buffer")
+	enterPath := filepath.Join(tmp, "entered")
+	message := "from stdin\nsecond line"
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+if [ "$1" = threads ] && [ "$2" = new ]; then
+  printf 'T-multiline-stdin\n'
+  exit 0
+fi
+if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-multiline-stdin ]; then
+  if [ -f "`+enterPath+`" ]; then
+    printf '%s\n' '{"id":"T-multiline-stdin","messages":[{"role":"user","content":"from stdin\nsecond line"}]}'
+  else
+    printf '%s\n' '{"id":"T-multiline-stdin","messages":[]}'
+  fi
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then
+  exit 1
+fi
+if [ "$1" = new-session ]; then
+  printf '@1\n'
+  exit 0
+fi
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = @1 ] && [ "$5" = '#{pane_id}' ]; then
+  printf '%%1\n'
+  exit 0
+fi
+if [ "$1" = load-buffer ]; then
+  cat > "`+bufferPath+`"
+  exit 0
+fi
+if [ "$1" = paste-buffer ]; then
+  exit 0
+fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then
+  printf entered > "`+enterPath+`"
+  exit 0
+fi
+if [ "$1" = send-keys ]; then
+  exit 0
+fi
+if [ "$1" = capture-pane ]; then
+  if [ -f "`+bufferPath+`" ] && [ ! -f "`+enterPath+`" ]; then
+    printf '╭ composer ─╮\n│ from stdin │\n│ second line │\n╰────────────╯\n'
+  else
+    printf '╭ composer ─╮\n│           │\n╰────────────╯\n'
+  fi
+  exit 0
+fi
+if [ "$1" = select-window ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	if err := (app{stdin: strings.NewReader(message)}).run([]string{"--config", configPath, "spawn", "--message-stdin", "stdin", workdir}); err != nil {
+		t.Fatal(err)
+	}
+	bufferBytes, err := os.ReadFile(bufferPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(bufferBytes); got != message {
+		t.Fatalf("tmux buffer got %q, want %q", got, message)
+	}
+}
+
+func TestSpawnRejectsInvalidPromptSourcesBeforeCreatingThread(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	messagePath := filepath.Join(tmp, "prompt.md")
+	if err := os.WriteFile(messagePath, []byte("hello\nAmp"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ampCalledPath := filepath.Join(tmp, "amp-called")
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+touch "`+ampCalledPath+`"
+printf 'T-should-not-exist\n'
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "file with positional message",
+			args: []string{"--config", filepath.Join(tmp, "workspaces.tsv"), "spawn", "--message-file", messagePath, "fresh", workdir, "positional", "workspace", "session"},
+			want: "mutually exclusive with positional <initial-message>",
+		},
+		{
+			name: "file and stdin",
+			args: []string{"--config", filepath.Join(tmp, "workspaces.tsv"), "spawn", "--message-file", messagePath, "--message-stdin", "fresh", workdir},
+			want: "--message-file and --message-stdin are mutually exclusive",
+		},
+		{
+			name: "missing file",
+			args: []string{"--config", filepath.Join(tmp, "workspaces.tsv"), "spawn", "--message-file", filepath.Join(tmp, "missing.md"), "fresh", workdir},
+			want: "read --message-file",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_ = os.Remove(ampCalledPath)
+			err := run(tt.args)
+			if err == nil {
+				t.Fatal("spawn succeeded, want prompt-source error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("got error %q, want %q", err, tt.want)
+			}
+			if _, err := os.Stat(ampCalledPath); !os.IsNotExist(err) {
+				t.Fatalf("amp threads new was called before prompt-source validation")
+			}
+		})
+	}
+}
+
 func TestStoreCurrentInfersWindowAndWorkdirFromTmux(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
