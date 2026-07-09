@@ -121,6 +121,10 @@ func (a app) run(args []string) error {
 		return a.park(opts, args)
 	case "park-current":
 		return a.parkCurrent(opts, args)
+	case "shelve":
+		return a.shelve(opts, args)
+	case "unshelve":
+		return a.unshelve(opts, args)
 	case "spawn":
 		return a.spawn(opts, args)
 	case "teardown":
@@ -221,6 +225,26 @@ func launch(opts options, args []string) error {
 	if len(rows) == 0 {
 		return fmt.Errorf("no rows found for workspace %q in %s", workspace, opts.configPath)
 	}
+	statuses, err := threadArchiveStatuses(rows)
+	if err != nil {
+		return fmt.Errorf("confirm shelved Amp threads before launch: %w", err)
+	}
+	activeRows := make([]config.Row, 0, len(rows))
+	for _, row := range rows {
+		switch statuses[canonicalThreadID(row.Thread)] {
+		case threadStatusArchived:
+			fmt.Printf("Skipping shelved row %s/%s (%s); run amux unshelve %s %s to make it launchable.\n", row.Workspace, row.Window, canonicalThreadID(row.Thread), row.Workspace, row.Window)
+		case threadStatusMissing:
+			return fmt.Errorf("Amp thread %s for %s/%s was not found in active or archived thread lists", canonicalThreadID(row.Thread), row.Workspace, row.Window)
+		default:
+			activeRows = append(activeRows, row)
+		}
+	}
+	if len(activeRows) == 0 {
+		fmt.Printf("No unshelved rows found for workspace %s in %s\n", workspace, opts.configPath)
+		return nil
+	}
+	rows = activeRows
 
 	runner := tmux.Runner{DryRun: opts.dryRun}
 	sessionExists := runner.HasSession(session)
@@ -647,6 +671,309 @@ func (a app) schedulePark(runner tmux.Runner, session, window, target, workspace
 	}
 	fmt.Fprintf(a.stdout, "The local Amp process will be asked to exit in %s; tmux will force-close it only if graceful shutdown times out.\n", parkShutdownDelay())
 	return nil
+}
+
+func (a app) shelve(opts options, args []string) error {
+	shelveArgs, err := parseShelveArgs(args)
+	if err != nil {
+		return err
+	}
+	readRunner := tmux.Runner{}
+	targets, err := shelveTargets(opts.configPath, readRunner, shelveArgs)
+	if err != nil {
+		return err
+	}
+	if len(targets) == 0 {
+		fmt.Fprintf(a.stdout, "No rows found to shelve in %s\n", opts.configPath)
+		return nil
+	}
+
+	if opts.dryRun {
+		for _, target := range targets {
+			a.printShelvePlan("Would", opts.configPath, target)
+		}
+		return nil
+	}
+	runner := tmux.Runner{}
+	for _, target := range targets {
+		archiveThread := canonicalThreadID(target.row.Thread)
+		if err := archiveAmpThread(archiveThread); err != nil {
+			return fmt.Errorf("archive Amp thread %s: %w", archiveThread, err)
+		}
+		fmt.Fprintf(a.stdout, "Shelved Amp thread %s\n", archiveThread)
+		fmt.Fprintf(a.stdout, "Restore config row %s/%s is preserved in %s\n", target.row.Workspace, target.row.Window, opts.configPath)
+		if target.pane != nil {
+			if err := runner.KillWindow(target.pane.WindowID); err != nil {
+				return fmt.Errorf("Amp thread %s was archived, but stop tmux window %s (%s) failed: %w", archiveThread, target.identity.Window, target.pane.WindowID, err)
+			}
+			fmt.Fprintf(a.stdout, "Stopped tmux window %s/%s (%s)\n", target.identity.Session, target.identity.Window, target.pane.WindowID)
+		} else if target.identity.Session != "" {
+			fmt.Fprintf(a.stdout, "No live tmux window %s/%s found to stop\n", target.identity.Session, target.identity.Window)
+		} else {
+			fmt.Fprintf(a.stdout, "No live tmux window for %s/%s found to stop\n", target.row.Workspace, target.row.Window)
+		}
+		fmt.Fprintf(a.stdout, "Run amux unshelve %s %s, then amux launch %s %s to restore it.\n", target.row.Workspace, target.row.Window, target.row.Workspace, launchSessionForShelveTarget(target))
+	}
+	return nil
+}
+
+func (a app) unshelve(opts options, args []string) error {
+	if opts.dryRun {
+		return errors.New("unshelve does not support --dry-run")
+	}
+	unshelveArgs, err := parseUnshelveArgs(args)
+	if err != nil {
+		return err
+	}
+	rows, err := rowsForShelveSelection(opts.configPath, unshelveArgs)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		fmt.Fprintf(a.stdout, "No rows found to unshelve in %s\n", opts.configPath)
+		return nil
+	}
+	for _, row := range rows {
+		thread := canonicalThreadID(row.Thread)
+		if err := unarchiveAmpThread(thread); err != nil {
+			return fmt.Errorf("unarchive Amp thread %s: %w", thread, err)
+		}
+		fmt.Fprintf(a.stdout, "Unshelved Amp thread %s\n", thread)
+		fmt.Fprintf(a.stdout, "Restore config row %s/%s remains in %s\n", row.Workspace, row.Window, opts.configPath)
+	}
+	return nil
+}
+
+func parseUnshelveArgs(args []string) (shelveArgs, error) {
+	parsed, err := parseShelveArgs(args)
+	if err != nil {
+		return parsed, errors.New(strings.ReplaceAll(err.Error(), "shelve", "unshelve"))
+	}
+	if parsed.sessionSet {
+		return parsed, errors.New("unshelve does not support --session")
+	}
+	if parsed.thread == "" && parsed.workspace == "" && len(parsed.positional) == 3 {
+		return parsed, errors.New("usage: amux unshelve [workspace] <window> OR amux unshelve --thread <thread-id-or-url> OR amux unshelve --workspace <workspace>")
+	}
+	return parsed, nil
+}
+
+type shelveArgs struct {
+	positional []string
+	thread     string
+	workspace  string
+	session    string
+	sessionSet bool
+}
+
+type shelveTarget struct {
+	row      config.Row
+	identity teardownIdentity
+	pane     *tmux.WindowPane
+}
+
+func parseShelveArgs(args []string) (shelveArgs, error) {
+	parsed := shelveArgs{positional: make([]string, 0, len(args)), session: defaultSession}
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--thread":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return parsed, errors.New("--thread requires a thread id or URL")
+			}
+			parsed.thread = args[i]
+		case "--workspace":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return parsed, errors.New("--workspace requires a workspace")
+			}
+			parsed.workspace = args[i]
+		case "--session":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return parsed, errors.New("--session requires a tmux session name")
+			}
+			parsed.session = args[i]
+			parsed.sessionSet = true
+		default:
+			if strings.HasPrefix(args[i], "--thread=") {
+				parsed.thread = strings.TrimPrefix(args[i], "--thread=")
+				if parsed.thread == "" {
+					return parsed, errors.New("--thread requires a thread id or URL")
+				}
+			} else if strings.HasPrefix(args[i], "--workspace=") {
+				parsed.workspace = strings.TrimPrefix(args[i], "--workspace=")
+				if parsed.workspace == "" {
+					return parsed, errors.New("--workspace requires a workspace")
+				}
+			} else if strings.HasPrefix(args[i], "--session=") {
+				parsed.session = strings.TrimPrefix(args[i], "--session=")
+				if parsed.session == "" {
+					return parsed, errors.New("--session requires a tmux session name")
+				}
+				parsed.sessionSet = true
+			} else if strings.HasPrefix(args[i], "--") {
+				return parsed, fmt.Errorf("unknown shelve option %s", args[i])
+			} else {
+				parsed.positional = append(parsed.positional, args[i])
+			}
+		}
+	}
+	if parsed.thread != "" && parsed.workspace != "" {
+		return parsed, errors.New("shelve accepts either --thread or --workspace, not both")
+	}
+	if (parsed.thread != "" || parsed.workspace != "") && len(parsed.positional) != 0 {
+		return parsed, errors.New("usage: amux shelve [workspace] <window> [session] OR amux shelve --thread <thread-id-or-url> [--session <session>] OR amux shelve --workspace <workspace> [--session <session>]")
+	}
+	if parsed.thread != "" {
+		if err := config.ValidateField("thread", parsed.thread); err != nil {
+			return parsed, err
+		}
+	}
+	if parsed.workspace != "" {
+		if err := config.ValidateField("workspace", parsed.workspace); err != nil {
+			return parsed, err
+		}
+	}
+	if parsed.session != "" {
+		if err := config.ValidateField("session", parsed.session); err != nil {
+			return parsed, err
+		}
+	}
+	if parsed.thread == "" && parsed.workspace == "" && (len(parsed.positional) == 0 || len(parsed.positional) > 3) {
+		return parsed, errors.New("usage: amux shelve [workspace] <window> [session]")
+	}
+	return parsed, nil
+}
+
+func shelveTargets(path string, runner tmux.Runner, args shelveArgs) ([]shelveTarget, error) {
+	rows, err := rowsForShelveSelection(path, args)
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]shelveTarget, 0, len(rows))
+	for _, row := range rows {
+		identity := teardownIdentity{Workspace: row.Workspace, Window: row.Window, Thread: row.Thread, Session: args.session}
+		if args.thread != "" && !args.sessionSet {
+			identity.Session = ""
+		}
+		target, err := verifiedShelveTarget(runner, identity, row)
+		if err != nil {
+			return nil, err
+		}
+		targets = append(targets, target)
+	}
+	return targets, nil
+}
+
+func rowsForShelveSelection(path string, args shelveArgs) ([]config.Row, error) {
+	if args.thread != "" {
+		row, err := verifiedTeardownRowByThread(path, args.thread)
+		if err != nil {
+			return nil, err
+		}
+		return []config.Row{row}, nil
+	}
+	if args.workspace != "" {
+		rows, err := rowsForWorkspaceReadOnly(path, args.workspace)
+		if err != nil {
+			return nil, err
+		}
+		return rows, nil
+	}
+	identity, err := teardownIdentityFromArgs(shelvePositionalArgs(args.positional))
+	if err != nil {
+		return nil, err
+	}
+	row, err := verifiedTeardownRow(path, identity)
+	if err != nil {
+		return nil, err
+	}
+	return []config.Row{row}, nil
+}
+
+func shelvePositionalArgs(args []string) []string {
+	if len(args) == 1 {
+		return []string{defaultWorkspace, args[0]}
+	}
+	return args
+}
+
+func verifiedShelveTarget(runner tmux.Runner, identity teardownIdentity, row config.Row) (shelveTarget, error) {
+	panes, err := livePanesForShelve(runner, identity)
+	if err != nil && !runner.DryRun {
+		return shelveTarget{}, fmt.Errorf("find tmux window %s/%s: %w", identity.Session, identity.Window, err)
+	}
+	if len(panes) == 0 {
+		return shelveTarget{identity: identity, row: row}, nil
+	}
+	if identity.Session == "" {
+		verified := make([]tmux.WindowPane, 0, 1)
+		for _, pane := range panes {
+			candidate := identity
+			candidate.Session = pane.Session
+			if explicitTeardownStartCommandMatches(candidate, row, normalizedTmuxStartCommand(pane.StartCommand)) {
+				verified = appendUniqueTeardownWindow(verified, pane)
+			}
+		}
+		if len(verified) == 0 {
+			return shelveTarget{}, fmt.Errorf("no live tmux window for thread %s matches restore row %s/%s; pass --session if it is in a specific tmux session", row.Thread, row.Workspace, row.Window)
+		}
+		if len(verified) > 1 {
+			return shelveTarget{}, fmt.Errorf("ambiguous live tmux windows for thread %s: candidates %s; pass --session to choose one", row.Thread, formatSessionPaneCandidates(verified))
+		}
+		identity.Session = verified[0].Session
+		return shelveTarget{identity: identity, row: row, pane: &verified[0]}, nil
+	}
+	verified, err := verifiedTeardownPane(runner, identity, row)
+	if err != nil {
+		return shelveTarget{}, err
+	}
+	return shelveTarget{identity: identity, row: row, pane: &verified}, nil
+}
+
+func livePanesForShelve(runner tmux.Runner, identity teardownIdentity) ([]tmux.WindowPane, error) {
+	if identity.Session != "" {
+		if !runner.HasSession(identity.Session) {
+			return nil, nil
+		}
+		return runner.WindowPanes(identity.Session, identity.Window)
+	}
+	panes, err := livePanesForTeardown(runner, identity)
+	if err != nil && isTmuxUnavailable(err) {
+		return nil, nil
+	}
+	return panes, err
+}
+
+func isTmuxUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "no server running") ||
+		strings.Contains(message, "failed to connect") ||
+		strings.Contains(message, "can't find session") ||
+		strings.Contains(message, "no such file or directory")
+}
+
+func (a app) printShelvePlan(prefix, path string, target shelveTarget) {
+	archiveThread := canonicalThreadID(target.row.Thread)
+	fmt.Fprintf(a.stdout, "%s archive Amp thread %s and preserve restore row %s/%s in %s\n", prefix, archiveThread, target.row.Workspace, target.row.Window, path)
+	if target.pane != nil {
+		fmt.Fprintf(a.stdout, "%s stop tmux window %s/%s (%s)\n", prefix, target.identity.Session, target.identity.Window, target.pane.WindowID)
+	} else if target.identity.Session != "" {
+		fmt.Fprintf(a.stdout, "No live tmux window %s/%s found to stop\n", target.identity.Session, target.identity.Window)
+	} else {
+		fmt.Fprintf(a.stdout, "No live tmux window for %s/%s found to stop\n", target.row.Workspace, target.row.Window)
+	}
+}
+
+func launchSessionForShelveTarget(target shelveTarget) string {
+	if target.identity.Session != "" {
+		return target.identity.Session
+	}
+	return defaultSession
 }
 
 func parkShutdownScript(target string, delay, grace time.Duration) string {
@@ -1705,6 +2032,19 @@ func archiveAmpThread(thread string) error {
 	return nil
 }
 
+func unarchiveAmpThread(thread string) error {
+	cmd := exec.Command("amp", "threads", "archive", "--unarchive", thread)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(out))
+		if message == "" {
+			return err
+		}
+		return fmt.Errorf("%w: %s", err, message)
+	}
+	return nil
+}
+
 type threadStatus string
 
 const (
@@ -1714,11 +2054,17 @@ const (
 )
 
 func threadArchiveStatuses(rows []config.Row) (map[string]threadStatus, error) {
-	active, err := ampThreadIDSet(false)
+	targets := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		if id := canonicalThreadID(row.Thread); id != "" {
+			targets[id] = true
+		}
+	}
+	active, err := ampThreadIDSet(false, targets)
 	if err != nil {
 		return nil, err
 	}
-	includingArchived, err := ampThreadIDSet(true)
+	includingArchived, err := ampThreadIDSet(true, targets)
 	if err != nil {
 		return nil, err
 	}
@@ -1737,33 +2083,50 @@ func threadArchiveStatuses(rows []config.Row) (map[string]threadStatus, error) {
 	return statuses, nil
 }
 
-func ampThreadIDSet(includeArchived bool) (map[string]bool, error) {
-	args := []string{"threads", "list", "--json"}
-	if includeArchived {
-		args = append(args, "--include-archived")
-	}
-	args = append(args, "--limit", "500")
-	cmd := exec.Command("amp", args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		message := strings.TrimSpace(string(out))
-		if message == "" {
-			return nil, err
-		}
-		return nil, fmt.Errorf("%w: %s", err, message)
-	}
-	var payload any
-	if err := json.Unmarshal(out, &payload); err != nil {
-		return nil, fmt.Errorf("parse amp threads list: %w", err)
-	}
+func ampThreadIDSet(includeArchived bool, targets map[string]bool) (map[string]bool, error) {
 	ids := make(map[string]bool)
-	for _, id := range collectThreadIDs(payload) {
-		id = canonicalThreadID(id)
-		if id != "" {
-			ids[id] = true
+	for offset := 0; ; offset += 500 {
+		args := []string{"threads", "list", "--json"}
+		if includeArchived {
+			args = append(args, "--include-archived")
+		}
+		args = append(args, "--limit", "500", "--offset", strconv.Itoa(offset))
+		cmd := exec.Command("amp", args...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			message := strings.TrimSpace(string(out))
+			if message == "" {
+				return nil, err
+			}
+			return nil, fmt.Errorf("%w: %s", err, message)
+		}
+		var payload any
+		if err := json.Unmarshal(out, &payload); err != nil {
+			return nil, fmt.Errorf("parse amp threads list: %w", err)
+		}
+		pageIDs := collectThreadIDs(payload)
+		for _, id := range pageIDs {
+			id = canonicalThreadID(id)
+			if id != "" {
+				ids[id] = true
+			}
+		}
+		if len(targets) > 0 && containsAllThreadIDs(ids, targets) {
+			return ids, nil
+		}
+		if len(pageIDs) < 500 {
+			return ids, nil
 		}
 	}
-	return ids, nil
+}
+
+func containsAllThreadIDs(ids, targets map[string]bool) bool {
+	for id := range targets {
+		if !ids[id] {
+			return false
+		}
+	}
+	return true
 }
 
 func formatCandidates(candidates []string) string {
@@ -1973,9 +2336,11 @@ func (a app) doctor(opts options, workspace, session string) error {
 		check("current tmux pane path", workdirErr)
 	}
 	if err == nil && len(rows) > 0 {
-		checkArchivedThreadRows(check, rows)
+		statuses := checkArchivedThreadRows(check, rows)
+		activeRows := rowsWithThreadStatus(rows, statuses, threadStatusActive)
 		runner := tmux.Runner{}
-		checkWorkspaceDrift(check, runner, workspace, session, rows, runnerRows)
+		checkWorkspaceDrift(check, runner, workspace, session, activeRows, runnerRows)
+		checkShelvedLiveDrift(check, runner, workspace, session, rowsWithThreadStatus(rows, statuses, threadStatusArchived))
 	}
 	if runnerErr == nil && len(runnerRows) > 0 {
 		runner := tmux.Runner{}
@@ -2131,22 +2496,58 @@ func windowPaneCommands(panes []tmux.WindowPane) []string {
 	return commands
 }
 
-func checkArchivedThreadRows(check func(string, error), rows []config.Row) {
+func checkArchivedThreadRows(check func(string, error), rows []config.Row) map[string]threadStatus {
 	statuses, err := threadArchiveStatuses(rows)
 	if err != nil {
 		check("Amp thread archive state", err)
-		return
+		return nil
 	}
 	check("Amp thread archive state", nil)
 	for _, row := range rows {
 		status := statuses[canonicalThreadID(row.Thread)]
 		switch status {
 		case threadStatusArchived:
-			check("thread "+row.Window, fmt.Errorf("restore row points at archived Amp thread %s; run amux prune-archived %s to unpin confirmed archived rows", canonicalThreadID(row.Thread), row.Workspace))
+			// Archived restore rows are intentional for shelved workspaces.
+			// They remain valid restore rows, but launch skips them until unshelve.
+			check("thread "+row.Window, nil)
 		case threadStatusMissing:
 			check("thread "+row.Window, fmt.Errorf("Amp thread %s was not found in active or archived thread lists", canonicalThreadID(row.Thread)))
 		default:
 			check("thread "+row.Window, nil)
+		}
+	}
+	return statuses
+}
+
+func rowsWithThreadStatus(rows []config.Row, statuses map[string]threadStatus, status threadStatus) []config.Row {
+	if statuses == nil {
+		return rows
+	}
+	filtered := make([]config.Row, 0, len(rows))
+	for _, row := range rows {
+		if statuses[canonicalThreadID(row.Thread)] == status {
+			filtered = append(filtered, row)
+		}
+	}
+	return filtered
+}
+
+func checkShelvedLiveDrift(check func(string, error), runner tmux.Runner, workspace, session string, rows []config.Row) {
+	if len(rows) == 0 {
+		return
+	}
+	panes, err := runner.Panes(session)
+	if err != nil {
+		check("shelved tmux session "+session+" panes", err)
+		return
+	}
+	live := make(map[string]bool, len(panes))
+	for _, pane := range panes {
+		live[pane.Window] = true
+	}
+	for _, row := range rows {
+		if live[row.Window] {
+			check("shelved live window "+row.Window, fmt.Errorf("shelved row in workspace %s is still running in tmux session %s", workspace, session))
 		}
 	}
 }
@@ -2238,7 +2639,8 @@ Commands:
       Launch or attach a tmux session. Defaults: workspace=mac session=Amp.
       Cold launches do not attach; existing config-matching sessions attach.
       Side effects: reads restore config, may create live local tmux/Amp
-      windows, and does not create or archive remote Amp threads.
+      windows for unshelved rows, and skips archived/shelved rows. It does not
+      create, archive, or unarchive remote Amp threads.
       Use --attach to always attach or --no-attach to never attach.
       If no command is given, launch is assumed.
 
@@ -2282,6 +2684,25 @@ Commands:
       Side effects: mutates live local tmux/Amp only. Restore config rows are
       preserved; use unpin-current for config-only cleanup or teardown for full cleanup.
       Amp thread history is not archived or deleted.
+
+  shelve [workspace] <window> [session]
+  shelve --thread <thread-id-or-url> [--session <session>]
+  shelve --workspace <workspace> [--session <session>]
+      Archive Amp thread(s) so they leave the Amp sidebar while preserving the
+      restore-config row(s) for future explicit unshelve+launch. If a matching live tmux window
+      exists, verify its start command matches the stored thread before stopping
+      it. With --thread, resolve one stored row by thread ID/URL and search all
+      tmux sessions unless --session is provided. With --workspace, shelve every
+      row in that workspace using session=Amp unless --session is provided.
+      Side effects: archives remote Amp thread(s), may stop verified live local
+      tmux/Amp windows, and does not remove restore-config rows.
+
+  unshelve [workspace] <window>
+  unshelve --thread <thread-id-or-url>
+  unshelve --workspace <workspace>
+      Explicitly unarchive shelved Amp thread(s) while preserving restore-config
+      row(s). Run launch afterwards to restore live tmux/Amp windows.
+      Side effects: unarchives remote Amp thread(s) only.
 
   spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] <window> <workdir> <initial-message> [workspace] [session]
       Create an empty Amp thread, open it in an interactive tmux window,
@@ -2359,7 +2780,7 @@ Commands:
   doctor [workspace] [session]
       Check dependencies, config readability, configured workdirs, and drift
       between the selected workspace and tmux session. Also reports restore
-      rows whose Amp threads are confirmed archived or missing, plus runner
+      Amp thread archive state and missing thread rows, plus runner
       registry drift when runners.tsv is present. Defaults: workspace=mac
       session=Amp.
       Side effects: none; inspects restore config, live local tmux, and remote
