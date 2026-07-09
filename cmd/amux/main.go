@@ -147,6 +147,8 @@ func (a app) run(args []string) error {
 		return a.pruneArchived(opts, args)
 	case "runner":
 		return a.runner(opts, args)
+	case "completion":
+		return a.completion(args)
 	case "update", "self-update":
 		return a.selfUpdate(opts, args)
 	case "version", "--version":
@@ -3123,6 +3125,10 @@ Commands:
   runner park [workspace] <window>
       Stop a live local runner tmux window while preserving runner config.
       Side effects: mutates live local tmux/Amp only; no remote Amp thread state.
+
+  completion <bash|zsh|fish>
+      Print a static shell completion script for commands and flags. Completions
+      intentionally do not inspect tmux sessions, workspaces, or Amp threads.
 
   update
       Download the latest GitHub release for this platform, verify its

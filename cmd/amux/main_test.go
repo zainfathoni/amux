@@ -54,6 +54,67 @@ func TestPathWritesToInjectedStdout(t *testing.T) {
 	}
 }
 
+func TestCompletionGeneratesShellScripts(t *testing.T) {
+	tests := []struct {
+		shell string
+		want  []string
+	}{
+		{
+			shell: "bash",
+			want: []string{
+				"complete -F _amux_complete amux",
+				"launch list shelved pin store pin-current store-current unpin remove unpin-current remove-current park park-current shelve-current shelve unshelve spawn teardown prune-archived migrate-config runner completion update self-update version path doctor help",
+				"--config --dry-run --attach --no-attach --terminal-launcher --help -h --version",
+				"--mode -m --title-prefix --message-file --message-stdin",
+				"list pin unpin launch park",
+			},
+		},
+		{
+			shell: "zsh",
+			want: []string{
+				"#compdef amux",
+				"\"self-update:Alias for update\"",
+				"\"shelve-current:Pin if needed, archive the thread, and stop the current window\"",
+				"'--terminal-launcher[terminal launcher command]:command:'",
+				"'--message-file[read initial message from file]:message file:_files'",
+				"_values 'shell' bash zsh fish",
+			},
+		},
+		{
+			shell: "fish",
+			want: []string{
+				"complete -c amux -f -n '__fish_use_subcommand' -a 'self-update' -d 'Alias for update'",
+				"complete -c amux -n '__fish_seen_subcommand_from spawn' -r -l 'message-file' -d 'Read initial message from file'",
+				"complete -c amux -n '__fish_seen_subcommand_from list' -f -l 'status' -d 'Append thread status'",
+				"complete -c amux -f -n '__fish_seen_subcommand_from runner; and not __fish_seen_subcommand_from list pin unpin launch park' -a 'park' -d 'Stop a live local runner window'",
+				"complete -c amux -f -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.shell, func(t *testing.T) {
+			var stdout bytes.Buffer
+			if err := (app{stdout: &stdout}).run([]string{"completion", tt.shell}); err != nil {
+				t.Fatal(err)
+			}
+			got := stdout.String()
+			for _, want := range tt.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("completion %s missing %q\n%s", tt.shell, want, got)
+				}
+			}
+		})
+	}
+}
+
+func TestCompletionRejectsUnsupportedShell(t *testing.T) {
+	err := (app{}).run([]string{"completion", "powershell"})
+	if err == nil || !strings.Contains(err.Error(), "unsupported shell") {
+		t.Fatalf("completion returned %v, want unsupported shell error", err)
+	}
+}
+
 func TestPathMigratesLegacyDefaultConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
