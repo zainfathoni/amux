@@ -1,6 +1,6 @@
 ---
 name: amux
-description: "Manages local Amp tmux workspace lifecycle with amux: restore, inspect, pin/unpin, park, shelve/unshelve, spawn interactive workers, runner lifecycle, and verified teardown. Use for local tmux/Amp restore orchestration and skill-only /amux sprawl; not for Amp-native Agents Anywhere remote creation except runner setup. Triggers: 'Park it', 'Pin it', 'Shelve this', 'Restore my workspace', 'Check amux', '/amux sprawl', '/amux finish'."
+description: "Manages local Amp tmux workspace lifecycle with amux: restore, inspect, pin/unpin, park, shelve/unshelve, spawn interactive workers, runner lifecycle, and verified teardown. Use for local tmux/Amp restore orchestration and skill-only /amux sprawl; not for Amp-native Agents Anywhere remote creation except runner setup. Triggers: 'Pin it', 'Unpin it', 'forget this on restore', 'Park it', 'Shelve this', 'defer this workspace', 'hide it for now', 'Restore my workspace', 'Spawn a worker for', 'Teardown this worker', 'Doctor amux', '/amux sprawl', '/amux finish'."
 ---
 
 # amux
@@ -40,6 +40,7 @@ Runner rows are not restore rows. Runner commands manage local `amp --no-tui` ru
 - **Unshelve this** / **resume deferred work**: `amux unshelve ...`, then `amux launch <workspace> [session]` if tmux windows should be restored.
 - **Restore my workspace**: `amux launch` for legacy defaults, `amux launch <workspace>` for same-named session, or `amux launch <workspace> <session>` for shared-session layouts.
 - **Check amux** / **doctor amux**: `amux doctor`, `amux doctor <workspace>`, or `amux doctor <workspace> <session>` with the same session-defaulting rules.
+- **Spawn a worker for ...**: load [`reference/workflows.md`](reference/workflows.md), then use `amux spawn ...` only for fresh interactive local Amp/tmux workers; prefer Amp-native Agents Anywhere for remote agent creation after a runner exists.
 - **Teardown this worker** / **archive and clean this up**: use `amux teardown` only when the user wants full verified worker cleanup.
 - **/amux sprawl #12 #34 ...**: skill-only orchestration around `gh`, `git worktree`, and `amux spawn`; inspect dependencies before creating branches, worktrees, tmux windows, restore rows, or remote threads.
 - **/amux finish** / **post-merge cleanup**: finish GitHub/git/release/worktree cleanup first, then run `amux teardown` last.
@@ -49,6 +50,7 @@ Runner rows are not restore rows. Runner commands manage local `amp --no-tui` ru
 - For exact CLI forms, session-defaulting examples, command semantics, self-update behavior, and the side-effect matrix, read [`reference/commands.md`](reference/commands.md).
 - For spawn, sprawl, teardown, finish, current-session, and explicit workspace procedures, read [`reference/workflows.md`](reference/workflows.md).
 - For stuck/misplaced worker replacement, verification commands, and mutation safety checks, read [`reference/troubleshooting.md`](reference/troubleshooting.md).
+- To check whether trigger phrases still map to the intended behavior, read [`reference/trigger-phrases.md`](reference/trigger-phrases.md).
 
 ## Safety guardrails
 
