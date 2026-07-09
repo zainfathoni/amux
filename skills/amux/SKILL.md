@@ -1,6 +1,6 @@
 ---
 name: amux
-description: "Manages Amp tmux workspace sessions with amux: restore/inspect/park tmux workspaces, spawn fresh interactive Amp threads, pin/unpin current windows in restore config, and tear down spawned workers. Use for local tmux/Amp lifecycle and restore config, not as a replacement for Amp-native Agents Anywhere remote creation. Trigger phrases: 'Park it' closes the current local tmux/Amp session while keeping it restorable; 'Pin it' pins the current window for restore."
+description: "Manages Amp tmux workspace sessions with amux: restore/inspect/park tmux workspaces, spawn fresh interactive Amp threads, pin/unpin current windows in restore config, fan out independent issue workers with skill-only /amux sprawl orchestration, and tear down spawned workers. Use for local tmux/Amp lifecycle and restore config, not as a replacement for Amp-native Agents Anywhere remote creation. Trigger phrases: 'Park it' closes the current local tmux/Amp session while keeping it restorable; 'Pin it' pins the current window for restore."
 ---
 
 # amux
@@ -98,8 +98,9 @@ These phrases are user-level shorthand and should work from any project when thi
 - **Shelve this** / **defer this workspace** / **hide it for now**: use `amux shelve`. Prefer `amux shelve --thread <thread-id-or-url>` for a single known thread, `amux shelve <workspace> <window> [session]` for a named row, and `amux shelve --workspace <workspace> [--session <session>]` for all rows in a workspace. This archives/hides the remote thread(s), preserves restore rows, and stops verified local windows. Future resume is explicit: `amux unshelve ...`, then `amux launch ...`.
 - **Show shelved work** / **list deferred work**: use `amux shelved [workspace]` or `amux list --shelved [workspace]`; use `amux list --active [workspace]` to show only launchable rows.
 - **Unshelve this** / **resume deferred work**: use `amux unshelve` with the same target shape as `shelve`, then `amux launch <workspace> [session]` if live tmux windows should be restored. Do not rely on `launch` alone to unarchive shelved threads.
+- **/amux sprawl #12 #34 ...** / **sprawl these issues**: skill-only issue orchestration for fanning out independent issues into separate worktrees and `amux spawn` workers. This is not an `amux` CLI command. Inspect every issue and dependency first; do not spawn dependent, ordered, or likely-conflicting work in parallel. For accepted independent issues, create issue-scoped worktrees from current `origin/main`, spawn one worker per worktree with an issue title prefix, pin restore rows through `spawn`, and report thread IDs, worktree paths, and branches.
 - **Teardown this worker** / **archive and clean this up**: use `amux teardown` only when the user explicitly wants full cleanup of the verified worker/thread. This archives the remote Amp thread, removes the row, and stops the local tmux window.
-- **Finish this worker after merge** / **post-merge cleanup**: do the GitHub/git lifecycle first, then use `amux teardown` last. This is not the same as park or shelve: parking preserves the restore row and active remote thread; shelving archives the remote thread but preserves the restore row for later; post-merge finish verifies merge/release/worktree/branch cleanup before final amux teardown.
+- **/amux finish** / **Finish this worker after merge** / **post-merge cleanup**: do the GitHub/git lifecycle first, then use `amux teardown` last. This is not the same as park or shelve: parking preserves the restore row and active remote thread; shelving archives the remote thread but preserves the restore row for later; post-merge finish verifies merge/release/worktree/branch cleanup before final amux teardown.
 - **Restore my workspace**: use `amux launch` for the legacy default workspace/session, `amux launch <workspace>` for the same-named tmux session, or `amux launch <workspace> <session>` for an older shared-session layout.
 - **Check amux** / **doctor amux**: use `amux doctor` for the legacy default workspace/session, `amux doctor <workspace>` for the same-named tmux session, or `amux doctor <workspace> <session>` for an older shared-session layout.
 
@@ -132,6 +133,66 @@ amux list mac
 The initial message is submitted via `tmux send-keys` into a normal interactive Amp window. The spawned process receives `AMUX_WORKSPACE`, `AMUX_SESSION`, `AMUX_WINDOW`, `AMUX_THREAD_ID`, and `AMUX_WORKDIR`; no-arg `amux teardown` depends on this identity. If the user keeps their amux config in a dotfiles or machine-restore repository, remind them to sync the changed `workspaces.tsv` there.
 
 `spawn` refuses to overwrite an existing tmux window and validates inputs before creating a new Amp thread. If a spawn fails, verify whether a new remote thread, local tmux window, or restore row was created before retrying.
+
+## Sprawl independent issue workers
+
+Use this when the user asks for `/amux sprawl #12 #34 ...`, asks to sprawl issues, or asks to fan out several issue-scoped workers. Sprawl is skill orchestration around `gh`, `git worktree`, and `amux spawn`; it is not an `amux` CLI command and should not be represented in command help.
+
+Dependency inspection is mandatory before creating any branch, worktree, tmux window, restore row, or remote Amp thread:
+
+1. Sync the base view of `main` without mutating unrelated worktrees:
+
+   ```sh
+   git fetch origin main
+   ```
+
+2. Read every requested issue before deciding parallelism:
+
+   ```sh
+   gh issue view <issue> --json number,title,body,comments,labels,assignees,url
+   ```
+
+3. Compare the issues for explicit and likely dependencies. Do **not** sprawl issues in parallel when any of these are true:
+
+   - one issue explicitly blocks, depends on, or must follow another issue
+   - one issue changes APIs, types, commands, config, lifecycle terms, docs, or generated artifacts that another issue consumes
+   - one issue is a prerequisite migration/refactor for another
+   - the issues are likely to edit the same high-churn files or product surface in conflicting ways
+   - the user requests ordered work
+
+   When uncertain, prefer sequencing or ask the user which issue should go first. If only a subset is independent, sprawl only that subset and report the deferred dependency chain.
+
+For each accepted independent issue:
+
+1. Choose unique names that include the issue number, for example branch `feature/issue-123-short-slug`, worktree `../<repo>-issue-123`, tmux window `issue-123`, and title prefix `#123`.
+2. Create the issue worktree from current `origin/main`:
+
+   ```sh
+   git worktree add -b <branch> <worktree-path> origin/main
+   ```
+
+3. Spawn one interactive worker for that worktree, using an issue prefix so the tmux window, restore row, `AMUX_WINDOW`, and Amp thread title are recognizable:
+
+   ```sh
+   amux spawn --title-prefix '#<issue>' <window> <worktree-path> "<initial-message>" <workspace> [session]
+   ```
+
+   The initial message should identify the issue URL/number, state that this worker owns only that issue/worktree, require dependency re-checking if it discovers overlap, and tell the worker to open a PR against `main` and report the PR URL plus any blockers back to the originating thread.
+
+4. Verify and capture the restore row/thread identity:
+
+   ```sh
+   amux list <workspace>
+   git -C <worktree-path> status --short --branch
+   ```
+
+Report the sprawl result back to the originating thread with:
+
+- the dependency policy applied, including any issues intentionally sequenced or skipped
+- for each spawned worker: issue number/title, Amp thread ID or URL, worktree path, branch, tmux window, and title prefix
+- the cleanup path: after each worker PR is merged, use `/amux finish` / **Finish a merged worker** so GitHub/git cleanup happens before final `amux teardown`
+
+If any spawn partially succeeds, stop and inspect for a created remote thread, tmux window, restore row, branch, or worktree before retrying. Do not duplicate workers for the same issue.
 
 ## Replace a stuck or misplaced worker
 

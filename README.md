@@ -319,9 +319,13 @@ Show shelved work      -> amux shelved [workspace] / amux list --shelved [worksp
 Unshelve this          -> amux unshelve <workspace> <window> / --thread / --workspace
 Restore my workspace   -> amux launch
 Spawn a worker for ... -> amux spawn [--mode <mode>] [--title-prefix <prefix>] ...
+/amux sprawl #1 #2     -> skill-only fan-out after issue dependency inspection; not a CLI command
+/amux finish           -> post-merge GitHub/git cleanup, then final amux teardown
 Teardown this worker   -> amux teardown / teardown --thread / teardown <workspace> <window>
 Doctor amux            -> amux doctor
 ```
+
+`/amux sprawl` is a higher-level skill workflow for independent issue work: the agent reads each requested issue, refuses to fan out dependent or likely-conflicting issues, creates one issue-scoped worktree/branch per independent issue from current `origin/main`, and then uses `amux spawn --title-prefix '#<issue>'` to start one restorable worker per worktree. Completed spawned workers should use `/amux finish` / the skill's post-merge finish workflow so GitHub/git cleanup happens before final `amux teardown`.
 
 The skill source lives at [`skills/amux/SKILL.md`](skills/amux/SKILL.md). Keep it in sync with command semantics when adding new lifecycle behavior; for agent use, the skill is part of the product surface, not just documentation.
 
