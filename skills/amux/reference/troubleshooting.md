@@ -15,22 +15,32 @@ Use this when a thread is stuck loading, was created under the wrong Amp project
    git -C <workdir> status --short --branch
    ```
 
-2. Prepare and preflight the replacement before stopping or unpinning anything. `amux spawn` currently accepts a single-line `initial-message` only; flatten paragraphs and remove tabs/newlines until explicit multi-line prompt support lands in issue [#76](https://github.com/zainfathoni/amux/issues/76). Validate the exact command with `--dry-run` first:
+2. Prepare and preflight the replacement before stopping or unpinning anything. Prefer `--message-file` for a structured replacement prompt; use `--message-stdin` when another command generates the prompt. Keep positional `<initial-message>` as a short single-line fallback only. Validate the exact command with `--dry-run` first:
+
+   ```sh
+   amux --dry-run spawn [--title-prefix '<prefix>'] --message-file <replacement-prompt.md> <candidate-window> <workdir> <workspace> [session]
+   ```
+
+   Keep the replacement prompt's first sentence title-neutral and task-specific. Avoid starting with "This is a replacement worker..." because Amp may auto-title the new thread from that phrase. Put replacement context after the task sentence. Example prompt file:
+
+   ```text
+   Work on issue-236 backup pull host.
+
+   This replaces old stuck thread T-.... Do not archive the old thread unless explicitly asked.
+
+   Inspect the worktree and current issue/task context, verify whether any cleanup or follow-up remains, and report status. Keep changes minimal and only act if needed.
+   ```
+
+   If a prompt file is not practical, use the positional fallback with one single-line prompt:
 
    ```sh
    amux --dry-run spawn [--title-prefix '<prefix>'] <candidate-window> <workdir> "<single-line replacement prompt>" <workspace> [session]
    ```
 
-   Keep the replacement prompt's first sentence title-neutral and task-specific. Avoid starting with "This is a replacement worker..." because Amp may auto-title the new thread from that phrase. Put replacement context after the task sentence. Example single-line prompt:
-
-   ```text
-   Work on issue-236 backup pull host. This replaces old stuck thread T-...; do not archive the old thread unless explicitly asked. Inspect the worktree and current issue/task context, verify whether any cleanup or follow-up remains, and report status. Keep changes minimal and only act if needed.
-   ```
-
 3. Prefer a temporary-name replacement so the old live window stays available until the replacement is verified:
 
    ```sh
-   amux spawn [--title-prefix '<prefix>'] <window>-replacement <workdir> "<single-line replacement prompt>" <workspace> [session]
+   amux spawn [--title-prefix '<prefix>'] --message-file <replacement-prompt.md> <window>-replacement <workdir> <workspace> [session]
    amux list <workspace>
    tmux list-panes -a -F '#{session_name}\t#{window_id}\t#{window_name}\t#{pane_current_path}\t#{pane_pid}\t#{pane_start_command}' | rg '<new-thread-id>|<window>-replacement|<workdir>'
    amp threads export <new-thread-id> | head -80
@@ -73,8 +83,8 @@ Use this when a thread is stuck loading, was created under the wrong Amp project
       amux version
       amux list <workspace>
       tmux list-windows -t <session>
-      amux --dry-run spawn [--title-prefix '<prefix>'] <window> <workdir> "<single-line replacement prompt>" <workspace> [session]
-      amux spawn [--title-prefix '<prefix>'] <window> <workdir> "<single-line replacement prompt>" <workspace> [session]
+      amux --dry-run spawn [--title-prefix '<prefix>'] --message-file <replacement-prompt.md> <window> <workdir> <workspace> [session]
+      amux spawn [--title-prefix '<prefix>'] --message-file <replacement-prompt.md> <window> <workdir> <workspace> [session]
       ```
 
    e. Verify the replacement row and live pane:
