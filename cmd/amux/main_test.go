@@ -2912,6 +2912,179 @@ exit 2
 	}
 }
 
+func TestShelveCurrentPinsArchivesAndStopsUnpinnedLiveWindow(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("mac\tother\t/tmp/other\tT-other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = archive ] && [ "$3" = T-current ]; then
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "%42" ]; then
+  case "$5" in
+    '#S:#I') printf 'Cafein:3\n'; exit 0 ;;
+    '#W') printf 'cafein-pr-119\n'; exit 0 ;;
+    '#{pane_current_path}') printf '/Users/zain/Code/GitHub/vibefromcafe/cafein.id\n'; exit 0 ;;
+  esac
+fi
+if [ "$1" = kill-window ] && [ "$2" = -t ] && [ "$3" = 'Cafein:3' ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "fake-tmux-socket")
+	t.Setenv("TMUX_PANE", "%42")
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "shelve-current", "cafein", "T-current"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotConfig := string(configBytes)
+	for _, want := range []string{
+		"mac\tother\t/tmp/other\tT-other\n",
+		"cafein\tcafein-pr-119\t/Users/zain/Code/GitHub/vibefromcafe/cafein.id\tT-current\n",
+	} {
+		if !strings.Contains(gotConfig, want) {
+			t.Fatalf("config missing %q\ngot: %q", want, gotConfig)
+		}
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		"tmux display-message -p -t %42 #S:#I",
+		"tmux display-message -p -t %42 #W",
+		"tmux display-message -p -t %42 #{pane_current_path}",
+		"amp threads archive T-current",
+		"tmux kill-window -t Cafein:3",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("shelve-current log missing %q\nlog:\n%s", want, log)
+		}
+	}
+	for _, want := range []string{
+		"Pinned cafein/cafein-pr-119",
+		"Shelved Amp thread T-current",
+		"Restore config row cafein/cafein-pr-119 is preserved",
+		"Stopped current tmux window cafein-pr-119 (Cafein:3)",
+		"Run amux unshelve cafein cafein-pr-119, then amux launch cafein to restore it.",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("shelve-current output missing %q\nstdout:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestShelveCurrentRequiresKnownThreadBeforeMutating(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "calls.log")
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "fake-tmux-socket")
+	t.Setenv("TMUX_PANE", "%42")
+	t.Setenv("AMUX_THREAD_ID", "")
+
+	err := run([]string{"--config", filepath.Join(tmp, "workspaces.tsv"), "shelve-current"})
+	if err == nil {
+		t.Fatal("shelve-current succeeded without thread, want error")
+	}
+	if !strings.Contains(err.Error(), "shelve-current requires a thread id or URL") {
+		t.Fatalf("got error %q, want thread guidance", err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if log := string(logBytes); strings.Contains(log, "amp threads archive") || strings.Contains(log, "tmux kill-window") || strings.Contains(log, "display-message") {
+		t.Fatalf("shelve-current inspected or mutated before known thread\nlog:\n%s", log)
+	}
+
+	err = run([]string{"--config", filepath.Join(tmp, "workspaces.tsv"), "shelve-current", "cafein"})
+	if err == nil {
+		t.Fatal("shelve-current treated one workspace-looking arg as a thread, want error")
+	}
+	if !strings.Contains(err.Error(), "one non-thread argument requires AMUX_THREAD_ID") {
+		t.Fatalf("got error %q, want non-thread argument guidance", err)
+	}
+}
+
+func TestShelveMissingRowInsideTmuxGuidesUnpinnedLiveWindow(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("mac\ths-backup-mbp\t/tmp/hs\tT-hs\nmac\tagents-anywhere-runner\t/tmp/runner\tT-runner\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "%42" ]; then
+  case "$5" in
+    '#W') printf 'cafein-pr-119\n'; exit 0 ;;
+    '#{pane_current_path}') printf '/Users/zain/Code/GitHub/vibefromcafe/cafein.id\n'; exit 0 ;;
+  esac
+fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "fake-tmux-socket")
+	t.Setenv("TMUX_PANE", "%42")
+
+	err := run([]string{"--config", configPath, "shelve", "cafein"})
+	if err == nil {
+		t.Fatal("shelve succeeded for missing unpinned row, want guidance")
+	}
+	message := err.Error()
+	for _, want := range []string{
+		"no restore row for mac/cafein",
+		"Current tmux window \"cafein-pr-119\"",
+		"/Users/zain/Code/GitHub/vibefromcafe/cafein.id",
+		"shelve is row-based and will not archive a live unpinned window",
+		"amux shelve-current <thread-id-or-url>",
+		"amux pin-current <thread-id-or-url>",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("missing-row error missing %q\nerror: %s", want, message)
+		}
+	}
+	if strings.Contains(message, "park-current") {
+		t.Fatalf("missing-row guidance suggested park-current as shelving\nerror: %s", message)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if strings.Contains(log, "amp threads archive") || strings.Contains(log, "tmux kill-window") {
+		t.Fatalf("shelve archived or stopped despite missing row\nlog:\n%s", log)
+	}
+}
+
 func TestShelveByThreadArchivesPreservesConfigAndStopsUniqueVerifiedWindow(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")

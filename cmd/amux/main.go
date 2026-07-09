@@ -123,6 +123,8 @@ func (a app) run(args []string) error {
 		return a.park(opts, args)
 	case "park-current":
 		return a.parkCurrent(opts, args)
+	case "shelve-current":
+		return a.shelveCurrent(opts, args)
 	case "shelve":
 		return a.shelve(opts, args)
 	case "unshelve":
@@ -780,6 +782,112 @@ func (a app) shelve(opts options, args []string) error {
 	return nil
 }
 
+func (a app) shelveCurrent(opts options, args []string) error {
+	workspace, thread, err := parseShelveCurrentArgs(args)
+	if err != nil {
+		return err
+	}
+	if os.Getenv("TMUX") == "" {
+		return errors.New("current tmux window is unavailable: run inside tmux")
+	}
+
+	runner := tmux.Runner{DryRun: opts.dryRun}
+	target, err := runner.CurrentTarget()
+	if err != nil {
+		return fmt.Errorf("current tmux target is unavailable: %w", err)
+	}
+	window, err := runner.CurrentWindow()
+	if err != nil {
+		return fmt.Errorf("current tmux window is unavailable: %w", err)
+	}
+	workdir, err := runner.CurrentWorkdir()
+	if err != nil {
+		return fmt.Errorf("current tmux pane path is unavailable: %w", err)
+	}
+	row := config.Row{Workspace: workspace, Window: window, Workdir: workdir, Thread: thread}
+	if err := row.Validate(); err != nil {
+		return err
+	}
+	if err := ensureShelveCurrentDoesNotReplaceDifferentThread(opts.configPath, row); err != nil {
+		return err
+	}
+
+	archiveThread := canonicalThreadID(thread)
+	if opts.dryRun {
+		fmt.Fprintf(a.stdout, "Would pin current restore row %s/%s in %s\n", row.Workspace, row.Window, opts.configPath)
+		fmt.Fprintf(a.stdout, "Would archive Amp thread %s\n", archiveThread)
+		fmt.Fprintf(a.stdout, "Would stop current tmux window %s (%s)\n", row.Window, target)
+		return nil
+	}
+	replaced, err := config.Store(opts.configPath, row)
+	if err != nil {
+		return err
+	}
+	if replaced {
+		fmt.Fprintf(a.stdout, "Updated %s/%s in %s\n", row.Workspace, row.Window, opts.configPath)
+	} else {
+		fmt.Fprintf(a.stdout, "Pinned %s/%s in %s\n", row.Workspace, row.Window, opts.configPath)
+	}
+	if err := archiveAmpThread(archiveThread); err != nil {
+		return fmt.Errorf("archive Amp thread %s: %w", archiveThread, err)
+	}
+	fmt.Fprintf(a.stdout, "Shelved Amp thread %s\n", archiveThread)
+	fmt.Fprintf(a.stdout, "Restore config row %s/%s is preserved in %s\n", row.Workspace, row.Window, opts.configPath)
+	if err := runner.KillWindow(target); err != nil {
+		return fmt.Errorf("Amp thread %s was archived, but stop current tmux window %s (%s) failed: %w", archiveThread, row.Window, target, err)
+	}
+	fmt.Fprintf(a.stdout, "Stopped current tmux window %s (%s)\n", row.Window, target)
+	fmt.Fprintf(a.stdout, "Run amux unshelve %s %s, then %s to restore it.\n", row.Workspace, row.Window, shelveLaunchCommand(shelveTarget{row: row}))
+	return nil
+}
+
+func parseShelveCurrentArgs(args []string) (string, string, error) {
+	if len(args) > 2 {
+		return "", "", errors.New("usage: amux shelve-current [workspace] [thread-id-or-url]")
+	}
+	workspace := defaultWorkspace
+	thread := os.Getenv("AMUX_THREAD_ID")
+	if len(args) == 1 {
+		if looksLikeThreadIDOrURL(args[0]) {
+			thread = args[0]
+		} else if thread != "" {
+			workspace = args[0]
+		} else {
+			return "", "", errors.New("shelve-current with one non-thread argument requires AMUX_THREAD_ID; use amux shelve-current <thread-id-or-url> or amux shelve-current <workspace> <thread-id-or-url>")
+		}
+	} else if len(args) == 2 {
+		workspace = args[0]
+		thread = args[1]
+	}
+	if thread == "" {
+		return "", "", errors.New("shelve-current requires a thread id or URL; run amux shelve-current <thread-id-or-url> or set AMUX_THREAD_ID")
+	}
+	if err := config.ValidateField("workspace", workspace); err != nil {
+		return "", "", err
+	}
+	if err := config.ValidateField("thread", thread); err != nil {
+		return "", "", err
+	}
+	return workspace, thread, nil
+}
+
+func looksLikeThreadIDOrURL(value string) bool {
+	return strings.HasPrefix(canonicalThreadID(value), "T-") || strings.Contains(value, "ampcode.com/threads/")
+}
+
+func ensureShelveCurrentDoesNotReplaceDifferentThread(path string, row config.Row) error {
+	rows, err := config.LoadReadOnly(path)
+	if err != nil {
+		return err
+	}
+	for _, existing := range rows {
+		if existing.Workspace == row.Workspace && existing.Window == row.Window && canonicalThreadID(existing.Thread) != canonicalThreadID(row.Thread) {
+			return fmt.Errorf("restore row %s/%s already points at thread %s; refusing to shelve current thread %s without replacing it. Use amux pin-current %s %s %s %s if you intentionally want to repoint the row, then retry shelve", row.Workspace, row.Window, existing.Thread, row.Thread, row.Workspace, row.Thread, row.Window, row.Workdir)
+		}
+	}
+	return nil
+}
+
 func (a app) unshelve(opts options, args []string) error {
 	if opts.dryRun {
 		return errors.New("unshelve does not support --dry-run")
@@ -961,9 +1069,25 @@ func rowsForShelveSelection(path string, args shelveArgs) ([]config.Row, error) 
 	}
 	row, err := verifiedTeardownRow(path, identity)
 	if err != nil {
-		return nil, err
+		return nil, shelveSelectionError(err)
 	}
 	return []config.Row{row}, nil
+}
+
+func shelveSelectionError(err error) error {
+	if err == nil || !strings.Contains(err.Error(), "no restore row for ") {
+		return err
+	}
+	if os.Getenv("TMUX") == "" {
+		return err
+	}
+	runner := tmux.Runner{}
+	window, windowErr := runner.CurrentWindow()
+	workdir, workdirErr := runner.CurrentWorkdir()
+	if windowErr != nil || workdirErr != nil {
+		return fmt.Errorf("%w. Shelve is row-based and will not archive a live unpinned window; run amux pin-current <thread-id-or-url> first, or run amux shelve-current <thread-id-or-url> from the target tmux pane", err)
+	}
+	return fmt.Errorf("%w. Current tmux window %q at %q is not pinned in restore config; shelve is row-based and will not archive a live unpinned window. Run amux shelve-current <thread-id-or-url> to pin, archive, and stop the current window, or run amux pin-current <thread-id-or-url> before shelving by row", err, window, workdir)
 }
 
 func shelvePositionalArgs(args []string) []string {
@@ -2759,6 +2883,15 @@ Commands:
       Side effects: mutates live local tmux/Amp only. Restore config rows are
       preserved; use unpin-current for config-only cleanup or teardown for full cleanup.
       Amp thread history is not archived or deleted.
+
+  shelve-current [workspace] [thread-id-or-url]
+      From inside the target tmux/Amp pane, pin the current window/path if needed,
+      archive the identified Amp thread so it leaves the Amp sidebar, preserve
+      the restore row, and stop the current tmux window. The thread argument may
+      be omitted only when AMUX_THREAD_ID is set. This is shelving; park-current
+      is local-only and never archives remote Amp thread state.
+      Side effects: may add/update one restore-config row, archives one remote
+      Amp thread, and stops the current live local tmux/Amp window.
 
   shelve [workspace] <window> [session]
   shelve --thread <thread-id-or-url> [--session <session>]

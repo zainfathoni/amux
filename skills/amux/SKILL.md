@@ -38,6 +38,7 @@ amux unpin mac <window>
 amux unpin-current [workspace]
 amux park [workspace] <window>
 amux park-current [workspace]
+amux shelve-current [workspace] [thread-id-or-url]
 amux shelve [workspace] <window> [session]
 amux shelve --thread <thread-id-or-url> [--session <session>]
 amux shelve --workspace <workspace> [--session <session>]
@@ -78,6 +79,7 @@ Launch auto-attaches by default only when the tmux session already existed, no r
 - `pin` and `pin-current` (`store` and `store-current` aliases): mutate restore config only.
 - `unpin` and `unpin-current` (`remove` and `remove-current` aliases): mutate restore config only; they do not stop local tmux/Amp windows and do not archive remote Amp threads.
 - `park` and `park-current`: stop only the resolved live local tmux/Amp window after a delay; they preserve restore config rows and do not archive or delete the remote Amp thread.
+- `shelve-current`: from the target tmux pane, pin or preserve the current window/path row, archive the identified current Amp thread, and stop the current local tmux/Amp window. It requires a supplied thread ID/URL unless `AMUX_THREAD_ID` is set.
 - `shelve`: archives selected remote Amp thread(s), preserves restore config rows, and stops only verified matching live local tmux/Amp windows.
 - `unshelve`: unarchives selected remote Amp thread(s) only; it preserves restore config rows and does not start tmux windows.
 - `spawn`: creates a remote Amp thread, creates/selects a live local tmux window, submits the initial message, injects `AMUX_WORKSPACE`, `AMUX_SESSION`, `AMUX_WINDOW`, `AMUX_THREAD_ID`, and `AMUX_WORKDIR`, and stores the restore row.
@@ -95,7 +97,7 @@ These phrases are user-level shorthand and should work from any project when thi
 - **Park it**: gracefully stop the current local tmux/Amp window/process while keeping its restore config row. This does not archive or delete the remote Amp thread, and it does not prevent future restore. `amux park-current` schedules a delayed interrupt/EOF for the target pane, returns so the agent can send its final response, then force-closes the tmux window only if the graceful stop times out. Use `unpin-current` for config-only cleanup, or `teardown` for archive+unpin+stop cleanup.
 - **Pin it**: pin the current tmux window in amux restore config. Ask for the thread ID/URL if it is not available in context.
 - **Unpin it** / **forget this on restore**: remove only the current restore-config row with `amux unpin-current`; do not stop tmux and do not archive the Amp thread.
-- **Shelve this** / **defer this workspace** / **hide it for now**: use `amux shelve`. Prefer `amux shelve --thread <thread-id-or-url>` for a single known thread, `amux shelve <workspace> <window> [session]` for a named row, and `amux shelve --workspace <workspace> [--session <session>]` for all rows in a workspace. This archives/hides the remote thread(s), preserves restore rows, and stops verified local windows. Future resume is explicit: `amux unshelve ...`, then `amux launch ...`.
+- **Shelve this** / **defer this workspace** / **hide it for now**: when acting from the pane to defer, use `amux shelve-current [workspace] <thread-id-or-url>` (or omit the thread only if `AMUX_THREAD_ID` is set). It pins/preserves the current row, archives/hides the identified remote thread, and stops the current tmux window. For already-pinned work, use `amux shelve --thread <thread-id-or-url>` for a single known thread, `amux shelve <workspace> <window> [session]` for a named row, or `amux shelve --workspace <workspace> [--session <session>]` for all rows in a workspace. If `shelve` reports no restore row for a live window, do not use `park-current` as a substitute; use `shelve-current` or `pin-current` with the thread ID. Future resume is explicit: `amux unshelve ...`, then `amux launch ...`.
 - **Show shelved work** / **list deferred work**: use `amux shelved [workspace]` or `amux list --shelved [workspace]`; use `amux list --active [workspace]` to show only launchable rows.
 - **Unshelve this** / **resume deferred work**: use `amux unshelve` with the same target shape as `shelve`, then `amux launch <workspace> [session]` if live tmux windows should be restored. Do not rely on `launch` alone to unarchive shelved threads.
 - **Teardown this worker** / **archive and clean this up**: use `amux teardown` only when the user explicitly wants full cleanup of the verified worker/thread. This archives the remote Amp thread, removes the row, and stops the local tmux window.
