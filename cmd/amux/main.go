@@ -151,15 +151,7 @@ func (a app) run(args []string) error {
 		if len(args) > 2 {
 			return errors.New("usage: amux doctor [workspace] [session]")
 		}
-		workspace := defaultWorkspace
-		session := defaultSession
-		if len(args) == 1 {
-			workspace = args[0]
-		}
-		if len(args) == 2 {
-			workspace = args[0]
-			session = args[1]
-		}
+		workspace, session := workspaceSessionFromArgs(args)
 		return a.doctor(opts, workspace, session)
 	case "help", "--help", "-h":
 		a.usage()
@@ -209,14 +201,7 @@ func launch(opts options, args []string) error {
 	if len(args) > 2 {
 		return errors.New("usage: amux launch [workspace] [session]")
 	}
-	workspace := defaultWorkspace
-	session := defaultSession
-	if len(args) >= 1 {
-		workspace = args[0]
-	}
-	if len(args) == 2 {
-		session = args[1]
-	}
+	workspace, session := workspaceSessionFromArgs(args)
 
 	rows, err := rowsForWorkspace(opts.configPath, workspace)
 	if err != nil {
@@ -283,6 +268,19 @@ func launch(opts options, args []string) error {
 		return err
 	}
 	return runner.SelectAndAttach(session, !shouldAttach)
+}
+
+func workspaceSessionFromArgs(args []string) (string, string) {
+	workspace := defaultWorkspace
+	session := defaultSession
+	if len(args) >= 1 {
+		workspace = args[0]
+		session = args[0]
+	}
+	if len(args) == 2 {
+		session = args[1]
+	}
+	return workspace, session
 }
 
 func shouldAttachAfterLaunch(opts options, runner tmux.Runner, session string, sessionExistedBeforeLaunch, restoredDuringLaunch bool, rows []config.Row) (bool, error) {
@@ -428,14 +426,7 @@ func (a app) runnerLaunch(opts options, args []string) error {
 	if len(args) > 2 {
 		return errors.New("usage: amux runner launch [workspace] [session]")
 	}
-	workspace := defaultWorkspace
-	session := defaultSession
-	if len(args) >= 1 {
-		workspace = args[0]
-	}
-	if len(args) == 2 {
-		session = args[1]
-	}
+	workspace, session := workspaceSessionFromArgs(args)
 	rows, err := runnerRowsForWorkspace(config.RunnerPath(opts.configPath), workspace)
 	if err != nil {
 		return err
@@ -712,7 +703,7 @@ func (a app) shelve(opts options, args []string) error {
 		} else {
 			fmt.Fprintf(a.stdout, "No live tmux window for %s/%s found to stop\n", target.row.Workspace, target.row.Window)
 		}
-		fmt.Fprintf(a.stdout, "Run amux unshelve %s %s, then amux launch %s %s to restore it.\n", target.row.Workspace, target.row.Window, target.row.Workspace, launchSessionForShelveTarget(target))
+		fmt.Fprintf(a.stdout, "Run amux unshelve %s %s, then %s to restore it.\n", target.row.Workspace, target.row.Window, shelveLaunchCommand(target))
 	}
 	return nil
 }
@@ -825,6 +816,14 @@ func parseShelveArgs(args []string) (shelveArgs, error) {
 	if (parsed.thread != "" || parsed.workspace != "") && len(parsed.positional) != 0 {
 		return parsed, errors.New("usage: amux shelve [workspace] <window> [session] OR amux shelve --thread <thread-id-or-url> [--session <session>] OR amux shelve --workspace <workspace> [--session <session>]")
 	}
+	if parsed.thread == "" && parsed.workspace == "" {
+		switch len(parsed.positional) {
+		case 2:
+			parsed.session = parsed.positional[0]
+		case 3:
+			parsed.session = parsed.positional[2]
+		}
+	}
 	if parsed.thread != "" {
 		if err := config.ValidateField("thread", parsed.thread); err != nil {
 			return parsed, err
@@ -833,6 +832,9 @@ func parseShelveArgs(args []string) (shelveArgs, error) {
 	if parsed.workspace != "" {
 		if err := config.ValidateField("workspace", parsed.workspace); err != nil {
 			return parsed, err
+		}
+		if !parsed.sessionSet {
+			parsed.session = parsed.workspace
 		}
 	}
 	if parsed.session != "" {
@@ -894,7 +896,7 @@ func rowsForShelveSelection(path string, args shelveArgs) ([]config.Row, error) 
 
 func shelvePositionalArgs(args []string) []string {
 	if len(args) == 1 {
-		return []string{defaultWorkspace, args[0]}
+		return []string{defaultWorkspace, args[0], defaultSession}
 	}
 	return args
 }
@@ -969,11 +971,11 @@ func (a app) printShelvePlan(prefix, path string, target shelveTarget) {
 	}
 }
 
-func launchSessionForShelveTarget(target shelveTarget) string {
+func shelveLaunchCommand(target shelveTarget) string {
 	if target.identity.Session != "" {
-		return target.identity.Session
+		return fmt.Sprintf("amux launch %s %s", target.row.Workspace, target.identity.Session)
 	}
-	return defaultSession
+	return fmt.Sprintf("amux launch %s", target.row.Workspace)
 }
 
 func parkShutdownScript(target string, delay, grace time.Duration) string {
@@ -1128,14 +1130,7 @@ func (a app) spawn(opts options, args []string) error {
 	window := args[0]
 	workdir := args[1]
 	initialMessage := args[2]
-	workspace := defaultWorkspace
-	session := defaultSession
-	if len(args) >= 4 {
-		workspace = args[3]
-	}
-	if len(args) == 5 {
-		session = args[4]
-	}
+	workspace, session := workspaceSessionFromArgs(args[3:])
 
 	if err := config.ValidateField("workspace", workspace); err != nil {
 		return err
@@ -1806,7 +1801,7 @@ func teardownIdentityFromArgs(args []string) (teardownIdentity, error) {
 	identity := teardownIdentity{
 		Workspace: args[0],
 		Window:    args[1],
-		Session:   defaultSession,
+		Session:   args[0],
 	}
 	if len(args) == 3 {
 		identity.Session = args[2]
@@ -2636,7 +2631,8 @@ func (a app) usage() {
 
 Commands:
   launch [workspace] [session]
-      Launch or attach a tmux session. Defaults: workspace=mac session=Amp.
+      Launch or attach a tmux session. With one workspace arg, session defaults
+      to the workspace name; with no args, defaults remain workspace=mac session=Amp.
       Cold launches do not attach; existing config-matching sessions attach.
       Side effects: reads restore config, may create live local tmux/Amp
       windows for unshelved rows, and skips archived/shelved rows. It does not
@@ -2693,7 +2689,9 @@ Commands:
       exists, verify its start command matches the stored thread before stopping
       it. With --thread, resolve one stored row by thread ID/URL and search all
       tmux sessions unless --session is provided. With --workspace, shelve every
-      row in that workspace using session=Amp unless --session is provided.
+      row in that workspace using the workspace-named session unless --session
+      is provided. With one positional window and no workspace, defaults remain
+      workspace=mac session=Amp.
       Side effects: archives remote Amp thread(s), may stop verified live local
       tmux/Amp windows, and does not remove restore-config rows.
 
@@ -2707,6 +2705,8 @@ Commands:
   spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] <window> <workdir> <initial-message> [workspace] [session]
       Create an empty Amp thread, open it in an interactive tmux window,
       submit the initial message with tmux send-keys, and store the row.
+      With one workspace arg, session defaults to the workspace name; with no
+      workspace arg, defaults remain workspace=mac session=Amp.
       The spawned Amp process receives AMUX_WORKSPACE, AMUX_SESSION,
       AMUX_WINDOW, AMUX_THREAD_ID, and AMUX_WORKDIR identity variables.
       Use --mode or -m to create the remote Amp thread with an Amp mode.
@@ -2727,7 +2727,8 @@ Commands:
       archive the matching Amp thread, remove the restore row, and stop the
       matched tmux window. With explicit workspace/window, verify the restore
       row and live tmux window start command agree on the same thread before
-      archiving/removing/stopping. With --thread, resolve the stored row and
+      archiving/removing/stopping; session defaults to the workspace name unless
+      passed explicitly. With --thread, resolve the stored row and
       verified live tmux window by thread id or Amp thread URL; pass --session
       when more than one tmux session could contain the window. Refuses to run
       if identity or tmux/config state is ambiguous.
@@ -2763,7 +2764,8 @@ Commands:
 
   runner launch [workspace] [session]
       Start configured local amp --no-tui runners inside tmux windows. Refuses
-      to reuse an existing live window with the same name. Defaults:
+      to reuse an existing live window with the same name. With one workspace
+      arg, session defaults to the workspace name; with no args, defaults remain
       workspace=mac session=Amp.
       Side effects: reads runner config and may create live local tmux/Amp
       runner windows; it does not create, continue, archive, or list Amp threads.
@@ -2780,9 +2782,10 @@ Commands:
   doctor [workspace] [session]
       Check dependencies, config readability, configured workdirs, and drift
       between the selected workspace and tmux session. Also reports restore
-      Amp thread archive state and missing thread rows, plus runner
-      registry drift when runners.tsv is present. Defaults: workspace=mac
-      session=Amp.
+      Amp thread archive state and missing thread rows, plus runner registry
+      drift when runners.tsv is present. With one workspace arg, session
+      defaults to the workspace name; with no args, defaults remain
+      workspace=mac session=Amp.
       Side effects: none; inspects restore config, live local tmux, and remote
       Amp thread state.
 

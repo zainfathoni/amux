@@ -458,6 +458,85 @@ exit 2
 	}
 }
 
+func TestLaunchWorkspaceDefaultsSessionToWorkspace(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("amux\tone\t"+workdir+"\tT-one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "calls.log")
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+if [ "$1" = threads ] && [ "$2" = list ]; then printf '[{"id":"T-one"}]\n'; exit 0; fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then exit 1; fi
+if [ "$1" = new-session ]; then exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "")
+
+	if err := runWithDiscardedStdout([]string{"--config", configPath, "launch", "amux"}); err != nil {
+		t.Fatal(err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if !strings.Contains(log, "has-session -t amux") || !strings.Contains(log, "new-session -d -s amux -n one") {
+		t.Fatalf("launch did not use workspace name as default session\nlog:\n%s", log)
+	}
+	if strings.Contains(log, "-s Amp") || strings.Contains(log, "-t Amp") {
+		t.Fatalf("launch used legacy default session despite explicit workspace\nlog:\n%s", log)
+	}
+}
+
+func TestLaunchNoArgsKeepsMacAmpDefaults(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("mac\tone\t"+workdir+"\tT-one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "calls.log")
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+if [ "$1" = threads ] && [ "$2" = list ]; then printf '[{"id":"T-one"}]\n'; exit 0; fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then exit 1; fi
+if [ "$1" = new-session ]; then exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "")
+
+	if err := runWithDiscardedStdout([]string{"--config", configPath, "launch"}); err != nil {
+		t.Fatal(err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if !strings.Contains(log, "has-session -t Amp") || !strings.Contains(log, "new-session -d -s Amp -n one") {
+		t.Fatalf("no-arg launch did not keep mac/Amp defaults\nlog:\n%s", log)
+	}
+}
+
 func TestLaunchAutoAttachesToExistingMatchingSession(t *testing.T) {
 	tmp := t.TempDir()
 	workdir := filepath.Join(tmp, "workdir")
@@ -1866,6 +1945,38 @@ exit 2
 	}
 }
 
+func TestSpawnDryRunWorkspaceDefaultsSessionToWorkspace(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nexit 2\n")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then
+  exit 1
+fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "--dry-run", "spawn", "dry", workdir, "hello", "amux"}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{
+		"Would create Amp thread for amux/dry",
+		"Would create tmux session \"amux\" with window \"dry\"",
+		"Would store amux/dry in " + configPath,
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("dry-run output missing %q\nstdout:\n%s", want, stdout.String())
+		}
+	}
+}
+
 func TestSpawnDryRunShortModeFlagPrintsMode(t *testing.T) {
 	tmp := t.TempDir()
 	workdir := filepath.Join(tmp, "workdir")
@@ -2636,7 +2747,7 @@ exit 2
 		"Shelved Amp thread T-rush",
 		"Shelved Amp thread T-notes",
 		"Restore config row tycho/rush is preserved",
-		"No live tmux window Amp/notes found to stop",
+		"No live tmux window tycho/notes found to stop",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("shelve output missing %q\nstdout:\n%s", want, stdout.String())
@@ -2709,6 +2820,48 @@ exit 2
 	}
 }
 
+func TestShelveByThreadWithoutLivePaneSuggestsWorkspaceDefaultLaunch(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("amux\tworker\t/tmp/project\tT-worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = archive ] && [ "$3" = T-worker ]; then
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "shelve", "--thread", "T-worker"}); err != nil {
+		t.Fatal(err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "No live tmux window for amux/worker found to stop") {
+		t.Fatalf("thread shelve output missing no-live-window message\nstdout:\n%s", out)
+	}
+	if !strings.Contains(out, "Run amux unshelve amux worker, then amux launch amux to restore it.") {
+		t.Fatalf("thread shelve output did not use workspace default launch hint\nstdout:\n%s", out)
+	}
+	if strings.Contains(out, "amux launch amux Amp") {
+		t.Fatalf("thread shelve output suggested legacy Amp session\nstdout:\n%s", out)
+	}
+}
+
 func TestShelveArchivesWhenConfiguredSessionIsNotLive(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
@@ -2755,7 +2908,7 @@ exit 2
 	if strings.Contains(log, "kill-window") {
 		t.Fatalf("shelve tried to kill an absent window\nlog:\n%s", log)
 	}
-	if !strings.Contains(stdout.String(), "No live tmux window Amp/old found to stop") {
+	if !strings.Contains(stdout.String(), "No live tmux window mac/old found to stop") {
 		t.Fatalf("shelve output did not report absent live window\nstdout:\n%s", stdout.String())
 	}
 }
@@ -2837,7 +2990,7 @@ exit 2
 	}
 	for _, want := range []string{
 		"Would archive Amp thread T-old",
-		"No live tmux window Amp/old found to stop",
+		"No live tmux window mac/old found to stop",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("dry-run shelve output missing %q\nstdout:\n%s", want, stdout.String())
@@ -4347,6 +4500,48 @@ exit 0
 	}
 }
 
+func TestDoctorWorkspaceDefaultsSessionToWorkspace(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("amux\tworker\t"+workdir+"\tT-thread\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "tmux.log")
+	writeAmpListExecutable(t, filepath.Join(tmp, "amp"), []string{"T-thread"}, []string{"T-thread"})
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ]; then
+  if [ "$4" = amux ]; then
+    printf 'worker\t`+workdir+`\n'
+    exit 0
+  fi
+  printf 'other\t/tmp\n'
+  exit 0
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := runWithDiscardedStdout([]string{"--config", configPath, "doctor", "amux"}); err != nil {
+		t.Fatal(err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if !strings.Contains(log, "tmux list-panes -s -t amux") {
+		t.Fatalf("doctor did not inspect workspace-named session\nlog:\n%s", log)
+	}
+	if strings.Contains(log, "tmux list-panes -s -t Amp") {
+		t.Fatalf("doctor inspected legacy default session despite explicit workspace\nlog:\n%s", log)
+	}
+}
+
 func TestRunnerPinListUnpinUsesSeparateRegistry(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
@@ -4438,6 +4633,42 @@ exit 0
 	}
 	if !strings.Contains(err.Error(), "refusing to reuse an ambiguous live process") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunnerLaunchWorkspaceDefaultsSessionToWorkspace(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	workdir := filepath.Join(tmp, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte("amux\tamux-runner\t"+workdir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "tmux.log")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then
+  exit 1
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := runWithDiscardedStdout([]string{"--config", configPath, "runner", "launch", "amux"}); err != nil {
+		t.Fatal(err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if !strings.Contains(log, "tmux new-session -d -s amux -n amux-runner") {
+		t.Fatalf("runner launch did not use workspace name as default session\nlog:\n%s", log)
+	}
+	if strings.Contains(log, "-s Amp") || strings.Contains(log, "-t Amp") {
+		t.Fatalf("runner launch used legacy default session despite explicit workspace\nlog:\n%s", log)
 	}
 }
 
