@@ -577,7 +577,7 @@ OK live tmux session matches config</code></pre>
               </div>
               <div class="feature">
                 <dt>Shelve deferred work</dt>
-                <dd><code>shelve</code> archives one thread, one restore row, or a whole workspace so deferred work leaves the Amp sidebar while its restore rows stay available for explicit <code>unshelve</code> later.</dd>
+                <dd><code>shelve</code> archives one thread, one restore row, or a whole workspace so deferred work leaves the Amp sidebar while its restore rows stay available for explicit <code>unshelve</code> later. <code>amux list</code> appends a status column, and <code>amux shelved [workspace]</code> shows only deferred rows.</dd>
               </div>
               <div class="feature">
                 <dt>Inspect drift</dt>
@@ -624,6 +624,9 @@ OK live tmux session matches config</code></pre>
               <p>
                 <code>amux</code> names four side-effect domains explicitly: restore-config rows, runner-config rows, live local tmux/Amp sessions, and remote Amp thread state. Pin/unpin commands only change the restore config (<code>store</code>/<code>remove</code> remain compatibility aliases); <code>runner pin</code>/<code>runner unpin</code> only change runner config; <code>park</code> and <code>runner park</code> only stop resolved live local windows while preserving config; <code>shelve</code> archives/hides deferred Amp threads while preserving restore rows; <code>teardown</code> is the explicit full cleanup that archives the verified thread, removes its row, and stops its verified local window.
               </p>
+              <p>
+                <code>amux list [workspace]</code> keeps the restore TSV fields first and appends <code>status</code>: <code>active</code>, <code>shelved</code>, <code>missing</code>, or <code>unknown</code> when Amp status cannot be read. Use <code>amux list --active</code>, <code>amux list --shelved</code>, or the <code>amux shelved</code> shortcut to focus the view.
+              </p>
             </div>
             <div class="panel">
               <h3>Config format</h3>
@@ -651,7 +654,7 @@ mac         project-runner     ~/Code/my-project</code></pre>
                 </div>
                 <div class="step">
                   <span class="step-number">4</span>
-                  <span class="step-copy"><strong>Verify</strong><span>Run <code>amux doctor [workspace] [session]</code> when live tmux state and config may have drifted.</span></span>
+                  <span class="step-copy"><strong>Verify</strong><span>Run <code>amux list --active [workspace]</code>, <code>amux shelved [workspace]</code>, or <code>amux doctor [workspace] [session]</code> when live tmux state and config may have drifted.</span></span>
                 </div>
                 <div class="step">
                   <span class="step-number">5</span>

@@ -150,7 +150,8 @@ amux launch [workspace] [session] # one workspace arg also selects the same-name
 amux --attach launch mac Amp
 amux --no-attach launch mac Amp
 amux launch mac --dry-run
-amux list [workspace]
+amux list [--active|--shelved] [workspace]
+amux shelved [workspace]
 amux pin <workspace> <window> <workdir> <thread-id-or-url>
 amux pin-current <thread-id-or-url>
 amux pin-current <workspace> <thread-id-or-url> [window] [workdir]
@@ -187,6 +188,8 @@ Compatibility aliases remain available: `store` for `pin`, `store-current` for `
 
 `amux spawn` injects a stable identity contract into the spawned Amp process: `AMUX_WORKSPACE`, `AMUX_SESSION`, `AMUX_WINDOW`, `AMUX_THREAD_ID`, and `AMUX_WORKDIR`. From that spawned process, no-arg `amux teardown` verifies the `AMUX_WORKSPACE`/`AMUX_SESSION`/`AMUX_WINDOW`/`AMUX_THREAD_ID` identity against the restore config and live tmux window, archives the matching Amp thread, removes the restore row, and stops the uniquely matched tmux window. If the identity, config row, or tmux window is missing, mismatched, or ambiguous, teardown refuses to archive or stop anything.
 
+`amux list [workspace]` prints restore rows with a trailing `status` column. Status is `active` when the thread is in Amp's active list, `shelved` when it is archived remotely but preserved in `workspaces.tsv`, `missing` when Amp confirms it is in neither active nor archived lists, and `unknown` when Amp thread status cannot be read. The original four columns remain in order, with `status` appended for compatibility with existing TSV readers that ignore extra columns. Use `amux list --active [workspace]` for only confirmed active rows, `amux list --shelved [workspace]` or `amux shelved [workspace]` for only confirmed shelved rows. Filtered listing fails closed if Amp status is unavailable instead of guessing.
+
 `amux` keeps four side-effect domains separate:
 
 - **Restore config**: rows in `workspaces.tsv` that describe what should be restored later.
@@ -199,7 +202,8 @@ Command side effects:
 | Command | Restore config | Runner config | Live local tmux/Amp | Remote Amp thread state |
 | --- | --- | --- | --- | --- |
 | `launch` | Read only | No change | Creates missing thread tmux windows/processes for unshelved rows only | Inspect archive state and continue active threads; skips shelved/archived rows |
-| `list`, `path`, `version` | Read only | No change | Inspect only | No change |
+| `list` / `shelved` | Read only | No change | Inspect only | Inspect only; unfiltered rows show `unknown` if status cannot be read |
+| `path`, `version` | Read only | No change | Inspect only | No change |
 | `doctor` | Read only | Read only | Inspect only | Inspect only |
 | `pin`, `pin-current` (`store`, `store-current`) | Add or replace rows | No change | No change | No change |
 | `unpin`, `unpin-current` (`remove`, `remove-current`) | Remove rows | No change | No change | No change |
@@ -298,6 +302,7 @@ Pin it                 -> amux pin-current <thread-id-or-url>
 Unpin it               -> amux unpin-current
 Park it                -> amux park-current
 Shelve this            -> amux shelve <workspace> <window> / --thread / --workspace
+Show shelved work      -> amux shelved [workspace] / amux list --shelved [workspace]
 Unshelve this          -> amux unshelve <workspace> <window> / --thread / --workspace
 Restore my workspace   -> amux launch
 Spawn a worker for ... -> amux spawn [--mode <mode>] [--title-prefix <prefix>] ...

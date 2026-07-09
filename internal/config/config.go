@@ -141,6 +141,18 @@ func Load(path string) ([]Row, error) {
 	return Parse(file)
 }
 
+func LoadReadOnly(path string) ([]Row, error) {
+	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return Parse(file)
+}
+
 func EnsureRunners(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
