@@ -853,7 +853,9 @@ func (a app) spawn(opts options, args []string) error {
 	if spawnOpts.mode != "" {
 		ampArgs = append(ampArgs, "--mode", spawnOpts.mode)
 	}
-	threadBytes, err := exec.Command("amp", ampArgs...).Output()
+	cmd := exec.Command("amp", ampArgs...)
+	cmd.Dir = expandedWorkdir
+	threadBytes, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("create Amp thread: %w", err)
 	}

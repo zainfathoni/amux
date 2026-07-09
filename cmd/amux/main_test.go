@@ -510,6 +510,7 @@ func TestSpawnCreatesInteractiveAmpWindowAndStoresThread(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
 if [ "$1" = threads ] && [ "$2" = new ]; then
+  printf 'amp threads new pwd=%s\n' "$(pwd)" >> "`+logPath+`"
   printf 'T-new-thread\n'
   exit 0
 fi
@@ -555,6 +556,7 @@ exit 2
 	}
 	log := string(logBytes)
 	for _, want := range []string{
+		"amp threads new pwd=" + workdir,
 		"new-session -d -P -F #{window_id} -s Amp -n new win cd '" + workdir + "' && AMUX_WORKSPACE='mac' AMUX_SESSION='Amp' AMUX_WINDOW='new win' AMUX_THREAD_ID='T-new-thread' AMUX_WORKDIR='" + workdir + "' exec amp threads continue 'T-new-thread'",
 		"send-keys -t @1 -l hello Amp",
 		"send-keys -t @1 Enter",
