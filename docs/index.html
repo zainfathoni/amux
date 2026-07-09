@@ -818,12 +818,9 @@ mac         project-runner     ~/Code/my-project</code></pre>
               </p>
             </div>
             <div class="terminal">
-              <pre><code><span class="prompt">$</span> curl -LO https://github.com/zainfathoni/amux/releases/latest/download/amux-linux-amd64.tar.gz
-<span class="prompt">$</span> curl -LO https://github.com/zainfathoni/amux/releases/latest/download/amux-linux-amd64.tar.gz.sha256
-<span class="prompt">$</span> sha256sum -c amux-linux-amd64.tar.gz.sha256
-<span class="prompt">$</span> tar -xzf amux-linux-amd64.tar.gz
-<span class="prompt">$</span> install -m 0755 amux-linux-amd64/amux ~/.local/bin/amux
-<span class="prompt">$</span> amux update --dry-run</code></pre>
+              <pre><code><span class="prompt">$</span> brew tap zainfathoni/amux https://github.com/zainfathoni/amux
+<span class="prompt">$</span> brew install zainfathoni/amux/amux
+<span class="prompt">$</span> brew upgrade amux</code></pre>
             </div>
           </div>
         </section>
