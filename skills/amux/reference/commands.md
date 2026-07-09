@@ -6,6 +6,7 @@ This is disclosed reference for [`../SKILL.md`](../SKILL.md). Load it when exact
 
 ```sh
 amux list [--status] [--active|--shelved] [workspace]
+amux workspaces [--include-runners]
 amux shelved [workspace]
 amux doctor [workspace] [session]
 amux launch [workspace] [session] [--dry-run]
@@ -69,6 +70,7 @@ No-arg `launch` and `doctor` still use the legacy workspace `mac` and tmux sessi
 ### list, shelved, and doctor
 
 - `amux list [workspace]` reads restore rows from local config only. It must stay instant and must not call Amp.
+- `amux workspaces` reads local restore config only and prints unique workspace names sorted one per line. It does not call Amp or tmux and does not create missing config files. Runner-only workspace names are excluded by default; use `--include-runners` only when runner inventory is explicitly relevant.
 - `amux list --status [workspace]` appends `status` after the original restore columns: `active`, `shelved`, `missing`, or `unknown` when Amp status cannot be read.
 - `amux list --active [workspace]` shows only confirmed launchable rows.
 - `amux list --shelved [workspace]` and `amux shelved [workspace]` show deferred rows. Filtered modes fail closed if Amp cannot confirm status.
@@ -160,7 +162,7 @@ If the row still appears in `amux list` and the thread still appears in Amp hist
 
 | Command | Restore config | Runner config | Live local tmux/Amp | Remote Amp thread state |
 | --- | --- | --- | --- | --- |
-| plain `list`, `path`, `version` | inspect only | none | none | none |
+| plain `list`, `workspaces`, `path`, `version` | inspect only | `workspaces --include-runners` inspects only | none | none |
 | `list --status`, `list --active`, `list --shelved`, `shelved`, `doctor` | inspect only | inspect where relevant | inspect only | inspect Amp archive/missing status only; no mutation |
 | `launch` | read | none | may create/attach windows | none; skips archived/shelved rows |
 | `pin`, `pin-current` | mutate rows | none | none | none |

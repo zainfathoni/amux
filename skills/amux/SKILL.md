@@ -23,6 +23,7 @@ Runner rows are not restore rows. Runner commands manage local `amp --no-tui` ru
 ## Always preserve these invariants
 
 - Plain `amux list [workspace]` is local-only and must stay instant; it does not call Amp.
+- `amux workspaces` is the local-only discovery step for all-workspace health checks. It lists restore workspace names only by default; use `--include-runners` only for machine inventory that should include runner-only workspace names.
 - `amux list --status`, `--active`, `--shelved`, and `amux shelved` inspect remote Amp archive state. Unfiltered `--status` may show `unknown`; filtered modes fail closed when Amp status cannot be confirmed.
 - `amux launch` skips archived/shelved rows. Deferred work resumes only after explicit `amux unshelve ...`, then `amux launch ...` if live tmux restoration is desired.
 - A single explicit workspace argument defaults the tmux session to that workspace: `amux launch amux`, `amux doctor amux`, `amux runner launch amux`, and `amux spawn ... amux` target workspace/session `amux`. Older shared-session layouts still pass an explicit session, e.g. `amux launch mac Amp`. No-arg legacy defaults may still use workspace `mac` and session `Amp`.
@@ -40,7 +41,7 @@ Runner rows are not restore rows. Runner commands manage local `amp --no-tui` ru
 - **Unshelve this** / **resume deferred work**: `amux unshelve ...`, then `amux launch <workspace> [session]` if tmux windows should be restored.
 - **Restore my workspace**: `amux launch` for legacy defaults, `amux launch <workspace>` for same-named session, or `amux launch <workspace> <session>` for shared-session layouts.
 - **Check amux** / **doctor amux**: `amux doctor`, `amux doctor <workspace>`, or `amux doctor <workspace> <session>` with the same session-defaulting rules.
-- **/amux health <workspace>** / **check worker responsiveness before replacement**: load [`reference/workflows.md`](reference/workflows.md), then run the skill-only health workflow. Inspect amux/tmux state, ping only verified Amp panes with unique `AMUX_HEALTH_CHECK` tokens, report classifications first, and do not replace anything.
+- **/amux health <workspace>** / **check worker responsiveness before replacement**: load [`reference/workflows.md`](reference/workflows.md), then run the skill-only health workflow. For all-workspace health checks, start with `amux workspaces`. Inspect amux/tmux state, ping only verified Amp panes with unique `AMUX_HEALTH_CHECK` tokens, report classifications first, and do not replace anything.
 - **Spawn a worker for ...**: load [`reference/workflows.md`](reference/workflows.md), then use `amux spawn ...` only for fresh interactive local Amp/tmux workers; prefer Amp-native Agents Anywhere for remote agent creation after a runner exists.
 - **Teardown this worker** / **archive and clean this up**: use `amux teardown` only when the user wants full verified worker cleanup.
 - **/amux sprawl #12 #34 ...**: skill-only orchestration around `gh`, `git worktree`, and `amux spawn`; inspect dependencies before creating branches, worktrees, tmux windows, restore rows, or remote threads.

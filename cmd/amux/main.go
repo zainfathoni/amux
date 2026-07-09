@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -110,7 +111,9 @@ func (a app) run(args []string) error {
 		return nil
 	}
 
-	if opts.configPath == "" {
+	if opts.configPath == "" && command == "workspaces" {
+		opts.configPath = config.DefaultPathReadOnly()
+	} else if opts.configPath == "" {
 		opts.configPath = config.DefaultPath()
 	}
 
@@ -119,6 +122,8 @@ func (a app) run(args []string) error {
 		return launch(opts, args)
 	case "list":
 		return a.list(opts, args)
+	case "workspaces":
+		return a.workspaces(opts, args)
 	case "shelved":
 		return a.list(opts, append([]string{"--shelved"}, args...))
 	case "pin", "store":
@@ -458,6 +463,44 @@ func listStatusLabel(status threadStatus) string {
 	default:
 		return "unknown"
 	}
+}
+
+func (a app) workspaces(opts options, args []string) error {
+	includeRunners := false
+	for _, arg := range args {
+		switch arg {
+		case "--include-runners":
+			includeRunners = true
+		default:
+			return errors.New("usage: amux workspaces [--include-runners]")
+		}
+	}
+	rows, err := config.LoadReadOnly(opts.configPath)
+	if err != nil {
+		return err
+	}
+	names := make(map[string]bool)
+	for _, row := range rows {
+		names[row.Workspace] = true
+	}
+	if includeRunners {
+		runnerRows, err := config.LoadRunnersReadOnly(config.RunnerPath(opts.configPath))
+		if err != nil {
+			return err
+		}
+		for _, row := range runnerRows {
+			names[row.Workspace] = true
+		}
+	}
+	sorted := make([]string, 0, len(names))
+	for name := range names {
+		sorted = append(sorted, name)
+	}
+	sort.Strings(sorted)
+	for _, name := range sorted {
+		fmt.Fprintln(a.stdout, name)
+	}
+	return nil
 }
 
 func (a app) runner(opts options, args []string) error {
@@ -3008,6 +3051,12 @@ Commands:
       --status shows unknown and filtered list fails closed.
       Side effects: none; status/filter modes inspect remote Amp thread state.
 
+  workspaces [--include-runners]
+      Print unique configured workspace names, sorted one per line. By default
+      this reads local restore config only and does not include runner-only
+      workspaces. Use --include-runners to also read runners.tsv.
+      Side effects: none; reads local config only and does not call Amp or tmux.
+
   shelved [workspace]
       Shortcut for list --shelved [workspace].
       Side effects: none; reads restore config and inspects remote Amp thread state.
@@ -3183,6 +3232,7 @@ Commands:
 Config default: %s
 Format: workspace<TAB>window<TAB>workdir<TAB>thread-id-or-url
 List output: workspace<TAB>window<TAB>workdir<TAB>thread-id-or-url
+Workspaces output: workspace, one per line, sorted
 Status list output: workspace<TAB>window<TAB>workdir<TAB>thread-id-or-url<TAB>status
 `, program, config.DefaultPath())
 }

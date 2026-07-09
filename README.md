@@ -233,6 +233,7 @@ amux teardown
 amux teardown --thread <thread-id-or-url> [--session <session>]
 amux teardown <workspace> <window> [session]
 amux prune-archived [workspace]
+amux workspaces [--include-runners]
 amux runner list [workspace]
 amux runner pin <workspace> <window> <workdir>
 amux runner unpin <workspace> <window>
@@ -257,6 +258,8 @@ The positional `amux spawn ... <initial-message>` remains intentionally single-l
 
 `amux list [workspace]` prints local restore rows only, without calling Amp, so it remains instant even with many remote threads. Use `amux list --status [workspace]` when you want a trailing `status` column: `active` when the thread is in Amp's active list, `shelved` when it is archived remotely but preserved in `workspaces.tsv`, `missing` when Amp confirms it is in neither active nor archived lists, and `unknown` when Amp thread status cannot be read. Use `amux list --active [workspace]` for only confirmed active rows, `amux list --shelved [workspace]` or `amux shelved [workspace]` for only confirmed shelved rows. Filtered listing fails closed if Amp status is unavailable instead of guessing.
 
+`amux workspaces` prints unique workspace names from `workspaces.tsv`, sorted one per line, without calling Amp or tmux and without creating missing config files. It intentionally excludes runner-only workspaces by default because interactive health checks target restore workspaces. Use `amux workspaces --include-runners` when machine-level inventory should also include workspace names that exist only in `runners.tsv`.
+
 `amux` keeps four side-effect domains separate:
 
 - **Restore config**: rows in `workspaces.tsv` that describe what should be restored later.
@@ -270,6 +273,7 @@ Command side effects:
 | --- | --- | --- | --- | --- |
 | `launch` | Read only | No change | Creates missing thread tmux windows/processes for unshelved rows only | Inspect archive state and continue active threads; skips shelved/archived rows |
 | `list` / `shelved` | Read only | No change | Inspect only | Plain `list` is local-only; `list --status`, filtered list, and `shelved` inspect remote thread status |
+| `workspaces` | Read only | Inspect only with `--include-runners` | No change | No change |
 | `path`, `version` | Read only | No change | Inspect only | No change |
 | `doctor` | Read only | Read only | Inspect only | Inspect only |
 | `pin`, `pin-current` (`store`, `store-current`) | Add or replace rows | No change | No change | No change |

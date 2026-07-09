@@ -18,6 +18,7 @@ type completionCommand struct {
 var completionCommands = []completionCommand{
 	{Name: "launch", Description: "Launch or attach a tmux session", Args: "[workspace] [session]"},
 	{Name: "list", Description: "Print configured restore rows", Flags: []string{"--status", "--active", "--shelved"}, Args: "[workspace]"},
+	{Name: "workspaces", Description: "Print configured workspace names", Flags: []string{"--include-runners"}},
 	{Name: "shelved", Description: "Shortcut for list --shelved", Args: "[workspace]"},
 	{Name: "pin", Description: "Add or replace one restore row", Args: "<workspace> <window> <workdir> <thread-id-or-url>"},
 	{Name: "store", Description: "Alias for pin", Args: "<workspace> <window> <workdir> <thread-id-or-url>"},
@@ -104,7 +105,7 @@ _amux_complete() {
         skip_next=1
         continue
         ;;
-      --config=*|--terminal-launcher=*|--mode=*|--title-prefix=*|--message-file=*|--thread=*|--workspace=*|--session=*|--dry-run|--attach|--no-attach|--status|--active|--shelved|--message-stdin|--help|-h|--version)
+      --config=*|--terminal-launcher=*|--mode=*|--title-prefix=*|--message-file=*|--thread=*|--workspace=*|--session=*|--dry-run|--attach|--no-attach|--status|--active|--shelved|--include-runners|--message-stdin|--help|-h|--version)
         continue
         ;;
     esac
@@ -126,6 +127,9 @@ _amux_complete() {
   case "$command" in
     list)
       COMPREPLY=( $(compgen -W "--status --active --shelved" -- "$cur") )
+      ;;
+    workspaces)
+      COMPREPLY=( $(compgen -W "--include-runners" -- "$cur") )
       ;;
     shelve)
       COMPREPLY=( $(compgen -W "--thread --workspace --session" -- "$cur") )
@@ -191,6 +195,9 @@ case $state in
     case $words[2] in
       list)
         _arguments '--status[append thread status]' '--active[only confirmed active rows]' '--shelved[only confirmed shelved rows]' '*:workspace:'
+        ;;
+      workspaces)
+        _arguments '--include-runners[include runner-only workspaces]'
         ;;
       shelve)
         _arguments '--thread[select by thread id or URL]:thread:' '--workspace[select all rows in workspace]:workspace:' '--session[tmux session]:session:' '*:arg:'
@@ -308,6 +315,8 @@ func flagDescription(flag string) string {
 		return "Read initial message from file"
 	case "--message-stdin":
 		return "Read initial message from stdin"
+	case "--include-runners":
+		return "Include runner-only workspaces"
 	case "--help", "-h":
 		return "Print help"
 	case "--version":
