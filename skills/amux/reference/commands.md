@@ -152,7 +152,8 @@ If the row still appears in `amux list` and the thread still appears in Amp hist
 
 | Command | Restore config | Runner config | Live local tmux/Amp | Remote Amp thread state |
 | --- | --- | --- | --- | --- |
-| `list`, `path`, `version`, plain `doctor` | inspect only | inspect where relevant | inspect only | none for plain `list`; status/filter modes inspect Amp archive state |
+| plain `list`, `path`, `version` | inspect only | none | none | none |
+| `list --status`, `list --active`, `list --shelved`, `shelved`, `doctor` | inspect only | inspect where relevant | inspect only | inspect Amp archive/missing status only; no mutation |
 | `launch` | read | none | may create/attach windows | none; skips archived/shelved rows |
 | `pin`, `pin-current` | mutate rows | none | none | none |
 | `unpin`, `unpin-current` | mutate rows | none | none | none |
