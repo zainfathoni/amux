@@ -103,6 +103,41 @@ amux update --dry-run
 
 The older `amux self-update` command remains available as a compatibility alias.
 
+## Shell completions
+
+`amux` can print static shell completions for bash, zsh, and fish. These cover
+commands, aliases, flags, runner subcommands, and common positional forms. They
+do not inspect tmux sessions, configured workspaces, or Amp threads.
+
+Install bash completions:
+
+```sh
+mkdir -p ~/.local/share/bash-completion/completions
+amux completion bash > ~/.local/share/bash-completion/completions/amux
+```
+
+Install zsh completions:
+
+```sh
+mkdir -p ~/.zfunc
+amux completion zsh > ~/.zfunc/_amux
+```
+
+Then ensure `~/.zfunc` is on your `fpath`, for example in `~/.zshrc`:
+
+```sh
+fpath=(~/.zfunc $fpath)
+autoload -Uz compinit
+compinit
+```
+
+Install fish completions:
+
+```fish
+mkdir -p ~/.config/fish/completions
+amux completion fish > ~/.config/fish/completions/amux.fish
+```
+
 ## Install from source
 
 Build and install the CLI from this repository:
@@ -203,6 +238,7 @@ amux runner pin <workspace> <window> <workdir>
 amux runner unpin <workspace> <window>
 amux runner launch [workspace] [session]
 amux runner park [workspace] <window>
+amux completion <bash|zsh|fish>
 amux version
 amux update
 amux path
