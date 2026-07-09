@@ -792,9 +792,9 @@ func (a app) shelveCurrent(opts options, args []string) error {
 	}
 
 	runner := tmux.Runner{DryRun: opts.dryRun}
-	target, err := runner.CurrentTarget()
+	windowID, err := runner.CurrentWindowID()
 	if err != nil {
-		return fmt.Errorf("current tmux target is unavailable: %w", err)
+		return fmt.Errorf("current tmux window id is unavailable: %w", err)
 	}
 	window, err := runner.CurrentWindow()
 	if err != nil {
@@ -808,35 +808,40 @@ func (a app) shelveCurrent(opts options, args []string) error {
 	if err := row.Validate(); err != nil {
 		return err
 	}
-	if err := ensureShelveCurrentDoesNotReplaceDifferentThread(opts.configPath, row); err != nil {
-		return err
-	}
-
-	archiveThread := canonicalThreadID(thread)
-	if opts.dryRun {
-		fmt.Fprintf(a.stdout, "Would pin current restore row %s/%s in %s\n", row.Workspace, row.Window, opts.configPath)
-		fmt.Fprintf(a.stdout, "Would archive Amp thread %s\n", archiveThread)
-		fmt.Fprintf(a.stdout, "Would stop current tmux window %s (%s)\n", row.Window, target)
-		return nil
-	}
-	replaced, err := config.Store(opts.configPath, row)
+	storedRow, rowExists, err := shelveCurrentStoredRow(opts.configPath, row)
 	if err != nil {
 		return err
 	}
-	if replaced {
-		fmt.Fprintf(a.stdout, "Updated %s/%s in %s\n", row.Workspace, row.Window, opts.configPath)
+	row = storedRow
+
+	archiveThread := canonicalThreadID(thread)
+	if opts.dryRun {
+		if rowExists {
+			fmt.Fprintf(a.stdout, "Would preserve existing restore row %s/%s in %s\n", row.Workspace, row.Window, opts.configPath)
+		} else {
+			fmt.Fprintf(a.stdout, "Would pin current restore row %s/%s in %s\n", row.Workspace, row.Window, opts.configPath)
+		}
+		fmt.Fprintf(a.stdout, "Would archive Amp thread %s\n", archiveThread)
+		fmt.Fprintf(a.stdout, "Would stop current tmux window %s (%s)\n", row.Window, windowID)
+		return nil
+	}
+	if rowExists {
+		fmt.Fprintf(a.stdout, "Restore config row %s/%s already exists in %s\n", row.Workspace, row.Window, opts.configPath)
 	} else {
+		if _, err := config.Store(opts.configPath, row); err != nil {
+			return err
+		}
 		fmt.Fprintf(a.stdout, "Pinned %s/%s in %s\n", row.Workspace, row.Window, opts.configPath)
 	}
 	if err := archiveAmpThread(archiveThread); err != nil {
-		return fmt.Errorf("archive Amp thread %s: %w", archiveThread, err)
+		return fmt.Errorf("archive Amp thread %s: %w; restore row %s/%s is preserved and current tmux window %s was not stopped", archiveThread, err, row.Workspace, row.Window, windowID)
 	}
 	fmt.Fprintf(a.stdout, "Shelved Amp thread %s\n", archiveThread)
 	fmt.Fprintf(a.stdout, "Restore config row %s/%s is preserved in %s\n", row.Workspace, row.Window, opts.configPath)
-	if err := runner.KillWindow(target); err != nil {
-		return fmt.Errorf("Amp thread %s was archived, but stop current tmux window %s (%s) failed: %w", archiveThread, row.Window, target, err)
+	if err := runner.KillWindow(windowID); err != nil {
+		return fmt.Errorf("Amp thread %s was archived, but stop current tmux window %s (%s) failed: %w", archiveThread, row.Window, windowID, err)
 	}
-	fmt.Fprintf(a.stdout, "Stopped current tmux window %s (%s)\n", row.Window, target)
+	fmt.Fprintf(a.stdout, "Stopped current tmux window %s (%s)\n", row.Window, windowID)
 	fmt.Fprintf(a.stdout, "Run amux unshelve %s %s, then %s to restore it.\n", row.Workspace, row.Window, shelveLaunchCommand(shelveTarget{row: row}))
 	return nil
 }
@@ -846,6 +851,9 @@ func parseShelveCurrentArgs(args []string) (string, string, error) {
 		return "", "", errors.New("usage: amux shelve-current [workspace] [thread-id-or-url]")
 	}
 	workspace := defaultWorkspace
+	if envWorkspace := os.Getenv("AMUX_WORKSPACE"); envWorkspace != "" {
+		workspace = envWorkspace
+	}
 	thread := os.Getenv("AMUX_THREAD_ID")
 	if len(args) == 1 {
 		if looksLikeThreadIDOrURL(args[0]) {
@@ -875,17 +883,21 @@ func looksLikeThreadIDOrURL(value string) bool {
 	return strings.HasPrefix(canonicalThreadID(value), "T-") || strings.Contains(value, "ampcode.com/threads/")
 }
 
-func ensureShelveCurrentDoesNotReplaceDifferentThread(path string, row config.Row) error {
+func shelveCurrentStoredRow(path string, row config.Row) (config.Row, bool, error) {
 	rows, err := config.LoadReadOnly(path)
 	if err != nil {
-		return err
+		return config.Row{}, false, err
 	}
 	for _, existing := range rows {
-		if existing.Workspace == row.Workspace && existing.Window == row.Window && canonicalThreadID(existing.Thread) != canonicalThreadID(row.Thread) {
-			return fmt.Errorf("restore row %s/%s already points at thread %s; refusing to shelve current thread %s without replacing it. Use amux pin-current %s %s %s %s if you intentionally want to repoint the row, then retry shelve", row.Workspace, row.Window, existing.Thread, row.Thread, row.Workspace, row.Thread, row.Window, row.Workdir)
+		if existing.Workspace != row.Workspace || existing.Window != row.Window {
+			continue
 		}
+		if canonicalThreadID(existing.Thread) != canonicalThreadID(row.Thread) {
+			return config.Row{}, false, fmt.Errorf("restore row %s/%s already points at thread %s; refusing to shelve current thread %s without replacing it. Use amux pin-current %s %s %s %s if you intentionally want to repoint the row, then retry shelve", row.Workspace, row.Window, existing.Thread, row.Thread, row.Workspace, row.Thread, row.Window, row.Workdir)
+		}
+		return existing, true, nil
 	}
-	return nil
+	return row, false, nil
 }
 
 func (a app) unshelve(opts options, args []string) error {
