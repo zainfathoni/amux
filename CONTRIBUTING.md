@@ -46,7 +46,7 @@ Use a temporary config while experimenting:
 
 ```sh
 tmp=$(mktemp -d)
-AMP_TMUX_WORKSPACES="$tmp/workspaces.tsv" amux list mac
+AMUX_WORKSPACES="$tmp/workspaces.tsv" amux list mac
 ```
 
 Prefer `--dry-run` before mutating tmux or workspace config:

@@ -5,7 +5,7 @@ description: "Manages Amp tmux workspace sessions with amux: restore/inspect/par
 
 # amux
 
-Manage `~/.config/amp-tmux/workspaces.tsv` and `~/.config/amp-tmux/runners.tsv` through `amux` instead of editing the TSV files manually.
+Manage `~/.config/amux/workspaces.tsv` and `~/.config/amux/runners.tsv` through `amux` instead of editing the TSV files manually. Legacy installs may still have `~/.config/amp-tmux`; use `amux migrate-config` to copy legacy files into the current directory without deleting the old files.
 
 Keep the four side-effect domains distinct:
 

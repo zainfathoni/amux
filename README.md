@@ -12,7 +12,7 @@ Website: [amux.zainf.dev](https://amux.zainf.dev)
 
 - default workspace: `mac`
 - default tmux session: `Amp`
-- default config path: `~/.config/amp-tmux/workspaces.tsv`
+- default config path: `~/.config/amux/workspaces.tsv`
 - fallback terminal launching is tuned for Omarchy/Alacritty environments
 
 If you already use Amp in tmux, the main workflow is ready to try. Start with `--dry-run`, keep the bundled `/amux` skill installed for agent operation, and file issues for rough edges.
@@ -108,8 +108,8 @@ Builds made through `make build` or `scripts/build-amux.sh` inject version metad
 Create a config file:
 
 ```sh
-mkdir -p ~/.config/amp-tmux
-cat > ~/.config/amp-tmux/workspaces.tsv <<'EOF'
+mkdir -p ~/.config/amux
+cat > ~/.config/amux/workspaces.tsv <<'EOF'
 # workspace	window	workdir	thread-id-or-url
 mac	my-project	~/Code/my-project	https://ampcode.com/threads/T-example
 EOF
@@ -227,10 +227,12 @@ Defaults:
 
 - workspace: `mac`
 - session: `Amp`
-- config: `~/.config/amp-tmux/workspaces.tsv`
-- runner config: `~/.config/amp-tmux/runners.tsv`
+- config: `~/.config/amux/workspaces.tsv`
+- runner config: `~/.config/amux/runners.tsv`
 
-Override the config path with either `--config <path>` or `AMP_TMUX_WORKSPACES`.
+Override the config path with either `--config <path>` or `AMUX_WORKSPACES`. The legacy `AMP_TMUX_WORKSPACES` variable remains supported for older installs and scripts.
+
+Older amux releases used `~/.config/amp-tmux`. Current amux uses `~/.config/amux` and automatically copies `workspaces.tsv`, `runners.tsv`, and future `shelves.tsv` from the legacy directory when the new files do not exist. The old directory is left in place for rollback and older binaries. Run `amux migrate-config` explicitly to perform the same copy and print the resolved path.
 
 The TSV format is:
 
