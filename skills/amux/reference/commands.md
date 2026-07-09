@@ -36,6 +36,7 @@ amux runner pin <workspace> <window> <workdir>
 amux runner unpin <workspace> <window>
 amux runner launch [workspace] [session]
 amux runner park [workspace] <window>
+amux update [--dry-run]
 ```
 
 Compatibility aliases: `store`/`store-current` for `pin`/`pin-current`, and `remove`/`remove-current` for `unpin`/`unpin-current`.
@@ -148,6 +149,13 @@ If the row still appears in `amux list` and the thread still appears in Amp hist
 - `runner park` stops only the resolved live local runner window.
 - Runner commands do not create, continue, archive, unarchive, or list remote Amp threads.
 
+### update
+
+- Use `update` for amux self-updates from a user-owned install path.
+- `update --dry-run` previews the release asset without replacing the binary.
+- `self-update` remains a compatibility alias for `update`.
+- Without `--dry-run`, `update` fetches latest GitHub release metadata and replaces the current amux binary after checksum verification.
+
 ## Side-effect matrix
 
 | Command | Restore config | Runner config | Live local tmux/Amp | Remote Amp thread state |
@@ -167,3 +175,4 @@ If the row still appears in `amux list` and the thread still appears in Amp hist
 | `runner pin`, `runner unpin` | none | mutate | none | none |
 | `runner launch` | none | read | may create runner windows | none |
 | `runner park` | none | preserve | stop verified runner window | none |
+| `update` (`self-update` alias) | none | none | replace current amux binary unless `--dry-run` | fetch latest GitHub release metadata; no Amp thread state |

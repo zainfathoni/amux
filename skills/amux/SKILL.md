@@ -46,7 +46,7 @@ Runner rows are not restore rows. Runner commands manage local `amp --no-tui` ru
 
 ## Load detailed reference only for the active branch
 
-- For exact CLI forms, session-defaulting examples, command semantics, and the side-effect matrix, read [`reference/commands.md`](reference/commands.md).
+- For exact CLI forms, session-defaulting examples, command semantics, self-update behavior, and the side-effect matrix, read [`reference/commands.md`](reference/commands.md).
 - For spawn, sprawl, teardown, finish, current-session, and explicit workspace procedures, read [`reference/workflows.md`](reference/workflows.md).
 - For stuck/misplaced worker replacement, verification commands, and mutation safety checks, read [`reference/troubleshooting.md`](reference/troubleshooting.md).
 

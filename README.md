@@ -70,14 +70,16 @@ it updates is shadowed by another install.
 Update a user-local release install with:
 
 ```sh
-amux self-update
+amux update
 ```
 
 Preview the update without replacing the binary:
 
 ```sh
-amux --dry-run self-update
+amux update --dry-run
 ```
+
+The older `amux self-update` command remains available as a compatibility alias.
 
 ## Install from source
 
@@ -177,12 +179,12 @@ amux runner unpin <workspace> <window>
 amux runner launch [workspace] [session]
 amux runner park [workspace] <window>
 amux version
-amux self-update
+amux update
 amux path
 amux doctor [workspace] [session]
 ```
 
-Compatibility aliases remain available: `store` for `pin`, `store-current` for `pin-current`, `remove` for `unpin`, and `remove-current` for `unpin-current`.
+Compatibility aliases remain available: `store` for `pin`, `store-current` for `pin-current`, `remove` for `unpin`, `remove-current` for `unpin-current`, and `self-update` for `update`.
 
 `amux spawn --mode <mode>` (or `-m <mode>`) creates the new Amp thread with the selected Amp mode. Omitting `--mode` preserves the default Amp thread behavior.
 

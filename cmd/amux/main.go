@@ -137,7 +137,7 @@ func (a app) run(args []string) error {
 		return a.pruneArchived(opts, args)
 	case "runner":
 		return a.runner(opts, args)
-	case "self-update":
+	case "update", "self-update":
 		return a.selfUpdate(opts, args)
 	case "version", "--version":
 		if len(args) != 0 {
@@ -3014,10 +3014,11 @@ Commands:
       Stop a live local runner tmux window while preserving runner config.
       Side effects: mutates live local tmux/Amp only; no remote Amp thread state.
 
-  self-update
+  update
       Download the latest GitHub release for this platform, verify its
       checksum, and replace the current binary. Refuses package-managed paths.
       With --dry-run, only print the planned update.
+      Compatibility alias: self-update.
 
   doctor [workspace] [session]
       Check dependencies, config readability, configured workdirs, and drift

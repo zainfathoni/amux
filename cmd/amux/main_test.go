@@ -340,6 +340,53 @@ func TestSelfUpdateDryRunPlansLatestReleaseAsset(t *testing.T) {
 	}
 }
 
+func TestUpdateAliasDryRunPlansLatestReleaseAsset(t *testing.T) {
+	tmp := t.TempDir()
+	exePath := filepath.Join(tmp, "amux")
+	if err := os.WriteFile(exePath, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	archiveName := fmt.Sprintf("amux-%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/latest" {
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+		}
+		fmt.Fprintf(w, `{"tag_name":"v9.9.9","assets":[{"name":%q,"browser_download_url":%q},{"name":%q,"browser_download_url":%q}]}`, archiveName, serverURL(r, "/archive"), archiveName+".sha256", serverURL(r, "/checksum"))
+	}))
+	defer server.Close()
+	withSelfUpdateTestState(t, exePath, server.URL+"/latest", server.Client())
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"update", "--dry-run"}); err != nil {
+		t.Fatal(err)
+	}
+
+	resolvedExePath, err := filepath.EvalSymlinks(exePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "Would update "+resolvedExePath+" to v9.9.9 using "+archiveName) {
+		t.Fatalf("unexpected dry-run output: %q", got)
+	}
+	contents, err := os.ReadFile(exePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "old binary" {
+		t.Fatalf("dry-run changed executable to %q", contents)
+	}
+}
+
+func TestUpdateAliasUsageUsesPreferredCommandName(t *testing.T) {
+	err := (app{}).run([]string{"update", "extra"})
+	if err == nil {
+		t.Fatal("update accepted extra argument, want usage error")
+	}
+	if got, want := err.Error(), "usage: amux update"; got != want {
+		t.Fatalf("got error %q, want %q", got, want)
+	}
+}
+
 func TestSelfUpdateDryRunWarnsWhenInstallIsShadowedOnPath(t *testing.T) {
 	tmp := t.TempDir()
 	installDir := filepath.Join(tmp, "install")
@@ -459,7 +506,7 @@ func TestSelfUpdateDryRunDoesNotRequireWritableInstallDirOrDownloadArchive(t *te
 	}
 }
 
-func TestSelfUpdateReplacesCurrentBinary(t *testing.T) {
+func TestUpdateAliasReplacesCurrentBinary(t *testing.T) {
 	tmp := t.TempDir()
 	exePath := filepath.Join(tmp, "amux")
 	if err := os.WriteFile(exePath, []byte("old binary"), 0o755); err != nil {
@@ -484,7 +531,7 @@ func TestSelfUpdateReplacesCurrentBinary(t *testing.T) {
 	withSelfUpdateTestState(t, exePath, server.URL+"/latest", server.Client())
 
 	var stdout bytes.Buffer
-	if err := (app{stdout: &stdout}).run([]string{"self-update"}); err != nil {
+	if err := (app{stdout: &stdout}).run([]string{"update"}); err != nil {
 		t.Fatal(err)
 	}
 
