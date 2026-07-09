@@ -1,6 +1,6 @@
 ---
 name: amux
-description: "Manages local Amp tmux workspace lifecycle with amux: restore, inspect, pin/unpin, park, shelve/unshelve, spawn interactive workers, runner lifecycle, and verified teardown. Use for local tmux/Amp restore orchestration and skill-only /amux sprawl; not for Amp-native Agents Anywhere remote creation except runner setup. Triggers: 'Pin it', 'Unpin it', 'forget this on restore', 'Park it', 'Restore my workspace', 'Spawn a worker for', 'Teardown this worker', 'Doctor amux', '/amux sprawl', '/amux finish'."
+description: "Manages local Amp tmux workspace lifecycle with amux: restore, inspect, pin/unpin, park, shelve/unshelve, spawn interactive workers, runner lifecycle, and verified teardown. Use for local tmux/Amp restore orchestration and skill-only /amux sprawl; not for Amp-native Agents Anywhere remote creation except runner setup. Triggers: 'Pin it', 'Unpin it', 'forget this on restore', 'Park it', 'Shelve this', 'defer this workspace', 'hide it for now', 'Restore my workspace', 'Spawn a worker for', 'Teardown this worker', 'Doctor amux', '/amux sprawl', '/amux finish'."
 ---
 
 # amux
