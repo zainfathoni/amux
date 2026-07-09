@@ -36,7 +36,7 @@ amux runner list [workspace]
 amux runner pin <workspace> <window> <workdir>
 amux runner unpin <workspace> <window>
 amux runner launch [workspace] [session]
-amux runner park [workspace] <window>
+amux runner park [workspace] <window> [session]
 amux update [--dry-run]
 ```
 
@@ -61,6 +61,7 @@ amux shelve mac worker Amp
 amux shelve --workspace mac --session Amp
 amux teardown mac worker Amp
 amux runner launch mac Amp
+amux runner park mac worker Amp
 ```
 
 No-arg `launch` and `doctor` still use the legacy workspace `mac` and tmux session `Amp` where that compatibility exists.
@@ -148,7 +149,7 @@ If the row still appears in `amux list` and the thread still appears in Amp hist
 - `runner pin` stores workspace/window/workdir intent in `runners.tsv`.
 - `runner unpin` removes runner config.
 - `runner launch` starts `amp --no-tui` in tmux from runner config.
-- `runner park` stops only the resolved live local runner window.
+- `runner park` stops only the verified live local runner window, using the workspace-named session unless a session is passed explicitly.
 - Runner commands do not create, continue, archive, unarchive, or list remote Amp threads.
 
 ### update

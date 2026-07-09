@@ -620,14 +620,9 @@ func (a app) runnerLaunch(opts options, args []string) error {
 }
 
 func (a app) runnerPark(opts options, args []string) error {
-	if len(args) < 1 || len(args) > 2 {
-		return errors.New("usage: amux runner park [workspace] <window>")
-	}
-	workspace := defaultWorkspace
-	window := args[0]
-	if len(args) == 2 {
-		workspace = args[0]
-		window = args[1]
+	workspace, window, session, err := parseRunnerParkArgs(args)
+	if err != nil {
+		return err
 	}
 	rows, err := runnerRowsForWorkspace(config.RunnerPath(opts.configPath), workspace)
 	if err != nil {
@@ -645,17 +640,62 @@ func (a app) runnerPark(opts options, args []string) error {
 	if !found {
 		return fmt.Errorf("no runner row for %s/%s in %s", workspace, window, config.RunnerPath(opts.configPath))
 	}
-	panes, err := tmux.Runner{DryRun: opts.dryRun}.WindowPanes(defaultSession, row.Window)
+	runner := tmux.Runner{DryRun: opts.dryRun}
+	panes, err := runner.WindowPanes(session, row.Window)
 	if err != nil {
 		return err
 	}
 	if len(panes) == 0 {
-		return fmt.Errorf("runner window %q is not running in tmux session %s", row.Window, defaultSession)
+		return fmt.Errorf("runner window %q is not running in tmux session %s", row.Window, session)
 	}
 	if len(panes) > 1 {
-		return fmt.Errorf("ambiguous runner window %q in tmux session %s", row.Window, defaultSession)
+		return fmt.Errorf("ambiguous runner window %q in tmux session %s: candidates %s; refusing runner park", row.Window, session, formatPaneCandidates(panes))
 	}
-	return a.schedulePark(tmux.Runner{DryRun: opts.dryRun}, defaultSession, row.Window, panes[0].WindowID, workspace)
+	if panes[0].WindowID == "" {
+		return fmt.Errorf("runner window %q in tmux session %q has no window id", row.Window, session)
+	}
+	if err := verifyRunnerParkPane(row, panes[0]); err != nil {
+		return err
+	}
+	return a.schedulePark(runner, session, row.Window, panes[0].WindowID, workspace)
+}
+
+func parseRunnerParkArgs(args []string) (workspace, window, session string, err error) {
+	switch len(args) {
+	case 1:
+		workspace = defaultWorkspace
+		window = args[0]
+		session = defaultSession
+	case 2:
+		workspace = args[0]
+		window = args[1]
+		session = workspace
+	case 3:
+		workspace = args[0]
+		window = args[1]
+		session = args[2]
+	default:
+		return "", "", "", errors.New("usage: amux runner park [workspace] <window> [session]")
+	}
+	if err := config.ValidateField("workspace", workspace); err != nil {
+		return "", "", "", err
+	}
+	if err := config.ValidateField("window", window); err != nil {
+		return "", "", "", err
+	}
+	if session == "" {
+		return "", "", "", errors.New("runner park session cannot be empty")
+	}
+	return workspace, window, session, nil
+}
+
+func verifyRunnerParkPane(row config.RunnerRow, pane tmux.WindowPane) error {
+	startCommand := normalizedTmuxStartCommand(pane.StartCommand)
+	workdir := config.ExpandHome(row.Workdir)
+	if startCommand == tmux.RunnerCommand(workdir) || (strings.Contains(startCommand, "amp --no-tui") && strings.Contains(startCommand, workdir)) {
+		return nil
+	}
+	return fmt.Errorf("tmux window %q in session %q is not the expected runner for %s/%s at %s: start command is %s", row.Window, pane.Session, row.Workspace, row.Window, workdir, pane.StartCommand)
 }
 
 func (a app) store(opts options, args []string) error {
@@ -3199,8 +3239,11 @@ Commands:
       Side effects: reads runner config and may create live local tmux/Amp
       runner windows; it does not create, continue, archive, or list Amp threads.
 
-  runner park [workspace] <window>
+  runner park [workspace] <window> [session]
       Stop a live local runner tmux window while preserving runner config.
+      With one workspace arg, session defaults to the workspace name; pass an
+      explicit session such as Amp for older shared-session layouts. Refuses to
+      stop a mismatched pane that is not an amp --no-tui runner for the row workdir.
       Side effects: mutates live local tmux/Amp only; no remote Amp thread state.
 
   completion <bash|zsh|fish>
