@@ -581,6 +581,30 @@ func (a app) runnerLaunch(opts options, args []string) error {
 	if len(args) > 2 {
 		return errors.New("usage: amux runner launch [workspace] [session]")
 	}
+	if len(args) == 0 {
+		rows, err := config.LoadRunners(config.RunnerPath(opts.configPath))
+		if err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			return fmt.Errorf("no runner rows found in %s", config.RunnerPath(opts.configPath))
+		}
+		byWorkspace := make(map[string][]config.RunnerRow)
+		workspaces := make([]string, 0)
+		for _, row := range rows {
+			if _, exists := byWorkspace[row.Workspace]; !exists {
+				workspaces = append(workspaces, row.Workspace)
+			}
+			byWorkspace[row.Workspace] = append(byWorkspace[row.Workspace], row)
+		}
+		sort.Strings(workspaces)
+		for _, workspace := range workspaces {
+			if err := a.launchRunnerRows(opts, workspace, byWorkspace[workspace]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	workspace, session := workspaceSessionFromArgs(args)
 	rows, err := runnerRowsForWorkspace(config.RunnerPath(opts.configPath), workspace)
 	if err != nil {
@@ -589,6 +613,10 @@ func (a app) runnerLaunch(opts options, args []string) error {
 	if len(rows) == 0 {
 		return fmt.Errorf("no runner rows found for workspace %q in %s", workspace, config.RunnerPath(opts.configPath))
 	}
+	return a.launchRunnerRows(opts, session, rows)
+}
+
+func (a app) launchRunnerRows(opts options, session string, rows []config.RunnerRow) error {
 	runner := tmux.Runner{DryRun: opts.dryRun}
 	sessionExists := runner.HasSession(session)
 	windowNames, err := runner.WindowNames(session)
@@ -610,7 +638,21 @@ func (a app) runnerLaunch(opts options, args []string) error {
 			continue
 		}
 		if tmux.WindowExists(windowNames, row.Window) {
-			return fmt.Errorf("runner window %q already exists in tmux session %s; refusing to reuse an ambiguous live process", row.Window, session)
+			panes, err := runner.WindowPanes(session, row.Window)
+			if err != nil {
+				return err
+			}
+			if len(panes) == 0 {
+				return fmt.Errorf("runner window %q already exists in tmux session %s, but no pane metadata was found; refusing to reuse an ambiguous live process", row.Window, session)
+			}
+			if len(panes) > 1 {
+				return fmt.Errorf("ambiguous runner window %q in tmux session %s: candidates %s; refusing runner launch", row.Window, session, formatPaneCandidates(panes))
+			}
+			if err := verifyRunnerParkPane(row, panes[0]); err != nil {
+				return err
+			}
+			fmt.Fprintf(a.stdout, "Runner %s/%s already running in tmux session %s; skipping\n", row.Workspace, row.Window, session)
+			continue
 		}
 		if err := runner.NewWindow(session, row.Window, command); err != nil {
 			return fmt.Errorf("create runner tmux window %q: %w", row.Window, err)
@@ -690,12 +732,19 @@ func parseRunnerParkArgs(args []string) (workspace, window, session string, err 
 }
 
 func verifyRunnerParkPane(row config.RunnerRow, pane tmux.WindowPane) error {
-	startCommand := normalizedTmuxStartCommand(pane.StartCommand)
 	workdir := config.ExpandHome(row.Workdir)
-	if startCommand == tmux.RunnerCommand(workdir) || (strings.Contains(startCommand, "amp --no-tui") && strings.Contains(startCommand, workdir)) {
+	if startCommandMatchesRunner(pane.StartCommand, workdir) {
 		return nil
 	}
 	return fmt.Errorf("tmux window %q in session %q is not the expected runner for %s/%s at %s: start command is %s", row.Window, pane.Session, row.Workspace, row.Window, workdir, pane.StartCommand)
+}
+
+func startCommandMatchesRunner(startCommand, workdir string) bool {
+	normalized := normalizedTmuxStartCommand(startCommand)
+	if normalized == tmux.RunnerCommand(workdir) {
+		return true
+	}
+	return strings.Contains(normalized, "amp --no-tui") && strings.Contains(normalized, "cd "+shellSingleQuote(workdir)+" &&")
 }
 
 func (a app) store(opts options, args []string) error {
@@ -3234,10 +3283,11 @@ Commands:
       Side effects: mutates runner config only.
 
   runner launch [workspace] [session]
-      Start configured local amp --no-tui runners inside tmux windows. Refuses
-      to reuse an existing live window with the same name. With one workspace
-      arg, session defaults to the workspace name; with no args, defaults remain
-      workspace=mac session=Amp.
+      Start configured local amp --no-tui runners inside tmux windows. Skips an
+      already-running window only when it verifies as the expected runner; fails
+      closed on same-name mismatches. With one workspace arg, session defaults
+      to the workspace name; with no args, launches every configured runner
+      workspace into its same-named tmux session.
       Side effects: reads runner config and may create live local tmux/Amp
       runner windows; it does not create, continue, archive, or list Amp threads.
 

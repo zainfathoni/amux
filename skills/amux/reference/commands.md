@@ -148,7 +148,7 @@ If the row still appears in `amux list` and the thread still appears in Amp hist
 - `runner list` inspects runner config only.
 - `runner pin` stores workspace/window/workdir intent in `runners.tsv`.
 - `runner unpin` removes runner config.
-- `runner launch` starts `amp --no-tui` in tmux from runner config.
+- `runner launch` with no args starts every configured runner workspace in same-named tmux sessions; already-running windows are skipped only when they verify as the expected runner, and same-name mismatches fail closed. Pass `[workspace] [session]` only to scope launch or target a legacy shared session.
 - `runner park` stops only the verified live local runner window, using the workspace-named session unless a session is passed explicitly.
 - Runner commands do not create, continue, archive, unarchive, or list remote Amp threads.
 

@@ -5787,13 +5787,81 @@ exit 0
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 if [ "$1" = has-session ]; then exit 0; fi
 if [ "$1" = list-windows ]; then printf 'amux-runner\n'; exit 0; fi
+if [ "$1" = list-panes ]; then printf 'amux-runner\t@1\tcd /wrong && exec amp --no-tui\n'; exit 0; fi
 exit 0
 `)
 	err = runWithDiscardedStdout([]string{"--config", configPath, "runner", "launch", "mac", "Amp"})
 	if err == nil {
-		t.Fatal("runner launch succeeded despite existing live window")
+		t.Fatal("runner launch succeeded despite mismatched live window")
 	}
-	if !strings.Contains(err.Error(), "refusing to reuse an ambiguous live process") {
+	if !strings.Contains(err.Error(), "is not the expected runner") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunnerLaunchSkipsAlreadyRunningExpectedRunner(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	workdir := filepath.Join(tmp, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte("mac\tamux-runner\t"+workdir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "tmux.log")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then exit 0; fi
+if [ "$1" = list-windows ]; then printf 'amux-runner\n'; exit 0; fi
+if [ "$1" = list-panes ]; then printf 'amux-runner\t@1\t%s\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`; exit 0; fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "runner", "launch", "mac", "Amp"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "Runner mac/amux-runner already running in tmux session Amp; skipping") {
+		t.Fatalf("runner launch did not report already-running runner\nstdout:\n%s", stdout.String())
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logBytes), "new-window") || strings.Contains(string(logBytes), "new-session") {
+		t.Fatalf("runner launch recreated already-running runner\nlog:\n%s", string(logBytes))
+	}
+}
+
+func TestRunnerLaunchRejectsPrefixMatchedRunnerWorkdir(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	workdir := filepath.Join(tmp, "proj")
+	liveWorkdir := filepath.Join(tmp, "project-old")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(liveWorkdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte("mac\tamux-runner\t"+workdir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then exit 0; fi
+if [ "$1" = list-windows ]; then printf 'amux-runner\n'; exit 0; fi
+if [ "$1" = list-panes ]; then printf 'amux-runner\t@1\t%s\n' `+shellSingleQuote(tmux.RunnerCommand(liveWorkdir))+`; exit 0; fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := runWithDiscardedStdout([]string{"--config", configPath, "runner", "launch", "mac", "Amp"})
+	if err == nil {
+		t.Fatal("runner launch succeeded despite prefix-matched wrong workdir")
+	}
+	if !strings.Contains(err.Error(), "is not the expected runner") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -5831,6 +5899,49 @@ exit 0
 	}
 	if strings.Contains(log, "-s Amp") || strings.Contains(log, "-t Amp") {
 		t.Fatalf("runner launch used legacy default session despite explicit workspace\nlog:\n%s", log)
+	}
+}
+
+func TestRunnerLaunchNoArgsStartsAllWorkspaceRunners(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	amuxWorkdir := filepath.Join(tmp, "amux")
+	cafeinWorkdir := filepath.Join(tmp, "cafein")
+	if err := os.Mkdir(amuxWorkdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(cafeinWorkdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte("cafein\tcafein-runner\t"+cafeinWorkdir+"\namux\tamux-runner\t"+amuxWorkdir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "tmux.log")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then
+  exit 1
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := runWithDiscardedStdout([]string{"--config", configPath, "runner", "launch"}); err != nil {
+		t.Fatal(err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if !strings.Contains(log, "tmux new-session -d -s amux -n amux-runner cd '"+amuxWorkdir+"' && exec amp --no-tui") {
+		t.Fatalf("runner launch did not create amux runner session\nlog:\n%s", log)
+	}
+	if !strings.Contains(log, "tmux new-session -d -s cafein -n cafein-runner cd '"+cafeinWorkdir+"' && exec amp --no-tui") {
+		t.Fatalf("runner launch did not create cafein runner session\nlog:\n%s", log)
+	}
+	if strings.Contains(log, "-s Amp") || strings.Contains(log, "-t Amp") {
+		t.Fatalf("runner launch no-arg used legacy default session\nlog:\n%s", log)
 	}
 }
 
