@@ -331,9 +331,12 @@ func workspaceMatchesSession(runner tmux.Runner, session string, rows []config.R
 
 func (a app) list(opts options, args []string) error {
 	filter := listFilterAll
+	showStatus := false
 	positional := make([]string, 0, len(args))
 	for _, arg := range args {
 		switch arg {
+		case "--status":
+			showStatus = true
 		case "--active":
 			if filter == listFilterShelved {
 				return errors.New("amux list accepts either --active or --shelved, not both")
@@ -352,7 +355,7 @@ func (a app) list(opts options, args []string) error {
 		}
 	}
 	if len(positional) > 1 {
-		return errors.New("usage: amux list [--active|--shelved] [workspace]")
+		return errors.New("usage: amux list [--status] [--active|--shelved] [workspace]")
 	}
 	workspace := ""
 	if len(positional) == 1 {
@@ -368,12 +371,18 @@ func (a app) list(opts options, args []string) error {
 			selected = append(selected, row)
 		}
 	}
+	needsStatus := showStatus || filter != listFilterAll
 	statuses := map[string]threadStatus{}
-	if len(selected) > 0 {
+	if needsStatus && len(selected) > 0 {
 		statuses, err = threadArchiveStatuses(selected)
 	}
 	if err != nil && filter != listFilterAll {
 		return fmt.Errorf("confirm Amp thread status before filtering list: %w", err)
+	}
+	if needsStatus {
+		fmt.Fprintln(a.stdout, "workspace\twindow\tworkdir\tthread-id-or-url\tstatus")
+	} else {
+		fmt.Fprintln(a.stdout, "workspace\twindow\tworkdir\tthread-id-or-url")
 	}
 	statusForRow := func(row config.Row) string {
 		if err != nil {
@@ -381,9 +390,11 @@ func (a app) list(opts options, args []string) error {
 		}
 		return listStatusLabel(statuses[canonicalThreadID(row.Thread)])
 	}
-	fmt.Fprintln(a.stdout, "workspace\twindow\tworkdir\tthread-id-or-url\tstatus")
 	for _, row := range selected {
-		status := statusForRow(row)
+		status := ""
+		if needsStatus {
+			status = statusForRow(row)
+		}
 		switch filter {
 		case listFilterActive:
 			if status != "active" {
@@ -394,7 +405,11 @@ func (a app) list(opts options, args []string) error {
 				continue
 			}
 		}
-		fmt.Fprintf(a.stdout, "%s\t%s\t%s\t%s\t%s\n", row.Workspace, row.Window, row.Workdir, row.Thread, status)
+		if needsStatus {
+			fmt.Fprintf(a.stdout, "%s\t%s\t%s\t%s\t%s\n", row.Workspace, row.Window, row.Workdir, row.Thread, status)
+		} else {
+			fmt.Fprintf(a.stdout, "%s\t%s\t%s\t%s\n", row.Workspace, row.Window, row.Workdir, row.Thread)
+		}
 	}
 	return nil
 }
@@ -2712,12 +2727,13 @@ Commands:
       Use --attach to always attach or --no-attach to never attach.
       If no command is given, launch is assumed.
 
-  list [--active|--shelved] [workspace]
-      Print configured rows with a trailing status column: active, shelved,
-      missing, or unknown. --active prints only confirmed active rows;
-      --shelved prints only confirmed shelved rows. If Amp thread status cannot
-      be confirmed, unfiltered list shows unknown and filtered list fails closed.
-      Side effects: none; reads restore config and inspects remote Amp thread state.
+  list [--status] [--active|--shelved] [workspace]
+      Print configured rows from local restore config. By default this is local-only
+      and does not call Amp. --status appends a status column: active, shelved,
+      missing, or unknown. --active prints only confirmed active rows; --shelved
+      prints only confirmed shelved rows. If Amp thread status cannot be confirmed,
+      --status shows unknown and filtered list fails closed.
+      Side effects: none; status/filter modes inspect remote Amp thread state.
 
   shelved [workspace]
       Shortcut for list --shelved [workspace].
@@ -2876,6 +2892,7 @@ Commands:
 
 Config default: %s
 Format: workspace<TAB>window<TAB>workdir<TAB>thread-id-or-url
-List output: workspace<TAB>window<TAB>workdir<TAB>thread-id-or-url<TAB>status
+List output: workspace<TAB>window<TAB>workdir<TAB>thread-id-or-url
+Status list output: workspace<TAB>window<TAB>workdir<TAB>thread-id-or-url<TAB>status
 `, program, config.DefaultPath())
 }

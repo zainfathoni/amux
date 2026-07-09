@@ -122,7 +122,31 @@ func TestVersionStringIncludesBuildMetadata(t *testing.T) {
 	}
 }
 
-func TestListShowsThreadStatus(t *testing.T) {
+func TestListIsLocalOnlyByDefault(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	contents := "mac\tworker\t/tmp/worker\tT-worker\n"
+	if err := os.WriteFile(configPath, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'default list should not call amp\n' >&2
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "list", "mac"}); err != nil {
+		t.Fatal(err)
+	}
+	want := "workspace\twindow\tworkdir\tthread-id-or-url\n" +
+		"mac\tworker\t/tmp/worker\tT-worker\n"
+	if got := stdout.String(); got != want {
+		t.Fatalf("list output = %q, want %q", got, want)
+	}
+}
+
+func TestListStatusShowsThreadStatus(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
 	contents := "mac\tactive\t/tmp/active\tT-active\nmac\tshelved\t/tmp/shelved\tT-shelved\nmac\tmissing\t/tmp/missing\tT-missing\n"
@@ -141,7 +165,7 @@ exit 0
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var stdout bytes.Buffer
-	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "list", "mac"}); err != nil {
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "list", "--status", "mac"}); err != nil {
 		t.Fatal(err)
 	}
 	want := "workspace\twindow\tworkdir\tthread-id-or-url\tstatus\n" +
@@ -188,7 +212,7 @@ exit 0
 	}
 }
 
-func TestListShowsUnknownWhenAmpThreadStatusUnavailable(t *testing.T) {
+func TestListStatusShowsUnknownWhenAmpThreadStatusUnavailable(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
 	if err := os.WriteFile(configPath, []byte("mac\tworker\t/tmp/worker\tT-worker\n"), 0o644); err != nil {
@@ -204,7 +228,7 @@ exit 0
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var stdout bytes.Buffer
-	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "list", "mac"}); err != nil {
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "list", "--status", "mac"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := stdout.String(); !strings.Contains(got, "mac\tworker\t/tmp/worker\tT-worker\tunknown") {
@@ -274,7 +298,7 @@ func TestListDoesNotCreateMissingConfig(t *testing.T) {
 	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
 		t.Fatalf("list created config path or got unexpected stat error: %v", err)
 	}
-	if got, want := stdout.String(), "workspace\twindow\tworkdir\tthread-id-or-url\tstatus\n"; got != want {
+	if got, want := stdout.String(), "workspace\twindow\tworkdir\tthread-id-or-url\n"; got != want {
 		t.Fatalf("got output %q, want %q", got, want)
 	}
 }
