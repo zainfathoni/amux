@@ -116,6 +116,50 @@ The initial message is submitted via `tmux send-keys` into a normal interactive 
 
 `spawn` refuses to overwrite an existing tmux window and validates inputs before creating a new Amp thread. If a spawn fails, verify whether a new remote thread, local tmux window, or restore row was created before retrying.
 
+## Replace a stuck or misplaced worker
+
+Use this when a thread is stuck loading, was created under the wrong Amp project, or needs a replacement while preserving the same worktree/task. Keep the local replacement workflow separate from remote archival: archive old remote threads only when the user explicitly asks.
+
+1. Identify the exact restore row, tmux session/window, workdir, and old thread:
+
+   ```sh
+   amux list <workspace>
+   tmux list-panes -a -F '#{session_name}\t#{window_id}\t#{window_name}\t#{pane_current_path}\t#{pane_pid}\t#{pane_start_command}' | rg '<old-thread-id>|<window>|<workdir>'
+   ps -eo pid,ppid,stat,args | rg '<old-thread-id>|amp threads archive' || true
+   git -C <workdir> status --short --branch
+   ```
+
+2. Remove only the stale restore row. Do not use `teardown` unless the user asked to archive the old thread too:
+
+   ```sh
+   amux unpin <workspace> <window>
+   ```
+
+3. If the stale local tmux window still exists, stop only the verified local window after matching session, window, workdir, and start command. Do not stop similarly named windows in other tmux sessions:
+
+   ```sh
+   tmux kill-window -t '<session>:<window>'
+   ```
+
+4. Spawn the replacement into the same workspace/session/workdir. Run `amux spawn` from any directory only if the installed `amux` is new enough to create the Amp thread in the target workdir; otherwise run it from `<workdir>` so Amp groups the thread under the correct project:
+
+   ```sh
+   amux version
+   amux spawn [--title-prefix '<prefix>'] <window> <workdir> "<replacement prompt>" <workspace> <session>
+   ```
+
+   The replacement prompt should say that it is a replacement worker, name the old thread(s), tell the worker not to archive them unless asked, and ask it to inspect/report before making unnecessary changes.
+
+5. Verify the replacement row and live pane:
+
+   ```sh
+   amux list <workspace>
+   tmux list-panes -a -F '#{session_name}\t#{window_id}\t#{window_name}\t#{pane_current_path}\t#{pane_pid}\t#{pane_start_command}' | rg '<new-thread-id>|<window>|<workdir>'
+   amp threads export <new-thread-id> | head -80
+   ```
+
+   Confirm the exported thread's initial tree points at `<workdir>` when project grouping matters.
+
 ## Tear down a spawned worker
 
 Use this only inside an Amp process that was created by `amux spawn` and has the injected `AMUX_*` variables.
