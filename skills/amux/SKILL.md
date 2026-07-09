@@ -27,7 +27,7 @@ Keep the four side-effect domains distinct:
 amux list mac
 amux doctor mac
 amux doctor mac Amp
-amux launch mac Amp --dry-run
+amux launch mac --dry-run
 amux --attach launch mac Amp
 amux --no-attach launch mac Amp
 amux pin mac <window> <workdir> <thread-id-or-url>
@@ -56,14 +56,16 @@ amux runner launch [workspace] [session]
 amux runner park [workspace] <window>
 ```
 
+For commands that accept `[workspace] [session]` (`launch`, `spawn`, `shelve`, `runner launch`, and `doctor`), one workspace argument also selects the same-named tmux session. For example, `amux launch amux` and `amux doctor amux` use workspace/session `amux`. Pass both arguments only for compatibility with older shared-session layouts, such as `amux launch mac Amp`. No-arg launch/doctor still use the legacy `mac` workspace and `Amp` tmux session.
+
 Use `pin-current` from inside a tmux/Amp thread when possible. It defaults to workspace `mac` plus the invoking pane's tmux window name and pane path, using `$TMUX_PANE` when available rather than the currently focused tmux client. `store-current` remains a compatibility alias.
 Use `unpin-current` from inside tmux when the invoking pane's window should no longer be restored. `remove-current` remains a compatibility alias.
-Use `spawn` for a fresh interactive Amp session. It must use `amp threads new` plus `amp threads continue` inside tmux; do not use `amp -x` or piped stdin for this workflow. Use `spawn --mode <mode>` or `spawn -m <mode>` when the user wants the new remote Amp thread created with a specific Amp mode. Use `spawn --title-prefix <prefix>` when the user wants the tmux window and new Amp thread renamed with an issue/task prefix such as `#255 worker`.
+Use `spawn` for a fresh interactive Amp session. It must use `amp threads new` plus `amp threads continue` inside tmux; do not use `amp -x` or piped stdin for this workflow. Use `spawn --mode <mode>` or `spawn -m <mode>` when the user wants the new remote Amp thread created with a specific Amp mode. Use `spawn --title-prefix <prefix>` when the user wants the tmux window and new Amp thread renamed with an issue/task prefix such as `#255 worker`. If a workspace is passed without a session, the spawned worker receives `AMUX_SESSION` set to the workspace name.
 Use `spawn --dry-run` to inspect a new-session plan safely. It validates inputs and checks live tmux window conflicts, but must not create or rename an Amp thread, mutate tmux, send keys, or update the restore config.
-Use `shelve` when the user wants to defer work and hide it from the Amp sidebar while keeping it restorable in amux. `amux shelve <workspace> <window> [session]` targets one row, `amux shelve --thread <thread-id-or-url> [--session <session>]` targets one stored thread by ID/URL and searches all tmux sessions unless scoped, and `amux shelve --workspace <workspace> [--session <session>]` targets all rows in a workspace. Shelving archives the remote Amp thread(s), preserves restore config rows, and stops only verified matching live tmux windows. `amux launch <workspace> <session>` skips shelved rows; use `amux unshelve <workspace> <window>`, `amux unshelve --thread <thread-id-or-url>`, or `amux unshelve --workspace <workspace>` explicitly before launching deferred work again.
-Use no-arg `teardown` only from inside an `amux spawn` worker with injected `AMUX_*` identity. It verifies the identity against restore config and live tmux before archiving the matching remote Amp thread, removing the restore row, and stopping the matched local tmux window. If a restored worker lacks `AMUX_*` but its thread is in `amux list` and live in tmux, use `amux teardown --thread <thread-id-or-url> [--session <session>]` instead; it resolves and verifies the row and tmux window by thread before cleanup.
+Use `shelve` when the user wants to defer work and hide it from the Amp sidebar while keeping it restorable in amux. `amux shelve <workspace> <window> [session]` targets one row, `amux shelve --thread <thread-id-or-url> [--session <session>]` targets one stored thread by ID/URL and searches all tmux sessions unless scoped, and `amux shelve --workspace <workspace> [--session <session>]` targets all rows in a workspace. For workspace-based shelve targets, omit `[session]` only when the live tmux session has the same name as the workspace; otherwise pass the session. Shelving archives the remote Amp thread(s), preserves restore config rows, and stops only verified matching live tmux windows. `amux launch <workspace> [session]` skips shelved rows; use `amux unshelve <workspace> <window>`, `amux unshelve --thread <thread-id-or-url>`, or `amux unshelve --workspace <workspace>` explicitly before launching deferred work again.
+Use no-arg `teardown` only from inside an `amux spawn` worker with injected `AMUX_*` identity. It verifies the identity against restore config and live tmux before archiving the matching remote Amp thread, removing the restore row, and stopping the matched local tmux window. If a restored worker lacks `AMUX_*` but its thread is in `amux list` and live in tmux, use `amux teardown --thread <thread-id-or-url> [--session <session>]` instead; it resolves and verifies the row and tmux window by thread before cleanup. For explicit `amux teardown <workspace> <window>`, omit `[session]` only when the live tmux session has the same name as the workspace; otherwise pass the session.
 Use `runner` subcommands when the target is a local Agents Anywhere runner: `runner pin` stores workspace/window/workdir intent in `runners.tsv`, `runner launch` starts `amp --no-tui` in tmux, `runner park` stops only the local runner window, and `runner unpin` removes runner config. Runner commands do not create, continue, archive, or list remote Amp threads.
-Use `doctor` before or after suspicious restore/runner changes to verify dependencies, configured workdirs, selected workspace rows, runner rows, live tmux drift in the default `Amp` session, and restore rows whose remote Amp threads are confirmed archived or missing.
+Use `doctor` before or after suspicious restore/runner changes to verify dependencies, configured workdirs, selected workspace rows, runner rows, live tmux drift in the selected tmux session, and restore rows whose remote Amp threads are confirmed archived or missing.
 Use `prune-archived [workspace]` when stale restore rows point at Amp threads that were already archived elsewhere. It removes only restore-config rows whose thread ID or URL is confirmed archived; it does not archive/delete remote threads or stop live tmux windows. If Amp cannot confirm archive state, or a thread is missing from both active and archived lists, it fails closed without changing config.
 Launch auto-attaches by default only when the tmux session already existed, no restore work was needed, and its live window set plus pane paths match the configured workspace. Cold restores and partial restores do not auto-attach. Use `launch --dry-run` to inspect restore actions without creating windows, `--attach launch` to force attach, or `--no-attach launch` to suppress auto-attach. If attach is requested from inside tmux, `amux` switches the current client to the target session; if tmux reports there is no terminal, `amux` opens the session through Omarchy's terminal launcher with direct Alacritty fallback.
 
@@ -92,10 +94,10 @@ These phrases are user-level shorthand and should work from any project when thi
 - **Pin it**: pin the current tmux window in amux restore config. Ask for the thread ID/URL if it is not available in context.
 - **Unpin it** / **forget this on restore**: remove only the current restore-config row with `amux unpin-current`; do not stop tmux and do not archive the Amp thread.
 - **Shelve this** / **defer this workspace** / **hide it for now**: use `amux shelve`. Prefer `amux shelve --thread <thread-id-or-url>` for a single known thread, `amux shelve <workspace> <window> [session]` for a named row, and `amux shelve --workspace <workspace> [--session <session>]` for all rows in a workspace. This archives/hides the remote thread(s), preserves restore rows, and stops verified local windows. Future resume is explicit: `amux unshelve ...`, then `amux launch ...`.
-- **Unshelve this** / **resume deferred work**: use `amux unshelve` with the same target shape as `shelve`, then `amux launch <workspace> <session>` if live tmux windows should be restored. Do not rely on `launch` alone to unarchive shelved threads.
+- **Unshelve this** / **resume deferred work**: use `amux unshelve` with the same target shape as `shelve`, then `amux launch <workspace> [session]` if live tmux windows should be restored. Do not rely on `launch` alone to unarchive shelved threads.
 - **Teardown this worker** / **archive and clean this up**: use `amux teardown` only when the user explicitly wants full cleanup of the verified worker/thread. This archives the remote Amp thread, removes the row, and stops the local tmux window.
-- **Restore my workspace**: use `amux launch mac Amp`, or `amux launch <workspace> <session>` if the user names a workspace/session.
-- **Check amux** / **doctor amux**: use `amux doctor mac Amp` unless the user names another workspace/session.
+- **Restore my workspace**: use `amux launch` for the legacy default workspace/session, `amux launch <workspace>` for the same-named tmux session, or `amux launch <workspace> <session>` for an older shared-session layout.
+- **Check amux** / **doctor amux**: use `amux doctor` for the legacy default workspace/session, `amux doctor <workspace>` for the same-named tmux session, or `amux doctor <workspace> <session>` for an older shared-session layout.
 
 For **Park it**, use the atomic command, then verify it disappeared locally:
 
@@ -152,11 +154,11 @@ Use this when a thread is stuck loading, was created under the wrong Amp project
    tmux kill-window -t '<session>:<window>'
    ```
 
-4. Spawn the replacement into the same workspace/session/workdir. Run `amux spawn` from any directory only if the installed `amux` is new enough to create the Amp thread in the target workdir; otherwise run it from `<workdir>` so Amp groups the thread under the correct project:
+4. Spawn the replacement into the same workspace/session/workdir. If the workspace and tmux session have the same name, omit the final session argument. Run `amux spawn` from any directory only if the installed `amux` is new enough to create the Amp thread in the target workdir; otherwise run it from `<workdir>` so Amp groups the thread under the correct project:
 
    ```sh
    amux version
-   amux spawn [--title-prefix '<prefix>'] <window> <workdir> "<replacement prompt>" <workspace> <session>
+   amux spawn [--title-prefix '<prefix>'] <window> <workdir> "<replacement prompt>" <workspace> [session]
    ```
 
    Keep the replacement prompt's first sentence title-neutral and task-specific. Avoid starting with "This is a replacement worker..." because Amp may auto-title the new thread from that phrase. Put replacement context in the second sentence/paragraph. Example:

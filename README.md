@@ -121,13 +121,13 @@ Use a real Amp thread ID or thread URL from your own Amp history in place of
 Preview the restore plan:
 
 ```sh
-amux launch mac Amp --dry-run
+amux launch mac --dry-run
 ```
 
 Restore the workspace:
 
 ```sh
-amux launch mac Amp
+amux launch mac
 ```
 
 Pin the current tmux window in the restore config for future restores:
@@ -146,10 +146,10 @@ amux unpin-current
 
 ```sh
 amux                         # launch default mac/Amp workspace; auto-attach if already restored
-amux launch [workspace] [session]
+amux launch [workspace] [session] # one workspace arg also selects the same-named tmux session
 amux --attach launch mac Amp
 amux --no-attach launch mac Amp
-amux launch mac Amp --dry-run
+amux launch mac --dry-run
 amux list [workspace]
 amux pin <workspace> <window> <workdir> <thread-id-or-url>
 amux pin-current <thread-id-or-url>
@@ -213,7 +213,9 @@ Command side effects:
 | `runner launch` | No change | Read only | Creates missing `amp --no-tui` runner windows | No change |
 | `runner park` | No change | No change; rows are preserved for future restore | Gracefully stop the resolved local runner window | No change |
 
-`amux doctor [workspace] [session]` is read-only and compares the selected workspace against the selected live tmux session. It also reports restore rows whose Amp threads are confirmed archived or missing, and runner registry drift when `runners.tsv` is present. Omitting the session preserves the default `Amp` behavior, so `amux doctor mac` remains equivalent to `amux doctor mac Amp`.
+For commands that accept `[workspace] [session]` (`launch`, `spawn`, `shelve`, `runner launch`, and `doctor`), passing one workspace now selects the same-named tmux session. For example, `amux launch amux` and `amux doctor amux` use workspace `amux` and tmux session `amux`. Passing both arguments remains supported for older or shared-session setups such as `amux launch mac Amp`. With no workspace argument, the compatibility default is still workspace `mac` and session `Amp`.
+
+`amux doctor [workspace] [session]` is read-only and compares the selected workspace against the selected live tmux session. It also reports restore rows whose Amp threads are confirmed archived or missing, and runner registry drift when `runners.tsv` is present.
 
 For `launch` and `spawn`, `--dry-run` validates inputs and checks tmux window conflicts without mutating state. For `spawn`, dry-run does not create or rename an Amp thread, create tmux windows, send keys, or update `workspaces.tsv`; it only prints the intended actions, including the selected mode and planned title rename when provided.
 
@@ -223,13 +225,13 @@ When launch attaches from inside an existing tmux client, `amux` switches that c
 
 `park [workspace] <window>` and `park-current [workspace]` are live-local-only. They resolve the intended live tmux window, schedule a delayed graceful terminal shutdown sequence for the target pane, then return immediately. This gives Amp time to receive the command result and send a final response before the local process exits. The delayed shutdown only force-closes the tmux window if graceful stop times out. Parking preserves restore config rows and never archives the remote Amp thread. Use `unpin`/`unpin-current` when you only want to stop restoring a row, `shelve` when you want to hide/defer a thread while keeping it restorable, and `teardown` when you intentionally want to archive the verified remote Amp thread, remove the row, and stop the local window.
 
-`shelve` is deferral without forgetting. It archives Amp thread(s) so they leave the Amp sidebar, preserves the restore row(s), and stops verified matching local tmux/Amp windows when they are live. Target one row with `amux shelve <workspace> <window> [session]`, one thread regardless of workspace with `amux shelve --thread <thread-id-or-url> [--session <session>]`, or every row in a workspace with `amux shelve --workspace <workspace> [--session <session>]`. Workspace shelving defaults to session `Amp`; thread shelving searches all tmux sessions unless `--session` is provided. `amux launch <workspace> <session>` skips shelved rows; run `amux unshelve <workspace> <window>`, `amux unshelve --thread <thread-id-or-url>`, or `amux unshelve --workspace <workspace>` explicitly before launching deferred work again.
+`shelve` is deferral without forgetting. It archives Amp thread(s) so they leave the Amp sidebar, preserves the restore row(s), and stops verified matching local tmux/Amp windows when they are live. Target one row with `amux shelve <workspace> <window> [session]`, one thread regardless of workspace with `amux shelve --thread <thread-id-or-url> [--session <session>]`, or every row in a workspace with `amux shelve --workspace <workspace> [--session <session>]`. Workspace-based shelving uses the workspace-named session unless a session is passed; thread shelving searches all tmux sessions unless `--session` is provided. `amux launch <workspace> [session]` skips shelved rows; run `amux unshelve <workspace> <window>`, `amux unshelve --thread <thread-id-or-url>`, or `amux unshelve --workspace <workspace>` explicitly before launching deferred work again.
 
-`teardown` is explicit full lifecycle cleanup: archive the verified Amp thread, remove the restore row, and stop the uniquely verified local tmux window. With no args it only runs from an `amux spawn` worker that has matching `AMUX_*` identity. From a restored worker that does not have `AMUX_*` but whose thread is stored and live, use `amux teardown --thread <thread-id-or-url> [--session <session>]`; it resolves the restore row by thread, then cross-checks the live tmux start command before mutating anything. From outside the worker when you know the row, use `amux teardown <workspace> <window> [session]`. All teardown forms fail closed if the target is missing, mismatched, or ambiguous.
+`teardown` is explicit full lifecycle cleanup: archive the verified Amp thread, remove the restore row, and stop the uniquely verified local tmux window. With no args it only runs from an `amux spawn` worker that has matching `AMUX_*` identity. From a restored worker that does not have `AMUX_*` but whose thread is stored and live, use `amux teardown --thread <thread-id-or-url> [--session <session>]`; it resolves the restore row by thread, then cross-checks the live tmux start command before mutating anything. From outside the worker when you know the row, use `amux teardown <workspace> <window> [session]`; if `[session]` is omitted, it defaults to the workspace name. All teardown forms fail closed if the target is missing, mismatched, or ambiguous.
 
 `prune-archived [workspace]` is explicit stale-restore cleanup. It removes confirmed archived rows only when you truly want to forget them; archived rows may also represent intentionally shelved work. Active rows are kept; missing threads, Amp CLI failures, or unreadable thread-list output fail closed without changing config. Unlike `teardown`, it does not archive/delete remote threads or stop live tmux windows.
 
-`amux runner ...` commands manage local runner intent for Amp Agents Anywhere. Runner rows live in `runners.tsv` next to `workspaces.tsv` and use `workspace<TAB>window<TAB>workdir`; they intentionally contain no thread ID. `amux runner launch [workspace] [session]` starts configured runners with `amp --no-tui` inside tmux windows and refuses to reuse an existing same-name window. `amux runner park [workspace] <window>` stops only the live local runner window while preserving runner config. Runner commands never create, continue, archive, or list remote Amp threads.
+`amux runner ...` commands manage local runner intent for Amp Agents Anywhere. Runner rows live in `runners.tsv` next to `workspaces.tsv` and use `workspace<TAB>window<TAB>workdir`; they intentionally contain no thread ID. `amux runner launch [workspace] [session]` starts configured runners with `amp --no-tui` inside tmux windows and refuses to reuse an existing same-name window; with one workspace arg, it uses the same name for the tmux session. `amux runner park [workspace] <window>` stops only the live local runner window while preserving runner config. Runner commands never create, continue, archive, or list remote Amp threads.
 
 ## Configuration
 
@@ -237,6 +239,7 @@ Defaults:
 
 - workspace: `mac`
 - session: `Amp`
+- when a workspace is explicitly passed without a session, that workspace name is used as the tmux session
 - config: `~/.config/amux/workspaces.tsv`
 - runner config: `~/.config/amux/runners.tsv`
 
@@ -296,10 +299,10 @@ Unpin it               -> amux unpin-current
 Park it                -> amux park-current
 Shelve this            -> amux shelve <workspace> <window> / --thread / --workspace
 Unshelve this          -> amux unshelve <workspace> <window> / --thread / --workspace
-Restore my workspace   -> amux launch mac Amp
+Restore my workspace   -> amux launch
 Spawn a worker for ... -> amux spawn [--mode <mode>] [--title-prefix <prefix>] ...
 Teardown this worker   -> amux teardown / teardown --thread / teardown <workspace> <window>
-Doctor amux            -> amux doctor mac Amp
+Doctor amux            -> amux doctor
 ```
 
 The skill source lives at [`skills/amux/SKILL.md`](skills/amux/SKILL.md). Keep it in sync with command semantics when adding new lifecycle behavior; for agent use, the skill is part of the product surface, not just documentation.
