@@ -327,6 +327,67 @@
         text-wrap: pretty;
       }
 
+      .demo-grid {
+        display: grid;
+        gap: 1.5rem;
+      }
+
+      .demo-card {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: rgb(255 255 255 / 0.03);
+        padding: 1.25rem;
+      }
+
+      .demo-card p {
+        margin: 1rem 0 0;
+        color: var(--muted);
+        font-size: 1rem;
+        line-height: 1.7;
+      }
+
+      .mini-label {
+        margin-bottom: 0.875rem;
+        color: #a7f3d0;
+        font-size: 0.8125rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .domain-diagram {
+        display: grid;
+        gap: 0.75rem;
+      }
+
+      .domain-node {
+        border: 1px solid rgb(52 211 153 / 0.22);
+        border-radius: 1rem;
+        background: rgb(52 211 153 / 0.08);
+        padding: 1rem;
+        color: var(--text);
+        font-weight: 600;
+        line-height: 1.4;
+      }
+
+      .domain-node span {
+        color: var(--muted);
+        font-size: 0.875rem;
+        font-weight: 400;
+      }
+
+      .tsv-compare {
+        display: grid;
+        gap: 1rem;
+      }
+
+      .tsv-compare strong {
+        display: block;
+        color: var(--text);
+        font-size: 0.9375rem;
+        font-weight: 600;
+      }
+
       .split {
         display: grid;
         gap: 1.5rem;
@@ -483,6 +544,19 @@
           gap: 3rem;
         }
 
+        .demo-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .demo-card-large {
+          grid-column: span 2;
+        }
+
+        .domain-diagram,
+        .tsv-compare {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
         .cta-box {
           padding: 2rem;
         }
@@ -504,6 +578,7 @@
             <span>amux</span>
           </a>
           <div class="nav-links">
+            <a href="#demo">Demo</a>
             <a href="#features">Features</a>
             <a href="#workflow">Workflow</a>
             <a href="https://github.com/zainfathoni/amux/releases/latest">Download</a>
@@ -536,16 +611,85 @@
                 </div>
                 <span>~/Code/amux</span>
               </div>
-              <pre><code><span class="prompt">$</span> amux launch amux --dry-run
-would create session amux
-would open window my-project
+              <pre><code><span class="prompt">$</span> amux pin-current mac https://ampcode.com/threads/T-123 web-redesign ~/Code/site
+saved row: mac  web-redesign  ~/Code/site  T-123
 
-<span class="prompt">$</span> amux launch amux
-restored amux/amux
+<span class="prompt">$</span> amux launch mac --dry-run
+would create tmux session mac
+would restore window web-redesign from T-123
 
-<span class="prompt">$</span> amux doctor amux
-OK config rows: 3
-OK live tmux session matches config</code></pre>
+<span class="prompt">$</span> amux launch mac
+restored mac/web-redesign
+
+<span class="prompt">$</span> amux park-current mac
+stopped local window; kept restore row</code></pre>
+            </div>
+          </div>
+        </section>
+
+        <section class="section" id="demo">
+          <div class="container">
+            <div class="section-heading">
+              <h2>See the workflow in one minute.</h2>
+              <p>
+                <code>amux</code> is not another remote agent system. It is a tiny local contract between your tmux windows, Amp threads, and a TSV file you can inspect before an agent touches anything.
+              </p>
+            </div>
+            <div class="demo-grid">
+              <div class="demo-card demo-card-large">
+                <div class="mini-label">Install and restore</div>
+                <div class="terminal terminal-compact" aria-label="Install and first restore terminal demo">
+                  <pre><code><span class="prompt">$</span> curl -LO https://github.com/zainfathoni/amux/releases/latest/download/amux-linux-amd64.tar.gz
+<span class="prompt">$</span> tar -xzf amux-linux-amd64.tar.gz
+<span class="prompt">$</span> install -m 0755 amux-linux-amd64/amux ~/.local/bin/amux
+
+<span class="comment"># Save the Amp thread in the tmux window you are already using.</span>
+<span class="prompt">$</span> amux pin-current mac https://ampcode.com/threads/T-123 web-redesign ~/Code/site
+
+<span class="comment"># Preview before creating windows.</span>
+<span class="prompt">$</span> amux launch mac --dry-run
+would create tmux session mac
+would restore web-redesign in ~/Code/site
+
+<span class="comment"># Recreate the local workspace later.</span>
+<span class="prompt">$</span> amux launch mac
+restored mac/web-redesign with amp threads continue T-123</code></pre>
+                </div>
+              </div>
+
+              <div class="demo-card">
+                <div class="mini-label">Side-effect domains</div>
+                <div class="domain-diagram" role="img" aria-label="amux separates restore config, runner config, live tmux sessions, and remote Amp thread state">
+                  <div class="domain-node">Restore config<br /><span>workspaces.tsv</span></div>
+                  <div class="domain-node">Runner config<br /><span>runners.tsv</span></div>
+                  <div class="domain-node">Live local<br /><span>tmux + Amp CLI</span></div>
+                  <div class="domain-node">Remote Amp<br /><span>thread archive</span></div>
+                </div>
+                <p>
+                  Commands say which box they touch: <code>pin</code> edits config only, <code>park</code> stops local windows only, and <code>teardown</code> performs verified full cleanup.
+                </p>
+              </div>
+
+              <div class="demo-card demo-card-large">
+                <div class="mini-label">Plain TSV before and after</div>
+                <div class="tsv-compare">
+                  <div>
+                    <strong>Before <code>pin-current</code></strong>
+                    <div class="terminal terminal-compact">
+                      <pre><code>workspace   window   workdir   thread
+mac         docs     ~/Docs    T-docs</code></pre>
+                    </div>
+                  </div>
+                  <div>
+                    <strong>After <code>pin-current</code></strong>
+                    <div class="terminal terminal-compact">
+                      <pre><code>workspace   window          workdir       thread
+mac         docs            ~/Docs        T-docs
+mac         web-redesign    ~/Code/site   T-123</code></pre>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </section>
