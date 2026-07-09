@@ -3501,6 +3501,164 @@ exit 2
 	}
 }
 
+func TestShelveCurrentExplicitThreadReusesExistingRestoreRowInOtherWorkspace(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	original := "omarchy\tomarchy-home\t/home/zain/Code/omarchy-home\tT-current\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = archive ] && [ "$3" = T-current ]; then
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "%42" ] && [ "$5" = '#{window_id}' ]; then
+  printf '@6\n'
+  exit 0
+fi
+if [ "$1" = kill-window ] && [ "$2" = -t ] && [ "$3" = @6 ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "fake-tmux-socket")
+	t.Setenv("TMUX_PANE", "%42")
+	t.Setenv("AMUX_WORKSPACE", "")
+	t.Setenv("AMUX_THREAD_ID", "")
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "shelve-current", "T-current"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(configBytes) != original {
+		t.Fatalf("shelve-current created or rewrote restore row\ngot:  %q\nwant: %q", configBytes, original)
+	}
+	if strings.Contains(string(configBytes), "mac\tomarchy-home") {
+		t.Fatalf("shelve-current created duplicate default workspace row: %q", configBytes)
+	}
+	if !strings.Contains(stdout.String(), "Restore config row omarchy/omarchy-home already exists") {
+		t.Fatalf("shelve-current did not report existing row preservation\nstdout:\n%s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "Pinned mac/") {
+		t.Fatalf("shelve-current reported pinning duplicate default workspace row\nstdout:\n%s", stdout.String())
+	}
+}
+
+func TestShelveCurrentExplicitThreadFailsClosedForAmbiguousRestoreRows(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	original := "omarchy\tomarchy-home\t/home/zain/Code/omarchy-home\tT-current\nmac\tomarchy-home\t/home/zain/Code/omarchy-home\tT-current\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "fake-tmux-socket")
+	t.Setenv("TMUX_PANE", "%42")
+	t.Setenv("AMUX_WORKSPACE", "")
+	t.Setenv("AMUX_THREAD_ID", "")
+
+	err := (app{}).run([]string{"--config", configPath, "shelve-current", "T-current"})
+	if err == nil {
+		t.Fatal("shelve-current succeeded with ambiguous restore rows, want error")
+	}
+	if !strings.Contains(err.Error(), "ambiguous restore rows for thread T-current") || !strings.Contains(err.Error(), "Use amux shelve <workspace> <window>") {
+		t.Fatalf("got error %q, want ambiguous restore row guidance", err)
+	}
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(configBytes) != original {
+		t.Fatalf("shelve-current mutated ambiguous config\ngot:  %q\nwant: %q", configBytes, original)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if log := string(logBytes); log != "" {
+		t.Fatalf("shelve-current touched amp or tmux before resolving ambiguous rows\nlog:\n%s", log)
+	}
+}
+
+func TestShelveCurrentPreflightFailureDoesNotArchiveOrMutateConfig(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = "%42" ]; then
+  case "$5" in
+    '#{window_id}') printf '@7\n'; exit 0 ;;
+    '#W') printf 'worker\n'; exit 0 ;;
+    '#{pane_current_path}') printf '/tmp/bad	path\n'; exit 0 ;;
+  esac
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "fake-tmux-socket")
+	t.Setenv("TMUX_PANE", "%42")
+	t.Setenv("AMUX_WORKSPACE", "")
+	t.Setenv("AMUX_THREAD_ID", "")
+
+	err := (app{}).run([]string{"--config", configPath, "shelve-current", "T-current"})
+	if err == nil {
+		t.Fatal("shelve-current succeeded with invalid current workdir, want error")
+	}
+	if !strings.Contains(err.Error(), "workdir must not contain tabs or newlines") {
+		t.Fatalf("got error %q, want workdir validation error", err)
+	}
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(configBytes) != "" {
+		t.Fatalf("shelve-current mutated config before preflight completed: %q", configBytes)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if strings.Contains(log, "amp threads archive") || strings.Contains(log, "tmux kill-window") {
+		t.Fatalf("shelve-current archived or stopped before preflight completed\nlog:\n%s", log)
+	}
+}
+
 func TestShelveCurrentRequiresKnownThreadBeforeMutating(t *testing.T) {
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "calls.log")
