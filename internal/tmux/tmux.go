@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,7 +11,8 @@ import (
 )
 
 type Runner struct {
-	DryRun bool
+	DryRun           bool
+	TerminalLauncher string
 }
 
 type Pane struct {
@@ -258,7 +260,7 @@ func (r Runner) SelectAndAttach(session string, noAttach bool) error {
 	}
 	if err := tmuxAttach(session); err != nil {
 		if isNoTerminalAttachError(err) {
-			return startTerminalAttach(session)
+			return startTerminalAttach(session, r.TerminalLauncher)
 		}
 		return err
 	}
@@ -277,13 +279,90 @@ func tmuxAttach(session string) error {
 	return nil
 }
 
-func startTerminalAttach(session string) error {
+func startTerminalAttach(session, terminalLauncher string) error {
+	commands, err := terminalAttachCommands(session, terminalLauncher)
+	if err != nil {
+		return err
+	}
+	var lastErr error
+	for _, args := range commands {
+		if len(args) == 0 {
+			continue
+		}
+		if err := exec.Command(args[0], args[1:]...).Start(); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	return lastErr
+}
+
+func terminalAttachCommands(session, terminalLauncher string) ([][]string, error) {
+	attachArgs := []string{"tmux", "attach", "-t", session}
+	commands := make([][]string, 0, 3)
+	if strings.TrimSpace(terminalLauncher) != "" {
+		launcherArgs, err := shellFields(terminalLauncher)
+		if err != nil {
+			return nil, fmt.Errorf("parse terminal launcher: %w", err)
+		}
+		commands = append(commands, append(append([]string{}, launcherArgs...), attachArgs...))
+	}
 	if _, err := exec.LookPath("uwsm-app"); err == nil {
 		if _, err := exec.LookPath("xdg-terminal-exec"); err == nil {
-			return exec.Command("uwsm-app", "--", "xdg-terminal-exec", "-e", "tmux", "attach", "-t", session).Start()
+			commands = append(commands, []string{"uwsm-app", "--", "xdg-terminal-exec", "-e", "tmux", "attach", "-t", session})
 		}
 	}
-	return exec.Command("alacritty", "-e", "tmux", "attach", "-t", session).Start()
+	commands = append(commands, []string{"alacritty", "-e", "tmux", "attach", "-t", session})
+	return commands, nil
+}
+
+func shellFields(input string) ([]string, error) {
+	var fields []string
+	var current strings.Builder
+	var quote rune
+	escaped := false
+	inField := false
+	for _, r := range input {
+		switch {
+		case escaped:
+			current.WriteRune(r)
+			escaped = false
+			inField = true
+		case r == '\\':
+			escaped = true
+			inField = true
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				current.WriteRune(r)
+			}
+			inField = true
+		case r == '\'' || r == '"':
+			quote = r
+			inField = true
+		case r == ' ' || r == '\t' || r == '\n' || r == '\r':
+			if inField {
+				fields = append(fields, current.String())
+				current.Reset()
+				inField = false
+			}
+		default:
+			current.WriteRune(r)
+			inField = true
+		}
+	}
+	if escaped {
+		return nil, errors.New("unfinished escape")
+	}
+	if quote != 0 {
+		return nil, errors.New("unterminated quote")
+	}
+	if inField {
+		fields = append(fields, current.String())
+	}
+	return fields, nil
 }
 
 func isNoTerminalAttachError(err error) bool {
