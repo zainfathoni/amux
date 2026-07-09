@@ -168,6 +168,7 @@ amux unshelve --workspace <workspace>
 amux spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] <window> <workdir> <initial-message> [workspace] [session]
 amux teardown
 amux teardown --thread <thread-id-or-url> [--session <session>]
+amux teardown <workspace> <window> [session]
 amux prune-archived [workspace]
 amux runner list [workspace]
 amux runner pin <workspace> <window> <workdir>
@@ -217,7 +218,7 @@ Command side effects:
 | `runner launch` | No change | Read only | Creates missing `amp --no-tui` runner windows | No change |
 | `runner park` | No change | No change; rows are preserved for future restore | Gracefully stop the resolved local runner window | No change |
 
-For commands that accept `[workspace] [session]` (`launch`, `spawn`, `shelve`, `runner launch`, and `doctor`), passing one workspace now selects the same-named tmux session. For example, `amux launch amux` and `amux doctor amux` use workspace `amux` and tmux session `amux`. Passing both arguments remains supported for older or shared-session setups such as `amux launch mac Amp`. With no workspace argument, the compatibility default is still workspace `mac` and session `Amp`.
+Compatibility decision: keep workspace-named sessions when a workspace is explicitly provided and the session is omitted. For `launch`, `doctor`, and `runner launch`, `amux <command> amux` uses workspace/session `amux`. For `spawn`, the optional trailing workspace does the same: `amux spawn worker ~/Code/repo "prompt" amux`. For workspace-based `shelve`, use `amux shelve amux worker` or `amux shelve --workspace amux`; for explicit `teardown`, use `amux teardown amux worker`. This is the preferred layout for new per-workspace sessions. Older shared-session layouts remain supported by passing the session explicitly, for example `amux launch mac Amp`, `amux spawn worker ~/Code/repo "prompt" mac Amp`, `amux shelve mac worker Amp`, `amux shelve --workspace mac --session Amp`, `amux teardown mac worker Amp`, `amux runner launch mac Amp`, or `amux doctor mac Amp`. With no workspace argument where the command supports one, the compatibility default is still workspace `mac` and session `Amp`.
 
 `amux doctor [workspace] [session]` is read-only and compares the selected workspace against the selected live tmux session. It also reports restore rows whose Amp threads are confirmed archived or missing, and runner registry drift when `runners.tsv` is present.
 

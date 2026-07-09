@@ -57,7 +57,7 @@ amux runner launch [workspace] [session]
 amux runner park [workspace] <window>
 ```
 
-For commands that accept `[workspace] [session]` (`launch`, `spawn`, `shelve`, `runner launch`, and `doctor`), one workspace argument also selects the same-named tmux session. For example, `amux launch amux` and `amux doctor amux` use workspace/session `amux`. Pass both arguments only for compatibility with older shared-session layouts, such as `amux launch mac Amp`. No-arg launch/doctor still use the legacy `mac` workspace and `Amp` tmux session.
+Compatibility decision: keep workspace-named sessions when a workspace is explicitly provided and the session is omitted. For `launch`, `doctor`, and `runner launch`, `amux <command> amux` uses workspace/session `amux`. For `spawn`, the optional trailing workspace does the same: `amux spawn worker ~/Code/repo "prompt" amux`. For workspace-based `shelve`, use `amux shelve amux worker` or `amux shelve --workspace amux`; for explicit `teardown`, use `amux teardown amux worker`. Pass an explicit session for older shared-session layouts, such as `amux launch mac Amp`, `amux shelve mac worker Amp`, `amux shelve --workspace mac --session Amp`, `amux teardown mac worker Amp`, or `amux runner launch mac Amp`. No-arg launch/doctor still use the legacy `mac` workspace and `Amp` tmux session.
 
 Use `pin-current` from inside a tmux/Amp thread when possible. It defaults to workspace `mac` plus the invoking pane's tmux window name and pane path, using `$TMUX_PANE` when available rather than the currently focused tmux client. `store-current` remains a compatibility alias.
 Use `unpin-current` from inside tmux when the invoking pane's window should no longer be restored. `remove-current` remains a compatibility alias.

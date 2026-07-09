@@ -565,7 +565,7 @@ OK live tmux session matches config</code></pre>
               </div>
               <div class="feature">
                 <dt>Restore workspaces</dt>
-                <dd>Launch a named workspace into a tmux session with one window per configured Amp thread.</dd>
+                <dd>Launch a named workspace into a tmux session with one window per configured Amp thread. One-workspace-argument commands use the same name for the tmux session; pass an explicit session such as <code>Amp</code> for older shared-session layouts.</dd>
               </div>
               <div class="feature">
                 <dt>Pin the current window</dt>
@@ -581,7 +581,7 @@ OK live tmux session matches config</code></pre>
               </div>
               <div class="feature">
                 <dt>Inspect drift</dt>
-                <dd>Use <code>doctor [workspace] [session]</code> to compare thread restore rows and runner rows with the intended live tmux session before trusting a restore.</dd>
+                <dd>Use <code>doctor [workspace] [session]</code> to compare thread restore rows and runner rows with the intended live tmux session before trusting a restore. For example, <code>amux doctor amux</code> checks session <code>amux</code>, while <code>amux doctor mac Amp</code> checks a legacy shared <code>Amp</code> session.</dd>
               </div>
               <div class="feature">
                 <dt>Manage runners separately</dt>

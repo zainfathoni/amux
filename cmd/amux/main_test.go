@@ -656,6 +656,73 @@ exit 2
 	}
 }
 
+func TestWorkspaceSessionCompatibilityDefaults(t *testing.T) {
+	workspace, session := workspaceSessionFromArgs(nil)
+	if workspace != "mac" || session != "Amp" {
+		t.Fatalf("no-arg default = %s/%s, want mac/Amp", workspace, session)
+	}
+
+	workspace, session = workspaceSessionFromArgs([]string{"amux"})
+	if workspace != "amux" || session != "amux" {
+		t.Fatalf("one workspace arg default = %s/%s, want amux/amux", workspace, session)
+	}
+
+	workspace, session = workspaceSessionFromArgs([]string{"amux", "Amp"})
+	if workspace != "amux" || session != "Amp" {
+		t.Fatalf("explicit session default = %s/%s, want amux/Amp", workspace, session)
+	}
+}
+
+func TestShelveAndTeardownWorkspaceDefaultsSessionToWorkspace(t *testing.T) {
+	parsed, err := parseShelveArgs([]string{"amux", "worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.session != "amux" || parsed.sessionSet {
+		t.Fatalf("shelve workspace/window session = %q sessionSet=%v, want implicit amux", parsed.session, parsed.sessionSet)
+	}
+
+	parsed, err = parseShelveArgs([]string{"amux", "worker", "Amp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.session != "Amp" || parsed.sessionSet {
+		t.Fatalf("shelve positional explicit session = %q sessionSet=%v, want implicit session argument Amp", parsed.session, parsed.sessionSet)
+	}
+
+	parsed, err = parseShelveArgs([]string{"--workspace", "amux"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.session != "amux" || parsed.sessionSet {
+		t.Fatalf("shelve --workspace session = %q sessionSet=%v, want implicit amux", parsed.session, parsed.sessionSet)
+	}
+
+	parsed, err = parseShelveArgs([]string{"--workspace", "amux", "--session", "Amp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.session != "Amp" || !parsed.sessionSet {
+		t.Fatalf("shelve --session escape hatch = %q sessionSet=%v, want explicit Amp", parsed.session, parsed.sessionSet)
+	}
+
+	identity, err := teardownIdentityFromArgs([]string{"amux", "worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Workspace != "amux" || identity.Window != "worker" || identity.Session != "amux" {
+		t.Fatalf("teardown identity = %#v, want workspace/window with implicit session amux", identity)
+	}
+
+	identity, err = teardownIdentityFromArgs([]string{"amux", "worker", "Amp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Workspace != "amux" || identity.Window != "worker" || identity.Session != "Amp" {
+		t.Fatalf("teardown explicit session identity = %#v, want workspace/window with session Amp", identity)
+	}
+}
+
 func TestLaunchNoArgsKeepsMacAmpDefaults(t *testing.T) {
 	tmp := t.TempDir()
 	workdir := filepath.Join(tmp, "workdir")
