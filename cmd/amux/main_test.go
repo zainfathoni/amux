@@ -385,6 +385,11 @@ func TestLaunchDoesNotAttachByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	logPath := filepath.Join(tmp, "calls.log")
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = list ]; then printf '[{"id":"T-one"}]\n'; exit 0; fi
+exit 2
+`)
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 printf '%s\n' "$*" >> "`+logPath+`"
 if [ "$1" = has-session ]; then exit 1; fi
@@ -411,6 +416,48 @@ exit 2
 	}
 }
 
+func TestLaunchSkipsShelvedThreadUntilExplicitUnshelve(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("mac\tshelved\t"+workdir+"\tT-shelved\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "calls.log")
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = list ]; then
+  case "$*" in
+    *" --include-archived "*) printf '[{"id":"T-shelved"}]\n'; exit 0 ;;
+    *) printf '[]\n'; exit 0 ;;
+  esac
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "")
+
+	if err := runWithDiscardedStdout([]string{"--config", configPath, "launch", "mac", "Amp"}); err != nil {
+		t.Fatal(err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if strings.Contains(log, "tmux new-session") || strings.Contains(log, "threads archive --unarchive") {
+		t.Fatalf("launch restored or unarchived shelved thread\nlog:\n%s", log)
+	}
+}
+
 func TestLaunchAutoAttachesToExistingMatchingSession(t *testing.T) {
 	tmp := t.TempDir()
 	workdir := filepath.Join(tmp, "workdir")
@@ -422,6 +469,11 @@ func TestLaunchAutoAttachesToExistingMatchingSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	logPath := filepath.Join(tmp, "calls.log")
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = list ]; then printf '[{"id":"T-one"}]\n'; exit 0; fi
+exit 2
+`)
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 printf '%s\n' "$*" >> "`+logPath+`"
 if [ "$1" = has-session ]; then exit 0; fi
@@ -458,6 +510,11 @@ func TestLaunchDoesNotAutoAttachToExistingDriftedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	logPath := filepath.Join(tmp, "calls.log")
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = list ]; then printf '[{"id":"T-one"}]\n'; exit 0; fi
+exit 2
+`)
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 printf '%s\n' "$*" >> "`+logPath+`"
 if [ "$1" = has-session ]; then exit 0; fi
@@ -493,6 +550,11 @@ func TestLaunchDoesNotAutoAttachAfterRestoringMissingWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	logPath := filepath.Join(tmp, "calls.log")
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = list ]; then printf '[{"id":"T-one"},{"id":"T-two"}]\n'; exit 0; fi
+exit 2
+`)
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 printf '%s\n' "$*" >> "`+logPath+`"
 if [ "$1" = has-session ]; then exit 0; fi
@@ -532,6 +594,11 @@ func TestLaunchAttachFlagAttaches(t *testing.T) {
 		t.Fatal(err)
 	}
 	logPath := filepath.Join(tmp, "calls.log")
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = list ]; then printf '[{"id":"T-one"}]\n'; exit 0; fi
+exit 2
+`)
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 printf '%s\n' "$*" >> "`+logPath+`"
 if [ "$1" = has-session ]; then exit 1; fi
@@ -2499,6 +2566,340 @@ exit 2
 	}
 }
 
+func TestShelveWorkspaceArchivesAllRowsPreservesConfigAndStopsVerifiedLiveWindows(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("tycho\trush\t/tmp/rush\tT-rush\ntycho\tnotes\t/tmp/notes\tT-notes\nomarchy\thome\t/tmp/home\tT-home\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = archive ]; then
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then exit 0; fi
+if [ "$1" = list-panes ]; then
+  printf 'rush\t@7\t%s\n' `+shellSingleQuote(tmux.ContinueCommand("/tmp/rush", "T-rush"))+`
+  printf 'other\t@8\tcd /tmp/other && exec amp threads continue T-other\n'
+  exit 0
+fi
+if [ "$1" = kill-window ] && [ "$2" = -t ] && [ "$3" = @7 ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "shelve", "--workspace", "tycho"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"tycho\trush\t/tmp/rush\tT-rush\n",
+		"tycho\tnotes\t/tmp/notes\tT-notes\n",
+		"omarchy\thome\t/tmp/home\tT-home\n",
+	} {
+		if !strings.Contains(string(configBytes), want) {
+			t.Fatalf("shelve changed config; missing %q in %q", want, configBytes)
+		}
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		"amp threads archive T-rush",
+		"amp threads archive T-notes",
+		"tmux kill-window -t @7",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("shelve log missing %q\nlog:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "amp threads archive T-home") {
+		t.Fatalf("shelve archived a different workspace\nlog:\n%s", log)
+	}
+	for _, want := range []string{
+		"Shelved Amp thread T-rush",
+		"Shelved Amp thread T-notes",
+		"Restore config row tycho/rush is preserved",
+		"No live tmux window Amp/notes found to stop",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("shelve output missing %q\nstdout:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestShelveByThreadArchivesPreservesConfigAndStopsUniqueVerifiedWindow(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("kelas\tmailgun\t/tmp/project\thttps://ampcode.com/threads/T-worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	startCommand := teardownExpectedStartCommand(
+		teardownIdentity{Workspace: "kelas", Session: "Kelas", Window: "mailgun", Thread: "https://ampcode.com/threads/T-worker"},
+		config.Row{Workspace: "kelas", Window: "mailgun", Workdir: "/tmp/project", Thread: "https://ampcode.com/threads/T-worker"},
+	)
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = archive ] && [ "$3" = T-worker ]; then
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ]; then
+  printf 'Kelas\tmailgun\t@21\t%s\n' `+shellSingleQuote(fmt.Sprintf("%q", startCommand))+`
+  printf 'Other\tmailgun\t@22\tcd /tmp/other && exec amp threads continue T-other\n'
+  exit 0
+fi
+if [ "$1" = kill-window ] && [ "$2" = -t ] && [ "$3" = @21 ]; then
+  exit 0
+fi
+exit 2
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "shelve", "--thread", "T-worker"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(configBytes), "kelas\tmailgun\t/tmp/project\thttps://ampcode.com/threads/T-worker\n"; got != want {
+		t.Fatalf("shelve changed config\ngot:  %q\nwant: %q", got, want)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		"tmux list-panes -a -F #{session_name}\t#{window_name}\t#{window_id}\t#{pane_start_command}",
+		"amp threads archive T-worker",
+		"tmux kill-window -t @21",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("thread shelve log missing %q\nlog:\n%s", want, log)
+		}
+	}
+	if !strings.Contains(stdout.String(), "Stopped tmux window Kelas/mailgun (@21)") {
+		t.Fatalf("thread shelve output missing stopped window\nstdout:\n%s", stdout.String())
+	}
+}
+
+func TestShelveArchivesWhenConfiguredSessionIsNotLive(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	original := "mac\told\t/tmp/old\tT-old\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = archive ] && [ "$3" = T-old ]; then
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then exit 1; fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "shelve", "mac", "old"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(configBytes) != original {
+		t.Fatalf("shelve changed config\ngot:  %q\nwant: %q", configBytes, original)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if !strings.Contains(log, "amp threads archive T-old") {
+		t.Fatalf("shelve did not archive when session was absent\nlog:\n%s", log)
+	}
+	if strings.Contains(log, "kill-window") {
+		t.Fatalf("shelve tried to kill an absent window\nlog:\n%s", log)
+	}
+	if !strings.Contains(stdout.String(), "No live tmux window Amp/old found to stop") {
+		t.Fatalf("shelve output did not report absent live window\nstdout:\n%s", stdout.String())
+	}
+}
+
+func TestShelveByThreadArchivesWhenTmuxServerIsUnavailable(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	original := "mac\told\t/tmp/old\tT-old\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = archive ] && [ "$3" = T-old ]; then
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ] && [ "$2" = -a ]; then
+  printf 'no server running on /tmp/tmux-fake\n' >&2
+  exit 1
+fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := (app{}).run([]string{"--config", configPath, "shelve", "--thread", "T-old"}); err != nil {
+		t.Fatal(err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if !strings.Contains(log, "amp threads archive T-old") {
+		t.Fatalf("thread shelve did not archive when tmux server was unavailable\nlog:\n%s", log)
+	}
+	if strings.Contains(log, "kill-window") {
+		t.Fatalf("thread shelve tried to kill an absent window\nlog:\n%s", log)
+	}
+}
+
+func TestShelveDryRunReportsNoLiveWindowWithoutArchiving(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	if err := os.WriteFile(configPath, []byte("mac\told\t/tmp/old\tT-old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then exit 1; fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "--dry-run", "shelve", "mac", "old"}); err != nil {
+		t.Fatal(err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if strings.Contains(log, "amp threads archive") || strings.Contains(log, "kill-window") {
+		t.Fatalf("dry-run shelve mutated state\nlog:\n%s", log)
+	}
+	for _, want := range []string{
+		"Would archive Amp thread T-old",
+		"No live tmux window Amp/old found to stop",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("dry-run shelve output missing %q\nstdout:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestUnshelveWorkspaceUnarchivesRowsWithoutChangingConfigOrTmux(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	logPath := filepath.Join(tmp, "calls.log")
+	original := "tycho\trush\t/tmp/rush\tT-rush\ntycho\tnotes\t/tmp/notes\tT-notes\nomarchy\thome\t/tmp/home\tT-home\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = archive ] && [ "$3" = --unarchive ]; then
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "unshelve", "--workspace", "tycho"}); err != nil {
+		t.Fatal(err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(configBytes) != original {
+		t.Fatalf("unshelve changed config\ngot:  %q\nwant: %q", configBytes, original)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		"amp threads archive --unarchive T-rush",
+		"amp threads archive --unarchive T-notes",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("unshelve log missing %q\nlog:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "T-home") || strings.Contains(log, "tmux") {
+		t.Fatalf("unshelve touched another workspace or tmux\nlog:\n%s", log)
+	}
+	if !strings.Contains(stdout.String(), "Unshelved Amp thread T-rush") || !strings.Contains(stdout.String(), "Unshelved Amp thread T-notes") {
+		t.Fatalf("unshelve output missing rows\nstdout:\n%s", stdout.String())
+	}
+}
+
 func TestParkCurrentRequiresInvokingPaneWhenInsideTmux(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("TMUX", "fake-tmux-socket")
@@ -3821,7 +4222,32 @@ exit 0
 	}
 }
 
-func TestDoctorReportsArchivedThreadRow(t *testing.T) {
+func TestDoctorAllowsArchivedShelvedThreadRow(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("mac\tarchived\t/tmp\tT-archived\nmac\tactive\t/tmp\tT-active\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeAmpListExecutable(t, filepath.Join(tmp, "amp"), []string{"T-active"}, []string{"T-active", "T-archived"})
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = list-panes ]; then
+  printf 'active\t/tmp\n'
+  exit 0
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	output, err := runCapturingStdout(t, []string{"--config", configPath, "doctor", "mac"})
+	if err != nil {
+		t.Fatalf("doctor failed despite archived shelved thread row: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "OK   thread archived") {
+		t.Fatalf("doctor output did not allow archived shelved thread row\n%s", output)
+	}
+}
+
+func TestDoctorReportsShelvedThreadStillLive(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
 	if err := os.WriteFile(configPath, []byte("mac\tarchived\t/tmp\tT-archived\n"), 0o644); err != nil {
@@ -3830,8 +4256,8 @@ func TestDoctorReportsArchivedThreadRow(t *testing.T) {
 	writeAmpListExecutable(t, filepath.Join(tmp, "amp"), nil, []string{"T-archived"})
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 if [ "$1" = list-panes ]; then
-  printf 'archived\t/tmp\n'
-  exit 0
+	printf 'archived\t/tmp\n'
+	exit 0
 fi
 exit 0
 `)
@@ -3839,10 +4265,10 @@ exit 0
 
 	output, err := runCapturingStdout(t, []string{"--config", configPath, "doctor", "mac"})
 	if err == nil {
-		t.Fatal("doctor succeeded despite archived thread row, want error")
+		t.Fatal("doctor succeeded despite shelved live window, want drift error")
 	}
-	if !strings.Contains(output, "FAIL thread archived") || !strings.Contains(output, "run amux prune-archived mac") {
-		t.Fatalf("doctor output did not report archived thread row\n%s", output)
+	if !strings.Contains(output, "FAIL shelved live window archived") {
+		t.Fatalf("doctor output did not report live shelved window\n%s", output)
 	}
 }
 
