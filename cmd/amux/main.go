@@ -823,6 +823,10 @@ func (a app) shelveCurrent(opts options, args []string) error {
 	if err != nil {
 		return err
 	}
+	row, rowExists, err := shelveCurrentExistingThreadRow(opts.configPath, thread)
+	if err != nil {
+		return err
+	}
 	if os.Getenv("TMUX") == "" {
 		return errors.New("current tmux window is unavailable: run inside tmux")
 	}
@@ -832,23 +836,26 @@ func (a app) shelveCurrent(opts options, args []string) error {
 	if err != nil {
 		return fmt.Errorf("current tmux window id is unavailable: %w", err)
 	}
-	window, err := runner.CurrentWindow()
-	if err != nil {
-		return fmt.Errorf("current tmux window is unavailable: %w", err)
+	if !rowExists {
+		window, err := runner.CurrentWindow()
+		if err != nil {
+			return fmt.Errorf("current tmux window is unavailable: %w", err)
+		}
+		workdir, err := runner.CurrentWorkdir()
+		if err != nil {
+			return fmt.Errorf("current tmux pane path is unavailable: %w", err)
+		}
+		row = config.Row{Workspace: workspace, Window: window, Workdir: workdir, Thread: thread}
+		if err := row.Validate(); err != nil {
+			return err
+		}
+		storedRow, storedRowExists, err := shelveCurrentStoredRow(opts.configPath, row)
+		if err != nil {
+			return err
+		}
+		row = storedRow
+		rowExists = storedRowExists
 	}
-	workdir, err := runner.CurrentWorkdir()
-	if err != nil {
-		return fmt.Errorf("current tmux pane path is unavailable: %w", err)
-	}
-	row := config.Row{Workspace: workspace, Window: window, Workdir: workdir, Thread: thread}
-	if err := row.Validate(); err != nil {
-		return err
-	}
-	storedRow, rowExists, err := shelveCurrentStoredRow(opts.configPath, row)
-	if err != nil {
-		return err
-	}
-	row = storedRow
 
 	archiveThread := canonicalThreadID(thread)
 	if opts.dryRun {
@@ -917,6 +924,27 @@ func parseShelveCurrentArgs(args []string) (string, string, error) {
 
 func looksLikeThreadIDOrURL(value string) bool {
 	return strings.HasPrefix(canonicalThreadID(value), "T-") || strings.Contains(value, "ampcode.com/threads/")
+}
+
+func shelveCurrentExistingThreadRow(path, thread string) (config.Row, bool, error) {
+	rows, err := config.LoadReadOnly(path)
+	if err != nil {
+		return config.Row{}, false, err
+	}
+	threadID := canonicalThreadID(thread)
+	matches := make([]config.Row, 0, 1)
+	for _, row := range rows {
+		if canonicalThreadID(row.Thread) == threadID {
+			matches = append(matches, row)
+		}
+	}
+	if len(matches) == 0 {
+		return config.Row{}, false, nil
+	}
+	if len(matches) > 1 {
+		return config.Row{}, false, fmt.Errorf("ambiguous restore rows for thread %s: candidates %s; refusing shelve-current. Use amux shelve <workspace> <window> to shelve a specific restore row", thread, formatRowCandidates(matches))
+	}
+	return matches[0], true, nil
 }
 
 func shelveCurrentStoredRow(path string, row config.Row) (config.Row, bool, error) {
