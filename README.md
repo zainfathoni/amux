@@ -192,6 +192,8 @@ amux unshelve [workspace] <window>
 amux unshelve --thread <thread-id-or-url>
 amux unshelve --workspace <workspace>
 amux spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] <window> <workdir> <initial-message> [workspace] [session]
+amux spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] --message-file <path> <window> <workdir> [workspace] [session]
+amux spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] --message-stdin <window> <workdir> [workspace] [session]
 amux teardown
 amux teardown --thread <thread-id-or-url> [--session <session>]
 amux teardown <workspace> <window> [session]
@@ -210,6 +212,8 @@ amux doctor [workspace] [session]
 Compatibility aliases remain available: `store` for `pin`, `store-current` for `pin-current`, `remove` for `unpin`, `remove-current` for `unpin-current`, and `self-update` for `update`.
 
 `amux spawn --mode <mode>` (or `-m <mode>`) creates the new Amp thread with the selected Amp mode. Omitting `--mode` preserves the default Amp thread behavior.
+
+The positional `amux spawn ... <initial-message>` remains intentionally single-line: tabs and newlines are rejected before any Amp thread is created. For structured prompts, use `--message-file prompt.md` or `--message-stdin < prompt.md`; these explicit sources allow multi-line content, are mutually exclusive with each other and with positional `<initial-message>`, and are read and validated before `spawn` creates the new Amp thread. Multi-line content is delivered through a tmux paste buffer with bracketed paste enabled when the Amp composer requests it, then verified against the newly created Amp thread before the restore row is stored. Prompts larger than 1 MiB are rejected.
 
 `amux spawn --title-prefix <prefix>` names the spawned tmux window `"<prefix> <window>"` and renames only the newly created Amp thread to that same name after the initial message is submitted, so Amp sees a non-empty thread. For issue-oriented work, use an explicit prefix such as `--title-prefix '#255'` to get a tmux window, restore row, `AMUX_WINDOW`, and Amp thread title like `#255 worker-window`. If the Amp thread rename fails after the worker is created, `spawn` reports a warning with a retry command and leaves the created/stored worker intact. Omitting `--title-prefix` preserves the existing spawn behavior and does not rename any Amp thread or prefix the tmux window.
 
@@ -245,7 +249,7 @@ Command side effects:
 | `runner launch` | No change | Read only | Creates missing `amp --no-tui` runner windows | No change |
 | `runner park` | No change | No change; rows are preserved for future restore | Gracefully stop the resolved local runner window | No change |
 
-Compatibility decision: keep workspace-named sessions when a workspace is explicitly provided and the session is omitted. For `launch`, `doctor`, and `runner launch`, `amux <command> amux` uses workspace/session `amux`. For `spawn`, the optional trailing workspace does the same: `amux spawn worker ~/Code/repo "prompt" amux`. For workspace-based `shelve`, use `amux shelve amux worker` or `amux shelve --workspace amux`; for explicit `teardown`, use `amux teardown amux worker`. This is the preferred layout for new per-workspace sessions. Older shared-session layouts remain supported by passing the session explicitly, for example `amux launch mac Amp`, `amux spawn worker ~/Code/repo "prompt" mac Amp`, `amux shelve mac worker Amp`, `amux shelve --workspace mac --session Amp`, `amux teardown mac worker Amp`, `amux runner launch mac Amp`, or `amux doctor mac Amp`. With no workspace argument where the command supports one, the compatibility default is still workspace `mac` and session `Amp`.
+Compatibility decision: keep workspace-named sessions when a workspace is explicitly provided and the session is omitted. For `launch`, `doctor`, and `runner launch`, `amux <command> amux` uses workspace/session `amux`. For `spawn`, the optional trailing workspace does the same: `amux spawn worker ~/Code/repo "prompt" amux` or `amux spawn --message-file prompt.md worker ~/Code/repo amux`. For workspace-based `shelve`, use `amux shelve amux worker` or `amux shelve --workspace amux`; for explicit `teardown`, use `amux teardown amux worker`. This is the preferred layout for new per-workspace sessions. Older shared-session layouts remain supported by passing the session explicitly, for example `amux launch mac Amp`, `amux spawn worker ~/Code/repo "prompt" mac Amp`, `amux spawn --message-file prompt.md worker ~/Code/repo mac Amp`, `amux shelve mac worker Amp`, `amux shelve --workspace mac --session Amp`, `amux teardown mac worker Amp`, `amux runner launch mac Amp`, or `amux doctor mac Amp`. With no workspace argument where the command supports one, the compatibility default is still workspace `mac` and session `Amp`.
 
 `amux doctor [workspace] [session]` is read-only and compares the selected workspace against the selected live tmux session. It also reports restore rows whose Amp threads are confirmed archived or missing, and runner registry drift when `runners.tsv` is present.
 
