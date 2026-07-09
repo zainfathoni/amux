@@ -263,6 +263,22 @@ exit 0
 	}
 }
 
+func TestListDoesNotCreateMissingConfig(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "missing", "workspaces.tsv")
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "list"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("list created config path or got unexpected stat error: %v", err)
+	}
+	if got, want := stdout.String(), "workspace\twindow\tworkdir\tthread-id-or-url\tstatus\n"; got != want {
+		t.Fatalf("got output %q, want %q", got, want)
+	}
+}
+
 func TestSelfUpdateDryRunPlansLatestReleaseAsset(t *testing.T) {
 	tmp := t.TempDir()
 	exePath := filepath.Join(tmp, "amux")

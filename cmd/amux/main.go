@@ -358,7 +358,7 @@ func (a app) list(opts options, args []string) error {
 	if len(positional) == 1 {
 		workspace = positional[0]
 	}
-	rows, err := config.Load(opts.configPath)
+	rows, err := config.LoadReadOnly(opts.configPath)
 	if err != nil {
 		return err
 	}
