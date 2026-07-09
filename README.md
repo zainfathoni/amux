@@ -237,6 +237,18 @@ When launch attaches from inside an existing tmux client, `amux` switches that c
 
 `amux runner ...` commands manage local runner intent for Amp Agents Anywhere. Runner rows live in `runners.tsv` next to `workspaces.tsv` and use `workspace<TAB>window<TAB>workdir`; they intentionally contain no thread ID. `amux runner launch [workspace] [session]` starts configured runners with `amp --no-tui` inside tmux windows and refuses to reuse an existing same-name window; with one workspace arg, it uses the same name for the tmux session. `amux runner park [workspace] <window>` stops only the live local runner window while preserving runner config. Runner commands never create, continue, archive, or list remote Amp threads.
 
+## Post-merge worker cleanup
+
+`amux teardown` intentionally does not merge PRs, publish releases, remove git worktrees, or delete branches. For a finished worker, use the bundled `/amux` skill's **Finish a merged worker** workflow so agents perform the broader GitHub/git lifecycle before the final amux cleanup:
+
+1. Verify the PR is merged with `gh pr view <pr-number> --json merged,mergeCommit,headRefName,url`.
+2. If a release is expected, make the release type or tag explicit, update `main`, confirm the tag does not already exist, then create/push the tag and watch the release workflow.
+3. Remove the worker worktree only after the worker worktree is clean, the PR is merged, and the main worktree is updated; do not force-remove dirty worktrees as routine cleanup.
+4. Delete local and remote worker branches only when they are confirmed merged, confirmed merged by the PR, or already deleted by the PR merge; prefer `git branch -d`, not `-D`, and require explicit confirmation before force-deleting a squash-merged local branch.
+5. Run `amux teardown` or `amux teardown --thread <thread-id-or-url> [--session <session>]` last, after git/GitHub cleanup is complete.
+
+This differs from parking and shelving: `park` stops only the live local tmux/Amp process while preserving the restore row and active remote thread; `shelve` archives/hides deferred Amp threads while preserving restore rows; `teardown` archives the verified thread, removes the row, and stops the verified local window.
+
 ## Configuration
 
 Defaults:
