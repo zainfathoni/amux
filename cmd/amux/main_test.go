@@ -765,14 +765,21 @@ func TestSelfUpdateChecksumMismatchLeavesCurrentBinary(t *testing.T) {
 }
 
 func TestSelfUpdateRefusesPackageManagedInstall(t *testing.T) {
-	withSelfUpdateTestState(t, "/nix/store/example-amux/bin/amux", "http://127.0.0.1/should-not-fetch", http.DefaultClient)
+	for _, exePath := range []string{
+		"/nix/store/example-amux/bin/amux",
+		"/home/linuxbrew/.linuxbrew/Cellar/amux/0.1.24/bin/amux",
+	} {
+		t.Run(exePath, func(t *testing.T) {
+			withSelfUpdateTestState(t, exePath, "http://127.0.0.1/should-not-fetch", http.DefaultClient)
 
-	err := (app{}).run([]string{"self-update"})
-	if err == nil {
-		t.Fatal("self-update succeeded for package-managed path, want error")
-	}
-	if !strings.Contains(err.Error(), "self-update refused for package-managed install") || !strings.Contains(err.Error(), "~/.local/bin/amux") {
-		t.Fatalf("unexpected error: %q", err)
+			err := (app{}).run([]string{"self-update"})
+			if err == nil {
+				t.Fatal("self-update succeeded for package-managed path, want error")
+			}
+			if !strings.Contains(err.Error(), "self-update refused for package-managed install") || !strings.Contains(err.Error(), "~/.local/bin/amux") {
+				t.Fatalf("unexpected error: %q", err)
+			}
+		})
 	}
 }
 

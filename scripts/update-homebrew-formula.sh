@@ -39,7 +39,6 @@ linux_arm64 = sys.argv[6]
 linux_amd64 = sys.argv[7]
 
 text = formula_path.read_text()
-text = re.sub(r'version "[^"]+"', f'version "{formula_version}"', text, count=1)
 
 replacements = {
     "darwin-arm64": darwin_arm64,
@@ -48,13 +47,27 @@ replacements = {
     "linux-amd64": linux_amd64,
 }
 
+def replace_once(pattern, replacement, label):
+    global text
+    count = len(re.findall(pattern, text))
+    if count != 1:
+        raise SystemExit(f"expected exactly one replacement for {label}, got {count}")
+    text = re.sub(pattern, replacement, text, count=1)
+
+replace_once(r'version "[^"]+"', f'version "{formula_version}"', "formula version")
+
 for platform, sha in replacements.items():
-    text = re.sub(
+    replace_once(
         rf'url "https://github\.com/zainfathoni/amux/releases/download/v[^/]+/amux-v[^/]+-{platform}\.tar\.gz"\n\s+sha256 "[0-9a-f]+"',
         f'url "https://github.com/zainfathoni/amux/releases/download/{tag}/amux-{tag}-{platform}.tar.gz"\n      sha256 "{sha}"',
-        text,
-        count=1,
+        platform,
     )
+
+for platform in replacements:
+    expected_url = f'https://github.com/zainfathoni/amux/releases/download/{tag}/amux-{tag}-{platform}.tar.gz'
+    count = text.count(expected_url)
+    if count != 1:
+        raise SystemExit(f"updated formula must contain expected URL exactly once: {expected_url} (got {count})")
 
 formula_path.write_text(text)
 PY

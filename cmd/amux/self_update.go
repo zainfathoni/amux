@@ -169,6 +169,7 @@ func managedInstallPath(path string) bool {
 		"/nix/store/",
 		"/gnu/store/",
 		"/opt/homebrew/Cellar/",
+		"/home/linuxbrew/.linuxbrew/Cellar/",
 		"/usr/local/Cellar/",
 		"/snap/",
 	}
