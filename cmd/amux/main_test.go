@@ -122,6 +122,147 @@ func TestVersionStringIncludesBuildMetadata(t *testing.T) {
 	}
 }
 
+func TestListShowsThreadStatus(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	contents := "mac\tactive\t/tmp/active\tT-active\nmac\tshelved\t/tmp/shelved\tT-shelved\nmac\tmissing\t/tmp/missing\tT-missing\n"
+	if err := os.WriteFile(configPath, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+if [ "$1" = threads ] && [ "$2" = list ]; then
+  case " $* " in
+    *" --include-archived "*) printf '%s\n' '[{"id":"T-active"},{"id":"T-shelved"}]'; exit 0 ;;
+    *) printf '%s\n' '[{"id":"T-active"}]'; exit 0 ;;
+  esac
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "list", "mac"}); err != nil {
+		t.Fatal(err)
+	}
+	want := "workspace\twindow\tworkdir\tthread-id-or-url\tstatus\n" +
+		"mac\tactive\t/tmp/active\tT-active\tactive\n" +
+		"mac\tshelved\t/tmp/shelved\tT-shelved\tshelved\n" +
+		"mac\tmissing\t/tmp/missing\tT-missing\tmissing\n"
+	if got := stdout.String(); got != want {
+		t.Fatalf("list output = %q, want %q", got, want)
+	}
+}
+
+func TestListFiltersActiveAndShelvedRows(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	contents := "mac\tactive\t/tmp/active\tT-active\nmac\tshelved\t/tmp/shelved\tT-shelved\nmac\tmissing\t/tmp/missing\tT-missing\n"
+	if err := os.WriteFile(configPath, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+if [ "$1" = threads ] && [ "$2" = list ]; then
+  case " $* " in
+    *" --include-archived "*) printf '%s\n' '[{"id":"T-active"},{"id":"T-shelved"}]'; exit 0 ;;
+    *) printf '%s\n' '[{"id":"T-active"}]'; exit 0 ;;
+  esac
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var activeOut bytes.Buffer
+	if err := (app{stdout: &activeOut}).run([]string{"--config", configPath, "list", "--active", "mac"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := activeOut.String(); strings.Contains(got, "shelved") || strings.Contains(got, "missing") || !strings.Contains(got, "mac\tactive\t/tmp/active\tT-active\tactive") {
+		t.Fatalf("active filter output unexpected:\n%s", got)
+	}
+
+	var shelvedOut bytes.Buffer
+	if err := (app{stdout: &shelvedOut}).run([]string{"--config", configPath, "shelved", "mac"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := shelvedOut.String(); strings.Contains(got, "T-active") || strings.Contains(got, "T-missing") || !strings.Contains(got, "mac\tshelved\t/tmp/shelved\tT-shelved\tshelved") {
+		t.Fatalf("shelved shortcut output unexpected:\n%s", got)
+	}
+}
+
+func TestListShowsUnknownWhenAmpThreadStatusUnavailable(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("mac\tworker\t/tmp/worker\tT-worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+if [ "$1" = threads ] && [ "$2" = list ]; then
+  printf 'offline\n' >&2
+  exit 2
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "list", "mac"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "mac\tworker\t/tmp/worker\tT-worker\tunknown") {
+		t.Fatalf("list output did not mark unknown status:\n%s", got)
+	}
+}
+
+func TestListFilterFailsClosedWhenAmpThreadStatusUnavailable(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("mac\tworker\t/tmp/worker\tT-worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+if [ "$1" = threads ] && [ "$2" = list ]; then
+  printf 'offline\n' >&2
+  exit 2
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := (app{}).run([]string{"--config", configPath, "list", "--shelved", "mac"})
+	if err == nil {
+		t.Fatal("list --shelved succeeded without confirmed Amp thread status")
+	}
+	if !strings.Contains(err.Error(), "confirm Amp thread status before filtering list") || !strings.Contains(err.Error(), "offline") {
+		t.Fatalf("got error %q, want fail-closed thread-status diagnostic", err)
+	}
+}
+
+func TestListStatusRespectsWorkspaceScope(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	contents := "mac\tactive\t/tmp/active\tT-active\nother\tshelved\t/tmp/shelved\tT-shelved\n"
+	if err := os.WriteFile(configPath, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+if [ "$1" = threads ] && [ "$2" = list ]; then
+  case " $* " in
+    *" --include-archived "*) printf '%s\n' '[{"id":"T-active"},{"id":"T-shelved"}]'; exit 0 ;;
+    *) printf '%s\n' '[{"id":"T-active"}]'; exit 0 ;;
+  esac
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "list", "--shelved", "other"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); strings.Contains(got, "T-active") || !strings.Contains(got, "other\tshelved\t/tmp/shelved\tT-shelved\tshelved") {
+		t.Fatalf("workspace-scoped shelved list output unexpected:\n%s", got)
+	}
+}
+
 func TestSelfUpdateDryRunPlansLatestReleaseAsset(t *testing.T) {
 	tmp := t.TempDir()
 	exePath := filepath.Join(tmp, "amux")

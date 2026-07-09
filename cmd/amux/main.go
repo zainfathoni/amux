@@ -109,6 +109,8 @@ func (a app) run(args []string) error {
 		return launch(opts, args)
 	case "list":
 		return a.list(opts, args)
+	case "shelved":
+		return a.list(opts, append([]string{"--shelved"}, args...))
 	case "pin", "store":
 		return a.store(opts, args)
 	case "pin-current", "store-current":
@@ -328,24 +330,94 @@ func workspaceMatchesSession(runner tmux.Runner, session string, rows []config.R
 }
 
 func (a app) list(opts options, args []string) error {
-	if len(args) > 1 {
-		return errors.New("usage: amux list [workspace]")
+	filter := listFilterAll
+	positional := make([]string, 0, len(args))
+	for _, arg := range args {
+		switch arg {
+		case "--active":
+			if filter == listFilterShelved {
+				return errors.New("amux list accepts either --active or --shelved, not both")
+			}
+			filter = listFilterActive
+		case "--shelved":
+			if filter == listFilterActive {
+				return errors.New("amux list accepts either --active or --shelved, not both")
+			}
+			filter = listFilterShelved
+		default:
+			if strings.HasPrefix(arg, "--") {
+				return fmt.Errorf("unknown list option: %s", arg)
+			}
+			positional = append(positional, arg)
+		}
+	}
+	if len(positional) > 1 {
+		return errors.New("usage: amux list [--active|--shelved] [workspace]")
 	}
 	workspace := ""
-	if len(args) == 1 {
-		workspace = args[0]
+	if len(positional) == 1 {
+		workspace = positional[0]
 	}
 	rows, err := config.Load(opts.configPath)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(a.stdout, "workspace\twindow\tworkdir\tthread-id-or-url")
+	selected := make([]config.Row, 0, len(rows))
 	for _, row := range rows {
 		if workspace == "" || row.Workspace == workspace {
-			fmt.Fprintf(a.stdout, "%s\t%s\t%s\t%s\n", row.Workspace, row.Window, row.Workdir, row.Thread)
+			selected = append(selected, row)
 		}
 	}
+	statuses := map[string]threadStatus{}
+	if len(selected) > 0 {
+		statuses, err = threadArchiveStatuses(selected)
+	}
+	if err != nil && filter != listFilterAll {
+		return fmt.Errorf("confirm Amp thread status before filtering list: %w", err)
+	}
+	statusForRow := func(row config.Row) string {
+		if err != nil {
+			return "unknown"
+		}
+		return listStatusLabel(statuses[canonicalThreadID(row.Thread)])
+	}
+	fmt.Fprintln(a.stdout, "workspace\twindow\tworkdir\tthread-id-or-url\tstatus")
+	for _, row := range selected {
+		status := statusForRow(row)
+		switch filter {
+		case listFilterActive:
+			if status != "active" {
+				continue
+			}
+		case listFilterShelved:
+			if status != "shelved" {
+				continue
+			}
+		}
+		fmt.Fprintf(a.stdout, "%s\t%s\t%s\t%s\t%s\n", row.Workspace, row.Window, row.Workdir, row.Thread, status)
+	}
 	return nil
+}
+
+type listFilter int
+
+const (
+	listFilterAll listFilter = iota
+	listFilterActive
+	listFilterShelved
+)
+
+func listStatusLabel(status threadStatus) string {
+	switch status {
+	case threadStatusActive:
+		return "active"
+	case threadStatusArchived:
+		return "shelved"
+	case threadStatusMissing:
+		return "missing"
+	default:
+		return "unknown"
+	}
 }
 
 func (a app) runner(opts options, args []string) error {
@@ -2640,9 +2712,16 @@ Commands:
       Use --attach to always attach or --no-attach to never attach.
       If no command is given, launch is assumed.
 
-  list [workspace]
-      Print configured rows.
-      Side effects: none; reads restore config only.
+  list [--active|--shelved] [workspace]
+      Print configured rows with a trailing status column: active, shelved,
+      missing, or unknown. --active prints only confirmed active rows;
+      --shelved prints only confirmed shelved rows. If Amp thread status cannot
+      be confirmed, unfiltered list shows unknown and filtered list fails closed.
+      Side effects: none; reads restore config and inspects remote Amp thread state.
+
+  shelved [workspace]
+      Shortcut for list --shelved [workspace].
+      Side effects: none; reads restore config and inspects remote Amp thread state.
 
   pin <workspace> <window> <workdir> <thread-id-or-url>
       Add or replace one restore-config row.
@@ -2797,5 +2876,6 @@ Commands:
 
 Config default: %s
 Format: workspace<TAB>window<TAB>workdir<TAB>thread-id-or-url
+List output: workspace<TAB>window<TAB>workdir<TAB>thread-id-or-url<TAB>status
 `, program, config.DefaultPath())
 }
