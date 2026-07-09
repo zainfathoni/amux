@@ -71,6 +71,101 @@ Report: dependency policy applied, any sequenced/skipped issues, each spawned wo
 
 If any spawn partially succeeds, stop and inspect for a created remote thread, tmux window, restore row, branch, or worktree before retrying. Do not duplicate workers for the same issue.
 
+## Health-check interactive workers before replacement
+
+Use this when the user asks for `/amux health <workspace>`, asks whether workers are responsive, or wants evidence before replacing stale-looking interactive Amp/tmux workers. This is skill-only orchestration; do not add or assume an `amux health` CLI command.
+
+The workflow is intentionally read-mostly. It may send one harmless prompt only to panes verified as interactive Amp panes. It must not archive threads, unpin/remove restore rows, park/kill windows, launch/spawn replacements, or rename anything. A failed health check means **candidate stale**, not automatically replaceable. If replacement is still desired, report the table first and ask for explicit approval to follow the safe replacement workflow in [`troubleshooting.md#replace-a-stuck-or-misplaced-worker`](troubleshooting.md#replace-a-stuck-or-misplaced-worker).
+
+### 1. Inspect amux and tmux state first
+
+Use the requested workspace. If the tmux session is not the same as the workspace, infer it from the restore rows or ask only when the target would otherwise be ambiguous.
+
+```sh
+amux version
+amux list <workspace>
+amux list --status <workspace>
+amux doctor <workspace> [session]
+tmux list-windows -t <session> -F '#{session_name}\t#{window_id}\t#{window_name}\t#{window_active}\t#{pane_current_path}'
+tmux list-panes -a -F '#{session_name}\t#{window_id}\t#{window_name}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}' | rg '<workspace>|<window>|<workdir>|<thread-id>'
+```
+
+For each configured row, compare the restore row's workspace, window, workdir, and thread ID/URL with tmux metadata and recent pane output. Treat any mismatch as unsafe to ping until explained.
+
+### 2. Classify rows that should not be pinged
+
+- `shelved`: `amux list --status` or `amux shelved <workspace>` confirms the thread is archived/deferred. Do not ping unless the user first asks to unshelve/resume.
+- `no-live-window`: the restore row exists but no tmux window/pane matches the expected session/window/workdir.
+- `mismatched`: a live pane exists, but the row, tmux window, workdir, or visible thread identity does not match the configured row.
+- `ambiguous`: more than one candidate pane matches, the pane is not clearly Amp, the pane appears to be a shell/editor/non-Amp process, the pane is mid-tool-call, waiting for user input, displaying an error/reconnect state, or otherwise unsafe to interrupt.
+
+Do not ping rows in those states. Record the evidence and continue with other rows.
+
+### 3. Ping only verified Amp panes
+
+Before sending anything, verify all of these are true for exactly one pane:
+
+- tmux session/window and pane workdir match the restore row
+- the pane appears to be an interactive Amp pane from command metadata and/or recent `tmux capture-pane` output
+- the visible thread identity/title is consistent with the restore row, or no conflicting identity is visible
+- the pane is idle enough for a short prompt; it is not visibly in a tool call, editor, shell, reconnect loop, or user-input decision
+
+Generate a unique token per pane so stale output cannot satisfy the check, for example:
+
+```sh
+token="$(date -u +%Y%m%dT%H%M%SZ)-$(uuidgen | tr '[:upper:]' '[:lower:]')"
+```
+
+Send exactly one concise read-only prompt to the verified pane:
+
+```text
+AMUX_HEALTH_CHECK <token>
+
+Please reply exactly:
+AMUX_HEALTH_OK <token>
+
+Do not inspect files, run commands, or change anything.
+```
+
+Use literal `tmux send-keys` input and then Enter; do not paste into any unverified pane:
+
+```sh
+tmux send-keys -t '<pane-id>' -l "AMUX_HEALTH_CHECK <token>"
+tmux send-keys -t '<pane-id>' Enter
+tmux send-keys -t '<pane-id>' Enter
+tmux send-keys -t '<pane-id>' -l "Please reply exactly:"
+tmux send-keys -t '<pane-id>' Enter
+tmux send-keys -t '<pane-id>' -l "AMUX_HEALTH_OK <token>"
+tmux send-keys -t '<pane-id>' Enter
+tmux send-keys -t '<pane-id>' Enter
+tmux send-keys -t '<pane-id>' -l "Do not inspect files, run commands, or change anything."
+tmux send-keys -t '<pane-id>' Enter
+```
+
+### 4. Wait for the exact response
+
+Wait a bounded amount of time, such as 60 seconds unless the user asked for a different timeout. Check pane output for the exact current token only:
+
+```sh
+tmux capture-pane -p -t '<pane-id>' -S -200 | rg -F "AMUX_HEALTH_OK <token>"
+```
+
+Classify the pinged row as:
+
+- `healthy`: row/window/workdir/thread appear matched and the pane replies with exactly `AMUX_HEALTH_OK <token>`.
+- `no-response`: the pane was verified and pinged, but the exact response did not appear before timeout. Stale output, a wrong token, or a partial response does not count.
+- `ambiguous`: the pane becomes unsafe to evaluate during the wait, for example conflicting output appears or another process takes over the pane.
+
+### 5. Report before any replacement
+
+Report the classifications first, with enough evidence for the user to approve or decline follow-up:
+
+| Workspace | Window | Workdir | Thread | Pane | Classification | Evidence / next step |
+| --- | --- | --- | --- | --- | --- | --- |
+| `<workspace>` | `<window>` | `<workdir>` | `<thread>` | `<pane-id>` | `healthy` / `no-live-window` / `no-response` / `mismatched` / `ambiguous` / `shelved` | `<brief evidence>` |
+
+End with the timeout caveat: `no-response` only means candidate stale. It does not prove the worker is safe to replace, and it does not authorize archival, unpinning, parking, killing, or spawning. If the user explicitly approves replacement, continue with [`troubleshooting.md#replace-a-stuck-or-misplaced-worker`](troubleshooting.md#replace-a-stuck-or-misplaced-worker).
+
 ## Tear down a spawned worker
 
 Use this only inside an Amp process created by `amux spawn` with injected `AMUX_*` variables:
