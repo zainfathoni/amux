@@ -148,7 +148,19 @@ Use this when a thread is stuck loading, was created under the wrong Amp project
    amux spawn [--title-prefix '<prefix>'] <window> <workdir> "<replacement prompt>" <workspace> <session>
    ```
 
-   The replacement prompt should say that it is a replacement worker, name the old thread(s), tell the worker not to archive them unless asked, and ask it to inspect/report before making unnecessary changes.
+   Keep the replacement prompt's first sentence title-neutral and task-specific. Avoid starting with "This is a replacement worker..." because Amp may auto-title the new thread from that phrase. Put replacement context in the second sentence/paragraph. Example:
+
+   ```text
+   Work on issue-236 backup pull host.
+
+   This replaces old stuck thread T-... . Do not archive the old thread unless explicitly asked. Inspect the worktree and current issue/task context, verify whether any cleanup or follow-up remains, and report status. Keep changes minimal and only act if needed.
+   ```
+
+   If the generated Amp title is still wrong, rename only the new thread:
+
+   ```sh
+   amp threads rename <new-thread-id> "<desired title>"
+   ```
 
 5. Verify the replacement row and live pane:
 
