@@ -5827,6 +5827,126 @@ exit 0
 	}
 }
 
+func TestRunnerParkWorkspaceDefaultsSessionToWorkspace(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	workdir := filepath.Join(tmp, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte("amux\tamux-runner\t"+workdir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "tmux.log")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ] && [ "$4" = amux ]; then
+  printf 'amux-runner\t@9\t%s\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`
+  exit 0
+fi
+if [ "$1" = run-shell ]; then exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "runner", "park", "amux", "amux-runner"}); err != nil {
+		t.Fatal(err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if !strings.Contains(log, "tmux list-panes -s -t amux -F #{window_name}\t#{window_id}\t#{pane_start_command}") {
+		t.Fatalf("runner park did not inspect workspace-named session\nlog:\n%s", log)
+	}
+	if strings.Contains(log, "-t Amp") {
+		t.Fatalf("runner park inspected legacy default session despite explicit workspace\nlog:\n%s", log)
+	}
+	if !strings.Contains(stdout.String(), "Scheduling tmux window amux/amux-runner (@9) to stop") {
+		t.Fatalf("runner park output missing workspace session\nstdout:\n%s", stdout.String())
+	}
+}
+
+func TestRunnerParkSupportsExplicitLegacySession(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	workdir := filepath.Join(tmp, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte("mac\tamux-runner\t"+workdir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "tmux.log")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ] && [ "$4" = Amp ]; then
+  printf 'amux-runner\t@7\t%s\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`
+  exit 0
+fi
+if [ "$1" = run-shell ]; then exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "runner", "park", "mac", "amux-runner", "Amp"}); err != nil {
+		t.Fatal(err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if !strings.Contains(log, "tmux list-panes -s -t Amp -F #{window_name}\t#{window_id}\t#{pane_start_command}") {
+		t.Fatalf("runner park did not inspect explicit legacy session\nlog:\n%s", log)
+	}
+	if !strings.Contains(stdout.String(), "Scheduling tmux window Amp/amux-runner (@7) to stop") {
+		t.Fatalf("runner park output missing explicit session\nstdout:\n%s", stdout.String())
+	}
+}
+
+func TestRunnerParkFailsClosedOnStartCommandMismatch(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	workdir := filepath.Join(tmp, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte("amux\tamux-runner\t"+workdir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "tmux.log")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ]; then
+  printf 'amux-runner\t@9\tcd `+workdir+` && exec amp threads continue T-thread\n'
+  exit 0
+fi
+if [ "$1" = run-shell ]; then exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := runWithDiscardedStdout([]string{"--config", configPath, "runner", "park", "amux", "amux-runner"})
+	if err == nil {
+		t.Fatal("runner park succeeded despite start-command mismatch")
+	}
+	if !strings.Contains(err.Error(), "is not the expected runner") {
+		t.Fatalf("got error %q, want runner mismatch", err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if strings.Contains(log, "tmux run-shell") {
+		t.Fatalf("runner park scheduled shutdown despite mismatch\nlog:\n%s", log)
+	}
+}
+
 func TestDoctorReportsRunnerDriftSeparately(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
