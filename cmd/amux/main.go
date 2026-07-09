@@ -3179,6 +3179,8 @@ Commands:
       The spawned Amp process receives AMUX_WORKSPACE, AMUX_SESSION,
       AMUX_WINDOW, AMUX_THREAD_ID, and AMUX_WORKDIR identity variables.
       Use --mode or -m to create the remote Amp thread with an Amp mode.
+      Built-in Dial modes are low, medium, high, and ultra; custom/plugin
+      mode strings are passed through unchanged.
       Use --title-prefix to name the spawned tmux window "<prefix> <window>"
       and rename only the newly created Amp thread to that same name after the
       initial message is submitted, for example "#255 worker".

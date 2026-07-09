@@ -59,6 +59,8 @@ var completionCommands = []completionCommand{
 
 var globalCompletionFlags = []string{"--config", "--dry-run", "--attach", "--no-attach", "--terminal-launcher", "--help", "-h", "--version"}
 
+const ampDialModeCompletions = "low medium high ultra"
+
 func (a app) completion(args []string) error {
 	if len(args) != 1 {
 		return errors.New("usage: amux completion <bash|zsh|fish>")
@@ -83,12 +85,23 @@ _amux_complete() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
+  case "$cur" in
+    --mode=*)
+      COMPREPLY=( $(compgen -W "%s" -P "--mode=" -- "${cur#--mode=}") )
+      return 0
+      ;;
+  esac
+
   case "$prev" in
     --config|--message-file)
       COMPREPLY=( $(compgen -f -- "$cur") )
       return 0
       ;;
-    --terminal-launcher|--mode|-m|--title-prefix|--thread|--workspace|--session)
+    --mode|-m)
+      COMPREPLY=( $(compgen -W "%s" -- "$cur") )
+      return 0
+      ;;
+    --terminal-launcher|--title-prefix|--thread|--workspace|--session)
       return 0
       ;;
   esac
@@ -154,7 +167,7 @@ _amux_complete() {
   esac
 }
 complete -F _amux_complete amux
-`, strings.Join(commandNames(completionCommands), " "), strings.Join(globalCompletionFlags, " "))
+`, ampDialModeCompletions, ampDialModeCompletions, strings.Join(commandNames(completionCommands), " "), strings.Join(globalCompletionFlags, " "))
 }
 
 func writeZshCompletion(w io.Writer) {
@@ -206,7 +219,7 @@ case $state in
         _arguments '--thread[select by thread id or URL]:thread:' '--workspace[select all rows in workspace]:workspace:' '*:arg:'
         ;;
       spawn)
-        _arguments '--mode[thread mode]:mode:' '-m[thread mode]:mode:' '--title-prefix[window/thread title prefix]:prefix:' '--message-file[read initial message from file]:message file:_files' '--message-stdin[read initial message from stdin]' '*:arg:'
+        _arguments '--mode[thread mode]:mode:(low medium high ultra)' '-m[thread mode]:mode:(low medium high ultra)' '--title-prefix[window/thread title prefix]:prefix:' '--message-file[read initial message from file]:message file:_files' '--message-stdin[read initial message from stdin]' '*:arg:'
         ;;
       teardown)
         _arguments '--thread[select by thread id or URL]:thread:' '--session[tmux session]:session:' '*:arg:'
@@ -255,6 +268,9 @@ func writeFishFlag(w io.Writer, condition, flag, description string, takesValue 
 		parts = append(parts, "-r")
 	} else {
 		parts = append(parts, "-f")
+	}
+	if flag == "--mode" || flag == "-m" {
+		parts = append(parts, "-f", "-a", fishQuote(ampDialModeCompletions))
 	}
 	if short != "" {
 		parts = append(parts, "-s", fishQuote(short))

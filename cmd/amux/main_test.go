@@ -66,6 +66,7 @@ func TestCompletionGeneratesShellScripts(t *testing.T) {
 				"launch list workspaces shelved pin store pin-current store-current unpin remove unpin-current remove-current park park-current shelve-current shelve unshelve spawn teardown prune-archived migrate-config runner completion update self-update version path doctor help",
 				"--config --dry-run --attach --no-attach --terminal-launcher --help -h --version",
 				"--mode -m --title-prefix --message-file --message-stdin",
+				"compgen -W \"low medium high ultra\"",
 				"--include-runners",
 				"list pin unpin launch park",
 			},
@@ -77,6 +78,7 @@ func TestCompletionGeneratesShellScripts(t *testing.T) {
 				"\"self-update:Alias for update\"",
 				"\"shelve-current:Pin if needed, archive the thread, and stop the current window\"",
 				"'--terminal-launcher[terminal launcher command]:command:'",
+				"'--mode[thread mode]:mode:(low medium high ultra)'",
 				"'--message-file[read initial message from file]:message file:_files'",
 				"'--include-runners[include runner-only workspaces]'",
 				"_values 'shell' bash zsh fish",
@@ -86,6 +88,7 @@ func TestCompletionGeneratesShellScripts(t *testing.T) {
 			shell: "fish",
 			want: []string{
 				"complete -c amux -f -n '__fish_use_subcommand' -a 'self-update' -d 'Alias for update'",
+				"complete -c amux -n '__fish_seen_subcommand_from spawn' -r -f -a 'low medium high ultra' -l 'mode' -d 'Amp thread mode'",
 				"complete -c amux -n '__fish_seen_subcommand_from spawn' -r -l 'message-file' -d 'Read initial message from file'",
 				"complete -c amux -n '__fish_seen_subcommand_from list' -f -l 'status' -d 'Append thread status'",
 				"complete -c amux -f -n '__fish_seen_subcommand_from runner; and not __fish_seen_subcommand_from list pin unpin launch park' -a 'park' -d 'Stop a live local runner window'",
@@ -2013,15 +2016,17 @@ func TestTextContainsComposerMessage(t *testing.T) {
 }
 
 func TestSpawnLongModeFlagCreatesThreadWithMode(t *testing.T) {
-	tmp := t.TempDir()
-	workdir := filepath.Join(tmp, "workdir")
-	if err := os.Mkdir(workdir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	configPath := filepath.Join(tmp, "workspaces.tsv")
-	logPath := filepath.Join(tmp, "calls.log")
+	for _, mode := range []string{"medium", "custom-plugin-mode"} {
+		t.Run(mode, func(t *testing.T) {
+			tmp := t.TempDir()
+			workdir := filepath.Join(tmp, "workdir")
+			if err := os.Mkdir(workdir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(tmp, "workspaces.tsv")
+			logPath := filepath.Join(tmp, "calls.log")
 
-	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+			writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
 printf '%s\n' "$*" >> "`+logPath+`"
 if [ "$1" = threads ] && [ "$2" = new ]; then
   printf 'T-mode-thread\n'
@@ -2033,7 +2038,7 @@ if [ "$1" = threads ] && [ "$2" = export ] && [ "$3" = T-mode-thread ]; then
 fi
 exit 2
 `)
-	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+			writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 if [ "$1" = has-session ]; then
   exit 1
 fi
@@ -2047,19 +2052,21 @@ fi
 exit 2
 `)
 
-	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+			t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
 
-	if err := run([]string{"--config", configPath, "spawn", "--mode", "plan", "mode win", workdir, "hello Amp"}); err != nil {
-		t.Fatal(err)
-	}
+			if err := run([]string{"--config", configPath, "spawn", "--mode", mode, "mode win", workdir, "hello Amp"}); err != nil {
+				t.Fatal(err)
+			}
 
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := string(logBytes); !strings.Contains(got, "threads new --mode plan\n") {
-		t.Fatalf("got amp calls %q, want mode thread creation", got)
+			logBytes, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(logBytes); !strings.Contains(got, "threads new --mode "+mode+"\n") {
+				t.Fatalf("got amp calls %q, want mode thread creation", got)
+			}
+		})
 	}
 }
 
@@ -2476,7 +2483,7 @@ exit 2
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var stdout bytes.Buffer
-	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "--dry-run", "spawn", "-m", "accept-edits", "dry", workdir, "hello"}); err != nil {
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "--dry-run", "spawn", "-m", "custom-plugin-mode", "dry", workdir, "hello"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2487,7 +2494,7 @@ exit 2
 		t.Fatalf("dry-run spawn wrote config file")
 	}
 	for _, want := range []string{
-		"Would create Amp thread for mac/dry with mode \"accept-edits\"",
+		"Would create Amp thread for mac/dry with mode \"custom-plugin-mode\"",
 		"Would create tmux session \"Amp\" with window \"dry\"",
 		"Would start Amp in " + workdir + " and submit initial message",
 		"Would store mac/dry in " + configPath,
