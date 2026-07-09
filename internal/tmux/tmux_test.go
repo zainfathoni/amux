@@ -295,6 +295,103 @@ exit 0
 	}
 }
 
+func TestSelectAndAttachUsesConfiguredTerminalLauncherBeforeDefaults(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "calls.log")
+
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = select-window ]; then
+  exit 0
+fi
+if [ "$1" = attach ]; then
+  echo 'open terminal failed: not a terminal' >&2
+  exit 1
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "custom-terminal"), `#!/bin/sh
+printf 'custom-terminal %s\n' "$*" >> "`+logPath+`"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(tmp, "uwsm-app"), `#!/bin/sh
+printf 'uwsm-app %s\n' "$*" >> "`+logPath+`"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(tmp, "xdg-terminal-exec"), `#!/bin/sh
+printf 'xdg-terminal-exec %s\n' "$*" >> "`+logPath+`"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(tmp, "alacritty"), `#!/bin/sh
+printf 'alacritty %s\n' "$*" >> "`+logPath+`"
+exit 0
+`)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX", "")
+
+	if err := (Runner{TerminalLauncher: "custom-terminal --new-window -e"}).SelectAndAttach("Amp", false); err != nil {
+		t.Fatal(err)
+	}
+
+	log := waitForLogContaining(t, logPath, "custom-terminal --new-window -e tmux attach -t Amp")
+	if !strings.Contains(log, "custom-terminal --new-window -e tmux attach -t Amp") {
+		t.Fatalf("log missing configured terminal launcher\nlog:\n%s", log)
+	}
+	if strings.Contains(log, "uwsm-app") || strings.Contains(log, "alacritty") {
+		t.Fatalf("used default fallback after configured terminal launcher started\nlog:\n%s", log)
+	}
+}
+
+func TestTerminalAttachCommandsPutConfiguredLauncherBeforeOmarchyAndAlacritty(t *testing.T) {
+	tmp := t.TempDir()
+	writeExecutable(t, filepath.Join(tmp, "uwsm-app"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(tmp, "xdg-terminal-exec"), "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", tmp)
+
+	commands, err := terminalAttachCommands("Amp", "custom-terminal --class 'Amp Window' -e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := commandStrings(commands)
+	want := []string{
+		"custom-terminal --class Amp Window -e tmux attach -t Amp",
+		"uwsm-app -- xdg-terminal-exec -e tmux attach -t Amp",
+		"alacritty -e tmux attach -t Amp",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("commands:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestTerminalAttachCommandsPreserveDefaultFallbackOrder(t *testing.T) {
+	tmp := t.TempDir()
+	writeExecutable(t, filepath.Join(tmp, "uwsm-app"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(tmp, "xdg-terminal-exec"), "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", tmp)
+
+	commands, err := terminalAttachCommands("Amp", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := commandStrings(commands)
+	want := []string{
+		"uwsm-app -- xdg-terminal-exec -e tmux attach -t Amp",
+		"alacritty -e tmux attach -t Amp",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("commands:\n got %q\nwant %q", got, want)
+	}
+}
+
+func commandStrings(commands [][]string) []string {
+	formatted := make([]string, 0, len(commands))
+	for _, command := range commands {
+		formatted = append(formatted, strings.Join(command, " "))
+	}
+	return formatted
+}
+
 func waitForLogContaining(t *testing.T, path, want string) string {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

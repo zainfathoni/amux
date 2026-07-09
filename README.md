@@ -151,6 +151,7 @@ amux                         # launch default mac/Amp workspace; auto-attach if 
 amux launch [workspace] [session] # one workspace arg also selects the same-named tmux session
 amux --attach launch mac Amp
 amux --no-attach launch mac Amp
+amux --terminal-launcher "kitty -e" --attach launch mac Amp
 amux launch mac --dry-run
 amux list [--status] [--active|--shelved] [workspace]
 amux shelved [workspace]
@@ -230,7 +231,7 @@ For `launch` and `spawn`, `--dry-run` validates inputs and checks tmux window co
 
 Launch uses auto-attach by default: cold restores create the tmux session and return, while an already-running session attaches only when its live window set and pane paths match the configured workspace. Use `--attach` to always attach after restoring, or `--no-attach` to never attach.
 
-When launch attaches from inside an existing tmux client, `amux` switches that client to the target session. From a normal interactive terminal, it attaches in-place. If tmux reports that the caller is not a terminal, `amux` opens the target session through Omarchy's terminal launcher, with direct Alacritty fallback.
+When launch attaches from inside an existing tmux client, `amux` switches that client to the target session. From a normal interactive terminal, it attaches in-place. If tmux reports that the caller is not a terminal, `amux` opens the target session through the configured terminal launcher, then Omarchy's terminal launcher, then direct Alacritty fallback. Configure the first launcher with `--terminal-launcher "kitty -e"` or `AMUX_TERMINAL_LAUNCHER="kitty -e"`; `amux` appends `tmux attach -t <session>` to the launcher command. Quoted launcher arguments are supported. Without that option or env var, the existing Omarchy/Alacritty order is unchanged.
 
 `park [workspace] <window>` and `park-current [workspace]` are live-local-only. They resolve the intended live tmux window, schedule a delayed graceful terminal shutdown sequence for the target pane, then return immediately. This gives Amp time to receive the command result and send a final response before the local process exits. The delayed shutdown only force-closes the tmux window if graceful stop times out. Parking preserves restore config rows and never archives the remote Amp thread. Use `unpin`/`unpin-current` when you only want to stop restoring a row, `shelve-current` or `shelve` when you want to hide/defer a thread while keeping it restorable, and `teardown` when you intentionally want to archive the verified remote Amp thread, remove the row, and stop the local window.
 
@@ -267,6 +268,8 @@ Defaults:
 - runner config: `~/.config/amux/runners.tsv`
 
 Override the config path with either `--config <path>` or `AMUX_WORKSPACES`. The legacy `AMP_TMUX_WORKSPACES` variable remains supported for older installs and scripts.
+
+Override the non-interactive attach terminal launcher with either `--terminal-launcher <command>` or `AMUX_TERMINAL_LAUNCHER`. The launcher command is parsed into shell-style words and `amux` appends `tmux attach -t <session>`. For example, `AMUX_TERMINAL_LAUNCHER="foot -e"` launches `foot -e tmux attach -t <session>`. If the configured launcher is unset or fails to start, `amux` keeps the default fallback order: Omarchy (`uwsm-app -- xdg-terminal-exec -e`) when available, then `alacritty -e`.
 
 Older amux releases used `~/.config/amp-tmux`. Current amux uses `~/.config/amux` and automatically copies `workspaces.tsv`, `runners.tsv`, and future config files from the legacy directory when the new files do not exist. The old directory is left in place for rollback and older binaries. Run `amux migrate-config` explicitly to perform the same copy and print the resolved path.
 

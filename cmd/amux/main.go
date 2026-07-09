@@ -18,9 +18,10 @@ import (
 )
 
 const (
-	defaultWorkspace  = "mac"
-	defaultSession    = "Amp"
-	spawnPollInterval = 100 * time.Millisecond
+	defaultWorkspace    = "mac"
+	defaultSession      = "Amp"
+	terminalLauncherEnv = "AMUX_TERMINAL_LAUNCHER"
+	spawnPollInterval   = 100 * time.Millisecond
 )
 
 var (
@@ -30,9 +31,10 @@ var (
 )
 
 type options struct {
-	configPath string
-	dryRun     bool
-	attachMode attachMode
+	configPath       string
+	dryRun           bool
+	attachMode       attachMode
+	terminalLauncher string
 }
 
 type attachMode int
@@ -71,6 +73,9 @@ func (a app) run(args []string) error {
 	opts, args, err := parseOptions(args)
 	if err != nil {
 		return err
+	}
+	if opts.terminalLauncher == "" {
+		opts.terminalLauncher = os.Getenv(terminalLauncherEnv)
 	}
 	command := "launch"
 	if len(args) > 0 {
@@ -181,6 +186,12 @@ func parseOptions(args []string) (options, []string, error) {
 			opts.attachMode = attachAlways
 		case "--no-attach":
 			opts.attachMode = attachNever
+		case "--terminal-launcher":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return opts, nil, errors.New("--terminal-launcher requires a command")
+			}
+			opts.terminalLauncher = args[i]
 		case "--config":
 			i++
 			if i >= len(args) || args[i] == "" {
@@ -192,6 +203,11 @@ func parseOptions(args []string) (options, []string, error) {
 				opts.configPath = strings.TrimPrefix(args[i], "--config=")
 				if opts.configPath == "" {
 					return opts, nil, errors.New("--config requires a path")
+				}
+			} else if strings.HasPrefix(args[i], "--terminal-launcher=") {
+				opts.terminalLauncher = strings.TrimPrefix(args[i], "--terminal-launcher=")
+				if opts.terminalLauncher == "" {
+					return opts, nil, errors.New("--terminal-launcher requires a command")
 				}
 			} else {
 				remaining = append(remaining, args[i])
@@ -235,7 +251,7 @@ func launch(opts options, args []string) error {
 	}
 	rows = activeRows
 
-	runner := tmux.Runner{DryRun: opts.dryRun}
+	runner := tmux.Runner{DryRun: opts.dryRun, TerminalLauncher: opts.terminalLauncher}
 	sessionExists := runner.HasSession(session)
 	sessionExistedBeforeLaunch := sessionExists
 	windowNames, err := runner.WindowNames(session)
@@ -2850,7 +2866,7 @@ func filterRunnerRows(rows []config.RunnerRow, workspace string) []config.Runner
 
 func (a app) usage() {
 	program := filepath.Base(os.Args[0])
-	fmt.Fprintf(a.stdout, `Usage: %s [--config path] [--dry-run] [--attach] [--no-attach] [command] [args]
+	fmt.Fprintf(a.stdout, `Usage: %s [--config path] [--dry-run] [--attach] [--no-attach] [--terminal-launcher command] [command] [args]
 
 Commands:
   launch [workspace] [session]
@@ -2861,6 +2877,9 @@ Commands:
       windows for unshelved rows, and skips archived/shelved rows. It does not
       create, archive, or unarchive remote Amp threads.
       Use --attach to always attach or --no-attach to never attach.
+      If tmux cannot attach because the caller is not a terminal,
+      --terminal-launcher (or AMUX_TERMINAL_LAUNCHER) runs before the default
+      Omarchy launcher and Alacritty fallback.
       If no command is given, launch is assumed.
 
   list [--status] [--active|--shelved] [workspace]

@@ -18,6 +18,28 @@ import (
 	"github.com/zainfathoni/amux/internal/tmux"
 )
 
+func TestParseOptionsAcceptsTerminalLauncher(t *testing.T) {
+	opts, remaining, err := parseOptions([]string{"--terminal-launcher", "kitty -e", "--terminal-launcher=ghostty -e", "launch", "mac"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.terminalLauncher != "ghostty -e" {
+		t.Fatalf("terminal launcher = %q, want ghostty -e", opts.terminalLauncher)
+	}
+	if got, want := strings.Join(remaining, " "), "launch mac"; got != want {
+		t.Fatalf("remaining = %q, want %q", got, want)
+	}
+}
+
+func TestParseOptionsRequiresTerminalLauncherCommand(t *testing.T) {
+	for _, args := range [][]string{{"--terminal-launcher"}, {"--terminal-launcher="}} {
+		_, _, err := parseOptions(args)
+		if err == nil || !strings.Contains(err.Error(), "--terminal-launcher requires a command") {
+			t.Fatalf("parseOptions(%v) err = %v, want terminal launcher error", args, err)
+		}
+	}
+}
+
 func TestPathWritesToInjectedStdout(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
