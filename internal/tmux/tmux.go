@@ -299,6 +299,10 @@ func (r Runner) CurrentTarget() (string, error) {
 	return displayCurrentMessage("#S:#I")
 }
 
+func (r Runner) CurrentWindowID() (string, error) {
+	return displayCurrentMessage("#{window_id}")
+}
+
 func (r Runner) CurrentWorkdir() (string, error) {
 	return displayCurrentMessage("#{pane_current_path}")
 }

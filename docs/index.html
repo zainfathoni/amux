@@ -577,7 +577,7 @@ OK live tmux session matches config</code></pre>
               </div>
               <div class="feature">
                 <dt>Shelve deferred work</dt>
-                <dd><code>shelve</code> archives one thread, one restore row, or a whole workspace so deferred work leaves the Amp sidebar while its restore rows stay available for explicit <code>unshelve</code> later. <code>amux list</code> appends a status column, and <code>amux shelved [workspace]</code> shows only deferred rows.</dd>
+                <dd><code>shelve-current</code> pins the current tmux/Amp window if needed, archives the identified thread, and stops the current window. <code>shelve</code> archives one existing restore row or a whole workspace so deferred work leaves the Amp sidebar while rows stay available for explicit <code>unshelve</code> later.</dd>
               </div>
               <div class="feature">
                 <dt>Inspect drift</dt>
@@ -622,7 +622,7 @@ OK live tmux session matches config</code></pre>
                 <code>amp --no-tui</code> runners are per working directory. Runner intent lives separately in <code>~/.config/amux/runners.tsv</code>, so <code>amux runner launch</code> can restore local runner windows without mixing them into thread restore rows.
               </p>
               <p>
-                <code>amux</code> names four side-effect domains explicitly: restore-config rows, runner-config rows, live local tmux/Amp sessions, and remote Amp thread state. Pin/unpin commands only change the restore config (<code>store</code>/<code>remove</code> remain compatibility aliases); <code>runner pin</code>/<code>runner unpin</code> only change runner config; <code>park</code> and <code>runner park</code> only stop resolved live local windows while preserving config; <code>shelve</code> archives/hides deferred Amp threads while preserving restore rows; <code>teardown</code> is the explicit full cleanup that archives the verified thread, removes its row, and stops its verified local window.
+                <code>amux</code> names four side-effect domains explicitly: restore-config rows, runner-config rows, live local tmux/Amp sessions, and remote Amp thread state. Pin/unpin commands only change the restore config (<code>store</code>/<code>remove</code> remain compatibility aliases); <code>runner pin</code>/<code>runner unpin</code> only change runner config; <code>park</code> and <code>runner park</code> only stop resolved live local windows while preserving config; <code>shelve-current</code> pins/preserves the current row before archiving the supplied current thread; row-based <code>shelve</code> archives/hides deferred Amp threads while preserving restore rows; <code>teardown</code> is the explicit full cleanup that archives the verified thread, removes its row, and stops its verified local window.
               </p>
               <p>
                 <code>amux list [workspace]</code> keeps the restore TSV fields first and appends <code>status</code>: <code>active</code>, <code>shelved</code>, <code>missing</code>, or <code>unknown</code> when Amp status cannot be read. Use <code>amux list --active</code>, <code>amux list --shelved</code>, or the <code>amux shelved</code> shortcut to focus the view.
@@ -650,7 +650,7 @@ mac         project-runner     ~/Code/my-project</code></pre>
                 </div>
                 <div class="step">
                   <span class="step-number">3</span>
-                  <span class="step-copy"><strong>Shelve or teardown</strong><span>Use <code>amux shelve --thread &lt;thread-id-or-url&gt;</code> or <code>amux shelve --workspace &lt;workspace&gt;</code> to hide deferred work while keeping rows restorable by explicit <code>amux unshelve ...</code>; use no-arg <code>amux teardown</code> only from a spawned <code>AMUX_*</code> identity, <code>amux teardown --thread &lt;thread-id-or-url&gt; [--session &lt;session&gt;]</code> from a restored worker without identity, or <code>amux teardown &lt;workspace&gt; &lt;window&gt; [session]</code> for full cleanup.</span></span>
+                  <span class="step-copy"><strong>Shelve or teardown</strong><span>Use <code>amux shelve-current [workspace] &lt;thread-id-or-url&gt;</code> from an unpinned current pane, or <code>amux shelve --thread &lt;thread-id-or-url&gt;</code>/<code>amux shelve --workspace &lt;workspace&gt;</code> for existing rows, to hide deferred work while keeping rows restorable by explicit <code>amux unshelve ...</code>; use no-arg <code>amux teardown</code> only from a spawned <code>AMUX_*</code> identity, <code>amux teardown --thread &lt;thread-id-or-url&gt; [--session &lt;session&gt;]</code> from a restored worker without identity, or <code>amux teardown &lt;workspace&gt; &lt;window&gt; [session]</code> for full cleanup.</span></span>
                 </div>
                 <div class="step">
                   <span class="step-number">4</span>
