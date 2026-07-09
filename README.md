@@ -248,7 +248,7 @@ amux doctor [workspace] [session]
 
 Compatibility aliases remain available: `store` for `pin`, `store-current` for `pin-current`, `remove` for `unpin`, `remove-current` for `unpin-current`, and `self-update` for `update`.
 
-`amux spawn --mode <mode>` (or `-m <mode>`) creates the new Amp thread with the selected Amp mode. Omitting `--mode` preserves the default Amp thread behavior.
+`amux spawn --mode <mode>` (or `-m <mode>`) creates the new Amp thread with the selected Amp mode. Amp's built-in Dial modes are `low`, `medium`, `high`, and `ultra`; shell completions suggest those built-ins. Custom/plugin mode names are still passed through unchanged, so amux does not restrict `--mode` to the built-in list. Omitting `--mode` preserves the default Amp thread behavior. For old Amp mode names, use `medium` instead of `smart` or `deep`, `low` instead of `rush`, and `high` or `ultra` instead of `deep**3`.
 
 The positional `amux spawn ... <initial-message>` remains intentionally single-line: tabs and newlines are rejected before any Amp thread is created. For structured prompts, use `--message-file prompt.md` or `--message-stdin < prompt.md`; these explicit sources allow multi-line content, are mutually exclusive with each other and with positional `<initial-message>`, and are read and validated before `spawn` creates the new Amp thread. Multi-line content is delivered through a tmux paste buffer with bracketed paste enabled when the Amp composer requests it, then verified against the newly created Amp thread before the restore row is stored. Prompts larger than 1 MiB are rejected.
 
@@ -393,7 +393,7 @@ Shelve this            -> amux shelve-current [workspace] [thread-id-or-url] / a
 Show shelved work      -> amux shelved [workspace] / amux list --shelved [workspace]
 Unshelve this          -> amux unshelve <workspace> <window> / --thread / --workspace
 Restore my workspace   -> amux launch
-Spawn a worker for ... -> amux spawn [--mode <mode>] [--title-prefix <prefix>] ...
+Spawn a worker for ... -> amux spawn [--mode medium] [--title-prefix <prefix>] ...
 /amux sprawl #1 #2     -> skill-only fan-out after issue dependency inspection; not a CLI command
 /amux finish           -> post-merge GitHub/git cleanup, then final amux teardown
 Teardown this worker   -> amux teardown / teardown --thread / teardown <workspace> <window>
