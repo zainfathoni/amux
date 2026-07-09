@@ -63,9 +63,10 @@ func TestCompletionGeneratesShellScripts(t *testing.T) {
 			shell: "bash",
 			want: []string{
 				"complete -F _amux_complete amux",
-				"launch list shelved pin store pin-current store-current unpin remove unpin-current remove-current park park-current shelve-current shelve unshelve spawn teardown prune-archived migrate-config runner completion update self-update version path doctor help",
+				"launch list workspaces shelved pin store pin-current store-current unpin remove unpin-current remove-current park park-current shelve-current shelve unshelve spawn teardown prune-archived migrate-config runner completion update self-update version path doctor help",
 				"--config --dry-run --attach --no-attach --terminal-launcher --help -h --version",
 				"--mode -m --title-prefix --message-file --message-stdin",
+				"--include-runners",
 				"list pin unpin launch park",
 			},
 		},
@@ -77,6 +78,7 @@ func TestCompletionGeneratesShellScripts(t *testing.T) {
 				"\"shelve-current:Pin if needed, archive the thread, and stop the current window\"",
 				"'--terminal-launcher[terminal launcher command]:command:'",
 				"'--message-file[read initial message from file]:message file:_files'",
+				"'--include-runners[include runner-only workspaces]'",
 				"_values 'shell' bash zsh fish",
 			},
 		},
@@ -226,6 +228,95 @@ exit 2
 		"mac\tworker\t/tmp/worker\tT-worker\n"
 	if got := stdout.String(); got != want {
 		t.Fatalf("list output = %q, want %q", got, want)
+	}
+}
+
+func TestWorkspacesPrintsUniqueSortedRestoreWorkspaces(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	contents := "zed\tone\t/tmp/one\tT-one\nmac\ttwo\t/tmp/two\tT-two\nmac\tthree\t/tmp/three\tT-three\n"
+	if err := os.WriteFile(configPath, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+printf 'workspaces should not call amp\n' >&2
+exit 2
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'workspaces should not call tmux\n' >&2
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "workspaces"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stdout.String(), "mac\nzed\n"; got != want {
+		t.Fatalf("workspaces output = %q, want %q", got, want)
+	}
+}
+
+func TestWorkspacesMissingConfigDoesNotCreateFiles(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "missing", "workspaces.tsv")
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "workspaces"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("workspaces output = %q, want empty", got)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("config path stat err = %v, want not exist", err)
+	}
+	if _, err := os.Stat(filepath.Dir(configPath)); !os.IsNotExist(err) {
+		t.Fatalf("config dir stat err = %v, want not exist", err)
+	}
+}
+
+func TestWorkspacesDefaultPathDoesNotMigrateLegacyConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AMUX_WORKSPACES", "")
+	t.Setenv("AMP_TMUX_WORKSPACES", "")
+	legacyDir := filepath.Join(home, ".config", "amp-tmux")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "workspaces.tsv"), []byte("legacy\tworker\t/tmp/worker\tT-worker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"workspaces"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stdout.String(), "legacy\n"; got != want {
+		t.Fatalf("workspaces output = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config", "amux")); !os.IsNotExist(err) {
+		t.Fatalf("amux config dir stat err = %v, want not exist", err)
+	}
+}
+
+func TestWorkspacesIncludeRunnersAddsRunnerOnlyWorkspaces(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("mac\tworker\t/tmp/worker\tT-worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte("runner-only\trunner\t/tmp/runner\nmac\tmac-runner\t/tmp/mac\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "workspaces", "--include-runners"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stdout.String(), "mac\nrunner-only\n"; got != want {
+		t.Fatalf("workspaces output = %q, want %q", got, want)
 	}
 }
 

@@ -73,16 +73,17 @@ If any spawn partially succeeds, stop and inspect for a created remote thread, t
 
 ## Health-check interactive workers before replacement
 
-Use this when the user asks for `/amux health <workspace>`, asks whether workers are responsive, or wants evidence before replacing stale-looking interactive Amp/tmux workers. This is skill-only orchestration; do not add or assume an `amux health` CLI command.
+Use this when the user asks for `/amux health <workspace>`, `/amux health all`, asks whether workers are responsive, or wants evidence before replacing stale-looking interactive Amp/tmux workers. This is skill-only orchestration; do not add or assume an `amux health` CLI command.
 
 The workflow is intentionally read-mostly. It may send one harmless prompt only to panes verified as interactive Amp panes. It must not archive threads, unpin/remove restore rows, park/kill windows, launch/spawn replacements, or rename anything. A failed health check means **candidate stale**, not automatically replaceable. If replacement is still desired, report the table first and ask for explicit approval to follow the safe replacement workflow in [`troubleshooting.md#replace-a-stuck-or-misplaced-worker`](troubleshooting.md#replace-a-stuck-or-misplaced-worker).
 
 ### 1. Inspect amux and tmux state first
 
-Use the requested workspace. If the tmux session is not the same as the workspace, infer it from the restore rows or ask only when the target would otherwise be ambiguous.
+Use the requested workspace. For an all-workspace health check, discover restore workspaces first with `amux workspaces`, then run this workflow once per returned workspace. Do not include runner-only workspaces by default; use `amux workspaces --include-runners` only when the user explicitly asks for runner inventory too. If the tmux session is not the same as the workspace, infer it from the restore rows or ask only when the target would otherwise be ambiguous.
 
 ```sh
 amux version
+amux workspaces # only for all-workspace health checks
 amux list <workspace>
 amux list --status <workspace>
 amux doctor <workspace> [session]

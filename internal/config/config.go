@@ -56,6 +56,28 @@ func DefaultPath() string {
 	return path
 }
 
+func DefaultPathReadOnly() string {
+	if path := os.Getenv(WorkspacesEnv); path != "" {
+		return path
+	}
+	if path := os.Getenv(LegacyWorkspacesEnv); path != "" {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return DefaultRelativePath
+	}
+	path := filepath.Join(home, DefaultRelativePath)
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	legacyPath := filepath.Join(home, LegacyDefaultRelativePath)
+	if _, err := os.Stat(legacyPath); err == nil {
+		return legacyPath
+	}
+	return path
+}
+
 func RunnerPath(workspacesPath string) string {
 	return filepath.Join(filepath.Dir(workspacesPath), "runners.tsv")
 }
