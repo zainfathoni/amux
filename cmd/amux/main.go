@@ -72,14 +72,36 @@ func (a app) run(args []string) error {
 	if err != nil {
 		return err
 	}
-	if opts.configPath == "" {
-		opts.configPath = config.DefaultPath()
-	}
-
 	command := "launch"
 	if len(args) > 0 {
 		command = args[0]
 		args = args[1:]
+	}
+
+	switch command {
+	case "migrate-config":
+		if opts.configPath != "" {
+			return errors.New("migrate-config uses the default config locations and does not support --config")
+		}
+		if len(args) != 0 {
+			return errors.New("usage: amux migrate-config")
+		}
+		migrated, err := config.MigrateDefaultDir()
+		if err != nil {
+			return err
+		}
+		if migrated {
+			fmt.Fprintf(a.stdout, "Migrated config from ~/%s to ~/%s\n", filepath.Dir(config.LegacyDefaultRelativePath), filepath.Dir(config.DefaultRelativePath))
+			fmt.Fprintln(a.stdout, "Old config files were left in place for rollback and older amux binaries.")
+		} else {
+			fmt.Fprintln(a.stdout, "No config migration needed.")
+		}
+		fmt.Fprintln(a.stdout, config.DefaultPath())
+		return nil
+	}
+
+	if opts.configPath == "" {
+		opts.configPath = config.DefaultPath()
 	}
 
 	switch command {
@@ -2298,6 +2320,12 @@ Commands:
       without changing config. Defaults: workspace=mac.
       Side effects: mutates restore config only; does not archive/delete remote
       Amp threads and does not stop live local tmux/Amp windows.
+
+  migrate-config
+      Copy legacy ~/.config/amp-tmux config files into ~/.config/amux when the
+      new files are missing. Leaves the legacy directory in place for rollback
+      and older amux binaries. Side effects: config files only; no tmux or Amp
+      thread changes.
 
   runner list [workspace]
       Print configured amp --no-tui runner rows from runners.tsv.

@@ -10,7 +10,12 @@ import (
 	"strings"
 )
 
-const DefaultRelativePath = ".config/amp-tmux/workspaces.tsv"
+const (
+	DefaultRelativePath       = ".config/amux/workspaces.tsv"
+	LegacyDefaultRelativePath = ".config/amp-tmux/workspaces.tsv"
+	WorkspacesEnv             = "AMUX_WORKSPACES"
+	LegacyWorkspacesEnv       = "AMP_TMUX_WORKSPACES"
+)
 
 type Row struct {
 	Workspace string
@@ -26,18 +31,90 @@ type RunnerRow struct {
 }
 
 func DefaultPath() string {
-	if path := os.Getenv("AMP_TMUX_WORKSPACES"); path != "" {
+	if path := os.Getenv(WorkspacesEnv); path != "" {
+		return path
+	}
+	if path := os.Getenv(LegacyWorkspacesEnv); path != "" {
 		return path
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return DefaultRelativePath
 	}
-	return filepath.Join(home, DefaultRelativePath)
+	path := filepath.Join(home, DefaultRelativePath)
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	legacyPath := filepath.Join(home, LegacyDefaultRelativePath)
+	if _, err := os.Stat(legacyPath); err == nil {
+		_, _ = MigrateDefaultDir()
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+		return legacyPath
+	}
+	return path
 }
 
 func RunnerPath(workspacesPath string) string {
 	return filepath.Join(filepath.Dir(workspacesPath), "runners.tsv")
+}
+
+func MigrateDefaultDir() (bool, error) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return false, err
+	}
+	legacyDir := filepath.Join(home, filepath.Dir(LegacyDefaultRelativePath))
+	newDir := filepath.Join(home, filepath.Dir(DefaultRelativePath))
+	if _, err := os.Stat(legacyDir); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	if err := os.MkdirAll(newDir, 0o755); err != nil {
+		return false, err
+	}
+	migrated := false
+	for _, name := range []string{"workspaces.tsv", "runners.tsv", "shelves.tsv"} {
+		copied, err := copyConfigFileIfMissing(filepath.Join(legacyDir, name), filepath.Join(newDir, name))
+		if err != nil {
+			return migrated, err
+		}
+		migrated = migrated || copied
+	}
+	return migrated, nil
+}
+
+func copyConfigFileIfMissing(src, dst string) (bool, error) {
+	data, err := os.ReadFile(src)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if _, err := os.Stat(dst); err == nil {
+		return false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	file, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return false, err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return false, err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return false, err
+	}
+	if err := file.Close(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func Ensure(path string) error {

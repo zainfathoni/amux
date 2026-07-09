@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -36,6 +37,107 @@ func TestEnsureWritesDefaultConfigWithPinUnpinGuidance(t *testing.T) {
 	}
 	if strings.Contains(string(got), "amux store/store-current/remove/remove-current/spawn") {
 		t.Fatalf("default config still prefers legacy store/remove guidance: %q", got)
+	}
+}
+
+func TestDefaultPathUsesAmuxConfigDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(WorkspacesEnv, "")
+	t.Setenv(LegacyWorkspacesEnv, "")
+
+	got := DefaultPath()
+	want := filepath.Join(home, ".config", "amux", "workspaces.tsv")
+	if got != want {
+		t.Fatalf("DefaultPath() = %q, want %q", got, want)
+	}
+}
+
+func TestDefaultPathMigratesLegacyConfigFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(WorkspacesEnv, "")
+	t.Setenv(LegacyWorkspacesEnv, "")
+	legacyDir := filepath.Join(home, ".config", "amp-tmux")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacyWorkspace := filepath.Join(legacyDir, "workspaces.tsv")
+	legacyRunner := filepath.Join(legacyDir, "runners.tsv")
+	if err := os.WriteFile(legacyWorkspace, []byte("mac\told\t/tmp\tT-old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyRunner, []byte("mac\trunner\t/tmp\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := DefaultPath()
+	want := filepath.Join(home, ".config", "amux", "workspaces.tsv")
+	if got != want {
+		t.Fatalf("DefaultPath() = %q, want migrated path %q", got, want)
+	}
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{filepath.Join(home, ".config", "amux", "workspaces.tsv"), "mac\told\t/tmp\tT-old\n"},
+		{filepath.Join(home, ".config", "amux", "runners.tsv"), "mac\trunner\t/tmp\n"},
+		{legacyWorkspace, "mac\told\t/tmp\tT-old\n"},
+	} {
+		gotBytes, err := os.ReadFile(tc.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(gotBytes) != tc.want {
+			t.Fatalf("%s = %q, want %q", tc.path, gotBytes, tc.want)
+		}
+	}
+}
+
+func TestDefaultPathDoesNotOverwriteExistingAmuxConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(WorkspacesEnv, "")
+	t.Setenv(LegacyWorkspacesEnv, "")
+	legacyDir := filepath.Join(home, ".config", "amp-tmux")
+	newDir := filepath.Join(home, ".config", "amux")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(newDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	newWorkspace := filepath.Join(newDir, "workspaces.tsv")
+	if err := os.WriteFile(filepath.Join(legacyDir, "workspaces.tsv"), []byte("mac\told\t/tmp\tT-old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newWorkspace, []byte("mac\tnew\t/tmp\tT-new\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := DefaultPath(); got != newWorkspace {
+		t.Fatalf("DefaultPath() = %q, want %q", got, newWorkspace)
+	}
+	gotBytes, err := os.ReadFile(newWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(gotBytes), "mac\tnew\t/tmp\tT-new\n"; got != want {
+		t.Fatalf("new config was overwritten: got %q, want %q", got, want)
+	}
+}
+
+func TestDefaultPathEnvironmentPrecedence(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(WorkspacesEnv, "/tmp/amux.tsv")
+	t.Setenv(LegacyWorkspacesEnv, "/tmp/legacy.tsv")
+	if got, want := DefaultPath(), "/tmp/amux.tsv"; got != want {
+		t.Fatalf("DefaultPath() = %q, want %q", got, want)
+	}
+	t.Setenv(WorkspacesEnv, "")
+	if got, want := DefaultPath(), "/tmp/legacy.tsv"; got != want {
+		t.Fatalf("DefaultPath() = %q, want %q", got, want)
 	}
 }
 

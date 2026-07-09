@@ -32,6 +32,62 @@ func TestPathWritesToInjectedStdout(t *testing.T) {
 	}
 }
 
+func TestPathMigratesLegacyDefaultConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AMUX_WORKSPACES", "")
+	t.Setenv("AMP_TMUX_WORKSPACES", "")
+	legacyDir := filepath.Join(home, ".config", "amp-tmux")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "workspaces.tsv"), []byte("mac\twin\t/tmp\tT-old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"path"}); err != nil {
+		t.Fatal(err)
+	}
+	newPath := filepath.Join(home, ".config", "amux", "workspaces.tsv")
+	if got, want := stdout.String(), newPath+"\n"; got != want {
+		t.Fatalf("path output = %q, want %q", got, want)
+	}
+	got, err := os.ReadFile(newPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "mac\twin\t/tmp\tT-old\n" {
+		t.Fatalf("migrated config = %q", got)
+	}
+}
+
+func TestMigrateConfigCommandReportsMigration(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AMUX_WORKSPACES", "")
+	t.Setenv("AMP_TMUX_WORKSPACES", "")
+	legacyDir := filepath.Join(home, ".config", "amp-tmux")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "workspaces.tsv"), []byte("mac\twin\t/tmp\tT-old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"migrate-config"}); err != nil {
+		t.Fatal(err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Migrated config from ~/.config/amp-tmux to ~/.config/amux") {
+		t.Fatalf("missing migration message: %q", out)
+	}
+	if !strings.Contains(out, filepath.Join(home, ".config", "amux", "workspaces.tsv")) {
+		t.Fatalf("missing migrated path: %q", out)
+	}
+}
+
 func TestVersionPrintsDefaultVersion(t *testing.T) {
 	var stdout bytes.Buffer
 	if err := (app{stdout: &stdout}).run([]string{"version"}); err != nil {
