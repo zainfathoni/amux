@@ -433,11 +433,11 @@ git push origin v0.1.1
 
 The tag push starts the Release workflow. The workflow builds platform archives and injects the tag name as the `amux version` value.
 Each release publishes versioned artifacts such as `amux-v0.1.1-linux-amd64.tar.gz` and stable aliases such as `amux-linux-amd64.tar.gz` for `releases/latest/download` links.
-
-After publishing a release, update `Formula/amux.rb` to the new tag and the
-versioned archive checksums so Homebrew users can upgrade with `brew upgrade
-amux`. Homebrew-managed installs should continue to use `brew upgrade`; the
-in-binary updater is only for user-writable manual release installs.
+After the release assets are published, the workflow updates `Formula/amux.rb`
+on `main` with the new tag and versioned archive checksums so Homebrew users can
+upgrade with `brew upgrade amux`. Homebrew-managed installs should continue to
+use `brew upgrade`; the in-binary updater is only for user-writable manual
+release installs.
 
 The standalone `amux` repository owns the installed `~/.local/bin/amux` binary.
 Dotfiles or machine-restore repositories should restore the workspace TSV and
