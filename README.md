@@ -48,6 +48,28 @@ Optional:
 
 ## Install from a release
 
+### Homebrew
+
+On macOS or Linux, install the release binary with Homebrew:
+
+```sh
+brew tap zainfathoni/amux https://github.com/zainfathoni/amux
+brew install zainfathoni/amux/amux
+```
+
+Update Homebrew installs with Homebrew, not `amux update` or `amux self-update`:
+
+```sh
+brew update
+brew upgrade amux
+```
+
+Homebrew installs live under Homebrew-managed Cellar paths, which are treated as
+immutable. `amux update` refuses to replace binaries from those paths so package
+management stays owned by Homebrew.
+
+### Manual release archive
+
 Download the archive for your platform from the [latest release](https://github.com/zainfathoni/amux/releases/latest), verify its checksum, and install the binary somewhere on your `PATH`:
 
 ```sh
@@ -369,6 +391,11 @@ git push origin v0.1.1
 The tag push starts the Release workflow. The workflow builds platform archives and injects the tag name as the `amux version` value.
 Each release publishes versioned artifacts such as `amux-v0.1.1-linux-amd64.tar.gz` and stable aliases such as `amux-linux-amd64.tar.gz` for `releases/latest/download` links.
 
+After publishing a release, update `Formula/amux.rb` to the new tag and the
+versioned archive checksums so Homebrew users can upgrade with `brew upgrade
+amux`. Homebrew-managed installs should continue to use `brew upgrade`; the
+in-binary updater is only for user-writable manual release installs.
+
 The standalone `amux` repository owns the installed `~/.local/bin/amux` binary.
 Dotfiles or machine-restore repositories should restore the workspace TSV and
 ensure `~/.local/bin` is on `PATH`, but should not track the compiled binary or
@@ -377,7 +404,6 @@ desired update flow.
 
 ## Roadmap
 
-- Better installation path, such as packaged release instructions or a package manager tap.
 - Shell completions.
 - More portable attach/open-terminal behavior outside the author's environment.
 - Expanded examples for common Amp/tmux workflows.
