@@ -43,7 +43,7 @@ type githubReleaseAsset struct {
 
 func (a app) selfUpdate(opts options, args []string) error {
 	if len(args) != 0 {
-		return errors.New("usage: amux self-update")
+		return errors.New("usage: amux update")
 	}
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		return fmt.Errorf("self-update is unsupported on %s/%s: no release asset is published for this platform", runtime.GOOS, runtime.GOARCH)

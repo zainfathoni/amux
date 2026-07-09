@@ -56,6 +56,7 @@ amux runner pin <workspace> <window> <workdir>
 amux runner unpin <workspace> <window>
 amux runner launch [workspace] [session]
 amux runner park [workspace] <window>
+amux update [--dry-run]
 ```
 
 Compatibility decision: keep workspace-named sessions when a workspace is explicitly provided and the session is omitted. For `launch`, `doctor`, and `runner launch`, `amux <command> amux` uses workspace/session `amux`. For `spawn`, the optional trailing workspace does the same: `amux spawn worker ~/Code/repo "prompt" amux`. For workspace-based `shelve`, use `amux shelve amux worker` or `amux shelve --workspace amux`; for explicit `teardown`, use `amux teardown amux worker`. Pass an explicit session for older shared-session layouts, such as `amux launch mac Amp`, `amux shelve mac worker Amp`, `amux shelve --workspace mac --session Amp`, `amux teardown mac worker Amp`, or `amux runner launch mac Amp`. No-arg launch/doctor still use the legacy `mac` workspace and `Amp` tmux session.
@@ -70,6 +71,7 @@ Use no-arg `teardown` only from inside an `amux spawn` worker with injected `AMU
 Use `runner` subcommands when the target is a local Agents Anywhere runner: `runner pin` stores workspace/window/workdir intent in `runners.tsv`, `runner launch` starts `amp --no-tui` in tmux, `runner park` stops only the local runner window, and `runner unpin` removes runner config. Runner commands do not create, continue, archive, or list remote Amp threads.
 Use `doctor` before or after suspicious restore/runner changes to verify dependencies, configured workdirs, selected workspace rows, runner rows, live tmux drift in the selected tmux session, and restore rows whose remote Amp threads are confirmed archived or missing.
 Use `prune-archived [workspace]` when stale restore rows point at Amp threads that were already archived elsewhere. It removes only restore-config rows whose thread ID or URL is confirmed archived; it does not archive/delete remote threads or stop live tmux windows. If Amp cannot confirm archive state, or a thread is missing from both active and archived lists, it fails closed without changing config.
+Use `update` for amux self-updates from a user-owned install path; `update --dry-run` previews the release asset without replacing the binary. `self-update` remains a compatibility alias for `update`.
 Launch auto-attaches by default only when the tmux session already existed, no restore work was needed, and its live window set plus pane paths match the configured workspace. Cold restores and partial restores do not auto-attach. Use `launch --dry-run` to inspect restore actions without creating windows, `--attach launch` to force attach, or `--no-attach launch` to suppress auto-attach. If attach is requested from inside tmux, `amux` switches the current client to the target session; if tmux reports there is no terminal, `amux` opens the session through Omarchy's terminal launcher with direct Alacritty fallback.
 
 ## Side-effect domains by command
@@ -89,6 +91,7 @@ Launch auto-attaches by default only when the tmux session already existed, no r
 - `runner pin` and `runner unpin`: mutate runner config only.
 - `runner launch`: reads runner config and may create live local `amp --no-tui` tmux windows; it does not create, continue, archive, or list remote Amp threads.
 - `runner park`: stops only the resolved live local runner window; it preserves runner config and does not touch remote Amp thread state.
+- `update` (`self-update` alias): fetches the latest GitHub release metadata and, unless `--dry-run` is set, replaces the current amux binary after checksum verification.
 
 ## Trigger phrases
 
