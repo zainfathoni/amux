@@ -1,12 +1,12 @@
 <!doctype html>
-<html lang="en" class="antialiased">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>amux — local tmux workspaces for Amp</title>
     <meta
       name="description"
-      content="amux is the local tmux workspace and lifecycle layer for Amp: restore workspaces, pin sessions, park live windows, spawn workers, and keep agents using the right commands."
+      content="amux keeps the local tmux side of Amp restorable: pin windows, launch workspaces, park sessions, spawn workers, and clean them up safely."
     />
     <meta property="og:title" content="amux — local tmux workspaces for Amp" />
     <meta
@@ -18,30 +18,29 @@
     <meta property="og:image" content="https://amux.zainf.dev/og-image.png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content="amux — Amp session manager for tmux" />
+    <meta property="og:image:alt" content="amux — local tmux workspaces for Amp" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="amux — local tmux workspaces for Amp" />
-    <meta name="twitter:description" content="The local tmux workspace layer that complements Amp Agents Anywhere with restorable, inspectable, agent-operated Amp sessions." />
+    <meta name="twitter:description" content="Restorable tmux workspaces for local Amp sessions." />
     <meta name="twitter:image" content="https://amux.zainf.dev/og-image.png" />
-    <meta name="theme-color" content="#18181b" />
+    <meta name="theme-color" content="#161E2E" />
     <link rel="canonical" href="https://amux.zainf.dev/" />
     <link rel="preconnect" href="https://rsms.me" />
     <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
     <style>
       :root {
         color-scheme: dark;
-        --bg: #09090b;
-        --panel: #18181b;
-        --panel-soft: #111113;
-        --text: #fafafa;
-        --muted: #a1a1aa;
-        --subtle: #71717a;
-        --line: rgb(255 255 255 / 0.1);
-        --line-soft: rgb(255 255 255 / 0.06);
-        --accent: #34d399;
-        --accent-strong: #10b981;
-        --accent-soft: rgb(52 211 153 / 0.12);
-        --radius: 1.5rem;
+        --navy: #252f3f;
+        --deep: #161e2e;
+        --deep-2: #141b29;
+        --terminal: #10141f;
+        --red: #f05252;
+        --white: #ffffff;
+        --ink: #d6dbe6;
+        --muted: rgb(255 255 255 / 0.65);
+        --faint: rgb(255 255 255 / 0.1);
+        --line: rgb(255 255 255 / 0.14);
+        --container: 70rem;
       }
 
       * {
@@ -54,12 +53,10 @@
 
       body {
         margin: 0;
-        background:
-          radial-gradient(circle at top left, rgb(52 211 153 / 0.16), transparent 30rem),
-          radial-gradient(circle at 85% 5%, rgb(59 130 246 / 0.13), transparent 28rem), var(--bg);
-        color: var(--text);
+        background: var(--deep);
+        color: var(--white);
         font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01", "ss03";
+        font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01";
       }
 
       a {
@@ -67,24 +64,42 @@
         text-decoration: none;
       }
 
+      a:hover {
+        color: var(--red);
+      }
+
       code,
-      pre {
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      pre,
+      button {
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      }
+
+      button {
+        appearance: none;
+      }
+
+      ::selection {
+        background: rgb(240 82 82 / 0.42);
       }
 
       .page {
-        isolation: isolate;
         min-height: 100dvh;
         overflow: hidden;
+        background:
+          linear-gradient(248deg, rgb(22 30 46) 17%, rgb(22 30 46 / 0.6) 100%),
+          radial-gradient(circle at 12% 18%, rgb(240 82 82 / 0.16), transparent 24rem),
+          var(--deep);
       }
 
       .container {
-        width: min(100% - 2rem, 72rem);
+        width: min(100% - 3rem, var(--container));
         margin-inline: auto;
       }
 
-      .header {
-        padding-block: 1.25rem;
+      .site-header {
+        position: relative;
+        z-index: 3;
+        padding-block: 1.375rem;
       }
 
       .nav {
@@ -98,147 +113,206 @@
         display: flex;
         align-items: center;
         gap: 0.75rem;
-        font-size: 0.9375rem;
-        font-weight: 600;
-        letter-spacing: -0.01em;
+        min-width: 0;
       }
 
       .mark {
         display: grid;
-        width: 2rem;
-        height: 2rem;
+        width: 1.875rem;
+        height: 1.875rem;
+        flex: 0 0 auto;
         place-items: center;
-        border: 1px solid var(--line);
-        border-radius: 0.75rem;
-        background: rgb(255 255 255 / 0.04);
-        color: var(--accent);
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-        font-size: 0.875rem;
+        border-radius: 999px;
+        background: var(--white);
+        color: var(--deep);
+        box-shadow: 0 0 0 2px var(--white), 0 0 0 5px rgb(255 255 255 / 0.08);
+        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+        font-size: 0.72rem;
+        font-weight: 800;
+        letter-spacing: -0.08em;
+      }
+
+      .brand-name {
+        font-size: 1.0625rem;
+        font-weight: 800;
+        letter-spacing: -0.04em;
+      }
+
+      .brand-tagline {
+        border-left: 1px solid rgb(255 255 255 / 0.18);
+        padding-left: 0.75rem;
+        color: rgb(255 255 255 / 0.62);
+        font-size: 0.75rem;
+        font-weight: 500;
+        letter-spacing: -0.01em;
       }
 
       .nav-links {
-        display: none;
+        display: flex;
         align-items: center;
-        gap: 1.5rem;
-        color: var(--muted);
+        gap: 1.625rem;
+        color: rgb(255 255 255 / 0.72);
         font-size: 0.875rem;
+        font-weight: 600;
       }
 
-      .nav-links a:hover {
-        color: var(--text);
-      }
-
-      .ghost-button,
-      .primary-button {
+      .nav-cta,
+      .button-primary,
+      .button-secondary {
         display: inline-flex;
-        min-height: 2.75rem;
         align-items: center;
         justify-content: center;
-        border-radius: 999px;
-        padding: 0.75rem 1rem;
-        font-size: 1rem;
-        font-weight: 600;
-        transition:
-          background-color 160ms ease,
-          color 160ms ease,
-          border-color 160ms ease,
-          transform 160ms ease;
+        min-height: 2.75rem;
+        padding: 0.75rem 1.5rem;
+        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+        font-size: 0.9375rem;
+        font-weight: 800;
+        letter-spacing: -0.02em;
+        transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease;
       }
 
-      .primary-button {
-        background: var(--accent);
-        color: #052e1b;
-        box-shadow: 0 0 0 1px var(--accent-strong);
+      .nav-cta,
+      .button-primary {
+        background: var(--red);
+        color: var(--deep);
       }
 
-      .primary-button:hover {
-        transform: translateY(-1px);
-        background: #6ee7b7;
+      .nav-cta {
+        min-height: auto;
+        padding: 0.5625rem 1.125rem;
+        font-size: 0.84375rem;
       }
 
-      .primary-button:focus-visible,
-      .ghost-button:focus-visible {
-        outline: 2px solid #60a5fa;
-        outline-offset: 3px;
+      .nav-cta:hover,
+      .button-primary:hover {
+        background: var(--white);
+        color: var(--deep);
       }
 
-      .ghost-button {
-        border: 1px solid var(--line);
-        color: var(--text);
-        background: rgb(255 255 255 / 0.03);
+      .button-secondary {
+        border: 1px solid rgb(255 255 255 / 0.25);
+        color: var(--white);
       }
 
-      .ghost-button:hover {
-        border-color: rgb(255 255 255 / 0.2);
-        background: rgb(255 255 255 / 0.06);
+      .button-secondary:hover {
+        border-color: rgb(255 255 255 / 0.62);
+        color: var(--white);
+      }
+
+      .nav-cta:focus-visible,
+      .button-primary:focus-visible,
+      .button-secondary:focus-visible,
+      .verb-button:focus-visible,
+      a:focus-visible {
+        outline: 2px solid var(--red);
+        outline-offset: 4px;
       }
 
       .hero {
-        padding-block: 4rem 5rem;
+        position: relative;
+      }
+
+      .hero::before {
+        content: "";
+        position: absolute;
+        inset: -6rem -10vw 0;
+        pointer-events: none;
+        opacity: 0.42;
+        background-image:
+          linear-gradient(120deg, rgb(255 255 255 / 0.18) 1px, transparent 1px),
+          linear-gradient(30deg, rgb(255 255 255 / 0.13) 1px, transparent 1px);
+        background-size: 56px 56px;
+        mask-image: linear-gradient(90deg, #000, transparent 82%);
       }
 
       .hero-grid {
+        position: relative;
+        z-index: 1;
         display: grid;
+        grid-template-columns: minmax(0, 10fr) minmax(0, 9fr);
+        gap: 3.5rem;
         align-items: center;
-        gap: 3rem;
+        padding-block: 4.5rem 5.5rem;
       }
 
       .eyebrow {
         display: inline-flex;
         align-items: center;
-        gap: 0.5rem;
-        border: 1px solid rgb(52 211 153 / 0.24);
-        border-radius: 999px;
-        background: var(--accent-soft);
+        border: 1px solid rgb(240 82 82 / 0.5);
+        background: rgb(240 82 82 / 0.08);
         padding: 0.375rem 0.75rem;
-        color: #a7f3d0;
-        font-size: 0.875rem;
-        font-weight: 500;
+        color: var(--red);
+        font-size: 0.8125rem;
+        font-weight: 700;
       }
 
-      .hero h1,
-      .section-heading h2,
-      .cta h2 {
+      h1,
+      h2 {
         margin: 0;
-        max-width: 13ch;
-        font-size: clamp(3rem, 8vw, 5.75rem);
-        font-weight: 600;
-        letter-spacing: -0.06em;
+        font-weight: 800;
+        letter-spacing: -0.045em;
         text-wrap: balance;
       }
 
-      .hero-copy {
-        margin: 1.5rem 0 0;
-        max-width: 61ch;
-        color: #d4d4d8;
-        font-size: 1.125rem;
-        line-height: 1.75;
+      h1 {
+        margin-top: 1.375rem;
+        font-size: clamp(3rem, 6.5vw, 4.75rem);
+        line-height: 0.95;
+      }
+
+      h2 {
+        font-size: clamp(2rem, 4vw, 2.875rem);
+        line-height: 1.02;
+      }
+
+      .accent {
+        color: var(--red);
+      }
+
+      .hero-copy,
+      .section-copy,
+      .install-copy {
+        color: rgb(255 255 255 / 0.72);
+        line-height: 1.65;
         text-wrap: pretty;
+      }
+
+      .hero-copy {
+        max-width: 52ch;
+        margin: 1.5rem 0 0;
+        font-size: 1.0625rem;
+      }
+
+      .hero-copy code,
+      .install-copy code,
+      .skill-copy code {
+        color: var(--white);
+        font-size: 0.92em;
       }
 
       .hero-actions {
         display: flex;
-        flex-direction: column;
+        flex-wrap: wrap;
         gap: 0.75rem;
         margin-top: 2rem;
       }
 
       .terminal {
-        overflow: hidden;
         border: 1px solid var(--line);
-        border-radius: var(--radius);
-        background: rgb(0 0 0 / 0.34);
-        box-shadow: 0 30px 80px rgb(0 0 0 / 0.35);
+        background: var(--terminal);
+        box-shadow: 0 2rem 5rem rgb(0 0 0 / 0.45);
       }
 
       .terminal-bar {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        border-bottom: 1px solid var(--line-soft);
-        padding: 0.875rem 1rem;
-        color: var(--subtle);
-        font-size: 0.8125rem;
+        gap: 1rem;
+        border-bottom: 1px solid rgb(255 255 255 / 0.08);
+        padding: 0.75rem 1rem;
+        color: rgb(255 255 255 / 0.58);
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        font-size: 0.75rem;
       }
 
       .dots {
@@ -247,580 +321,558 @@
       }
 
       .dot {
-        width: 0.625rem;
-        height: 0.625rem;
+        width: 0.5625rem;
+        height: 0.5625rem;
         border-radius: 999px;
-        background: var(--line);
+        background: rgb(255 255 255 / 0.15);
       }
 
-      .terminal pre {
-        margin: 0;
+      .dot.hot {
+        background: var(--red);
+      }
+
+      .terminal-body {
+        min-height: var(--terminal-min, 14rem);
         overflow-x: auto;
-        padding: 1.25rem;
-        color: #e4e4e7;
-        font-size: 0.9375rem;
-        line-height: 1.8;
-      }
-
-      .terminal-compact {
-        margin-top: 1rem;
-        box-shadow: none;
+        padding: 1rem 1.25rem;
+        color: var(--ink);
+        font-size: 0.84375rem;
+        line-height: 1.85;
+        white-space: pre-wrap;
       }
 
       .prompt {
-        color: var(--accent);
+        color: var(--red);
       }
 
-      .comment {
-        color: var(--subtle);
+      .output {
+        color: rgb(255 255 255 / 0.66);
+      }
+
+      .cursor {
+        display: inline-block;
+        width: 0.5rem;
+        height: 0.95rem;
+        background: var(--red);
+        vertical-align: -0.12rem;
+        animation: blink 1.1s steps(1) infinite;
+      }
+
+      @keyframes blink {
+        0%,
+        55% {
+          opacity: 1;
+        }
+        56%,
+        100% {
+          opacity: 0;
+        }
       }
 
       .section {
-        padding-block: 5rem;
-        border-top: 1px solid var(--line-soft);
+        border-top: 1px solid rgb(255 255 255 / 0.08);
+        padding-block: 4.75rem 5.25rem;
+      }
+
+      .section.alt {
+        background: var(--deep-2);
       }
 
       .section-heading {
-        display: grid;
+        display: flex;
+        align-items: baseline;
         gap: 1rem;
-        margin-bottom: 2.5rem;
       }
 
-      .section-heading h2,
-      .cta h2 {
-        max-width: 18ch;
-        font-size: clamp(2.25rem, 5vw, 3.75rem);
+      .rule {
+        width: 2.125rem;
+        height: 0.3125rem;
+        flex: 0 0 auto;
+        background: var(--red);
+        transform: translateY(-0.625rem);
       }
 
-      .section-heading p,
-      .cta p {
-        margin: 0;
-        max-width: 62ch;
-        color: var(--muted);
-        font-size: 1.0625rem;
-        line-height: 1.75;
-        text-wrap: pretty;
-      }
-
-      .feature-grid {
-        display: grid;
-        gap: 1.5rem;
-      }
-
-      .feature {
-        border-top: 1px solid var(--line);
-        padding-top: 1.5rem;
-      }
-
-      .feature dt {
-        color: var(--text);
-        font-size: 1.0625rem;
-        font-weight: 600;
-        letter-spacing: -0.02em;
-      }
-
-      .feature dd {
-        margin: 0.625rem 0 0;
-        color: var(--muted);
+      .section-copy {
+        max-width: 64ch;
+        margin: 1.125rem 0 0 3.125rem;
         font-size: 1rem;
-        line-height: 1.7;
-        text-wrap: pretty;
       }
 
-      .demo-grid {
+      .lifecycle-grid,
+      .skill-grid,
+      .install-grid {
         display: grid;
-        gap: 1.5rem;
+        grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+        gap: 2.5rem;
+        align-items: start;
+        margin-top: 2.5rem;
       }
 
-      .demo-card {
-        border: 1px solid var(--line);
-        border-radius: var(--radius);
-        background: rgb(255 255 255 / 0.03);
-        padding: 1.25rem;
+      .verb-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
       }
 
-      .demo-card p {
-        margin: 1rem 0 0;
-        color: var(--muted);
-        font-size: 1rem;
-        line-height: 1.7;
-      }
-
-      .mini-label {
-        margin-bottom: 0.875rem;
-        color: #a7f3d0;
-        font-size: 0.8125rem;
+      .verb-button {
+        border: 1px solid rgb(255 255 255 / 0.18);
+        background: transparent;
+        color: rgb(255 255 255 / 0.75);
+        cursor: pointer;
+        padding: 0.5625rem 0.9375rem;
+        font-size: 0.84375rem;
         font-weight: 700;
-        letter-spacing: 0.08em;
+        transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+      }
+
+      .verb-button[aria-pressed="true"] {
+        border-color: var(--red);
+        background: var(--red);
+        color: var(--deep);
+      }
+
+      .verb-description {
+        min-height: 4.6rem;
+        margin: 1.375rem 0 0;
+        color: rgb(255 255 255 / 0.75);
+        font-size: 0.9375rem;
+        line-height: 1.65;
+      }
+
+      .touch-label {
+        margin-top: 1.125rem;
+        color: rgb(255 255 255 / 0.58);
+        font-size: 0.6875rem;
+        font-weight: 800;
+        letter-spacing: 0.12em;
         text-transform: uppercase;
       }
 
-      .domain-diagram {
-        display: grid;
-        gap: 0.75rem;
+      .domains {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin-top: 0.625rem;
       }
 
-      .domain-node {
-        border: 1px solid rgb(52 211 153 / 0.22);
-        border-radius: 1rem;
-        background: rgb(52 211 153 / 0.08);
-        padding: 1rem;
-        color: var(--text);
-        font-weight: 600;
-        line-height: 1.4;
-      }
-
-      .domain-node span {
-        color: var(--muted);
-        font-size: 0.875rem;
-        font-weight: 400;
-      }
-
-      .tsv-compare {
-        display: grid;
-        gap: 1rem;
-      }
-
-      .tsv-compare strong {
-        display: block;
-        color: var(--text);
-        font-size: 0.9375rem;
-        font-weight: 600;
-      }
-
-      .split {
-        display: grid;
-        gap: 1.5rem;
-      }
-
-      .panel {
-        border: 1px solid var(--line);
-        border-radius: var(--radius);
-        background: rgb(255 255 255 / 0.03);
-        padding: 1.25rem;
-      }
-
-      .panel h3 {
-        margin: 0;
-        font-size: 1.125rem;
-        font-weight: 600;
-        letter-spacing: -0.02em;
-      }
-
-      .panel p {
-        margin: 0.75rem 0 0;
-        color: var(--muted);
-        font-size: 1rem;
-        line-height: 1.7;
-      }
-
-      .steps {
-        display: grid;
-        gap: 1rem;
-        margin-top: 1.5rem;
-      }
-
-      .step {
-        display: grid;
-        grid-template-columns: auto 1fr;
-        gap: 0.875rem;
-        align-items: start;
-      }
-
-      .step-number {
-        display: grid;
-        width: 1.75rem;
-        height: 1.75rem;
-        place-items: center;
-        border-radius: 999px;
-        background: var(--accent-soft);
-        color: #a7f3d0;
-        font-size: 0.875rem;
+      .domain {
+        border: 1px solid rgb(255 255 255 / 0.12);
+        padding: 0.375rem 0.75rem;
+        color: rgb(255 255 255 / 0.55);
+        font-size: 0.78125rem;
         font-weight: 700;
-        font-variant-numeric: tabular-nums;
       }
 
-      .step strong {
-        display: block;
-        font-weight: 600;
+      .domain.active {
+        border-color: rgb(240 82 82 / 0.7);
+        background: rgb(240 82 82 / 0.14);
+        color: var(--red);
       }
 
-      .step-copy span {
+      .verb-note {
+        min-height: 1.25rem;
+        margin-top: 0.625rem;
+        color: rgb(255 255 255 / 0.62);
+        font-size: 0.8125rem;
+      }
+
+      .section-title-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 1.5rem;
+        flex-wrap: wrap;
+      }
+
+      .release-link {
+        color: var(--red);
+        font-size: 0.875rem;
+        font-weight: 800;
+      }
+
+      .api-grid,
+      .trigger-list {
+        display: grid;
+        gap: 1px;
+        border: 1px solid var(--faint);
+        background: var(--faint);
+      }
+
+      .api-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        margin-top: 2.5rem;
+      }
+
+      .api-card,
+      .trigger-row {
+        background: var(--deep);
+      }
+
+      .api-card {
+        padding: 1.5rem 1.375rem;
+      }
+
+      .api-card code {
         display: block;
-        margin-top: 0.25rem;
-        color: var(--muted);
-        font-size: 1rem;
+        color: var(--red);
+        font-size: 0.875rem;
+        font-weight: 800;
+      }
+
+      .api-card p {
+        margin: 0.75rem 0 0;
+        color: rgb(255 255 255 / 0.65);
+        font-size: 0.875rem;
         line-height: 1.6;
       }
 
-      .cta {
-        padding-block: 5rem;
-        border-top: 1px solid var(--line-soft);
+      .skill-grid,
+      .install-grid {
+        margin-top: 0;
       }
 
-      .cta-box {
+      .skill-copy,
+      .install-copy {
+        margin: 1.125rem 0 0;
+        color: rgb(255 255 255 / 0.65);
+        font-size: 1rem;
+        line-height: 1.65;
+      }
+
+      .inline-command {
+        overflow-x: auto;
+        margin-top: 1.5rem;
+        border: 1px solid var(--line);
+        background: var(--terminal);
+        padding: 0.875rem 1rem;
+        color: var(--ink);
+        font-size: 0.8125rem;
+        white-space: nowrap;
+      }
+
+      .small-note {
+        margin: 0.875rem 0 0;
+        color: rgb(255 255 255 / 0.62);
+        font-size: 0.84375rem;
+      }
+
+      .small-note a,
+      .install-links a {
+        color: rgb(255 255 255 / 0.78);
+        text-decoration: underline;
+        text-underline-offset: 0.2rem;
+      }
+
+      .trigger-row {
         display: grid;
-        gap: 2rem;
+        grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+        gap: 1rem;
+        align-items: baseline;
+        padding: 0.875rem 1.25rem;
+      }
+
+      .trigger-say {
+        font-size: 0.9375rem;
+        font-weight: 800;
+        letter-spacing: -0.02em;
+      }
+
+      .trigger-run {
+        color: rgb(255 255 255 / 0.6);
+        font-size: 0.8125rem;
+      }
+
+      .install-grid {
         align-items: center;
-        border: 1px solid rgb(52 211 153 / 0.22);
-        border-radius: calc(var(--radius) + 0.5rem);
-        background:
-          linear-gradient(135deg, rgb(52 211 153 / 0.12), transparent 42%),
-          rgb(255 255 255 / 0.03);
-        padding: 1.5rem;
+      }
+
+      .install-copy {
+        max-width: 44ch;
+      }
+
+      .install-links {
+        margin: 0.875rem 0 0;
+        color: rgb(255 255 255 / 0.62);
+        font-size: 0.875rem;
+        line-height: 1.6;
+      }
+
+      .install-terminal {
+        border-color: rgb(240 82 82 / 0.4);
+      }
+
+      .install-terminal pre {
+        margin: 0;
+        overflow-x: auto;
+        padding: 1.125rem 1.25rem;
+        color: var(--ink);
+        font-size: 0.84375rem;
+        line-height: 1.9;
+      }
+
+      .comment {
+        color: rgb(255 255 255 / 0.58);
       }
 
       .footer {
-        border-top: 1px solid var(--line-soft);
-        padding-block: 2rem;
-        color: var(--subtle);
-        font-size: 0.875rem;
+        border-top: 1px solid rgb(255 255 255 / 0.08);
       }
 
       .footer-inner {
         display: flex;
-        flex-direction: column;
+        align-items: center;
+        justify-content: space-between;
         gap: 1rem;
+        flex-wrap: wrap;
+        padding-block: 1.75rem;
+        color: rgb(255 255 255 / 0.62);
+        font-size: 0.84375rem;
       }
 
       .footer-links {
         display: flex;
-        flex-wrap: wrap;
-        gap: 1rem;
+        gap: 1.25rem;
       }
 
-      .footer a:hover {
-        color: var(--text);
+      .footer a {
+        color: rgb(255 255 255 / 0.72);
       }
 
-      @media (min-width: 640px) {
+      @media (max-width: 880px) {
         .container {
-          width: min(100% - 3rem, 72rem);
+          width: min(100% - 2rem, var(--container));
         }
 
-        .nav-links {
-          display: flex;
+        .nav {
+          align-items: flex-start;
         }
 
-        .hero-actions {
-          flex-direction: row;
-          align-items: center;
-        }
-
-        .primary-button,
-        .ghost-button {
-          min-height: 2.5rem;
-          padding: 0.625rem 1rem;
-          font-size: 0.9375rem;
-        }
-
-        .hero-copy,
-        .section-heading p,
-        .cta p {
-          font-size: 1rem;
-        }
-
-        .feature dd,
-        .panel p,
-        .step-copy span {
-          font-size: 0.9375rem;
-        }
-      }
-
-      @media (min-width: 900px) {
-        .hero {
-          padding-block: 6rem 7rem;
+        .brand-tagline,
+        .nav-links a:not(.nav-cta) {
+          display: none;
         }
 
         .hero-grid,
-        .split,
-        .cta-box {
-          grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-          gap: 3rem;
+        .lifecycle-grid,
+        .skill-grid,
+        .install-grid {
+          grid-template-columns: 1fr;
         }
 
-        .feature-grid {
-          grid-template-columns: repeat(3, minmax(0, 1fr));
-          gap: 3rem;
+        .hero-grid {
+          gap: 2rem;
+          padding-block: 3rem 4rem;
         }
 
-        .demo-grid {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
+        .section {
+          padding-block: 3.5rem 4rem;
         }
 
-        .demo-card-large {
-          grid-column: span 2;
+        .section-copy {
+          margin-left: 0;
         }
 
-        .domain-diagram,
-        .tsv-compare {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
+        .api-grid {
+          grid-template-columns: 1fr 1fr;
+        }
+      }
+
+      @media (max-width: 560px) {
+        .nav-links {
+          gap: 0.75rem;
         }
 
-        .cta-box {
-          padding: 2rem;
+        .hero-actions,
+        .button-primary,
+        .button-secondary {
+          width: 100%;
         }
 
-        .footer-inner {
-          flex-direction: row;
-          align-items: center;
-          justify-content: space-between;
+        .api-grid,
+        .trigger-row {
+          grid-template-columns: 1fr;
+        }
+
+        .terminal-body,
+        .install-terminal pre {
+          font-size: 0.78rem;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          animation-duration: 0.001ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.001ms !important;
         }
       }
     </style>
   </head>
   <body>
     <div class="page">
-      <header class="header">
+      <header class="site-header">
         <nav class="container nav" aria-label="Primary navigation">
-          <a class="brand" href="/" aria-label="Homepage">
-            <span class="mark">am</span>
-            <span>amux</span>
+          <a class="brand" href="#top" aria-label="amux home">
+            <span class="mark" aria-hidden="true">am</span>
+            <span class="brand-name">amux</span>
+            <span class="brand-tagline">local tmux workspaces for Amp</span>
           </a>
           <div class="nav-links">
-            <a href="#demo">Demo</a>
-            <a href="#features">Features</a>
-            <a href="#workflow">Workflow</a>
-            <a href="https://github.com/zainfathoni/amux/releases/latest">Download</a>
+            <a href="#lifecycle">Lifecycle</a>
+            <a href="#new">New</a>
+            <a href="#skill">Agent skill</a>
             <a href="https://github.com/zainfathoni/amux">GitHub</a>
+            <a class="nav-cta" href="#install">Install</a>
           </div>
         </nav>
       </header>
 
-      <main>
-        <section class="hero">
+      <main id="top">
+        <section class="hero" aria-labelledby="hero-title">
           <div class="container hero-grid">
             <div>
-              <div class="eyebrow">Local tmux workspaces for Amp</div>
-              <h1>Restore agent workspaces without the ritual.</h1>
+              <div class="eyebrow">Complements Amp Agents Anywhere</div>
+              <h1 id="hero-title">Pin. Launch.<br />Park. <span class="accent">Teardown.</span></h1>
               <p class="hero-copy">
-                Amp can now start agents anywhere you run a runner. <code>amux</code> complements that with a small CLI and bundled <code>/amux</code> skill for keeping local Amp/tmux workspaces restorable, inspectable, and safe for agents to operate.
+                Amp runs your agents anywhere. <code>amux</code> keeps the local side — tmux windows, threads, runners — restorable
+                from plain TSV files, with lifecycle verbs safe enough to hand to the agents themselves.
               </p>
               <div class="hero-actions">
-                <a class="primary-button" href="https://github.com/zainfathoni/amux/releases/latest">Download latest</a>
-                <a class="ghost-button" href="https://github.com/zainfathoni/amux">View on GitHub</a>
+                <a class="button-primary" href="#install">Install with Homebrew</a>
+                <a class="button-secondary" href="https://github.com/zainfathoni/amux">View on GitHub</a>
               </div>
             </div>
 
-            <div class="terminal" aria-label="amux command example">
+            <div class="terminal" aria-label="amux restore terminal demo">
               <div class="terminal-bar">
-                <div class="dots" aria-hidden="true">
-                  <span class="dot"></span>
-                  <span class="dot"></span>
-                  <span class="dot"></span>
-                </div>
-                <span>~/Code/amux</span>
+                <span class="dots" aria-hidden="true"><span class="dot"></span><span class="dot"></span><span class="dot hot"></span></span>
+                <span>tmux · Amp</span>
               </div>
-              <pre><code><span class="prompt">$</span> amux pin-current mac https://ampcode.com/threads/T-123 web-redesign ~/Code/site
-saved row: mac  web-redesign  ~/Code/site  T-123
-
-<span class="prompt">$</span> amux launch mac --dry-run
-would create tmux session mac
-would restore window web-redesign from T-123
-
-<span class="prompt">$</span> amux launch mac
-restored mac/web-redesign
-
-<span class="prompt">$</span> amux park-current mac
-stopped local window; kept restore row</code></pre>
+              <div class="terminal-body" id="hero-terminal" style="--terminal-min: 14.75rem"></div>
             </div>
           </div>
         </section>
 
-        <section class="section" id="demo">
+        <section class="section alt" id="lifecycle" aria-labelledby="lifecycle-title">
           <div class="container">
             <div class="section-heading">
-              <h2>See the workflow in one minute.</h2>
-              <p>
-                <code>amux</code> is not another remote agent system. It is a tiny local contract between your tmux windows, Amp threads, and a TSV file you can inspect before an agent touches anything.
-              </p>
+              <span class="rule" aria-hidden="true"></span>
+              <h2 id="lifecycle-title">Every verb declares its blast radius.</h2>
             </div>
-            <div class="demo-grid">
-              <div class="demo-card demo-card-large">
-                <div class="mini-label">Install and restore</div>
-                <div class="terminal terminal-compact" aria-label="Install and first restore terminal demo">
-                  <pre><code><span class="prompt">$</span> curl -LO https://github.com/zainfathoni/amux/releases/latest/download/amux-linux-amd64.tar.gz
-<span class="prompt">$</span> tar -xzf amux-linux-amd64.tar.gz
-<span class="prompt">$</span> install -m 0755 amux-linux-amd64/amux ~/.local/bin/amux
+            <p class="section-copy">
+              amux separates four side-effect domains and each command touches the fewest it can. Click a verb — the terminal plays it,
+              and the domains it mutates light up.
+            </p>
 
-<span class="comment"># Save the Amp thread in the tmux window you are already using.</span>
-<span class="prompt">$</span> amux pin-current mac https://ampcode.com/threads/T-123 web-redesign ~/Code/site
-
-<span class="comment"># Preview before creating windows.</span>
-<span class="prompt">$</span> amux launch mac --dry-run
-would create tmux session mac
-would restore web-redesign in ~/Code/site
-
-<span class="comment"># Recreate the local workspace later.</span>
-<span class="prompt">$</span> amux launch mac
-restored mac/web-redesign with amp threads continue T-123</code></pre>
-                </div>
+            <div class="lifecycle-grid">
+              <div>
+                <div class="verb-list" id="verb-list" role="group" aria-label="Lifecycle commands"></div>
+                <p class="verb-description" id="verb-description" aria-live="polite"></p>
+                <div class="touch-label">Touches</div>
+                <div class="domains" id="domains"></div>
+                <div class="verb-note" id="verb-note" aria-live="polite"></div>
               </div>
-
-              <div class="demo-card">
-                <div class="mini-label">Side-effect domains</div>
-                <div class="domain-diagram" role="img" aria-label="amux separates restore config, runner config, live tmux sessions, and remote Amp thread state">
-                  <div class="domain-node">Restore config<br /><span>workspaces.tsv</span></div>
-                  <div class="domain-node">Runner config<br /><span>runners.tsv</span></div>
-                  <div class="domain-node">Live local<br /><span>tmux + Amp CLI</span></div>
-                  <div class="domain-node">Remote Amp<br /><span>thread archive</span></div>
+              <div class="terminal" aria-label="Selected amux command output">
+                <div class="terminal-bar">
+                  <span>$ amux <span id="active-verb-label">pin</span></span>
+                  <span class="accent">live</span>
                 </div>
-                <p>
-                  Commands say which box they touch: <code>pin</code> edits config only, <code>park</code> stops local windows only, and <code>teardown</code> performs verified full cleanup.
-                </p>
-              </div>
-
-              <div class="demo-card demo-card-large">
-                <div class="mini-label">Plain TSV before and after</div>
-                <div class="tsv-compare">
-                  <div>
-                    <strong>Before <code>pin-current</code></strong>
-                    <div class="terminal terminal-compact">
-                      <pre><code>workspace   window   workdir   thread
-mac         docs     ~/Docs    T-docs</code></pre>
-                    </div>
-                  </div>
-                  <div>
-                    <strong>After <code>pin-current</code></strong>
-                    <div class="terminal terminal-compact">
-                      <pre><code>workspace   window          workdir       thread
-mac         docs            ~/Docs        T-docs
-mac         web-redesign    ~/Code/site   T-123</code></pre>
-                    </div>
-                  </div>
-                </div>
+                <div class="terminal-body" id="verb-terminal" style="--terminal-min: 10.5rem"></div>
               </div>
             </div>
           </div>
         </section>
 
-        <section class="section" id="features">
+        <section class="section" id="new" aria-labelledby="new-title">
           <div class="container">
-            <div class="section-heading">
-              <h2>Built for persistent local agent work.</h2>
-              <p>
-                Amp Agents Anywhere provides first-party remote thread creation and per-directory runners. <code>amux</code> manages the local tmux workspace around the Amp sessions you want to keep organized.
-              </p>
+            <div class="section-title-row">
+              <div class="section-heading">
+                <span class="rule" aria-hidden="true"></span>
+                <h2 id="new-title">Fresh off the main branch.</h2>
+              </div>
+              <a class="release-link" href="https://github.com/zainfathoni/amux/releases">All releases →</a>
             </div>
-            <dl class="feature-grid">
-              <div class="feature">
-                <dt>Complement Agents Anywhere</dt>
-                <dd>Use Amp-native remote creation for new agents, and use <code>amux</code> for the local tmux workspace lifecycle: restore known threads, store runner intent, inspect drift, park, spawn, and verified cleanup.</dd>
-              </div>
-              <div class="feature">
-                <dt>Restore workspaces</dt>
-                <dd>Launch a named workspace into a tmux session with one window per configured Amp thread. One-workspace-argument commands use the same name for the tmux session; pass an explicit session such as <code>Amp</code> for older shared-session layouts.</dd>
-              </div>
-              <div class="feature">
-                <dt>Pin the current window</dt>
-                <dd>Pin or unpin the tmux window you are already in without manually retyping its name or path. These commands only mutate restore config.</dd>
-              </div>
-              <div class="feature">
-                <dt>Park live sessions</dt>
-                <dd><code>park</code> and <code>park-current</code> stop only the resolved local tmux/Amp window while preserving the restore row and leaving remote Amp thread history untouched.</dd>
-              </div>
-              <div class="feature">
-                <dt>Shelve deferred work</dt>
-                <dd><code>shelve-current</code> pins the current tmux/Amp window if needed, archives the identified thread, and stops the current window. <code>shelve</code> archives one existing restore row or a whole workspace so deferred work leaves the Amp sidebar while rows stay available for explicit <code>unshelve</code> later.</dd>
-              </div>
-              <div class="feature">
-                <dt>Inspect drift</dt>
-                <dd>Use <code>doctor [workspace] [session]</code> to compare thread restore rows and runner rows with the intended live tmux session before trusting a restore. For example, <code>amux doctor amux</code> checks session <code>amux</code>, while <code>amux doctor mac Amp</code> checks a legacy shared <code>Amp</code> session.</dd>
-              </div>
-              <div class="feature">
-                <dt>Manage runners separately</dt>
-                <dd><code>runner pin</code>, <code>runner launch</code>, and <code>runner park</code> manage local <code>amp --no-tui</code> runner windows from <code>runners.tsv</code>, without faking thread IDs or touching remote Amp thread state. No-arg runner launch restores every configured runner workspace into same-named tmux sessions, skipping already-running verified runners; workspace runner parking targets the workspace-named session unless an explicit legacy shared session is passed.</dd>
-              </div>
-              <div class="feature">
-                <dt>Preview first</dt>
-                <dd><code>launch --dry-run</code> and <code>spawn --dry-run</code> validate inputs and report intended actions, including planned title-prefix renames, without mutating restore config, local tmux/Amp state, or remote Amp threads.</dd>
-              </div>
-              <div class="feature">
-                <dt>Spawn fresh threads</dt>
-                <dd>Create a new Amp thread in a real interactive tmux window, optionally pass an Amp Dial mode (<code>low</code>, <code>medium</code>, <code>high</code>, or <code>ultra</code>) with <code>--mode</code> while still allowing custom/plugin mode strings, use <code>--message-file</code> or <code>--message-stdin</code> for explicit multi-line prompts, or name both the tmux window and new Amp thread <code>&lt;prefix&gt; &lt;window&gt;</code> with <code>--title-prefix</code>, then add it to your restore config and inject stable <code>AMUX_*</code> identity for lifecycle commands.</dd>
-              </div>
-              <div class="feature">
-                <dt>Teardown workers safely</dt>
-                <dd><code>amux teardown</code> verifies spawned identity against config and tmux before archiving the matching Amp thread, removing the row, and stopping the uniquely matched window. From a restored worker without <code>AMUX_*</code>, use <code>amux teardown --thread &lt;thread-id-or-url&gt; [--session &lt;session&gt;]</code>; from outside the worker when you know the row, use <code>amux teardown &lt;workspace&gt; &lt;window&gt; [session]</code>. Both forms cross-check the restore row and live tmux start command agree on the same thread before mutating anything.</dd>
-              </div>
-              <div class="feature">
-                <dt>Plain-text config</dt>
-                <dd>The restore contract is a simple TSV file that is easy to read, diff, back up, and sync.</dd>
-              </div>
-              <div class="feature">
-                <dt>Agent skill included</dt>
-                <dd>The repository includes a <code>/amux</code> skill that teaches Amp agents the safe vocabulary: <code>pin</code> for restore config, <code>park</code> for live-local shutdown, <code>teardown</code> for verified full cleanup, and <code>doctor</code> before guessing.</dd>
-              </div>
-            </dl>
-          </div>
-        </section>
-
-        <section class="section" id="workflow">
-          <div class="container split">
-            <div class="section-heading">
-              <h2>A tiny contract you can understand.</h2>
-              <p>
-                The default config lives at <code>~/.config/amux/workspaces.tsv</code>. Each row maps a workspace, a tmux window, a working directory, and an Amp thread.
-              </p>
-              <p>
-                <code>amp --no-tui</code> runners are per working directory. Runner intent lives separately in <code>~/.config/amux/runners.tsv</code>, so <code>amux runner launch</code> can restore all configured local runner windows without mixing them into thread restore rows.
-              </p>
-              <p>
-                <code>amux</code> names four side-effect domains explicitly: restore-config rows, runner-config rows, live local tmux/Amp sessions, and remote Amp thread state. Pin/unpin commands only change the restore config (<code>store</code>/<code>remove</code> remain compatibility aliases); <code>runner pin</code>/<code>runner unpin</code> only change runner config; <code>park</code> and <code>runner park</code> only stop resolved live local windows while preserving config, with runner parking verified against an <code>amp --no-tui</code> pane for the configured workdir; <code>shelve-current</code> pins/preserves the current row before archiving the supplied current thread; row-based <code>shelve</code> archives/hides deferred Amp threads while preserving restore rows; <code>teardown</code> is the explicit full cleanup that archives the verified thread, removes its row, and stops its verified local window.
-              </p>
-              <p>
-                <code>amux list [workspace]</code> keeps the restore TSV fields first and appends <code>status</code>: <code>active</code>, <code>shelved</code>, <code>missing</code>, or <code>unknown</code> when Amp status cannot be read. Use <code>amux list --active</code>, <code>amux list --shelved</code>, or the <code>amux shelved</code> shortcut to focus the view.
-              </p>
-            </div>
-            <div class="panel">
-              <h3>Config format</h3>
-              <div class="terminal terminal-compact">
-                <pre><code>workspace   window       workdir             thread
-mac         my-project   ~/Code/my-project   T-example
-mac         docs         ~/Code/docs         T-docs
-
-# runners.tsv
-workspace   window             workdir
-mac         project-runner     ~/Code/my-project</code></pre>
-              </div>
-              <div class="steps">
-                <div class="step">
-                  <span class="step-number">1</span>
-                  <span class="step-copy"><strong>Pin</strong><span>Save the current tmux window in restore config with <code>amux pin-current</code>.</span></span>
-                </div>
-                <div class="step">
-                  <span class="step-number">2</span>
-                  <span class="step-copy"><strong>Restore</strong><span>Run <code>amux launch</code> to recreate the workspace later.</span></span>
-                </div>
-                <div class="step">
-                  <span class="step-number">3</span>
-                  <span class="step-copy"><strong>Shelve or teardown</strong><span>Use <code>amux shelve-current [workspace] &lt;thread-id-or-url&gt;</code> from an unpinned current pane, or <code>amux shelve --thread &lt;thread-id-or-url&gt;</code>/<code>amux shelve --workspace &lt;workspace&gt;</code> for existing rows, to hide deferred work while keeping rows restorable by explicit <code>amux unshelve ...</code>; use no-arg <code>amux teardown</code> only from a spawned <code>AMUX_*</code> identity, <code>amux teardown --thread &lt;thread-id-or-url&gt; [--session &lt;session&gt;]</code> from a restored worker without identity, or <code>amux teardown &lt;workspace&gt; &lt;window&gt; [session]</code> for full cleanup.</span></span>
-                </div>
-                <div class="step">
-                  <span class="step-number">4</span>
-                  <span class="step-copy"><strong>Verify</strong><span>Run <code>amux list --active [workspace]</code>, <code>amux shelved [workspace]</code>, or <code>amux doctor [workspace] [session]</code> when live tmux state and config may have drifted.</span></span>
-                </div>
-                <div class="step">
-                  <span class="step-number">5</span>
-                  <span class="step-copy"><strong>Agent skill</strong><span>Install <code>skills/amux</code> as <code>~/.agents/skills/amux</code> so agents can respond reliably to phrases like “pin it”, “park it”, “teardown this worker”, and “doctor amux”.</span></span>
-                </div>
-              </div>
+            <div class="api-grid">
+              <article class="api-card">
+                <code>amux completion &lt;shell&gt;</code>
+                <p>Static completions for bash, zsh, and fish — commands, aliases, flags, runner subcommands.</p>
+              </article>
+              <article class="api-card">
+                <code>amux update</code>
+                <p>Self-update user-local installs, with <code>--dry-run</code>. Refuses Homebrew/Nix-managed paths so package managers stay in charge.</p>
+              </article>
+              <article class="api-card">
+                <code>amux workspaces</code>
+                <p>Instant local workspace inventory, no Amp calls. Add <code>--include-runners</code> for machine-level checks.</p>
+              </article>
+              <article class="api-card">
+                <code>amux prune-archived</code>
+                <p>Forget restore rows whose threads are confirmed archived. Fails closed on any doubt.</p>
+              </article>
+              <article class="api-card">
+                <code>spawn --title-prefix '#255'</code>
+                <p>Issue-numbered workers: tmux window, restore row, and Amp thread all named <code>#255 worker</code>.</p>
+              </article>
+              <article class="api-card">
+                <code>spawn --message-file …</code>
+                <p>Multi-line prompts from a file or stdin, delivered via bracketed paste and verified against the new thread.</p>
+              </article>
             </div>
           </div>
         </section>
 
-        <section class="cta">
-          <div class="container cta-box">
+        <section class="section alt" id="skill" aria-labelledby="skill-title">
+          <div class="container skill-grid">
             <div>
-              <h2>Install it, try it, keep what works.</h2>
-              <p>
-                <code>amux</code> is intentionally small: a Go binary, tmux, Amp, and a text file. Start with a dry run, then let it restore the local Amp workspace you already use.
+              <div class="section-heading">
+                <span class="rule" aria-hidden="true"></span>
+                <h2 id="skill-title">Your agent already speaks it.</h2>
+              </div>
+              <p class="skill-copy">
+                The bundled <code>/amux</code> skill teaches Amp agents the safe vocabulary — which verb mutates which domain, and when to run
+                <code>doctor</code> instead of guessing.
+              </p>
+              <div class="inline-command"><span class="prompt">$</span> ln -sfn "$PWD/skills/amux" ~/.agents/skills/amux</div>
+              <p class="small-note">
+                Skill workflows go beyond the CLI:
+                <a href="https://github.com/zainfathoni/amux/blob/main/skills/amux/SKILL.md">read the skill source</a>.
               </p>
             </div>
-            <div class="terminal">
+            <div class="trigger-list" aria-label="amux skill trigger phrases">
+              <div class="trigger-row"><span class="trigger-say">“Pin it”</span><code class="trigger-run">amux pin-current &lt;thread-url&gt;</code></div>
+              <div class="trigger-row"><span class="trigger-say">“Park it”</span><code class="trigger-run">amux park-current</code></div>
+              <div class="trigger-row"><span class="trigger-say">“Shelve this”</span><code class="trigger-run">amux shelve-current</code></div>
+              <div class="trigger-row"><span class="trigger-say">“Restore my workspace”</span><code class="trigger-run">amux launch</code></div>
+              <div class="trigger-row"><span class="trigger-say">“/amux sprawl #12 #34”</span><code class="trigger-run">one worktree + spawned worker per independent issue</code></div>
+              <div class="trigger-row"><span class="trigger-say">“/amux health”</span><code class="trigger-run">read-only responsiveness check across workers</code></div>
+              <div class="trigger-row"><span class="trigger-say">“/amux finish”</span><code class="trigger-run">post-merge git/GitHub cleanup, then verified teardown</code></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section" id="install" aria-labelledby="install-title">
+          <div class="container install-grid">
+            <div>
+              <h2 id="install-title">A binary, tmux,<br />and a text file.</h2>
+              <p class="install-copy">
+                No daemon, no database. Start with <code>--dry-run</code>, keep what works. Release archives ship for Linux and macOS, amd64 and arm64.
+              </p>
+              <p class="install-links">
+                Prefer manual installs?
+                <a href="https://github.com/zainfathoni/amux#install-from-a-release">Release archive instructions</a> ·
+                <a href="https://github.com/zainfathoni/amux#install-from-source">build from source</a>
+              </p>
+            </div>
+            <div class="terminal install-terminal" aria-label="amux install commands">
+              <div class="terminal-bar">install</div>
               <pre><code><span class="prompt">$</span> brew tap zainfathoni/amux https://github.com/zainfathoni/amux
 <span class="prompt">$</span> brew install zainfathoni/amux/amux
-<span class="prompt">$</span> brew upgrade amux</code></pre>
+
+<span class="comment"># then pin the window you're in, and never re-open it by hand again</span>
+<span class="prompt">$</span> amux pin-current https://ampcode.com/threads/T-123</code></pre>
             </div>
           </div>
         </section>
@@ -828,14 +880,205 @@ mac         project-runner     ~/Code/my-project</code></pre>
 
       <footer class="footer">
         <div class="container footer-inner">
-          <span>MIT licensed. Built by Zain Fathoni.</span>
+          <span>MIT licensed · Built by <a href="https://www.zainfathoni.com">Zain Fathoni</a></span>
           <div class="footer-links">
             <a href="https://github.com/zainfathoni/amux">GitHub</a>
             <a href="https://github.com/zainfathoni/amux/releases/latest">Releases</a>
             <a href="https://github.com/zainfathoni/amux/issues">Issues</a>
+            <a href="https://github.com/zainfathoni/amux#readme">Docs</a>
           </div>
         </div>
       </footer>
     </div>
+
+    <script>
+      const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const heroScript = [
+        { cmd: "amux pin-current https://ampcode.com/threads/T-123", out: ["saved row: mac  web-redesign  ~/Code/site  T-123"] },
+        { cmd: "amux launch mac --dry-run", out: ["would create tmux session mac", "would restore window web-redesign from T-123"] },
+        { cmd: "amux launch mac", out: ["restored mac/web-redesign"] },
+        { cmd: "amux park-current", out: ["stopped local window; kept restore row"] },
+      ];
+
+      const domainNames = ["Restore config", "Runner config", "Live tmux", "Remote Amp"];
+      const verbs = {
+        pin: {
+          label: "pin",
+          desc: "Save the tmux window you are already in — window name, workdir, thread — into workspaces.tsv. Config only: nothing starts, nothing stops.",
+          domains: [0],
+          note: "",
+          script: [{ cmd: "amux pin-current https://ampcode.com/threads/T-123", out: ["saved row: mac  web-redesign  ~/Code/site  T-123"] }],
+        },
+        launch: {
+          label: "launch",
+          desc: "Recreate every pinned window with amp threads continue. Preview the whole plan with --dry-run before a single window exists.",
+          domains: [2],
+          note: "Reads restore config; skips shelved rows.",
+          script: [
+            { cmd: "amux launch mac --dry-run", out: ["would create tmux session mac", "would restore window web-redesign from T-123"] },
+            { cmd: "amux launch mac", out: ["restored mac/web-redesign"] },
+          ],
+        },
+        park: {
+          label: "park",
+          desc: "Stop the local tmux/Amp window, gracefully. The restore row and the remote thread stay exactly where they are.",
+          domains: [2],
+          note: "",
+          script: [{ cmd: "amux park-current", out: ["stopped local window; kept restore row"] }],
+        },
+        shelve: {
+          label: "shelve",
+          desc: "Defer without forgetting. Archives the thread so it leaves the Amp sidebar, keeps the restore row, stops the local window. unshelve brings it back.",
+          domains: [2, 3],
+          note: "",
+          script: [{ cmd: "amux shelve --thread T-123", out: ["archived T-123; restore row preserved", "stopped window mac/web-redesign"] }],
+        },
+        spawn: {
+          label: "spawn",
+          desc: "A fresh Amp thread in a real interactive tmux window — with an Amp Dial mode, an issue-style title prefix, and a stable AMUX_* identity injected for later cleanup.",
+          domains: [0, 2, 3],
+          note: "",
+          script: [{ cmd: "amux spawn -m medium --title-prefix '#255' fix ~/Code/site \"Fix the flaky spec\"", out: ["created thread T-456", "window: #255 fix · restore row stored", "AMUX_* identity injected"] }],
+        },
+        teardown: {
+          label: "teardown",
+          desc: "Verified full cleanup. Cross-checks identity against config and live tmux, then archives the thread, removes the row, and stops the window — or refuses to touch anything.",
+          domains: [0, 2, 3],
+          note: "Fails closed on any mismatch.",
+          script: [{ cmd: "amux teardown", out: ["verified AMUX_* identity against config + tmux", "archived T-456 · removed row · stopped window"] }],
+        },
+        runner: {
+          label: "runner …",
+          desc: "First-class amp --no-tui runner windows, pinned in their own runners.tsv. Runner rows never fake thread IDs and never touch remote Amp state.",
+          domains: [1, 2],
+          note: "",
+          script: [{ cmd: "amux runner launch mac", out: ["started amp --no-tui in mac/project-runner"] }],
+        },
+        doctor: {
+          label: "doctor",
+          desc: "Read-only drift check: compares restore rows and runner rows against the live tmux session, and flags archived or missing threads before you trust a restore.",
+          domains: [],
+          note: "Read-only — inspects all four domains, mutates none.",
+          script: [{ cmd: "amux doctor amux", out: ["config ↔ live tmux: no drift", "runner registry: ok", "archived/missing threads: none"] }],
+        },
+      };
+
+      const tokens = new WeakMap();
+
+      function escapeHtml(value) {
+        return value.replace(/[&<>"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[char]);
+      }
+
+      function renderTerminal(target, state) {
+        const rows = state.lines
+          .map((line) => line.command
+            ? `<div><span class="prompt">$ </span>${escapeHtml(line.text)}</div>`
+            : `<div class="output">${escapeHtml(line.text)}</div>`)
+          .join("");
+        const typing = state.typing !== null
+          ? `<div><span class="prompt">$ </span>${escapeHtml(state.typing)}<span class="cursor"></span></div>`
+          : `<div><span class="prompt">$ </span><span class="cursor"></span></div>`;
+        target.innerHTML = rows + typing;
+      }
+
+      function playTerminal(target, script, { loop = false } = {}) {
+        const token = {};
+        tokens.set(target, token);
+
+        if (prefersReducedMotion) {
+          const lines = [];
+          script.forEach((step) => {
+            lines.push({ command: true, text: step.cmd });
+            step.out.forEach((text) => lines.push({ command: false, text }));
+          });
+          renderTerminal(target, { lines, typing: null });
+          return;
+        }
+
+        const acts = [];
+        script.forEach((step) => {
+          acts.push({ type: "new" });
+          for (const ch of step.cmd) acts.push({ type: "char", ch });
+          acts.push({ type: "end" });
+          step.out.forEach((line) => acts.push({ type: "out", line }));
+          acts.push({ type: "pause", ms: 1400 });
+        });
+
+        const state = { lines: [], typing: null };
+        let index = 0;
+        renderTerminal(target, state);
+
+        function tick() {
+          if (tokens.get(target) !== token) return;
+          if (index >= acts.length) {
+            if (!loop) return;
+            index = 0;
+            setTimeout(() => {
+              if (tokens.get(target) !== token) return;
+              state.lines = [];
+              state.typing = null;
+              renderTerminal(target, state);
+              setTimeout(tick, 700);
+            }, 1600);
+            return;
+          }
+
+          const act = acts[index++];
+          let delay = 30;
+          if (act.type === "new") state.typing = "";
+          if (act.type === "char") state.typing = `${state.typing || ""}${act.ch}`;
+          if (act.type === "end") {
+            state.lines.push({ command: true, text: state.typing });
+            state.typing = null;
+          }
+          if (act.type === "out") state.lines.push({ command: false, text: act.line });
+          renderTerminal(target, state);
+
+          if (act.type === "char") delay = 16 + Math.random() * 38;
+          if (act.type === "end") delay = 380;
+          if (act.type === "out") delay = 150;
+          if (act.type === "pause") delay = act.ms;
+          setTimeout(tick, delay);
+        }
+
+        tick();
+      }
+
+      const heroTerminal = document.querySelector("#hero-terminal");
+      const verbTerminal = document.querySelector("#verb-terminal");
+      const verbList = document.querySelector("#verb-list");
+      const domains = document.querySelector("#domains");
+      const activeVerbLabel = document.querySelector("#active-verb-label");
+      const verbDescription = document.querySelector("#verb-description");
+      const verbNote = document.querySelector("#verb-note");
+
+      function selectVerb(id) {
+        const spec = verbs[id];
+        activeVerbLabel.textContent = id;
+        verbDescription.textContent = spec.desc;
+        verbNote.textContent = spec.note;
+        document.querySelectorAll(".verb-button").forEach((button) => {
+          button.setAttribute("aria-pressed", String(button.dataset.verb === id));
+        });
+        domains.innerHTML = domainNames
+          .map((name, index) => `<span class="domain ${spec.domains.includes(index) ? "active" : ""}">${name}</span>`)
+          .join("");
+        playTerminal(verbTerminal, spec.script);
+      }
+
+      Object.entries(verbs).forEach(([id, spec]) => {
+        const button = document.createElement("button");
+        button.className = "verb-button";
+        button.type = "button";
+        button.dataset.verb = id;
+        button.textContent = spec.label;
+        button.addEventListener("click", () => selectVerb(id));
+        verbList.append(button);
+      });
+
+      playTerminal(heroTerminal, heroScript, { loop: true });
+      selectVerb("pin");
+    </script>
   </body>
 </html>

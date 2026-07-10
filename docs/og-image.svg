@@ -1,69 +1,75 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
-  <title id="title">amux — Amp session manager for tmux</title>
-  <desc id="desc">A dark social preview card for amux with terminal-inspired panels and green accents.</desc>
+  <title id="title">amux — local tmux workspaces for Amp</title>
+  <desc id="desc">A navy and red social preview card for amux, showing lifecycle verbs and a terminal panel.</desc>
   <defs>
-    <radialGradient id="glow-left" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(140 90) rotate(48) scale(620 520)">
-      <stop offset="0" stop-color="#34d399" stop-opacity="0.34" />
-      <stop offset="0.55" stop-color="#34d399" stop-opacity="0.08" />
-      <stop offset="1" stop-color="#34d399" stop-opacity="0" />
-    </radialGradient>
-    <radialGradient id="glow-right" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1040 70) rotate(135) scale(520 430)">
-      <stop offset="0" stop-color="#60a5fa" stop-opacity="0.28" />
-      <stop offset="0.6" stop-color="#60a5fa" stop-opacity="0.07" />
-      <stop offset="1" stop-color="#60a5fa" stop-opacity="0" />
-    </radialGradient>
-    <linearGradient id="card" x1="148" y1="94" x2="1052" y2="536" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#18181b" />
-      <stop offset="1" stop-color="#0f1014" />
+    <linearGradient id="wash" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1d2638" />
+      <stop offset="0.5" stop-color="#161e2e" />
+      <stop offset="1" stop-color="#10141f" />
     </linearGradient>
-    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#6ee7b7" />
-      <stop offset="1" stop-color="#10b981" />
-    </linearGradient>
-    <filter id="shadow" x="80" y="40" width="1040" height="560" color-interpolation-filters="sRGB">
-      <feDropShadow dx="0" dy="28" stdDeviation="38" flood-color="#000000" flood-opacity="0.44" />
+    <radialGradient id="red-glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(158 116) rotate(40) scale(540 430)">
+      <stop offset="0" stop-color="#f05252" stop-opacity="0.36" />
+      <stop offset="0.55" stop-color="#f05252" stop-opacity="0.1" />
+      <stop offset="1" stop-color="#f05252" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="white-glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1010 80) rotate(128) scale(460 360)">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.16" />
+      <stop offset="0.65" stop-color="#ffffff" stop-opacity="0.04" />
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0" />
+    </radialGradient>
+    <pattern id="mesh" width="58" height="58" patternUnits="userSpaceOnUse" patternTransform="rotate(30)">
+      <path d="M0 0H58" stroke="#ffffff" stroke-opacity="0.16" stroke-width="1" />
+    </pattern>
+    <filter id="shadow" x="70" y="44" width="1060" height="548" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="28" stdDeviation="34" flood-color="#000000" flood-opacity="0.42" />
     </filter>
   </defs>
 
-  <rect width="1200" height="630" fill="#09090b" />
-  <rect width="1200" height="630" fill="url(#glow-left)" />
-  <rect width="1200" height="630" fill="url(#glow-right)" />
-
-  <g opacity="0.5">
-    <path d="M0 502H1200" stroke="#ffffff" stroke-opacity="0.045" />
-    <path d="M0 126H1200" stroke="#ffffff" stroke-opacity="0.035" />
-    <path d="M236 0V630" stroke="#ffffff" stroke-opacity="0.035" />
-    <path d="M964 0V630" stroke="#ffffff" stroke-opacity="0.035" />
-  </g>
+  <rect width="1200" height="630" fill="#161e2e" />
+  <rect width="1200" height="630" fill="url(#wash)" />
+  <rect width="1200" height="630" fill="url(#red-glow)" />
+  <rect width="1200" height="630" fill="url(#white-glow)" />
+  <rect width="1200" height="630" fill="url(#mesh)" opacity="0.34" />
+  <rect width="1200" height="630" fill="url(#wash)" opacity="0.72" />
 
   <g filter="url(#shadow)">
-    <rect x="108" y="82" width="984" height="466" rx="42" fill="url(#card)" stroke="#ffffff" stroke-opacity="0.12" />
-    <rect x="132" y="106" width="936" height="418" rx="28" fill="#09090b" fill-opacity="0.34" stroke="#ffffff" stroke-opacity="0.06" />
+    <rect x="86" y="78" width="1028" height="474" fill="#141b29" stroke="#ffffff" stroke-opacity="0.12" />
+    <rect x="112" y="104" width="976" height="422" fill="#161e2e" stroke="#ffffff" stroke-opacity="0.08" />
   </g>
 
-  <g transform="translate(164 148)">
-    <rect width="82" height="82" rx="24" fill="#ffffff" fill-opacity="0.05" stroke="#ffffff" stroke-opacity="0.13" />
-    <text x="41" y="53" text-anchor="middle" font-family="SFMono-Regular, Consolas, Liberation Mono, monospace" font-size="31" font-weight="700" fill="#6ee7b7">am</text>
+  <g transform="translate(154 142)">
+    <circle cx="34" cy="34" r="34" fill="#ffffff" />
+    <text x="34" y="43" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="800" letter-spacing="-2" fill="#161e2e">am</text>
+    <text x="88" y="43" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="32" font-weight="800" letter-spacing="-1.4" fill="#ffffff">amux</text>
+    <path d="M182 14V54" stroke="#ffffff" stroke-opacity="0.18" />
+    <text x="204" y="41" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="21" font-weight="500" fill="#ffffff" opacity="0.62">local tmux workspaces for Amp</text>
   </g>
 
-  <g transform="translate(164 272)">
-    <text font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="88" font-weight="700" letter-spacing="-6" fill="#fafafa">amux</text>
-    <text y="74" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="34" font-weight="600" letter-spacing="-0.8" fill="#d4d4d8">Amp session manager for tmux</text>
-    <text y="132" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="28" font-weight="500" fill="#a1a1aa">pin • park • restore • spawn • teardown</text>
+  <g transform="translate(154 270)">
+    <text font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="68" font-weight="800" letter-spacing="-4" fill="#ffffff">Pin. Launch.</text>
+    <text y="72" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="68" font-weight="800" letter-spacing="-4" fill="#ffffff">Park. </text>
+    <text x="180" y="72" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="68" font-weight="800" letter-spacing="-4" fill="#f05252">Teardown.</text>
+    <text y="136" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="25" font-weight="500" fill="#ffffff" opacity="0.72">One TSV restores local Amp workspaces.</text>
   </g>
 
-  <g transform="translate(780 160)">
-    <rect width="280" height="286" rx="24" fill="#111113" stroke="#ffffff" stroke-opacity="0.12" />
-    <rect x="0" y="0" width="280" height="48" rx="24" fill="#18181b" />
-    <circle cx="30" cy="24" r="6" fill="#ef4444" />
-    <circle cx="52" cy="24" r="6" fill="#f59e0b" />
-    <circle cx="74" cy="24" r="6" fill="#10b981" />
-    <text x="22" y="91" font-family="SFMono-Regular, Consolas, Liberation Mono, monospace" font-size="18" fill="#6ee7b7">$ amux launch</text>
-    <text x="22" y="128" font-family="SFMono-Regular, Consolas, Liberation Mono, monospace" font-size="18" fill="#d4d4d8">restored mac/Amp</text>
-    <text x="22" y="182" font-family="SFMono-Regular, Consolas, Liberation Mono, monospace" font-size="18" fill="#6ee7b7">$ amux doctor</text>
-    <text x="22" y="219" font-family="SFMono-Regular, Consolas, Liberation Mono, monospace" font-size="18" fill="#d4d4d8">OK config rows: 3</text>
-    <rect x="22" y="246" width="128" height="8" rx="4" fill="url(#accent)" />
+  <g transform="translate(750 164)">
+    <rect width="310" height="296" fill="#10141f" stroke="#ffffff" stroke-opacity="0.14" />
+    <rect width="310" height="48" fill="#141b29" />
+    <circle cx="28" cy="24" r="5" fill="#ffffff" opacity="0.16" />
+    <circle cx="48" cy="24" r="5" fill="#ffffff" opacity="0.16" />
+    <circle cx="68" cy="24" r="5" fill="#f05252" />
+    <text x="210" y="30" font-family="SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace" font-size="14" fill="#ffffff" opacity="0.58">tmux · Amp</text>
+    <text x="24" y="92" font-family="SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace" font-size="18" fill="#f05252">$</text>
+    <text x="48" y="92" font-family="SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace" font-size="18" fill="#d6dbe6">amux pin-current T-123</text>
+    <text x="48" y="128" font-family="SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace" font-size="17" fill="#ffffff" opacity="0.66">saved row: mac web-redesign</text>
+    <text x="24" y="184" font-family="SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace" font-size="18" fill="#f05252">$</text>
+    <text x="48" y="184" font-family="SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace" font-size="18" fill="#d6dbe6">amux launch --dry-run</text>
+    <text x="48" y="220" font-family="SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace" font-size="17" fill="#ffffff" opacity="0.66">would restore window</text>
+    <rect x="48" y="252" width="84" height="8" fill="#f05252" />
   </g>
 
-  <text x="164" y="492" font-family="SFMono-Regular, Consolas, Liberation Mono, monospace" font-size="24" fill="#71717a">amux.zainf.dev</text>
+  <g transform="translate(154 494)">
+    <rect width="34" height="5" fill="#f05252" />
+    <text x="54" y="8" font-family="SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace" font-size="23" fill="#ffffff" opacity="0.58">amux.zainf.dev</text>
+  </g>
 </svg>
