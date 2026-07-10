@@ -119,7 +119,7 @@ func (a app) run(args []string) error {
 
 	switch command {
 	case "launch":
-		return launch(opts, args)
+		return a.launch(opts, args)
 	case "list":
 		return a.list(opts, args)
 	case "workspaces":
@@ -180,7 +180,7 @@ func (a app) run(args []string) error {
 	default:
 		// Compatibility with the Bash helper: `amux mac Amp` means launch.
 		if len(args) <= 1 {
-			return launch(opts, append([]string{command}, args...))
+			return a.launch(opts, append([]string{command}, args...))
 		}
 		a.usage()
 		return fmt.Errorf("unknown command: %s", command)
@@ -229,9 +229,41 @@ func parseOptions(args []string) (options, []string, error) {
 	return opts, remaining, nil
 }
 
-func launch(opts options, args []string) error {
+func (a app) launch(opts options, args []string) error {
 	if len(args) > 2 {
 		return errors.New("usage: amux launch [workspace] [session]")
+	}
+	if len(args) == 0 {
+		if opts.attachMode == attachAlways {
+			return errors.New("--attach requires an explicit workspace when launch targets all workspaces")
+		}
+		rows, err := config.Load(opts.configPath)
+		if err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			return fmt.Errorf("no rows found in %s", opts.configPath)
+		}
+		statuses, err := threadArchiveStatuses(rows)
+		if err != nil {
+			return fmt.Errorf("confirm shelved Amp threads before launch: %w", err)
+		}
+		byWorkspace := make(map[string][]config.Row)
+		for _, row := range rows {
+			byWorkspace[row.Workspace] = append(byWorkspace[row.Workspace], row)
+		}
+		names := make([]string, 0, len(byWorkspace))
+		for workspace := range byWorkspace {
+			names = append(names, workspace)
+		}
+		sort.Strings(names)
+		opts.attachMode = attachNever
+		for _, workspace := range names {
+			if err := a.launchWorkspace(opts, workspace, workspace, byWorkspace[workspace], statuses); err != nil {
+				return fmt.Errorf("launch workspace %q: %w", workspace, err)
+			}
+		}
+		return nil
 	}
 	workspace, session := workspaceSessionFromArgs(args)
 
@@ -246,11 +278,15 @@ func launch(opts options, args []string) error {
 	if err != nil {
 		return fmt.Errorf("confirm shelved Amp threads before launch: %w", err)
 	}
+	return a.launchWorkspace(opts, workspace, session, rows, statuses)
+}
+
+func (a app) launchWorkspace(opts options, workspace, session string, rows []config.Row, statuses map[string]threadStatus) error {
 	activeRows := make([]config.Row, 0, len(rows))
 	for _, row := range rows {
 		switch statuses[canonicalThreadID(row.Thread)] {
 		case threadStatusArchived:
-			fmt.Printf("Skipping shelved row %s/%s (%s); run amux unshelve %s %s to make it launchable.\n", row.Workspace, row.Window, canonicalThreadID(row.Thread), row.Workspace, row.Window)
+			fmt.Fprintf(a.stdout, "Skipping shelved row %s/%s (%s); run amux unshelve %s %s to make it launchable.\n", row.Workspace, row.Window, canonicalThreadID(row.Thread), row.Workspace, row.Window)
 		case threadStatusMissing:
 			return fmt.Errorf("Amp thread %s for %s/%s was not found in active or archived thread lists", canonicalThreadID(row.Thread), row.Workspace, row.Window)
 		default:
@@ -258,12 +294,12 @@ func launch(opts options, args []string) error {
 		}
 	}
 	if len(activeRows) == 0 {
-		fmt.Printf("No unshelved rows found for workspace %s in %s\n", workspace, opts.configPath)
+		fmt.Fprintf(a.stdout, "No unshelved rows found for workspace %s in %s\n", workspace, opts.configPath)
 		return nil
 	}
 	rows = activeRows
 
-	runner := tmux.Runner{DryRun: opts.dryRun, TerminalLauncher: opts.terminalLauncher}
+	runner := tmux.Runner{DryRun: opts.dryRun, TerminalLauncher: opts.terminalLauncher, Output: a.stdout}
 	sessionExists := runner.HasSession(session)
 	sessionExistedBeforeLaunch := sessionExists
 	windowNames, err := runner.WindowNames(session)
@@ -3127,12 +3163,16 @@ func (a app) usage() {
 Commands:
   launch [workspace] [session]
       Launch or attach a tmux session. With one workspace arg, session defaults
-      to the workspace name; with no args, defaults remain workspace=mac session=Amp.
+      to the workspace name; with no args, launches every configured workspace
+      into its same-named tmux session without attaching. Use an explicit workspace
+      with --attach.
+      Multi-workspace launch runs in sorted order and stops at the first failure;
+      the error identifies that workspace and earlier workspaces may be restored.
       Cold launches do not attach; existing config-matching sessions attach.
       Side effects: reads restore config, may create live local tmux/Amp
       windows for unshelved rows, and skips archived/shelved rows. It does not
       create, archive, or unarchive remote Amp threads.
-      Use --attach to always attach or --no-attach to never attach.
+      Use --attach with a workspace to always attach or --no-attach to never attach.
       If tmux cannot attach because the caller is not a terminal,
       --terminal-launcher (or AMUX_TERMINAL_LAUNCHER) runs before the default
       Omarchy launcher and Alacritty fallback.

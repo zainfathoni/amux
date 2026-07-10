@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1007,19 +1008,26 @@ func TestShelveAndTeardownWorkspaceDefaultsSessionToWorkspace(t *testing.T) {
 	}
 }
 
-func TestLaunchNoArgsKeepsMacAmpDefaults(t *testing.T) {
+func TestLaunchNoArgsStartsAllWorkspacesInSameNamedSessions(t *testing.T) {
 	tmp := t.TempDir()
-	workdir := filepath.Join(tmp, "workdir")
-	if err := os.Mkdir(workdir, 0o755); err != nil {
+	amuxWorkdir := filepath.Join(tmp, "amux")
+	cafeinWorkdir := filepath.Join(tmp, "cafein")
+	if err := os.Mkdir(amuxWorkdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(cafeinWorkdir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(tmp, "workspaces.tsv")
-	if err := os.WriteFile(configPath, []byte("mac\tone\t"+workdir+"\tT-one\n"), 0o644); err != nil {
+	configRows := "cafein\tcafein-worker\t" + cafeinWorkdir + "\tT-cafein\n" +
+		"amux\tamux-worker\t" + amuxWorkdir + "\tT-amux\n"
+	if err := os.WriteFile(configPath, []byte(configRows), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	logPath := filepath.Join(tmp, "calls.log")
 	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
-if [ "$1" = threads ] && [ "$2" = list ]; then printf '[{"id":"T-one"}]\n'; exit 0; fi
+printf 'amp %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = threads ] && [ "$2" = list ]; then printf '[{"id":"T-amux"},{"id":"T-cafein"}]\n'; exit 0; fi
 exit 2
 `)
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
@@ -1031,7 +1039,7 @@ exit 2
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX", "")
 
-	if err := runWithDiscardedStdout([]string{"--config", configPath, "launch"}); err != nil {
+	if err := runWithDiscardedStdout([]string{"--config", configPath}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1040,8 +1048,205 @@ exit 2
 		t.Fatal(err)
 	}
 	log := string(logBytes)
-	if !strings.Contains(log, "has-session -t Amp") || !strings.Contains(log, "new-session -d -s Amp -n one") {
-		t.Fatalf("no-arg launch did not keep mac/Amp defaults\nlog:\n%s", log)
+	if !strings.Contains(log, "new-session -d -s amux -n amux-worker") {
+		t.Fatalf("no-arg launch did not create amux session\nlog:\n%s", log)
+	}
+	if !strings.Contains(log, "new-session -d -s cafein -n cafein-worker") {
+		t.Fatalf("no-arg launch did not create cafein session\nlog:\n%s", log)
+	}
+	if strings.Contains(log, "-s Amp") || strings.Contains(log, "-t Amp") {
+		t.Fatalf("no-arg launch used legacy default session\nlog:\n%s", log)
+	}
+	if strings.Index(log, "new-session -d -s amux") > strings.Index(log, "new-session -d -s cafein") {
+		t.Fatalf("no-arg launch did not use sorted workspace order\nlog:\n%s", log)
+	}
+	if calls := strings.Count(log, "amp threads list"); calls != 2 {
+		t.Fatalf("no-arg launch called amp threads list %d times, want one active and one archived listing\nlog:\n%s", calls, log)
+	}
+}
+
+func TestLaunchNoArgsRejectsAttach(t *testing.T) {
+	err := (app{}).run([]string{"--attach", "launch"})
+	if err == nil {
+		t.Fatal("no-arg launch accepted --attach")
+	}
+	if !strings.Contains(err.Error(), "--attach requires an explicit workspace") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLaunchNoArgsSkipsArchivedWorkspaceAndDoesNotAttachExistingWorkspace(t *testing.T) {
+	tmp := t.TempDir()
+	activeWorkdir := filepath.Join(tmp, "active")
+	archivedWorkdir := filepath.Join(tmp, "archived")
+	for _, dir := range []string{activeWorkdir, archivedWorkdir} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	rows := "a-archived\told\t" + archivedWorkdir + "\tT-old\nb-active\tlive\t" + activeWorkdir + "\tT-live\n"
+	if err := os.WriteFile(configPath, []byte(rows), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "calls.log")
+	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
+case "$*" in
+  *--include-archived*) printf '[{"id":"T-old"},{"id":"T-live"}]\n' ;;
+  *) printf '[{"id":"T-live"}]\n' ;;
+esac
+`)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then exit 0; fi
+if [ "$1" = list-windows ]; then printf 'live\n'; exit 0; fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "launch"}); err != nil {
+		t.Fatal(err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if strings.Contains(log, "attach") || strings.Contains(log, "switch-client") || strings.Contains(log, "-t a-archived") {
+		t.Fatalf("bulk launch attached or touched archived workspace\nlog:\n%s", log)
+	}
+	if !strings.Contains(log, "has-session -t b-active") {
+		t.Fatalf("bulk launch did not continue to active workspace after archived workspace\nlog:\n%s", log)
+	}
+	if !strings.Contains(stdout.String(), "Skipping shelved row a-archived/old") {
+		t.Fatalf("archived notice was not routed to app stdout: %q", stdout.String())
+	}
+}
+
+func TestLaunchNoArgsStopsAtWorkspaceFailureWithContext(t *testing.T) {
+	tmp := t.TempDir()
+	firstWorkdir := filepath.Join(tmp, "first")
+	lastWorkdir := filepath.Join(tmp, "last")
+	for _, dir := range []string{firstWorkdir, lastWorkdir} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	rows := "a\tfirst\t" + firstWorkdir + "\tT-first\n" +
+		"b\tbroken\t" + filepath.Join(tmp, "missing") + "\tT-broken\n" +
+		"c\tlast\t" + lastWorkdir + "\tT-last\n"
+	if err := os.WriteFile(configPath, []byte(rows), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "calls.log")
+	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nprintf '[{\"id\":\"T-first\"},{\"id\":\"T-broken\"},{\"id\":\"T-last\"}]\\n'\n")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then exit 1; fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := runWithDiscardedStdout([]string{"--config", configPath, "launch"})
+	if err == nil || !strings.Contains(err.Error(), `launch workspace "b"`) {
+		t.Fatalf("unexpected bulk launch error: %v", err)
+	}
+	logBytes, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	log := string(logBytes)
+	if !strings.Contains(log, "new-session -d -s a") || strings.Contains(log, "-s c") || strings.Contains(log, "-t c") {
+		t.Fatalf("bulk launch did not stop after sorted workspace failure\nlog:\n%s", log)
+	}
+}
+
+func TestLaunchNoArgsStopsAtMissingThreadWithWorkspaceContext(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	rows := "a\tfirst\t" + workdir + "\tT-first\n" +
+		"b-missing\tmissing\t" + workdir + "\tT-missing\n" +
+		"c\tlast\t" + workdir + "\tT-last\n"
+	if err := os.WriteFile(configPath, []byte(rows), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "calls.log")
+	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nprintf '[{\"id\":\"T-first\"},{\"id\":\"T-last\"}]\\n'\n")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then exit 1; fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := runWithDiscardedStdout([]string{"--config", configPath, "launch"})
+	if err == nil || !strings.Contains(err.Error(), `launch workspace "b-missing"`) || !strings.Contains(err.Error(), "T-missing") {
+		t.Fatalf("unexpected missing-thread bulk launch error: %v", err)
+	}
+	logBytes, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	log := string(logBytes)
+	if !strings.Contains(log, "new-session -d -s a") || strings.Contains(log, "-s c") || strings.Contains(log, "-t c") {
+		t.Fatalf("bulk launch did not stop at missing thread workspace\nlog:\n%s", log)
+	}
+}
+
+func TestLaunchNoArgsDryRunWritesSortedPlansToAppStdout(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("b\tsecond\t"+workdir+"\tT-second\na\tfirst\t"+workdir+"\tT-first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\nprintf '[{\"id\":\"T-first\"},{\"id\":\"T-second\"}]\\n'\n")
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "--dry-run", "launch"}); err != nil {
+		t.Fatal(err)
+	}
+	out := stdout.String()
+	first := strings.Index(out, "'-s' 'a' '-n' 'first'")
+	second := strings.Index(out, "'-s' 'b' '-n' 'second'")
+	if first < 0 || second < 0 || first > second {
+		t.Fatalf("bulk dry-run plans were missing or unsorted\nstdout:\n%s", out)
+	}
+}
+
+func TestLaunchNoArgsAmpListFailureDoesNotTouchTmux(t *testing.T) {
+	tmp := t.TempDir()
+	workdir := filepath.Join(tmp, "workdir")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	if err := os.WriteFile(configPath, []byte("a\tworker\t"+workdir+"\tT-one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "tmux.log")
+	writeExecutable(t, filepath.Join(tmp, "amp"), "#!/bin/sh\necho status unavailable >&2\nexit 1\n")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+shellSingleQuote(logPath)+"\n")
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := runWithDiscardedStdout([]string{"--config", configPath, "launch"})
+	if err == nil || !strings.Contains(err.Error(), "confirm shelved Amp threads before launch") || strings.Contains(err.Error(), "launch workspace") {
+		t.Fatalf("unexpected global status error: %v", err)
+	}
+	if logBytes, readErr := os.ReadFile(logPath); readErr == nil && len(logBytes) > 0 {
+		t.Fatalf("bulk launch touched tmux after Amp list failure\nlog:\n%s", logBytes)
+	} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatal(readErr)
 	}
 }
 

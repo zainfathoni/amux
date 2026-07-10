@@ -10,7 +10,7 @@ amux workspaces [--include-runners]
 amux shelved [workspace]
 amux doctor [workspace] [session]
 amux launch [workspace] [session] [--dry-run]
-amux --attach launch [workspace] [session]
+amux --attach launch <workspace> [session]
 amux --no-attach launch [workspace] [session]
 amux pin <workspace> <window> <workdir> <thread-id-or-url>
 amux pin-current <thread-id-or-url>
@@ -64,7 +64,7 @@ amux runner launch mac Amp
 amux runner park mac worker Amp
 ```
 
-No-arg `launch` and `doctor` still use the legacy workspace `mac` and tmux session `Amp` where that compatibility exists.
+No-arg `launch` restores all configured workspaces into same-named sessions. No-arg `doctor` still uses the legacy workspace `mac` and tmux session `Amp`.
 
 ## Command semantics
 
@@ -80,11 +80,12 @@ No-arg `launch` and `doctor` still use the legacy workspace `mac` and tmux sessi
 ### launch
 
 - Reads restore config, skips archived/shelved rows, and may create live local tmux/Amp windows for unshelved rows.
+- With no args, restores every configured workspace in sorted order into its same-named tmux session without attaching. Execution stops at the first workspace failure, so earlier workspaces may already be restored; errors identify the failed workspace.
 - Does not create, archive, unarchive, or delete remote Amp threads.
-- `launch --dry-run` inspects restore actions without creating windows.
+- `launch --dry-run` validates restore inputs and prints planned tmux commands without inspecting existing tmux conflicts or creating windows.
 - Auto-attaches by default only when the tmux session already existed, no restore work was needed, and its live window set plus pane paths match the configured workspace.
 - Cold restores and partial restores do not auto-attach.
-- Use `--attach launch` to force attach or `--no-attach launch` to suppress auto-attach.
+- Use `--attach launch <workspace> [session]` to force attach or `--no-attach launch` to suppress auto-attach.
 - If attach is requested from inside tmux, `amux` switches the current client to the target session. If tmux reports no terminal, `amux` opens the session through Omarchy's terminal launcher with direct Alacritty fallback.
 
 ### pin and unpin

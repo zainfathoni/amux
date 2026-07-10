@@ -8,6 +8,19 @@ import (
 	"time"
 )
 
+func TestDryRunWritesPlannedCommandToConfiguredOutput(t *testing.T) {
+	var output strings.Builder
+	runner := Runner{DryRun: true, Output: &output}
+
+	if err := runner.NewSession("amux", "worker", "amp threads continue T-one"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := output.String(); !strings.Contains(got, "tmux 'new-session' '-d' '-s' 'amux' '-n' 'worker'") {
+		t.Fatalf("dry-run output = %q", got)
+	}
+}
+
 func TestContinueCommandQuotesShellArgs(t *testing.T) {
 	got := ContinueCommand("/tmp/with space/that's", "T-'thread'")
 	want := "cd '/tmp/with space/that'\\''s' && exec amp threads continue 'T-'\\''thread'\\'''"

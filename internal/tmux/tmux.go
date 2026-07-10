@@ -13,6 +13,14 @@ import (
 type Runner struct {
 	DryRun           bool
 	TerminalLauncher string
+	Output           io.Writer
+}
+
+func (r Runner) output() io.Writer {
+	if r.Output != nil {
+		return r.Output
+	}
+	return os.Stdout
 }
 
 type Pane struct {
@@ -156,7 +164,7 @@ func (r Runner) AllWindowPanes() ([]WindowPane, error) {
 func (r Runner) NewSession(session, window, command string) error {
 	args := []string{"new-session", "-d", "-s", session, "-n", window, command}
 	if r.DryRun {
-		fmt.Printf("tmux %s\n", shellJoin(args))
+		fmt.Fprintf(r.output(), "tmux %s\n", shellJoin(args))
 		return nil
 	}
 	return tmuxRun(args...)
@@ -165,7 +173,7 @@ func (r Runner) NewSession(session, window, command string) error {
 func (r Runner) NewWindow(session, window, command string) error {
 	args := []string{"new-window", "-t", session, "-n", window, command}
 	if r.DryRun {
-		fmt.Printf("tmux %s\n", shellJoin(args))
+		fmt.Fprintf(r.output(), "tmux %s\n", shellJoin(args))
 		return nil
 	}
 	return tmuxRun(args...)
@@ -293,8 +301,8 @@ func (r Runner) SelectAndAttach(session string, noAttach bool) error {
 		return nil
 	}
 	if r.DryRun {
-		fmt.Printf("tmux select-window -t %s:1\n", shellQuote(session))
-		fmt.Printf("tmux attach -t %s\n", shellQuote(session))
+		fmt.Fprintf(r.output(), "tmux select-window -t %s:1\n", shellQuote(session))
+		fmt.Fprintf(r.output(), "tmux attach -t %s\n", shellQuote(session))
 		return nil
 	}
 	if err := tmuxRun("select-window", "-t", session+":1"); err != nil {

@@ -16,7 +16,7 @@ type completionCommand struct {
 }
 
 var completionCommands = []completionCommand{
-	{Name: "launch", Description: "Launch or attach a tmux session", Args: "[workspace] [session]"},
+	{Name: "launch", Description: "Launch all workspaces or one selected tmux session", Args: "[workspace] [session]"},
 	{Name: "list", Description: "Print configured restore rows", Flags: []string{"--status", "--active", "--shelved"}, Args: "[workspace]"},
 	{Name: "workspaces", Description: "Print configured workspace names", Flags: []string{"--include-runners"}},
 	{Name: "shelved", Description: "Shortcut for list --shelved", Args: "[workspace]"},
