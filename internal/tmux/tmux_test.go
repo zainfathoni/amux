@@ -21,6 +21,32 @@ func TestDryRunWritesPlannedCommandToConfiguredOutput(t *testing.T) {
 	}
 }
 
+func TestNewWindowUsesEmptyWindowComponentInExactSessionTarget(t *testing.T) {
+	tmp := t.TempDir()
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" != new-window ]; then exit 2; fi
+if [ "$2" = -t ] && [ "$3" = '=odd session $x:' ] && [ "$4" = -n ] && [ "$5" = worker ] && [ "$6" = 'amp --no-tui' ] && [ "$#" = 6 ]; then
+  exit 0
+fi
+if [ "$2" = -P ] && [ "$3" = -F ] && [ "$4" = '#{window_id}' ] && [ "$5" = -t ] && [ "$6" = '=odd session $x:' ] && [ "$7" = -n ] && [ "$8" = thread ] && [ "$9" = 'amp threads continue T-one' ] && [ "$#" = 9 ]; then
+  printf '@1\n'
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	runner := Runner{}
+	if err := runner.NewWindow("odd session $x", "worker", "amp --no-tui"); err != nil {
+		t.Fatal(err)
+	}
+	if windowID, err := runner.NewWindowID("odd session $x", "thread", "amp threads continue T-one"); err != nil {
+		t.Fatal(err)
+	} else if windowID != "@1" {
+		t.Fatalf("NewWindowID() = %q, want @1", windowID)
+	}
+}
+
 func TestContinueCommandQuotesShellArgs(t *testing.T) {
 	got := ContinueCommand("/tmp/with space/that's", "T-'thread'")
 	want := "cd '/tmp/with space/that'\\''s' && exec amp threads continue 'T-'\\''thread'\\'''"

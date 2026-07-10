@@ -37,18 +37,26 @@ type WindowPane struct {
 	StartCommand string
 }
 
+func exactSessionTarget(session string) string {
+	return "=" + session
+}
+
+func nextWindowTarget(session string) string {
+	return exactSessionTarget(session) + ":"
+}
+
 func (r Runner) HasSession(session string) bool {
 	if r.DryRun {
 		return false
 	}
-	return exec.Command("tmux", "has-session", "-t", session).Run() == nil
+	return exec.Command("tmux", "has-session", "-t", exactSessionTarget(session)).Run() == nil
 }
 
 func (r Runner) WindowNames(session string) ([]string, error) {
 	if r.DryRun {
 		return nil, nil
 	}
-	out, err := tmuxOutput("list-windows", "-t", session, "-F", "#{window_name}")
+	out, err := tmuxOutput("list-windows", "-t", exactSessionTarget(session), "-F", "#{window_name}")
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +179,7 @@ func (r Runner) NewSession(session, window, command string) error {
 }
 
 func (r Runner) NewWindow(session, window, command string) error {
-	args := []string{"new-window", "-t", session, "-n", window, command}
+	args := []string{"new-window", "-t", nextWindowTarget(session), "-n", window, command}
 	if r.DryRun {
 		fmt.Fprintf(r.output(), "tmux %s\n", shellJoin(args))
 		return nil
@@ -193,7 +201,7 @@ func (r Runner) NewSessionWindowID(session, window, command string) (string, err
 }
 
 func (r Runner) NewWindowID(session, window, command string) (string, error) {
-	args := []string{"new-window", "-P", "-F", "#{window_id}", "-t", session, "-n", window, command}
+	args := []string{"new-window", "-P", "-F", "#{window_id}", "-t", nextWindowTarget(session), "-n", window, command}
 	if r.DryRun {
 		fmt.Printf("tmux %s\n", shellJoin(args))
 		return "", nil

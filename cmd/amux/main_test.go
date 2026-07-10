@@ -933,7 +933,7 @@ exit 2
 		t.Fatal(err)
 	}
 	log := string(logBytes)
-	if !strings.Contains(log, "has-session -t amux") || !strings.Contains(log, "new-session -d -s amux -n one") {
+	if !strings.Contains(log, "has-session -t =amux") || !strings.Contains(log, "new-session -d -s amux -n one") {
 		t.Fatalf("launch did not use workspace name as default session\nlog:\n%s", log)
 	}
 	if strings.Contains(log, "-s Amp") || strings.Contains(log, "-t Amp") {
@@ -1116,7 +1116,7 @@ exit 0
 	if strings.Contains(log, "attach") || strings.Contains(log, "switch-client") || strings.Contains(log, "-t a-archived") {
 		t.Fatalf("bulk launch attached or touched archived workspace\nlog:\n%s", log)
 	}
-	if !strings.Contains(log, "has-session -t b-active") {
+	if !strings.Contains(log, "has-session -t =b-active") {
 		t.Fatalf("bulk launch did not continue to active workspace after archived workspace\nlog:\n%s", log)
 	}
 	if !strings.Contains(stdout.String(), "Skipping shelved row a-archived/old") {
@@ -2920,7 +2920,7 @@ exit 2
 		t.Fatalf("spawn created a new session despite existing session\nlog:\n%s", log)
 	}
 	for _, want := range []string{
-		"new-window -P -F #{window_id} -t Amp -n fresh cd '" + workdir + "' && AMUX_WORKSPACE='mac' AMUX_SESSION='Amp' AMUX_WINDOW='fresh' AMUX_THREAD_ID='T-existing-session' AMUX_WORKDIR='" + workdir + "' exec amp threads continue 'T-existing-session'",
+		"new-window -P -F #{window_id} -t =Amp: -n fresh cd '" + workdir + "' && AMUX_WORKSPACE='mac' AMUX_SESSION='Amp' AMUX_WINDOW='fresh' AMUX_THREAD_ID='T-existing-session' AMUX_WORKDIR='" + workdir + "' exec amp threads continue 'T-existing-session'",
 		"send-keys -t @7 -l hello",
 		"send-keys -t @7 Enter",
 		"select-window -t @7",
@@ -6014,7 +6014,7 @@ exit 0
 	if !strings.Contains(log, "tmux new-session -d -s Amp -n amux-runner cd '"+workdir+"' && exec amp --no-tui") {
 		t.Fatalf("runner launch did not create first no-tui session\nlog:\n%s", log)
 	}
-	if !strings.Contains(log, "tmux new-window -t Amp -n other-runner cd '"+workdir+"' && exec amp --no-tui") {
+	if !strings.Contains(log, "tmux new-window -t =Amp: -n other-runner cd '"+workdir+"' && exec amp --no-tui") {
 		t.Fatalf("runner launch did not create second no-tui window\nlog:\n%s", log)
 	}
 
