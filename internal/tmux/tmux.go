@@ -24,6 +24,8 @@ type WindowPane struct {
 	Session      string
 	Window       string
 	WindowID     string
+	Path         string
+	Command      string
 	StartCommand string
 }
 
@@ -96,6 +98,33 @@ func (r Runner) WindowPanes(session, window string) ([]WindowPane, error) {
 			continue
 		}
 		panes = append(panes, WindowPane{Session: session, Window: fields[0], WindowID: fields[1], StartCommand: fields[2]})
+	}
+	return panes, nil
+}
+
+func (r Runner) WindowPanesWithCommand(session, window string) ([]WindowPane, error) {
+	if r.DryRun {
+		return nil, nil
+	}
+	out, err := tmuxOutput("list-panes", "-s", "-t", session, "-F", "#{window_name}\t#{window_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}")
+	if err != nil {
+		return nil, err
+	}
+	text := strings.TrimSuffix(string(out), "\n")
+	if text == "" {
+		return nil, nil
+	}
+	lines := strings.Split(text, "\n")
+	panes := make([]WindowPane, 0, len(lines))
+	for _, line := range lines {
+		fields := strings.SplitN(line, "\t", 5)
+		if len(fields) != 5 {
+			return nil, fmt.Errorf("unexpected tmux pane row %q", line)
+		}
+		if fields[0] != window {
+			continue
+		}
+		panes = append(panes, WindowPane{Session: session, Window: fields[0], WindowID: fields[1], Path: fields[2], Command: fields[3], StartCommand: fields[4]})
 	}
 	return panes, nil
 }

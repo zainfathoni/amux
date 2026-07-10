@@ -638,7 +638,7 @@ func (a app) launchRunnerRows(opts options, session string, rows []config.Runner
 			continue
 		}
 		if tmux.WindowExists(windowNames, row.Window) {
-			panes, err := runner.WindowPanes(session, row.Window)
+			panes, err := runner.WindowPanesWithCommand(session, row.Window)
 			if err != nil {
 				return err
 			}
@@ -683,7 +683,7 @@ func (a app) runnerPark(opts options, args []string) error {
 		return fmt.Errorf("no runner row for %s/%s in %s", workspace, window, config.RunnerPath(opts.configPath))
 	}
 	runner := tmux.Runner{DryRun: opts.dryRun}
-	panes, err := runner.WindowPanes(session, row.Window)
+	panes, err := runner.WindowPanesWithCommand(session, row.Window)
 	if err != nil {
 		return err
 	}
@@ -734,6 +734,9 @@ func parseRunnerParkArgs(args []string) (workspace, window, session string, err 
 func verifyRunnerParkPane(row config.RunnerRow, pane tmux.WindowPane) error {
 	workdir := config.ExpandHome(row.Workdir)
 	if startCommandMatchesRunner(pane.StartCommand, workdir) {
+		return nil
+	}
+	if pane.StartCommand == "" && pane.Path == workdir && pane.Command == "amp" {
 		return nil
 	}
 	return fmt.Errorf("tmux window %q in session %q is not the expected runner for %s/%s at %s: start command is %s", row.Window, pane.Session, row.Workspace, row.Window, workdir, pane.StartCommand)
@@ -2939,12 +2942,15 @@ func checkRunnerDrift(check func(string, error), runner tmux.Runner, workspace, 
 		} else {
 			check("runner pane path "+row.Window, nil)
 		}
-		if panes := windowPanes[row.Window]; len(panes) == 0 {
+		runnerPanes, err := runner.WindowPanesWithCommand(session, row.Window)
+		if err != nil {
+			check("runner start command "+row.Window, err)
+		} else if len(runnerPanes) == 0 {
 			check("runner start command "+row.Window, fmt.Errorf("no tmux pane start command found for runner window"))
-		} else if len(panes) > 1 {
-			check("runner start command "+row.Window, fmt.Errorf("ambiguous runner window panes: candidates %s", formatPaneCandidates(panes)))
-		} else if panes[0].StartCommand != tmux.RunnerCommand(configuredWorkdir) && !strings.Contains(panes[0].StartCommand, "amp --no-tui") {
-			check("runner start command "+row.Window, fmt.Errorf("expected amp --no-tui for %s but live start command is %s", configuredWorkdir, panes[0].StartCommand))
+		} else if len(runnerPanes) > 1 {
+			check("runner start command "+row.Window, fmt.Errorf("ambiguous runner window panes: candidates %s", formatPaneCandidates(runnerPanes)))
+		} else if err := verifyRunnerParkPane(row, runnerPanes[0]); err != nil {
+			check("runner start command "+row.Window, err)
 		} else {
 			check("runner start command "+row.Window, nil)
 		}

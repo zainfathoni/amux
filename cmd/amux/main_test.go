@@ -5787,7 +5787,7 @@ exit 0
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 if [ "$1" = has-session ]; then exit 0; fi
 if [ "$1" = list-windows ]; then printf 'amux-runner\n'; exit 0; fi
-if [ "$1" = list-panes ]; then printf 'amux-runner\t@1\tcd /wrong && exec amp --no-tui\n'; exit 0; fi
+if [ "$1" = list-panes ]; then printf 'amux-runner\t@1\t`+workdir+`\tamp\tcd /wrong && exec amp --no-tui\n'; exit 0; fi
 exit 0
 `)
 	err = runWithDiscardedStdout([]string{"--config", configPath, "runner", "launch", "mac", "Amp"})
@@ -5814,7 +5814,7 @@ func TestRunnerLaunchSkipsAlreadyRunningExpectedRunner(t *testing.T) {
 printf 'tmux %s\n' "$*" >> "`+logPath+`"
 if [ "$1" = has-session ]; then exit 0; fi
 if [ "$1" = list-windows ]; then printf 'amux-runner\n'; exit 0; fi
-if [ "$1" = list-panes ]; then printf 'amux-runner\t@1\t%s\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`; exit 0; fi
+if [ "$1" = list-panes ]; then printf 'amux-runner\t@1\t`+workdir+`\tamp\t%s\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`; exit 0; fi
 exit 0
 `)
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -5835,6 +5835,33 @@ exit 0
 	}
 }
 
+func TestRunnerLaunchSkipsManualRunnerWithEmptyStartCommand(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	workdir := filepath.Join(tmp, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte("mac\tamux-runner\t"+workdir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then exit 0; fi
+if [ "$1" = list-windows ]; then printf 'amux-runner\n'; exit 0; fi
+if [ "$1" = list-panes ]; then printf 'amux-runner\t@1\t`+workdir+`\tamp\t\n'; exit 0; fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "runner", "launch", "mac", "Amp"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "Runner mac/amux-runner already running in tmux session Amp; skipping") {
+		t.Fatalf("runner launch did not adopt manual runner\nstdout:\n%s", stdout.String())
+	}
+}
+
 func TestRunnerLaunchRejectsPrefixMatchedRunnerWorkdir(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
@@ -5852,7 +5879,7 @@ func TestRunnerLaunchRejectsPrefixMatchedRunnerWorkdir(t *testing.T) {
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 if [ "$1" = has-session ]; then exit 0; fi
 if [ "$1" = list-windows ]; then printf 'amux-runner\n'; exit 0; fi
-if [ "$1" = list-panes ]; then printf 'amux-runner\t@1\t%s\n' `+shellSingleQuote(tmux.RunnerCommand(liveWorkdir))+`; exit 0; fi
+if [ "$1" = list-panes ]; then printf 'amux-runner\t@1\t`+liveWorkdir+`\tamp\t%s\n' `+shellSingleQuote(tmux.RunnerCommand(liveWorkdir))+`; exit 0; fi
 exit 0
 `)
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -5959,7 +5986,7 @@ func TestRunnerParkWorkspaceDefaultsSessionToWorkspace(t *testing.T) {
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 printf 'tmux %s\n' "$*" >> "`+logPath+`"
 if [ "$1" = list-panes ] && [ "$4" = amux ]; then
-  printf 'amux-runner\t@9\t%s\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`
+  printf 'amux-runner\t@9\t`+workdir+`\tamp\t%s\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`
   exit 0
 fi
 if [ "$1" = run-shell ]; then exit 0; fi
@@ -5976,7 +6003,7 @@ exit 2
 		t.Fatal(err)
 	}
 	log := string(logBytes)
-	if !strings.Contains(log, "tmux list-panes -s -t amux -F #{window_name}\t#{window_id}\t#{pane_start_command}") {
+	if !strings.Contains(log, "tmux list-panes -s -t amux -F #{window_name}\t#{window_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}") {
 		t.Fatalf("runner park did not inspect workspace-named session\nlog:\n%s", log)
 	}
 	if strings.Contains(log, "-t Amp") {
@@ -6001,7 +6028,7 @@ func TestRunnerParkSupportsExplicitLegacySession(t *testing.T) {
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 printf 'tmux %s\n' "$*" >> "`+logPath+`"
 if [ "$1" = list-panes ] && [ "$4" = Amp ]; then
-  printf 'amux-runner\t@7\t%s\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`
+  printf 'amux-runner\t@7\t`+workdir+`\tamp\t%s\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`
   exit 0
 fi
 if [ "$1" = run-shell ]; then exit 0; fi
@@ -6018,7 +6045,7 @@ exit 2
 		t.Fatal(err)
 	}
 	log := string(logBytes)
-	if !strings.Contains(log, "tmux list-panes -s -t Amp -F #{window_name}\t#{window_id}\t#{pane_start_command}") {
+	if !strings.Contains(log, "tmux list-panes -s -t Amp -F #{window_name}\t#{window_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}") {
 		t.Fatalf("runner park did not inspect explicit legacy session\nlog:\n%s", log)
 	}
 	if !strings.Contains(stdout.String(), "Scheduling tmux window Amp/amux-runner (@7) to stop") {
@@ -6040,7 +6067,7 @@ func TestRunnerParkFailsClosedOnStartCommandMismatch(t *testing.T) {
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 printf 'tmux %s\n' "$*" >> "`+logPath+`"
 if [ "$1" = list-panes ]; then
-  printf 'amux-runner\t@9\tcd `+workdir+` && exec amp threads continue T-thread\n'
+  printf 'amux-runner\t@9\t`+workdir+`\tamp\tcd `+workdir+` && exec amp threads continue T-thread\n'
   exit 0
 fi
 if [ "$1" = run-shell ]; then exit 0; fi
@@ -6104,6 +6131,50 @@ exit 0
 	}
 	if strings.Contains(output, "FAIL stored window rogue-runner") {
 		t.Fatalf("doctor reported live runner as thread restore drift instead of runner drift\n%s", output)
+	}
+}
+
+func TestDoctorAcceptsManualRunnerWithEmptyStartCommand(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	workdir := filepath.Join(tmp, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("mac\tthread\t"+workdir+"\tT-thread\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte("mac\tamux-runner\t"+workdir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeAmpListExecutable(t, filepath.Join(tmp, "amp"), []string{"T-thread"}, []string{"T-thread"})
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = list-panes ] && [ "$2" = -s ]; then
+  case "$6" in
+    *pane_current_command*)
+      printf 'thread\t@1\t`+workdir+`\tamp\tcd `+workdir+` && exec amp threads continue T-thread\namux-runner\t@2\t`+workdir+`\tamp\t\n'
+      exit 0
+      ;;
+    *)
+      printf 'thread\t`+workdir+`\namux-runner\t`+workdir+`\n'
+      exit 0
+      ;;
+  esac
+fi
+if [ "$1" = list-panes ] && [ "$2" = -a ]; then
+  printf 'Amp\tthread\t@1\tcd `+workdir+` && exec amp threads continue T-thread\nAmp\tamux-runner\t@2\t\n'
+  exit 0
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	output, err := runCapturingStdout(t, []string{"--config", configPath, "doctor", "mac", "Amp"})
+	if err != nil {
+		t.Fatalf("doctor failed despite manual runner: %v\n%s", err, output)
+	}
+	if strings.Contains(output, "FAIL runner start command amux-runner") {
+		t.Fatalf("doctor rejected manual runner with empty start command\n%s", output)
 	}
 }
 
