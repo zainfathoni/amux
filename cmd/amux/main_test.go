@@ -583,6 +583,8 @@ func TestSelfUpdateDryRunWarnsWhenInstallIsShadowedOnPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", shadowDir+string(os.PathListSeparator)+installDir)
+	expectedInstallPath := resolvePathForComparison(exePath)
+	expectedShadowPath := resolvePathForComparison(shadowPath)
 	archiveName := fmt.Sprintf("amux-%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/latest" {
@@ -598,10 +600,10 @@ func TestSelfUpdateDryRunWarnsWhenInstallIsShadowedOnPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "Would update "+exePath+" to v9.9.9 using "+archiveName) {
+	if !strings.Contains(out, "Would update "+expectedInstallPath+" to v9.9.9 using "+archiveName) {
 		t.Fatalf("unexpected dry-run output: %q", out)
 	}
-	if !strings.Contains(out, "Warning: updated "+exePath+", but `amux` on PATH resolves to "+shadowPath) {
+	if !strings.Contains(out, "Warning: updated "+expectedInstallPath+", but `amux` on PATH resolves to "+expectedShadowPath) {
 		t.Fatalf("missing shadowed PATH warning: %q", out)
 	}
 }
@@ -625,6 +627,8 @@ func TestSelfUpdateWarnsWhenUpToDateInstallIsShadowedOnPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", shadowDir+string(os.PathListSeparator)+installDir)
+	expectedInstallPath := resolvePathForComparison(exePath)
+	expectedShadowPath := resolvePathForComparison(shadowPath)
 	oldVersion := version
 	version = "v9.9.9"
 	t.Cleanup(func() { version = oldVersion })
@@ -645,8 +649,33 @@ func TestSelfUpdateWarnsWhenUpToDateInstallIsShadowedOnPath(t *testing.T) {
 	if !strings.Contains(out, "amux is already up to date (v9.9.9)") {
 		t.Fatalf("unexpected self-update output: %q", out)
 	}
-	if !strings.Contains(out, "Warning: updated "+exePath+", but `amux` on PATH resolves to "+shadowPath) {
+	if !strings.Contains(out, "Warning: updated "+expectedInstallPath+", but `amux` on PATH resolves to "+expectedShadowPath) {
 		t.Fatalf("missing shadowed PATH warning: %q", out)
+	}
+}
+
+func TestSelfUpdateShadowWarningIgnoresSymlinkToInstallPath(t *testing.T) {
+	tmp := t.TempDir()
+	installDir := filepath.Join(tmp, "install")
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(installDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exePath := filepath.Join(installDir, "amux")
+	pathEntry := filepath.Join(binDir, "amux")
+	if err := os.WriteFile(exePath, []byte("current binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(exePath, pathEntry); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	if warning := selfUpdateShadowWarning(exePath); warning != "" {
+		t.Fatalf("selfUpdateShadowWarning() = %q, want no warning", warning)
 	}
 }
 
