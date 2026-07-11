@@ -34,6 +34,7 @@ Runner rows are not restore rows. Runner commands manage local `amp --no-tui` ru
 ## Common trigger routing
 
 - **Park it**: `amux park-current`. This preserves the restore row and active remote thread; verify local disappearance if needed.
+- **Restart an unresponsive client**: use `amux restart <workspace> <window> [session]` for a pinned thread client, or `amux runner restart <workspace> <window> [session]` for an `amp --no-tui` runner. Both preserve config and remote thread state.
 - **Pin it**: `amux pin-current <thread-id-or-url>`. Ask for the current thread ID/URL if it is not available.
 - **Unpin it** / **forget this on restore**: `amux unpin-current`; do not stop tmux and do not archive the thread.
 - **Shelve this** / **defer this workspace** / **hide it for now**: use `amux shelve-current [workspace] <thread-id-or-url>` from the pane, or `amux shelve --thread ...`, `amux shelve <workspace> <window> [session]`, or `amux shelve --workspace ...` for already-pinned work. Do not substitute `park-current` when the intended outcome is hidden/deferred remote work.

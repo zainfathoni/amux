@@ -30,6 +30,7 @@ var completionCommands = []completionCommand{
 	{Name: "remove-current", Description: "Alias for unpin-current", Args: "[workspace]"},
 	{Name: "park", Description: "Stop a live local tmux window without changing restore config", Args: "[workspace] <window>"},
 	{Name: "park-current", Description: "Stop the current tmux window without changing restore config", Args: "[workspace]"},
+	{Name: "restart", Description: "Restart a verified Amp client in place", Args: "[workspace] <window> [session]"},
 	{Name: "shelve-current", Description: "Pin if needed, archive the thread, and stop the current window", Args: "[workspace] [thread-id-or-url]"},
 	{Name: "shelve", Description: "Archive thread rows while preserving restore config", Flags: []string{"--thread", "--workspace", "--session"}, Args: "[workspace] <window> [session]"},
 	{Name: "unshelve", Description: "Unarchive shelved thread rows", Flags: []string{"--thread", "--workspace"}, Args: "[workspace] <window>"},
@@ -46,6 +47,7 @@ var completionCommands = []completionCommand{
 			{Name: "unpin", Description: "Remove one runner row", Args: "<workspace> <window>"},
 			{Name: "launch", Description: "Start configured runner windows", Args: "[workspace] [session]"},
 			{Name: "park", Description: "Stop a live local runner window", Args: "[workspace] <window>"},
+			{Name: "restart", Description: "Restart a verified runner in place", Args: "[workspace] <window> [session]"},
 		},
 	},
 	{Name: "completion", Description: "Print shell completion script", Args: "<bash|zsh|fish>"},
@@ -158,7 +160,7 @@ _amux_complete() {
       ;;
     runner)
       if [[ -z "$subcommand" ]]; then
-        COMPREPLY=( $(compgen -W "list pin unpin launch park" -- "$cur") )
+        COMPREPLY=( $(compgen -W "list pin unpin launch park restart" -- "$cur") )
       fi
       ;;
     completion)

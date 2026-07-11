@@ -19,6 +19,7 @@ amux unpin <workspace> <window>
 amux unpin-current [workspace]
 amux park [workspace] <window>
 amux park-current [workspace]
+amux restart [workspace] <window> [session]
 amux shelve-current [workspace] [thread-id-or-url]
 amux shelve [workspace] <window> [session]
 amux shelve --thread <thread-id-or-url> [--session <session>]
@@ -37,6 +38,7 @@ amux runner pin <workspace> <window> <workdir>
 amux runner unpin <workspace> <window>
 amux runner launch [workspace] [session]
 amux runner park [workspace] <window> [session]
+amux runner restart [workspace] <window> [session]
 amux update [--dry-run]
 ```
 
@@ -109,6 +111,12 @@ No-arg `launch` restores all configured workspaces into same-named sessions. No-
 
 If the row still appears in `amux list` and the thread still appears in Amp history after parking, that is expected.
 
+### restart
+
+- `restart` force-restarts an unresponsive configured Amp client in place and continues the same remote thread.
+- It verifies the live pane against the restore row before using `tmux respawn-pane -k`; restore config and remote thread state are unchanged.
+- Use `amux restart <workspace> <window>` for workspace-named sessions, or pass the session explicitly for older shared-session layouts.
+
 ### shelve and unshelve
 
 - Use `shelve` when the user wants to defer work and hide it from the Amp sidebar while keeping it restorable in amux.
@@ -151,6 +159,7 @@ If the row still appears in `amux list` and the thread still appears in Amp hist
 - `runner unpin` removes runner config.
 - `runner launch` with no args starts every configured runner workspace in same-named tmux sessions; already-running windows are skipped only when they verify as the expected runner, and same-name mismatches fail closed. Pass `[workspace] [session]` only to scope launch or target a legacy shared session.
 - `runner park` stops only the verified live local runner window, using the workspace-named session unless a session is passed explicitly.
+- `runner restart` force-restarts only the verified live runner pane with `amp --no-tui`, preserving its config row.
 - Runner commands do not create, continue, archive, unarchive, or list remote Amp threads.
 
 ### update
@@ -170,6 +179,7 @@ If the row still appears in `amux list` and the thread still appears in Amp hist
 | `pin`, `pin-current` | mutate rows | none | none | none |
 | `unpin`, `unpin-current` | mutate rows | none | none | none |
 | `park`, `park-current` | preserve rows | none | stop verified window | none |
+| `restart` | preserve rows | none | restart verified client | none |
 | `shelve-current`, `shelve` | preserve rows; current may pin/preserve | none | stop verified windows | archive/hide selected threads |
 | `unshelve` | preserve rows | none | none | unarchive selected threads |
 | `spawn` | store row | none | create/select window and send initial message | create thread, optionally set mode/title prefix |
@@ -179,4 +189,5 @@ If the row still appears in `amux list` and the thread still appears in Amp hist
 | `runner pin`, `runner unpin` | none | mutate | none | none |
 | `runner launch` | none | read | may create runner windows | none |
 | `runner park` | none | preserve | stop verified runner window | none |
+| `runner restart` | none | preserve | restart verified runner | none |
 | `update` (`self-update` alias) | none | none | replace current amux binary unless `--dry-run` | fetch latest GitHub release metadata; no Amp thread state |

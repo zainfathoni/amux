@@ -64,12 +64,12 @@ func TestCompletionGeneratesShellScripts(t *testing.T) {
 			shell: "bash",
 			want: []string{
 				"complete -F _amux_complete amux",
-				"launch list workspaces shelved pin store pin-current store-current unpin remove unpin-current remove-current park park-current shelve-current shelve unshelve spawn teardown prune-archived migrate-config runner completion update self-update version path doctor help",
+				"launch list workspaces shelved pin store pin-current store-current unpin remove unpin-current remove-current park park-current restart shelve-current shelve unshelve spawn teardown prune-archived migrate-config runner completion update self-update version path doctor help",
 				"--config --dry-run --attach --no-attach --terminal-launcher --help -h --version",
 				"--mode -m --title-prefix --message-file --message-stdin",
 				"compgen -W \"low medium high ultra\"",
 				"--include-runners",
-				"list pin unpin launch park",
+				"list pin unpin launch park restart",
 			},
 		},
 		{
@@ -92,7 +92,7 @@ func TestCompletionGeneratesShellScripts(t *testing.T) {
 				"complete -c amux -n '__fish_seen_subcommand_from spawn' -r -f -a 'low medium high ultra' -l 'mode' -d 'Amp thread mode'",
 				"complete -c amux -n '__fish_seen_subcommand_from spawn' -r -l 'message-file' -d 'Read initial message from file'",
 				"complete -c amux -n '__fish_seen_subcommand_from list' -f -l 'status' -d 'Append thread status'",
-				"complete -c amux -f -n '__fish_seen_subcommand_from runner; and not __fish_seen_subcommand_from list pin unpin launch park' -a 'park' -d 'Stop a live local runner window'",
+				"complete -c amux -f -n '__fish_seen_subcommand_from runner; and not __fish_seen_subcommand_from list pin unpin launch park restart' -a 'restart' -d 'Restart a verified runner in place'",
 				"complete -c amux -f -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'",
 			},
 		},
@@ -6030,6 +6030,132 @@ exit 0
 	}
 	if !strings.Contains(err.Error(), "is not the expected runner") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRestartRespawnsVerifiedThreadClient(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	workdir := filepath.Join(tmp, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("amux\tworker\t"+workdir+"\tT-thread\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "tmux.log")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ]; then
+  if [ "$2" = -t ]; then printf '%%7\t0\n'; exit 0; fi
+  printf 'amux\tworker\t@7\t%%7\t`+workdir+`\tamp\t%s\n' `+shellSingleQuote(tmux.ContinueCommand(workdir, "T-thread"))+`
+  exit 0
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := runWithDiscardedStdout([]string{"--config", configPath, "restart", "amux", "worker"}); err != nil {
+		t.Fatal(err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "tmux respawn-pane -k -t %7 cd '" + workdir + "' && AMUX_WORKSPACE='amux' AMUX_SESSION='amux' AMUX_WINDOW='worker' AMUX_THREAD_ID='T-thread' AMUX_WORKDIR='" + workdir + "' exec amp threads continue 'T-thread'"; !strings.Contains(string(logBytes), want) {
+		t.Fatalf("restart did not respawn the configured thread client\nlog:\n%s", logBytes)
+	}
+	if !strings.Contains(string(logBytes), "tmux list-panes -s -t =amux") {
+		t.Fatalf("restart did not use an exact tmux session target\nlog:\n%s", logBytes)
+	}
+}
+
+func TestRunnerRestartRespawnsVerifiedNoTUIClient(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	workdir := filepath.Join(tmp, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte("amux\trunner\t"+workdir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "tmux.log")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ]; then
+  if [ "$2" = -t ]; then printf '%%9\t0\n'; exit 0; fi
+  printf 'amux\trunner\t@9\t%%9\t`+workdir+`\tamp\t%s\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`
+  exit 0
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := runWithDiscardedStdout([]string{"--config", configPath, "runner", "restart", "amux", "runner"}); err != nil {
+		t.Fatal(err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "tmux respawn-pane -k -t %9 cd '" + workdir + "' && exec amp --no-tui"; !strings.Contains(string(logBytes), want) {
+		t.Fatalf("runner restart did not respawn the configured no-tui client\nlog:\n%s", logBytes)
+	}
+}
+
+func TestRestartDoesNotCreateMissingConfig(t *testing.T) {
+	for _, args := range [][]string{
+		{"restart", "amux", "worker"},
+		{"--dry-run", "restart", "amux", "worker"},
+		{"runner", "restart", "amux", "runner"},
+		{"--dry-run", "runner", "restart", "amux", "runner"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			tmp := t.TempDir()
+			configPath := filepath.Join(tmp, "missing", "workspaces.tsv")
+			command := append([]string{"--config", configPath}, args...)
+			if err := runWithDiscardedStdout(command); err == nil {
+				t.Fatal("restart succeeded without configured row")
+			}
+			if _, err := os.Stat(filepath.Dir(configPath)); !os.IsNotExist(err) {
+				t.Fatalf("restart created missing config directory: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunnerRestartRejectsUnverifiedInteractiveAmp(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	workdir := filepath.Join(tmp, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte("amux\trunner\t"+workdir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "tmux.log")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ]; then
+  printf 'amux\trunner\t@9\t%%9\t`+workdir+`\tamp\t\n'
+  exit 0
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := runWithDiscardedStdout([]string{"--config", configPath, "runner", "restart", "amux", "runner"})
+	if err == nil || !strings.Contains(err.Error(), "not the exact configured runner") {
+		t.Fatalf("runner restart error = %v, want strict runner mismatch", err)
+	}
+	logBytes, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(logBytes), "respawn-pane") {
+		t.Fatalf("runner restart respawned an unverified interactive Amp client\nlog:\n%s", logBytes)
 	}
 }
 

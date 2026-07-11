@@ -219,6 +219,7 @@ amux unpin <workspace> <window>
 amux unpin-current [workspace]
 amux park [workspace] <window>
 amux park-current [workspace]
+amux restart [workspace] <window> [session]
 amux shelve-current [workspace] [thread-id-or-url]
 amux shelve [workspace] <window> [session]
 amux shelve --thread <thread-id-or-url> [--session <session>]
@@ -239,6 +240,7 @@ amux runner pin <workspace> <window> <workdir>
 amux runner unpin <workspace> <window>
 amux runner launch [workspace] [session]
 amux runner park [workspace] <window> [session]
+amux runner restart [workspace] <window> [session]
 amux completion <bash|zsh|fish>
 amux version
 amux update
@@ -279,6 +281,7 @@ Command side effects:
 | `pin`, `pin-current` (`store`, `store-current`) | Add or replace rows | No change | No change | No change |
 | `unpin`, `unpin-current` (`remove`, `remove-current`) | Remove rows | No change | No change | No change |
 | `park`, `park-current` | No change; rows are preserved for future restore | No change | Gracefully stop the resolved local tmux/Amp window | No change; Amp thread history is not archived or deleted |
+| `restart` | No change; rows are preserved | No change | Force-restart the verified local Amp client in place | No change |
 | `shelve-current` | Add or update the current window's restore row before archiving | No change | Stop the current tmux/Amp window | Archive the identified current Amp thread so it leaves the Amp sidebar |
 | `shelve` | No change; rows are preserved for future restore | No change | Stop verified matching local tmux/Amp windows when present | Archive the selected thread, thread row, or workspace's threads so they leave the Amp sidebar |
 | `unshelve` | No change; rows are preserved for future restore | No change | No change | Unarchive the selected thread, thread row, or workspace's threads |
@@ -288,6 +291,7 @@ Command side effects:
 | `runner pin`, `runner unpin` | No change | Add/replace/remove runner rows | No change | No change |
 | `runner launch` | No change | Read only | Creates missing `amp --no-tui` runner windows | No change |
 | `runner park` | No change | No change; rows are preserved for future restore | Gracefully stop the resolved local runner window | No change |
+| `runner restart` | No change | No change; rows are preserved | Force-restart the verified local runner in place | No change |
 
 Compatibility decision: keep workspace-named sessions when a workspace is explicitly provided and the session is omitted. For `launch`, `doctor`, `runner launch`, and `runner park`, explicit workspace commands target that workspace's same-named tmux session, for example `amux launch amux`, `amux doctor amux`, `amux runner launch amux`, and `amux runner park amux runner-window`. For `spawn`, the optional trailing workspace does the same: `amux spawn worker ~/Code/repo "prompt" amux` or `amux spawn --message-file prompt.md worker ~/Code/repo amux`. For workspace-based `shelve`, use `amux shelve amux worker` or `amux shelve --workspace amux`; for explicit `teardown`, use `amux teardown amux worker`. This is the preferred layout for new per-workspace sessions. Older shared-session layouts remain supported by passing the session explicitly, for example `amux launch mac Amp`, `amux spawn worker ~/Code/repo "prompt" mac Amp`, `amux spawn --message-file prompt.md worker ~/Code/repo mac Amp`, `amux shelve mac worker Amp`, `amux shelve --workspace mac --session Amp`, `amux teardown mac worker Amp`, `amux runner launch mac Amp`, `amux runner park mac runner-window Amp`, or `amux doctor mac Amp`. With no workspace argument, `amux launch` and `amux runner launch` launch every workspace in their respective config into same-named tmux sessions. Other commands that support an omitted workspace retain the compatibility default of workspace `mac` and session `Amp`.
 
@@ -310,6 +314,8 @@ When launch attaches from inside an existing tmux client, `amux` switches that c
 `prune-archived [workspace]` is explicit stale-restore cleanup. It removes confirmed archived rows only when you truly want to forget them; archived rows may also represent intentionally shelved work. Active rows are kept; missing threads, Amp CLI failures, or unreadable thread-list output fail closed without changing config. Unlike `teardown`, it does not archive/delete remote threads or stop live tmux windows.
 
 `amux runner ...` commands manage local runner intent for Amp Agents Anywhere. Runner rows live in `runners.tsv` next to `workspaces.tsv` and use `workspace<TAB>window<TAB>workdir`; they intentionally contain no thread ID. `amux runner launch` starts every configured runner workspace with `amp --no-tui` inside same-named tmux sessions, skips already-running windows that verify as the expected runner, and fails closed on same-name mismatches; pass `[workspace] [session]` to launch only one workspace or target an older shared-session layout. `amux runner park [workspace] <window> [session]` stops only the verified live local runner window for the configured workdir while preserving runner config; with a workspace and no session, it targets the workspace-named session, and older shared-session layouts can pass the session explicitly. Runner commands never create, continue, archive, or list remote Amp threads.
+
+When a local client stops responding, `amux restart [workspace] <window> [session]` force-restarts a verified thread client and continues the same remote thread, while `amux runner restart [workspace] <window> [session]` force-restarts a verified `amp --no-tui` runner. Both use tmux's in-place pane respawn, preserve config, and fail closed if the live command does not match the configured target.
 
 ## Post-merge worker cleanup
 

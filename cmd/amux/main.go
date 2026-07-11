@@ -138,6 +138,8 @@ func (a app) run(args []string) error {
 		return a.park(opts, args)
 	case "park-current":
 		return a.parkCurrent(opts, args)
+	case "restart":
+		return a.restart(opts, args)
 	case "shelve-current":
 		return a.shelveCurrent(opts, args)
 	case "shelve":
@@ -541,7 +543,7 @@ func (a app) workspaces(opts options, args []string) error {
 
 func (a app) runner(opts options, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: amux runner <list|pin|unpin|launch|park> [args]")
+		return errors.New("usage: amux runner <list|pin|unpin|launch|park|restart> [args]")
 	}
 	switch args[0] {
 	case "list":
@@ -554,6 +556,8 @@ func (a app) runner(opts options, args []string) error {
 		return a.runnerLaunch(opts, args[1:])
 	case "park":
 		return a.runnerPark(opts, args[1:])
+	case "restart":
+		return a.runnerRestart(opts, args[1:])
 	default:
 		return fmt.Errorf("unknown runner command: %s", args[0])
 	}
@@ -778,6 +782,50 @@ func verifyRunnerParkPane(row config.RunnerRow, pane tmux.WindowPane) error {
 	return fmt.Errorf("tmux window %q in session %q is not the expected runner for %s/%s at %s: start command is %s", row.Window, pane.Session, row.Workspace, row.Window, workdir, pane.StartCommand)
 }
 
+func (a app) runnerRestart(opts options, args []string) error {
+	workspace, window, session, err := parseRestartArgs("amux runner restart [workspace] <window> [session]", args)
+	if err != nil {
+		return err
+	}
+	rows, err := runnerRowsForWorkspaceReadOnly(config.RunnerPath(opts.configPath), workspace)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if row.Window != window {
+			continue
+		}
+		workdir := config.ExpandHome(row.Workdir)
+		if stat, err := os.Stat(workdir); err != nil || !stat.IsDir() {
+			return fmt.Errorf("missing runner workdir for window %q: %s", row.Window, workdir)
+		}
+		readRunner := tmux.Runner{}
+		panes, err := readRunner.RestartWindowPanes(session, window)
+		if err != nil {
+			return err
+		}
+		if len(panes) != 1 {
+			return fmt.Errorf("runner restart requires exactly one pane in tmux window %s/%s; found %d", session, window, len(panes))
+		}
+		if normalizedTmuxStartCommand(panes[0].StartCommand) != tmux.RunnerCommand(workdir) {
+			return fmt.Errorf("tmux window %q in session %q is not the exact configured runner for %s/%s at %s; refusing restart", window, session, workspace, window, workdir)
+		}
+		if panes[0].PaneID == "" {
+			return fmt.Errorf("runner window %q in tmux session %q has no pane id", window, session)
+		}
+		return a.respawnVerifiedPane(opts, panes[0].PaneID, tmux.RunnerCommand(workdir), fmt.Sprintf("runner %s/%s in tmux session %s", workspace, window, session))
+	}
+	return fmt.Errorf("no runner row for %s/%s in %s", workspace, window, config.RunnerPath(opts.configPath))
+}
+
+func parseRestartArgs(usage string, args []string) (workspace, window, session string, err error) {
+	workspace, window, session, err = parseRunnerParkArgs(args)
+	if err != nil {
+		return "", "", "", fmt.Errorf("usage: %s", usage)
+	}
+	return workspace, window, session, nil
+}
+
 func startCommandMatchesRunner(startCommand, workdir string) bool {
 	normalized := normalizedTmuxStartCommand(startCommand)
 	if normalized == tmux.RunnerCommand(workdir) {
@@ -934,6 +982,78 @@ func (a app) parkCurrent(opts options, args []string) error {
 	}
 
 	return a.schedulePark(runner, target, window, target, workspace)
+}
+
+func (a app) restart(opts options, args []string) error {
+	workspace, window, session, err := parseRestartArgs("amux restart [workspace] <window> [session]", args)
+	if err != nil {
+		return err
+	}
+	identity := teardownIdentity{Workspace: workspace, Session: session, Window: window}
+	row, err := verifiedRestartRow(opts.configPath, identity)
+	if err != nil {
+		return err
+	}
+	identity.Thread = row.Thread
+	workdir := config.ExpandHome(row.Workdir)
+	if stat, err := os.Stat(workdir); err != nil || !stat.IsDir() {
+		return fmt.Errorf("missing workdir for window %q: %s", row.Window, workdir)
+	}
+	panes, err := (tmux.Runner{}).RestartWindowPanes(session, window)
+	if err != nil {
+		return fmt.Errorf("find tmux window %s/%s: %w", session, window, err)
+	}
+	if len(panes) != 1 {
+		return fmt.Errorf("restart requires exactly one pane in tmux window %s/%s; found %d", session, window, len(panes))
+	}
+	if !explicitTeardownStartCommandMatches(identity, row, normalizedTmuxStartCommand(panes[0].StartCommand)) {
+		return fmt.Errorf("tmux window %q in session %q start command does not match restore row thread %s; refusing restart", window, session, row.Thread)
+	}
+	if panes[0].PaneID == "" {
+		return fmt.Errorf("tmux window %q in session %q has no pane id", window, session)
+	}
+	command := teardownExpectedStartCommand(identity, row)
+	return a.respawnVerifiedPane(opts, panes[0].PaneID, command, fmt.Sprintf("Amp thread %s in tmux window %s/%s", canonicalThreadID(row.Thread), session, window))
+}
+
+func verifiedRestartRow(path string, identity teardownIdentity) (config.Row, error) {
+	rows, err := config.LoadReadOnly(path)
+	if err != nil {
+		return config.Row{}, err
+	}
+	var matches []config.Row
+	for _, row := range rows {
+		if row.Workspace == identity.Workspace && row.Window == identity.Window {
+			matches = append(matches, row)
+		}
+	}
+	if len(matches) == 0 {
+		return config.Row{}, fmt.Errorf("no restore row for %s/%s", identity.Workspace, identity.Window)
+	}
+	if len(matches) > 1 {
+		return config.Row{}, fmt.Errorf("ambiguous restore rows for %s/%s; refusing restart", identity.Workspace, identity.Window)
+	}
+	return matches[0], nil
+}
+
+func (a app) respawnVerifiedPane(opts options, paneID, command, description string) error {
+	if opts.dryRun {
+		fmt.Fprintf(a.stdout, "Would restart %s\n", description)
+		return (tmux.Runner{DryRun: true, Output: a.stdout}).RespawnPane(paneID, command)
+	}
+	fmt.Fprintf(a.stdout, "Restarting %s\n", description)
+	runner := tmux.Runner{}
+	if err := runner.RespawnPane(paneID, command); err != nil {
+		return err
+	}
+	alive, err := runner.PaneAlive(paneID)
+	if err != nil || !alive {
+		if err != nil {
+			return fmt.Errorf("old client was terminated, but verify replacement pane %s: %w", paneID, err)
+		}
+		return fmt.Errorf("old client was terminated, but the replacement in pane %s exited immediately; config and remote thread were preserved", paneID)
+	}
+	return nil
 }
 
 func (a app) schedulePark(runner tmux.Runner, session, window, target, workspace string) error {
@@ -3233,6 +3353,13 @@ Commands:
       preserved; use unpin-current for config-only cleanup or teardown for full cleanup.
       Amp thread history is not archived or deleted.
 
+  restart [workspace] <window> [session]
+      Force-restart a configured, verified Amp client in place, continuing the
+      same remote thread in the same tmux window. With an explicit workspace and
+      no session, session defaults to the workspace name. This is intended for
+      an unresponsive local client and does not change restore config or remote
+      Amp thread state. Refuses mismatched or multi-pane windows.
+
   shelve-current [workspace] [thread-id-or-url]
       From inside the target tmux/Amp pane, pin the current window/path if needed,
       archive the identified Amp thread so it leaves the Amp sidebar, preserve
@@ -3342,6 +3469,11 @@ Commands:
       With one workspace arg, session defaults to the workspace name; pass an
       explicit session such as Amp for older shared-session layouts. Refuses to
       stop a mismatched pane that is not an amp --no-tui runner for the row workdir.
+      Side effects: mutates live local tmux/Amp only; no remote Amp thread state.
+
+  runner restart [workspace] <window> [session]
+      Force-restart a configured, verified amp --no-tui runner in place while
+      preserving runner config. Refuses mismatched or multi-pane windows.
       Side effects: mutates live local tmux/Amp only; no remote Amp thread state.
 
   completion <bash|zsh|fish>

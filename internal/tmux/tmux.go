@@ -32,9 +32,33 @@ type WindowPane struct {
 	Session      string
 	Window       string
 	WindowID     string
+	PaneID       string
 	Path         string
 	Command      string
 	StartCommand string
+}
+
+func (r Runner) RestartWindowPanes(session, window string) ([]WindowPane, error) {
+	out, err := tmuxOutput("list-panes", "-s", "-t", exactSessionTarget(session), "-F", "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}")
+	if err != nil {
+		return nil, err
+	}
+	text := strings.TrimSuffix(string(out), "\n")
+	if text == "" {
+		return nil, nil
+	}
+	var panes []WindowPane
+	for _, line := range strings.Split(text, "\n") {
+		fields := strings.SplitN(line, "\t", 7)
+		if len(fields) != 7 {
+			return nil, fmt.Errorf("unexpected tmux restart pane row %q", line)
+		}
+		if fields[0] != session || fields[1] != window {
+			continue
+		}
+		panes = append(panes, WindowPane{Session: fields[0], Window: fields[1], WindowID: fields[2], PaneID: fields[3], Path: fields[4], Command: fields[5], StartCommand: fields[6]})
+	}
+	return panes, nil
 }
 
 func exactSessionTarget(session string) string {
@@ -293,6 +317,24 @@ func (r Runner) KillWindow(target string) error {
 		return nil
 	}
 	return tmuxRun(args...)
+}
+
+func (r Runner) RespawnPane(target, command string) error {
+	args := []string{"respawn-pane", "-k", "-t", target, command}
+	if r.DryRun {
+		fmt.Fprintf(r.output(), "tmux %s\n", shellJoin(args))
+		return nil
+	}
+	return tmuxRun(args...)
+}
+
+func (r Runner) PaneAlive(target string) (bool, error) {
+	out, err := tmuxOutput("list-panes", "-t", target, "-F", "#{pane_id}\t#{pane_dead}")
+	if err != nil {
+		return false, err
+	}
+	fields := strings.SplitN(strings.TrimSpace(string(out)), "\t", 2)
+	return len(fields) == 2 && fields[0] == target && fields[1] == "0", nil
 }
 
 func (r Runner) RunShell(command string) error {
