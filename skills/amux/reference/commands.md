@@ -17,7 +17,10 @@ amux pin-current <thread-id-or-url>
 amux pin-current <workspace> <thread-id-or-url> [window] [workdir]
 amux unpin <workspace> <window>
 amux unpin-current [workspace]
-amux park [workspace] <window>
+amux park
+amux park --workspace <workspace>
+amux park <window>
+amux park <workspace> <window> [session]
 amux park-current [workspace]
 amux restart [[workspace] <window> [session]]
 amux shelve-current [workspace] [thread-id-or-url]
@@ -97,6 +100,10 @@ No-arg `launch` restores all configured workspaces into same-named sessions. No-
 - Use `pin-current` and `unpin-current` from inside tmux when possible. They default to workspace `mac` plus the invoking pane's tmux window name and pane path, using `$TMUX_PANE` when available rather than the currently focused tmux client.
 
 ### park
+
+- `park` with no args selects all configured live thread clients machine-wide; `--workspace <workspace>` selects one workspace across sessions; positional forms select one verified client.
+- `park <window>` preserves the legacy `mac` workspace and `Amp` session defaults. `park <workspace> <window>` also defaults to the legacy `Amp` session; pass the session explicitly for another layout.
+- It preflights and revalidates complete bulk plans, skips configured rows that are not running, rejects split windows, preserves restore and remote thread state, and excludes runners.
 
 - `park` and `park-current` stop only the resolved live local tmux/Amp window after a delay.
 - They preserve restore config rows and do not archive, delete, or hide the remote Amp thread.

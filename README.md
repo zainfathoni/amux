@@ -216,7 +216,10 @@ amux pin-current <thread-id-or-url>
 amux pin-current <workspace> <thread-id-or-url> [window] [workdir]
 amux unpin <workspace> <window>
 amux unpin-current [workspace]
-amux park [workspace] <window>
+amux park
+amux park --workspace <workspace>
+amux park <window>
+amux park <workspace> <window> [session]
 amux park-current [workspace]
 amux restart [[workspace] <window> [session]]
 amux shelve-current [workspace] [thread-id-or-url]
@@ -302,7 +305,7 @@ Launch uses auto-attach by default when a workspace is specified: cold restores 
 
 When launch attaches from inside an existing tmux client, `amux` switches that client to the target session. From a normal interactive terminal, it attaches in-place. If tmux reports that the caller is not a terminal, `amux` opens the target session through the configured terminal launcher, then Omarchy's terminal launcher, then direct Alacritty fallback. Configure the first launcher with `--terminal-launcher "kitty -e"` or `AMUX_TERMINAL_LAUNCHER="kitty -e"`; `amux` appends `tmux attach -t <session>` to the launcher command. Quoted launcher arguments are supported. Without that option or env var, the existing Omarchy/Alacritty order is unchanged.
 
-`park [workspace] <window>` and `park-current [workspace]` are live-local-only. They resolve the intended live tmux window, schedule a delayed graceful terminal shutdown sequence for the target pane, then return immediately. This gives Amp time to receive the command result and send a final response before the local process exits. The delayed shutdown only force-closes the tmux window if graceful stop times out. Parking preserves restore config rows and never archives the remote Amp thread. Use `unpin`/`unpin-current` when you only want to stop restoring a row, `shelve-current` or `shelve` when you want to hide/defer a thread while keeping it restorable, and `teardown` when you intentionally want to archive the verified remote Amp thread, remove the row, and stop the local window.
+`park` and `park-current [workspace]` are live-local-only. With no arguments, `park` targets all configured interactive clients on the machine; `park --workspace <workspace>` targets one workspace across tmux sessions; `park <window>` preserves the legacy `mac` workspace and `Amp` session defaults; and `park <workspace> <window> [session]` targets one configured client, also defaulting to the legacy `Amp` session when session is omitted. Bulk parking preflights and then revalidates every selected client before scheduling any shutdown, skips configured clients that are not running, rejects split windows, and excludes runners. Parking schedules a delayed graceful terminal shutdown sequence and returns immediately. The delayed job revalidates pane identity before sending keys and again before force-closing its window. Parking preserves restore config rows and never archives the remote Amp thread. Use `unpin`/`unpin-current` when you only want to stop restoring a row, `shelve-current` or `shelve` when you want to hide/defer a thread while keeping it restorable, and `teardown` when you intentionally want to archive the verified remote Amp thread, remove the row, and stop the local window.
 
 `shelve-current [workspace] [thread-id-or-url]` is the current-window path for live tmux/Amp work that may not be pinned yet. Run it from the pane you want to defer; it derives the current window and workdir, requires an explicit thread ID/URL unless `AMUX_THREAD_ID` is already set, writes or preserves a useful restore row, archives the thread so it leaves the Amp sidebar, and stops the current tmux window. It refuses to guess a thread and does not replace an existing same workspace/window row that points at a different thread.
 
