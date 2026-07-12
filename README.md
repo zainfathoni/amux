@@ -219,7 +219,7 @@ amux unpin <workspace> <window>
 amux unpin-current [workspace]
 amux park [workspace] <window>
 amux park-current [workspace]
-amux restart [workspace] <window> [session]
+amux restart [[workspace] <window> [session]]
 amux shelve-current [workspace] [thread-id-or-url]
 amux shelve [workspace] <window> [session]
 amux shelve --thread <thread-id-or-url> [--session <session>]
@@ -240,7 +240,7 @@ amux runner pin <workspace> <window> <workdir>
 amux runner unpin <workspace> <window>
 amux runner launch [workspace] [session]
 amux runner park [workspace] <window> [session]
-amux runner restart [workspace] <window> [session]
+amux runner restart [[workspace] <window> [session]]
 amux completion <bash|zsh|fish>
 amux version
 amux update
@@ -315,7 +315,7 @@ When launch attaches from inside an existing tmux client, `amux` switches that c
 
 `amux runner ...` commands manage local runner intent for Amp Agents Anywhere. Runner rows live in `runners.tsv` next to `workspaces.tsv` and use `workspace<TAB>window<TAB>workdir`; they intentionally contain no thread ID. `amux runner launch` starts every configured runner workspace with `amp --no-tui` inside same-named tmux sessions, skips already-running windows that verify as the expected runner, and fails closed on same-name mismatches; pass `[workspace] [session]` to launch only one workspace or target an older shared-session layout. `amux runner park [workspace] <window> [session]` stops only the verified live local runner window for the configured workdir while preserving runner config; with a workspace and no session, it targets the workspace-named session, and older shared-session layouts can pass the session explicitly. Runner commands never create, continue, archive, or list remote Amp threads.
 
-When a local client stops responding, `amux restart [workspace] <window> [session]` force-restarts a verified thread client and continues the same remote thread, while `amux runner restart [workspace] <window> [session]` force-restarts a verified `amp --no-tui` runner. Both use tmux's in-place pane respawn, preserve config, and fail closed if the live command does not match the configured target.
+When local clients stop responding, `amux restart` force-restarts every configured thread client and continues the same remote threads, while `amux runner restart` force-restarts every configured `amp --no-tui` runner. Both process rows in sorted order using workspace-named tmux sessions and stop at the first failure. Pass `[workspace] <window> [session]` to either command to restart only one client or target an older shared-session layout. Both use tmux's in-place pane respawn, preserve config, and fail closed if a live command does not match its configured target.
 
 ## Post-merge worker cleanup
 

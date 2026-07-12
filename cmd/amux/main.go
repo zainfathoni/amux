@@ -783,6 +783,27 @@ func verifyRunnerParkPane(row config.RunnerRow, pane tmux.WindowPane) error {
 }
 
 func (a app) runnerRestart(opts options, args []string) error {
+	if len(args) == 0 {
+		rows, err := config.LoadRunnersReadOnly(config.RunnerPath(opts.configPath))
+		if err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			return fmt.Errorf("no runner rows found in %s", config.RunnerPath(opts.configPath))
+		}
+		sort.Slice(rows, func(i, j int) bool {
+			if rows[i].Workspace == rows[j].Workspace {
+				return rows[i].Window < rows[j].Window
+			}
+			return rows[i].Workspace < rows[j].Workspace
+		})
+		for _, row := range rows {
+			if err := a.runnerRestart(opts, []string{row.Workspace, row.Window}); err != nil {
+				return fmt.Errorf("restart runner %s/%s: %w", row.Workspace, row.Window, err)
+			}
+		}
+		return nil
+	}
 	workspace, window, session, err := parseRestartArgs("amux runner restart [workspace] <window> [session]", args)
 	if err != nil {
 		return err
@@ -985,6 +1006,27 @@ func (a app) parkCurrent(opts options, args []string) error {
 }
 
 func (a app) restart(opts options, args []string) error {
+	if len(args) == 0 {
+		rows, err := config.LoadReadOnly(opts.configPath)
+		if err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			return fmt.Errorf("no rows found in %s", opts.configPath)
+		}
+		sort.Slice(rows, func(i, j int) bool {
+			if rows[i].Workspace == rows[j].Workspace {
+				return rows[i].Window < rows[j].Window
+			}
+			return rows[i].Workspace < rows[j].Workspace
+		})
+		for _, row := range rows {
+			if err := a.restart(opts, []string{row.Workspace, row.Window}); err != nil {
+				return fmt.Errorf("restart %s/%s: %w", row.Workspace, row.Window, err)
+			}
+		}
+		return nil
+	}
 	workspace, window, session, err := parseRestartArgs("amux restart [workspace] <window> [session]", args)
 	if err != nil {
 		return err
@@ -3353,12 +3395,13 @@ Commands:
       preserved; use unpin-current for config-only cleanup or teardown for full cleanup.
       Amp thread history is not archived or deleted.
 
-  restart [workspace] <window> [session]
+  restart [[workspace] <window> [session]]
       Force-restart a configured, verified Amp client in place, continuing the
-      same remote thread in the same tmux window. With an explicit workspace and
-      no session, session defaults to the workspace name. This is intended for
-      an unresponsive local client and does not change restore config or remote
-      Amp thread state. Refuses mismatched or multi-pane windows.
+      same remote thread in the same tmux window. With no args, restart every
+      configured client in sorted order using workspace-named sessions. With an
+      explicit workspace and no session, session defaults to the workspace name.
+      This does not change restore config or remote Amp thread state. Refuses
+      mismatched or multi-pane windows and stops at the first failure.
 
   shelve-current [workspace] [thread-id-or-url]
       From inside the target tmux/Amp pane, pin the current window/path if needed,
@@ -3471,9 +3514,11 @@ Commands:
       stop a mismatched pane that is not an amp --no-tui runner for the row workdir.
       Side effects: mutates live local tmux/Amp only; no remote Amp thread state.
 
-  runner restart [workspace] <window> [session]
+  runner restart [[workspace] <window> [session]]
       Force-restart a configured, verified amp --no-tui runner in place while
-      preserving runner config. Refuses mismatched or multi-pane windows.
+      preserving runner config. With no args, restart every configured runner in
+      sorted order using workspace-named sessions. Refuses mismatched or
+      multi-pane windows and stops at the first failure.
       Side effects: mutates live local tmux/Amp only; no remote Amp thread state.
 
   completion <bash|zsh|fish>

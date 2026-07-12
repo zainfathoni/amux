@@ -19,7 +19,7 @@ amux unpin <workspace> <window>
 amux unpin-current [workspace]
 amux park [workspace] <window>
 amux park-current [workspace]
-amux restart [workspace] <window> [session]
+amux restart [[workspace] <window> [session]]
 amux shelve-current [workspace] [thread-id-or-url]
 amux shelve [workspace] <window> [session]
 amux shelve --thread <thread-id-or-url> [--session <session>]
@@ -38,7 +38,7 @@ amux runner pin <workspace> <window> <workdir>
 amux runner unpin <workspace> <window>
 amux runner launch [workspace] [session]
 amux runner park [workspace] <window> [session]
-amux runner restart [workspace] <window> [session]
+amux runner restart [[workspace] <window> [session]]
 amux update [--dry-run]
 ```
 
@@ -113,7 +113,7 @@ If the row still appears in `amux list` and the thread still appears in Amp hist
 
 ### restart
 
-- `restart` force-restarts an unresponsive configured Amp client in place and continues the same remote thread.
+- `restart` with no args force-restarts every configured Amp client in sorted order using workspace-named sessions; it stops at the first failure. A targeted restart continues the same remote thread in place.
 - It verifies the live pane against the restore row before using `tmux respawn-pane -k`; restore config and remote thread state are unchanged.
 - Use `amux restart <workspace> <window>` for workspace-named sessions, or pass the session explicitly for older shared-session layouts.
 
@@ -159,7 +159,7 @@ If the row still appears in `amux list` and the thread still appears in Amp hist
 - `runner unpin` removes runner config.
 - `runner launch` with no args starts every configured runner workspace in same-named tmux sessions; already-running windows are skipped only when they verify as the expected runner, and same-name mismatches fail closed. Pass `[workspace] [session]` only to scope launch or target a legacy shared session.
 - `runner park` stops only the verified live local runner window, using the workspace-named session unless a session is passed explicitly.
-- `runner restart` force-restarts only the verified live runner pane with `amp --no-tui`, preserving its config row.
+- `runner restart` with no args force-restarts every configured runner in sorted order using workspace-named sessions and stops at the first failure. Its targeted form restarts only the selected verified live runner pane with `amp --no-tui`.
 - Runner commands do not create, continue, archive, unarchive, or list remote Amp threads.
 
 ### update

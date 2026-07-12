@@ -92,7 +92,7 @@ func TestCompletionGeneratesShellScripts(t *testing.T) {
 				"complete -c amux -n '__fish_seen_subcommand_from spawn' -r -f -a 'low medium high ultra' -l 'mode' -d 'Amp thread mode'",
 				"complete -c amux -n '__fish_seen_subcommand_from spawn' -r -l 'message-file' -d 'Read initial message from file'",
 				"complete -c amux -n '__fish_seen_subcommand_from list' -f -l 'status' -d 'Append thread status'",
-				"complete -c amux -f -n '__fish_seen_subcommand_from runner; and not __fish_seen_subcommand_from list pin unpin launch park restart' -a 'restart' -d 'Restart a verified runner in place'",
+				"complete -c amux -f -n '__fish_seen_subcommand_from runner; and not __fish_seen_subcommand_from list pin unpin launch park restart' -a 'restart' -d 'Restart all or one verified runner in place'",
 				"complete -c amux -f -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'",
 			},
 		},
@@ -6156,6 +6156,70 @@ exit 0
 	}
 	if strings.Contains(string(logBytes), "respawn-pane") {
 		t.Fatalf("runner restart respawned an unverified interactive Amp client\nlog:\n%s", logBytes)
+	}
+}
+
+func TestRestartNoArgsRestartsAllConfiguredClients(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	workdir := filepath.Join(tmp, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configText := "zeta\tworker-b\t" + workdir + "\tT-b\nalpha\tworker-a\t" + workdir + "\tT-a\n"
+	if err := os.WriteFile(configPath, []byte(configText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+case "$*" in
+  *'-t =alpha '*) printf 'alpha\tworker-a\t@1\t%%1\t`+workdir+`\tamp\t%s\n' `+shellSingleQuote(tmux.ContinueCommand(workdir, "T-a"))+` ;;
+  *'-t =zeta '*) printf 'zeta\tworker-b\t@2\t%%2\t`+workdir+`\tamp\t%s\n' `+shellSingleQuote(tmux.ContinueCommand(workdir, "T-b"))+` ;;
+esac
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "--dry-run", "restart"}); err != nil {
+		t.Fatal(err)
+	}
+	output := stdout.String()
+	alpha := strings.Index(output, "Would restart Amp thread T-a")
+	zeta := strings.Index(output, "Would restart Amp thread T-b")
+	if alpha < 0 || zeta < 0 || alpha >= zeta {
+		t.Fatalf("bulk restart did not process all clients in sorted order\nstdout:\n%s", output)
+	}
+}
+
+func TestRunnerRestartNoArgsRestartsAllConfiguredRunners(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	workdir := filepath.Join(tmp, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runnerText := "zeta\trunner-b\t" + workdir + "\nalpha\trunner-a\t" + workdir + "\n"
+	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte(runnerText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+case "$*" in
+  *'-t =alpha '*) printf 'alpha\trunner-a\t@1\t%%1\t`+workdir+`\tamp\t%s\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+` ;;
+  *'-t =zeta '*) printf 'zeta\trunner-b\t@2\t%%2\t`+workdir+`\tamp\t%s\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+` ;;
+esac
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "--dry-run", "runner", "restart"}); err != nil {
+		t.Fatal(err)
+	}
+	output := stdout.String()
+	alpha := strings.Index(output, "Would restart runner alpha/runner-a")
+	zeta := strings.Index(output, "Would restart runner zeta/runner-b")
+	if alpha < 0 || zeta < 0 || alpha >= zeta {
+		t.Fatalf("bulk runner restart did not process all runners in sorted order\nstdout:\n%s", output)
 	}
 }
 
