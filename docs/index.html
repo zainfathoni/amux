@@ -761,7 +761,7 @@
             <span class="brand-tagline">local tmux workspaces for Amp</span>
           </a>
           <div class="nav-links">
-            <a href="#lifecycle">Lifecycle</a>
+            <a href="#lifecycle">Glossary</a>
             <a href="#new">New</a>
             <a href="#skill">Agent skill</a>
             <a href="https://github.com/zainfathoni/amux">GitHub</a>
@@ -800,11 +800,11 @@
           <div class="container">
             <div class="section-heading">
               <span class="rule" aria-hidden="true"></span>
-              <h2 id="lifecycle-title">Every verb declares its blast radius.</h2>
+              <h2 id="lifecycle-title">A shared lifecycle vocabulary.</h2>
             </div>
             <p class="section-copy">
-              amux separates four side-effect domains and each command touches the fewest it can. Click a verb — the terminal plays it,
-              and the domains it mutates light up.
+              Launch, restart, park, shelve, and teardown name distinct states instead of interchangeable ways to “stop” work. This is the
+              public glossary: click a term to see its meaning, command output, and side-effect domains.
             </p>
 
             <div class="lifecycle-grid">
@@ -938,7 +938,7 @@
         { cmd: "amux pin-current https://ampcode.com/threads/T-123", out: ["saved row: mac  web-redesign  ~/Code/site  T-123"] },
         { cmd: "amux launch mac --dry-run", out: ["would create tmux session mac", "would restore window web-redesign from T-123"] },
         { cmd: "amux launch mac", out: ["restored mac/web-redesign"] },
-        { cmd: "amux park-current", out: ["stopped local window; kept restore row"] },
+        { cmd: "amux park mac web-redesign", out: ["scheduled park for Amp/web-redesign", "kept restore row and remote thread"] },
       ];
 
       const domainNames = ["Restore config", "Runner config", "Live tmux", "Remote Amp"];
@@ -950,9 +950,16 @@
           note: "",
           script: [{ cmd: "amux pin-current https://ampcode.com/threads/T-123", out: ["saved row: mac  web-redesign  ~/Code/site  T-123"] }],
         },
+        unpin: {
+          label: "unpin",
+          desc: "Remove work from restore configuration without changing local execution or remote thread state.",
+          domains: [0],
+          note: "The live window and remote thread keep running.",
+          script: [{ cmd: "amux unpin mac web-redesign", out: ["removed restore row mac/web-redesign", "local client and remote thread unchanged"] }],
+        },
         launch: {
           label: "launch",
-          desc: "Recreate every pinned window with amp threads continue. Preview the whole plan with --dry-run before a single window exists.",
+          desc: "Make configured, active work available locally. Launch may create tmux windows and Amp clients, but does not change remote thread state.",
           domains: [2],
           note: "Reads restore config; skips shelved rows.",
           script: [
@@ -960,19 +967,37 @@
             { cmd: "amux launch mac", out: ["restored mac/web-redesign"] },
           ],
         },
+        restart: {
+          label: "restart",
+          desc: "Replace a running local client in place while preserving its restore configuration and remote thread.",
+          domains: [2],
+          note: "Verifies the configured client before replacing its process.",
+          script: [{ cmd: "amux restart mac web-redesign", out: ["verified mac/web-redesign", "restarted local client; preserved thread T-123"] }],
+        },
         park: {
           label: "park",
-          desc: "Stop the local tmux/Amp window, gracefully. The restore row and the remote thread stay exactly where they are.",
+          desc: "Stop local execution while preserving both restore configuration and remote thread state. Park one window, one workspace, or every configured interactive client on the machine.",
           domains: [2],
-          note: "",
-          script: [{ cmd: "amux park-current", out: ["stopped local window; kept restore row"] }],
+          note: "Runners have a separate lifecycle and are excluded.",
+          script: [
+            { cmd: "amux park mac web-redesign", out: ["window scope · scheduled Amp/web-redesign"] },
+            { cmd: "amux park --workspace mac", out: ["workspace scope · scheduled 3 configured clients"] },
+            { cmd: "amux park", out: ["machine scope · scheduled 7 configured clients", "restore rows and remote threads preserved"] },
+          ],
         },
         shelve: {
           label: "shelve",
-          desc: "Defer without forgetting. Archives the thread so it leaves the Amp sidebar, keeps the restore row, stops the local window. unshelve brings it back.",
+          desc: "Defer work by hiding its remote thread and stopping local execution while preserving restore configuration.",
           domains: [2, 3],
-          note: "",
+          note: "Shelved work must be unshelved before launch.",
           script: [{ cmd: "amux shelve --thread T-123", out: ["archived T-123; restore row preserved", "stopped window mac/web-redesign"] }],
+        },
+        unshelve: {
+          label: "unshelve",
+          desc: "Make a shelved remote thread active again without launching it locally.",
+          domains: [3],
+          note: "Run launch separately when you want a local client.",
+          script: [{ cmd: "amux unshelve mac web-redesign", out: ["unarchived T-123", "restore row preserved; no local window started"] }],
         },
         spawn: {
           label: "spawn",
@@ -983,7 +1008,7 @@
         },
         teardown: {
           label: "teardown",
-          desc: "Verified full cleanup. Cross-checks identity against config and live tmux, then archives the thread, removes the row, and stops the window — or refuses to touch anything.",
+          desc: "Finish managed work by hiding its remote thread, removing its restore configuration, and stopping local execution.",
           domains: [0, 2, 3],
           note: "Fails closed on any mismatch.",
           script: [{ cmd: "amux teardown", out: ["verified AMUX_* identity against config + tmux", "archived T-456 · removed row · stopped window"] }],
