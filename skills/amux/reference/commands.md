@@ -113,7 +113,7 @@ If the row still appears in `amux list` and the thread still appears in Amp hist
 
 ### restart
 
-- `restart` with no args force-restarts every configured Amp client in sorted order using workspace-named sessions; it stops at the first failure. A targeted restart continues the same remote thread in place.
+- `restart` with no args discovers configured Amp clients across all tmux sessions, preflights the complete plan, skips rows that are not running, then restarts verified panes in sorted config order. It stops at the first runtime failure with progress counts. A targeted restart continues the same remote thread in place.
 - It verifies the live pane against the restore row before using `tmux respawn-pane -k`; restore config and remote thread state are unchanged.
 - Use `amux restart <workspace> <window>` for workspace-named sessions, or pass the session explicitly for older shared-session layouts.
 
@@ -159,7 +159,7 @@ If the row still appears in `amux list` and the thread still appears in Amp hist
 - `runner unpin` removes runner config.
 - `runner launch` with no args starts every configured runner workspace in same-named tmux sessions; already-running windows are skipped only when they verify as the expected runner, and same-name mismatches fail closed. Pass `[workspace] [session]` only to scope launch or target a legacy shared session.
 - `runner park` stops only the verified live local runner window, using the workspace-named session unless a session is passed explicitly.
-- `runner restart` with no args force-restarts every configured runner in sorted order using workspace-named sessions and stops at the first failure. Its targeted form restarts only the selected verified live runner pane with `amp --no-tui`.
+- `runner restart` with no args discovers configured runners across all tmux sessions, preflights the complete plan, skips rows that are not running, then restarts verified panes in sorted config order. Its targeted form restarts only the selected verified live runner pane with `amp --no-tui`.
 - Runner commands do not create, continue, archive, unarchive, or list remote Amp threads.
 
 ### update

@@ -784,25 +784,7 @@ func verifyRunnerParkPane(row config.RunnerRow, pane tmux.WindowPane) error {
 
 func (a app) runnerRestart(opts options, args []string) error {
 	if len(args) == 0 {
-		rows, err := config.LoadRunnersReadOnly(config.RunnerPath(opts.configPath))
-		if err != nil {
-			return err
-		}
-		if len(rows) == 0 {
-			return fmt.Errorf("no runner rows found in %s", config.RunnerPath(opts.configPath))
-		}
-		sort.Slice(rows, func(i, j int) bool {
-			if rows[i].Workspace == rows[j].Workspace {
-				return rows[i].Window < rows[j].Window
-			}
-			return rows[i].Workspace < rows[j].Workspace
-		})
-		for _, row := range rows {
-			if err := a.runnerRestart(opts, []string{row.Workspace, row.Window}); err != nil {
-				return fmt.Errorf("restart runner %s/%s: %w", row.Workspace, row.Window, err)
-			}
-		}
-		return nil
+		return a.restartAllRunners(opts)
 	}
 	workspace, window, session, err := parseRestartArgs("amux runner restart [workspace] <window> [session]", args)
 	if err != nil {
@@ -828,13 +810,17 @@ func (a app) runnerRestart(opts options, args []string) error {
 		if len(panes) != 1 {
 			return fmt.Errorf("runner restart requires exactly one pane in tmux window %s/%s; found %d", session, window, len(panes))
 		}
+		if panes[0].Dead {
+			return fmt.Errorf("runner pane %s in tmux window %s/%s is dead and not currently running", panes[0].PaneID, session, window)
+		}
 		if normalizedTmuxStartCommand(panes[0].StartCommand) != tmux.RunnerCommand(workdir) {
 			return fmt.Errorf("tmux window %q in session %q is not the exact configured runner for %s/%s at %s; refusing restart", window, session, workspace, window, workdir)
 		}
-		if panes[0].PaneID == "" {
-			return fmt.Errorf("runner window %q in tmux session %q has no pane id", window, session)
+		if panes[0].PaneID == "" || panes[0].WindowID == "" {
+			return fmt.Errorf("runner window %q in tmux session %q has no pane or window id", window, session)
 		}
-		return a.respawnVerifiedPane(opts, panes[0].PaneID, tmux.RunnerCommand(workdir), fmt.Sprintf("runner %s/%s in tmux session %s", workspace, window, session))
+		plan := restartPlan{key: workspace + "/" + window, pane: panes[0], command: tmux.RunnerCommand(workdir), description: fmt.Sprintf("runner %s/%s in tmux session %s", workspace, window, session)}
+		return a.executeRestartPlans(opts, []restartPlan{plan})
 	}
 	return fmt.Errorf("no runner row for %s/%s in %s", workspace, window, config.RunnerPath(opts.configPath))
 }
@@ -1007,25 +993,7 @@ func (a app) parkCurrent(opts options, args []string) error {
 
 func (a app) restart(opts options, args []string) error {
 	if len(args) == 0 {
-		rows, err := config.LoadReadOnly(opts.configPath)
-		if err != nil {
-			return err
-		}
-		if len(rows) == 0 {
-			return fmt.Errorf("no rows found in %s", opts.configPath)
-		}
-		sort.Slice(rows, func(i, j int) bool {
-			if rows[i].Workspace == rows[j].Workspace {
-				return rows[i].Window < rows[j].Window
-			}
-			return rows[i].Workspace < rows[j].Workspace
-		})
-		for _, row := range rows {
-			if err := a.restart(opts, []string{row.Workspace, row.Window}); err != nil {
-				return fmt.Errorf("restart %s/%s: %w", row.Workspace, row.Window, err)
-			}
-		}
-		return nil
+		return a.restartAllThreads(opts)
 	}
 	workspace, window, session, err := parseRestartArgs("amux restart [workspace] <window> [session]", args)
 	if err != nil {
@@ -1048,14 +1016,18 @@ func (a app) restart(opts options, args []string) error {
 	if len(panes) != 1 {
 		return fmt.Errorf("restart requires exactly one pane in tmux window %s/%s; found %d", session, window, len(panes))
 	}
+	if panes[0].Dead {
+		return fmt.Errorf("pane %s in tmux window %s/%s is dead and not currently running", panes[0].PaneID, session, window)
+	}
 	if !explicitTeardownStartCommandMatches(identity, row, normalizedTmuxStartCommand(panes[0].StartCommand)) {
 		return fmt.Errorf("tmux window %q in session %q start command does not match restore row thread %s; refusing restart", window, session, row.Thread)
 	}
-	if panes[0].PaneID == "" {
-		return fmt.Errorf("tmux window %q in session %q has no pane id", window, session)
+	if panes[0].PaneID == "" || panes[0].WindowID == "" {
+		return fmt.Errorf("tmux window %q in session %q has no pane or window id", window, session)
 	}
 	command := teardownExpectedStartCommand(identity, row)
-	return a.respawnVerifiedPane(opts, panes[0].PaneID, command, fmt.Sprintf("Amp thread %s in tmux window %s/%s", canonicalThreadID(row.Thread), session, window))
+	plan := restartPlan{key: workspace + "/" + window, pane: panes[0], command: command, description: fmt.Sprintf("Amp thread %s in tmux window %s/%s", canonicalThreadID(row.Thread), session, window)}
+	return a.executeRestartPlans(opts, []restartPlan{plan})
 }
 
 func verifiedRestartRow(path string, identity teardownIdentity) (config.Row, error) {
@@ -1088,12 +1060,166 @@ func (a app) respawnVerifiedPane(opts options, paneID, command, description stri
 	if err := runner.RespawnPane(paneID, command); err != nil {
 		return err
 	}
-	alive, err := runner.PaneAlive(paneID)
-	if err != nil || !alive {
-		if err != nil {
-			return fmt.Errorf("old client was terminated, but verify replacement pane %s: %w", paneID, err)
-		}
+	time.Sleep(500 * time.Millisecond)
+	pane, err := runner.RestartPaneByID(paneID)
+	if err != nil {
+		return fmt.Errorf("old client was terminated, but verify replacement pane %s: %w", paneID, err)
+	}
+	if pane.Dead || normalizedTmuxStartCommand(pane.StartCommand) != command {
 		return fmt.Errorf("old client was terminated, but the replacement in pane %s exited immediately; config and remote thread were preserved", paneID)
+	}
+	return nil
+}
+
+type restartPlan struct {
+	key         string
+	pane        tmux.WindowPane
+	command     string
+	description string
+}
+
+type restartConfigKey struct {
+	workspace string
+	window    string
+}
+
+func (a app) restartAllThreads(opts options) error {
+	rows, err := config.LoadReadOnly(opts.configPath)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return fmt.Errorf("no rows found in %s", opts.configPath)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Workspace == rows[j].Workspace {
+			return rows[i].Window < rows[j].Window
+		}
+		return rows[i].Workspace < rows[j].Workspace
+	})
+	panes, err := (tmux.Runner{}).AllRestartWindowPanes()
+	if err != nil {
+		return fmt.Errorf("inventory tmux panes for restart: %w", err)
+	}
+	plans := make([]restartPlan, 0, len(rows))
+	seenKeys := make(map[restartConfigKey]bool)
+	seenPanes := make(map[string]string)
+	for _, row := range rows {
+		key := row.Workspace + "/" + row.Window
+		configKey := restartConfigKey{workspace: row.Workspace, window: row.Window}
+		if seenKeys[configKey] {
+			return fmt.Errorf("duplicate restore row %s; refusing system-wide restart before changing any client", key)
+		}
+		seenKeys[configKey] = true
+		workdir := config.ExpandHome(row.Workdir)
+		if stat, err := os.Stat(workdir); err != nil || !stat.IsDir() {
+			return fmt.Errorf("missing workdir for %s: %s; refusing system-wide restart before changing any client", key, workdir)
+		}
+		matches := make([]tmux.WindowPane, 0, 1)
+		for _, pane := range panes {
+			identity := teardownIdentity{Workspace: row.Workspace, Session: pane.Session, Window: row.Window, Thread: row.Thread}
+			if !pane.Dead && pane.Window == row.Window && explicitTeardownStartCommandMatches(identity, row, normalizedTmuxStartCommand(pane.StartCommand)) {
+				matches = append(matches, pane)
+			}
+		}
+		if len(matches) == 0 {
+			fmt.Fprintf(a.stdout, "Skipping configured client %s: not running in tmux\n", key)
+			continue
+		}
+		if len(matches) > 1 {
+			return fmt.Errorf("ambiguous live tmux panes for %s: candidates %s; refusing system-wide restart before changing any client", key, formatSessionPaneCandidates(matches))
+		}
+		pane := matches[0]
+		if pane.PaneID == "" || pane.WindowID == "" {
+			return fmt.Errorf("tmux target for %s has an empty pane or window id; refusing system-wide restart before changing any client", key)
+		}
+		if owner, exists := seenPanes[pane.PaneID]; exists {
+			return fmt.Errorf("tmux pane %s is claimed by both %s and %s; refusing system-wide restart before changing any client", pane.PaneID, owner, key)
+		}
+		seenPanes[pane.PaneID] = key
+		identity := teardownIdentity{Workspace: row.Workspace, Session: pane.Session, Window: row.Window, Thread: row.Thread}
+		plans = append(plans, restartPlan{key: key, pane: pane, command: teardownExpectedStartCommand(identity, row), description: fmt.Sprintf("Amp thread %s in tmux window %s/%s", canonicalThreadID(row.Thread), pane.Session, row.Window)})
+	}
+	return a.executeRestartPlans(opts, plans)
+}
+
+func (a app) restartAllRunners(opts options) error {
+	rows, err := config.LoadRunnersReadOnly(config.RunnerPath(opts.configPath))
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return fmt.Errorf("no runner rows found in %s", config.RunnerPath(opts.configPath))
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Workspace == rows[j].Workspace {
+			return rows[i].Window < rows[j].Window
+		}
+		return rows[i].Workspace < rows[j].Workspace
+	})
+	panes, err := (tmux.Runner{}).AllRestartWindowPanes()
+	if err != nil {
+		return fmt.Errorf("inventory tmux panes for runner restart: %w", err)
+	}
+	plans := make([]restartPlan, 0, len(rows))
+	seenKeys := make(map[restartConfigKey]bool)
+	seenPanes := make(map[string]string)
+	for _, row := range rows {
+		key := row.Workspace + "/" + row.Window
+		configKey := restartConfigKey{workspace: row.Workspace, window: row.Window}
+		if seenKeys[configKey] {
+			return fmt.Errorf("duplicate runner row %s; refusing system-wide restart before changing any runner", key)
+		}
+		seenKeys[configKey] = true
+		workdir := config.ExpandHome(row.Workdir)
+		if stat, err := os.Stat(workdir); err != nil || !stat.IsDir() {
+			return fmt.Errorf("missing runner workdir for %s: %s; refusing system-wide restart before changing any runner", key, workdir)
+		}
+		command := tmux.RunnerCommand(workdir)
+		matches := make([]tmux.WindowPane, 0, 1)
+		for _, pane := range panes {
+			if !pane.Dead && pane.Window == row.Window && normalizedTmuxStartCommand(pane.StartCommand) == command {
+				matches = append(matches, pane)
+			}
+		}
+		if len(matches) == 0 {
+			fmt.Fprintf(a.stdout, "Skipping configured runner %s: not running in tmux\n", key)
+			continue
+		}
+		if len(matches) > 1 {
+			return fmt.Errorf("ambiguous live tmux panes for runner %s: candidates %s; refusing system-wide restart before changing any runner", key, formatSessionPaneCandidates(matches))
+		}
+		pane := matches[0]
+		if pane.PaneID == "" || pane.WindowID == "" {
+			return fmt.Errorf("tmux target for runner %s has an empty pane or window id; refusing system-wide restart before changing any runner", key)
+		}
+		if owner, exists := seenPanes[pane.PaneID]; exists {
+			return fmt.Errorf("tmux pane %s is claimed by both %s and %s; refusing system-wide restart before changing any runner", pane.PaneID, owner, key)
+		}
+		seenPanes[pane.PaneID] = key
+		plans = append(plans, restartPlan{key: key, pane: pane, command: command, description: fmt.Sprintf("runner %s in tmux session %s", key, pane.Session)})
+	}
+	return a.executeRestartPlans(opts, plans)
+}
+
+func (a app) executeRestartPlans(opts options, plans []restartPlan) error {
+	if len(plans) == 0 {
+		fmt.Fprintln(a.stdout, "No configured clients are currently running in tmux.")
+		return nil
+	}
+	for i, plan := range plans {
+		current, err := (tmux.Runner{}).RestartPaneByID(plan.pane.PaneID)
+		if err != nil || current.Dead || current.PaneID != plan.pane.PaneID || current.WindowID != plan.pane.WindowID || current.Session != plan.pane.Session || current.Window != plan.pane.Window || normalizedTmuxStartCommand(current.StartCommand) != normalizedTmuxStartCommand(plan.pane.StartCommand) {
+			return fmt.Errorf("restart precondition changed for %s; completed: %d/%d, not attempted: %d", plan.key, i, len(plans), len(plans)-i)
+		}
+		if err := a.respawnVerifiedPane(opts, plan.pane.PaneID, plan.command, plan.description); err != nil {
+			return fmt.Errorf("restart failed for %s; completed: %d/%d, not attempted: %d: %w", plan.key, i, len(plans), len(plans)-i-1, err)
+		}
+		if opts.dryRun {
+			fmt.Fprintf(a.stdout, "Planned %d/%d: %s\n", i+1, len(plans), plan.key)
+		} else {
+			fmt.Fprintf(a.stdout, "Restarted %d/%d: %s\n", i+1, len(plans), plan.key)
+		}
 	}
 	return nil
 }
@@ -3397,11 +3523,12 @@ Commands:
 
   restart [[workspace] <window> [session]]
       Force-restart a configured, verified Amp client in place, continuing the
-      same remote thread in the same tmux window. With no args, restart every
-      configured client in sorted order using workspace-named sessions. With an
+      same remote thread in the same tmux window. With no args, discover verified
+      configured clients across all tmux sessions, preflight them, skip rows that
+      are not running, then restart live panes in sorted config order. With an
       explicit workspace and no session, session defaults to the workspace name.
       This does not change restore config or remote Amp thread state. Refuses
-      mismatched or multi-pane windows and stops at the first failure.
+      duplicate, mismatched, or ambiguous targets and stops at runtime failure.
 
   shelve-current [workspace] [thread-id-or-url]
       From inside the target tmux/Amp pane, pin the current window/path if needed,
@@ -3516,9 +3643,10 @@ Commands:
 
   runner restart [[workspace] <window> [session]]
       Force-restart a configured, verified amp --no-tui runner in place while
-      preserving runner config. With no args, restart every configured runner in
-      sorted order using workspace-named sessions. Refuses mismatched or
-      multi-pane windows and stops at the first failure.
+      preserving runner config. With no args, discover configured runners across
+      all tmux sessions, preflight them, skip rows that are not running, then
+      restart live panes in sorted config order. Refuses duplicate, mismatched,
+      or ambiguous targets and stops at the first runtime failure.
       Side effects: mutates live local tmux/Amp only; no remote Amp thread state.
 
   completion <bash|zsh|fish>

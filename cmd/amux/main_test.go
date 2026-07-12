@@ -6047,8 +6047,7 @@ func TestRestartRespawnsVerifiedThreadClient(t *testing.T) {
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 printf 'tmux %s\n' "$*" >> "`+logPath+`"
 if [ "$1" = list-panes ]; then
-  if [ "$2" = -t ]; then printf '%%7\t0\n'; exit 0; fi
-  printf 'amux\tworker\t@7\t%%7\t`+workdir+`\tamp\t%s\n' `+shellSingleQuote(tmux.ContinueCommand(workdir, "T-thread"))+`
+  printf 'amux\tworker\t@7\t%%7\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(tmux.ContinueCommandWithEnv(workdir, "T-thread", map[string]string{"AMUX_WORKSPACE": "amux", "AMUX_SESSION": "amux", "AMUX_WINDOW": "worker", "AMUX_THREAD_ID": "T-thread", "AMUX_WORKDIR": workdir}))+`
   exit 0
 fi
 exit 0
@@ -6084,8 +6083,7 @@ func TestRunnerRestartRespawnsVerifiedNoTUIClient(t *testing.T) {
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 printf 'tmux %s\n' "$*" >> "`+logPath+`"
 if [ "$1" = list-panes ]; then
-  if [ "$2" = -t ]; then printf '%%9\t0\n'; exit 0; fi
-  printf 'amux\trunner\t@9\t%%9\t`+workdir+`\tamp\t%s\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`
+  printf 'amux\trunner\t@9\t%%9\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`
   exit 0
 fi
 exit 0
@@ -6139,7 +6137,7 @@ func TestRunnerRestartRejectsUnverifiedInteractiveAmp(t *testing.T) {
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 printf 'tmux %s\n' "$*" >> "`+logPath+`"
 if [ "$1" = list-panes ]; then
-  printf 'amux\trunner\t@9\t%%9\t`+workdir+`\tamp\t\n'
+  printf 'amux\trunner\t@9\t%%9\t`+workdir+`\tamp\t\t0\n'
   exit 0
 fi
 exit 0
@@ -6171,10 +6169,14 @@ func TestRestartNoArgsRestartsAllConfiguredClients(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
-case "$*" in
-  *'-t =alpha '*) printf 'alpha\tworker-a\t@1\t%%1\t`+workdir+`\tamp\t%s\n' `+shellSingleQuote(tmux.ContinueCommand(workdir, "T-a"))+` ;;
-  *'-t =zeta '*) printf 'zeta\tworker-b\t@2\t%%2\t`+workdir+`\tamp\t%s\n' `+shellSingleQuote(tmux.ContinueCommand(workdir, "T-b"))+` ;;
-esac
+if [ "$2" = -a ]; then
+  printf 'Shared\tworker-a\t@1\t%%1\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(tmux.ContinueCommand(workdir, "T-a"))+`
+  printf 'Legacy\tworker-b\t@2\t%%2\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(tmux.ContinueCommand(workdir, "T-b"))+`
+elif [ "$3" = "%1" ]; then
+  printf 'Shared\tworker-a\t@1\t%%1\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(tmux.ContinueCommand(workdir, "T-a"))+`
+elif [ "$3" = "%2" ]; then
+  printf 'Legacy\tworker-b\t@2\t%%2\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(tmux.ContinueCommand(workdir, "T-b"))+`
+fi
 exit 0
 `)
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -6202,24 +6204,71 @@ func TestRunnerRestartNoArgsRestartsAllConfiguredRunners(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte(runnerText), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	logPath := filepath.Join(tmp, "tmux.log")
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
-case "$*" in
-  *'-t =alpha '*) printf 'alpha\trunner-a\t@1\t%%1\t`+workdir+`\tamp\t%s\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+` ;;
-  *'-t =zeta '*) printf 'zeta\trunner-b\t@2\t%%2\t`+workdir+`\tamp\t%s\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+` ;;
-esac
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$2" = -a ]; then
+  printf 'Shared\trunner-a\t@1\t%%1\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`
+  printf 'Legacy\trunner-b\t@2\t%%2\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`
+elif [ "$3" = "%1" ]; then
+  printf 'Shared\trunner-a\t@1\t%%1\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`
+elif [ "$3" = "%2" ]; then
+  printf 'Legacy\trunner-b\t@2\t%%2\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`
+fi
 exit 0
 `)
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var stdout bytes.Buffer
-	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "--dry-run", "runner", "restart"}); err != nil {
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "runner", "restart"}); err != nil {
 		t.Fatal(err)
 	}
 	output := stdout.String()
-	alpha := strings.Index(output, "Would restart runner alpha/runner-a")
-	zeta := strings.Index(output, "Would restart runner zeta/runner-b")
+	alpha := strings.Index(output, "Restarted 1/2: alpha/runner-a")
+	zeta := strings.Index(output, "Restarted 2/2: zeta/runner-b")
 	if alpha < 0 || zeta < 0 || alpha >= zeta {
 		t.Fatalf("bulk runner restart did not process all runners in sorted order\nstdout:\n%s", output)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(logBytes), "tmux respawn-pane -k -t") != 2 {
+		t.Fatalf("bulk runner restart did not respawn both panes\nlog:\n%s", logBytes)
+	}
+}
+
+func TestRunnerRestartNoArgsRejectsDuplicateRowsBeforeRespawn(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "workspaces.tsv")
+	workdir := filepath.Join(tmp, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rows := "amux\trunner\t" + workdir + "\namux\trunner\t" + workdir + "\n"
+	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte(rows), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(tmp, "tmux.log")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> "`+logPath+`"
+if [ "$2" = -a ]; then
+  printf 'Shared\trunner\t@1\t%%1\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`
+fi
+exit 0
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := runWithDiscardedStdout([]string{"--config", configPath, "runner", "restart"})
+	if err == nil || !strings.Contains(err.Error(), "duplicate runner row amux/runner") {
+		t.Fatalf("bulk runner restart error = %v, want duplicate-row preflight failure", err)
+	}
+	logBytes, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(logBytes), "respawn-pane") {
+		t.Fatalf("bulk runner restart mutated tmux before duplicate-row failure\nlog:\n%s", logBytes)
 	}
 }
 
