@@ -63,8 +63,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: main
 
       - uses: actions/download-artifact@v4
         with:
@@ -75,19 +73,26 @@ jobs:
         with:
           files: dist/*
 
+      - name: Check out Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: zainfathoni/homebrew-tap
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          path: homebrew-tap
+
       - name: Update Homebrew formula
         run: |
-          git pull --ff-only origin main
-          scripts/update-homebrew-formula.sh "${GITHUB_REF_NAME}" dist Formula/amux.rb
-          ruby -c Formula/amux.rb
+          formula=homebrew-tap/Formula/amux.rb
+          scripts/update-homebrew-formula.sh "${GITHUB_REF_NAME}" dist "$formula"
+          ruby -c "$formula"
 
-          if git diff --quiet -- Formula/amux.rb; then
-            echo "Formula/amux.rb is already current for ${GITHUB_REF_NAME}"
+          if git -C homebrew-tap diff --quiet -- Formula/amux.rb; then
+            echo "Homebrew formula is already current for ${GITHUB_REF_NAME}"
             exit 0
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/amux.rb
-          git commit -m "Update Homebrew formula to ${GITHUB_REF_NAME}"
-          git push origin HEAD:main
+          git -C homebrew-tap config user.name "github-actions[bot]"
+          git -C homebrew-tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C homebrew-tap add Formula/amux.rb
+          git -C homebrew-tap commit -m "Update amux to ${GITHUB_REF_NAME}"
+          git -C homebrew-tap push origin HEAD:main

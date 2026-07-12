@@ -53,8 +53,7 @@ Optional:
 On macOS or Linux, install the release binary with Homebrew:
 
 ```sh
-brew tap zainfathoni/amux https://github.com/zainfathoni/amux
-brew install zainfathoni/amux/amux
+brew install zainfathoni/tap/amux
 ```
 
 Update Homebrew installs with Homebrew, not `amux update` or `amux self-update`:
@@ -444,10 +443,12 @@ git push origin v0.1.1
 The tag push starts the Release workflow. The workflow builds platform archives and injects the tag name as the `amux version` value.
 Each release publishes versioned artifacts such as `amux-v0.1.1-linux-amd64.tar.gz` and stable aliases such as `amux-linux-amd64.tar.gz` for `releases/latest/download` links.
 After the release assets are published, the workflow updates `Formula/amux.rb`
-on `main` with the new tag and versioned archive checksums so Homebrew users can
-upgrade with `brew upgrade amux`. Homebrew-managed installs should continue to
-use `brew upgrade`; the in-binary updater is only for user-writable manual
-release installs.
+in the [`zainfathoni/tap`](https://github.com/zainfathoni/homebrew-tap) Homebrew
+tap with the new tag and versioned archive checksums. This requires a repository
+secret named `HOMEBREW_TAP_DEPLOY_KEY` whose public key has write access to the
+tap. Homebrew users can then upgrade with `brew upgrade amux`.
+Homebrew-managed installs should continue to use `brew upgrade`; the in-binary
+updater is only for user-writable manual release installs.
 
 The standalone `amux` repository owns the installed `~/.local/bin/amux` binary.
 Dotfiles or machine-restore repositories should restore the workspace TSV and
