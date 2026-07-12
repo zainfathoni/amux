@@ -445,10 +445,10 @@ Each release publishes versioned artifacts such as `amux-v0.1.1-linux-amd64.tar.
 After the release assets are published, the workflow updates `Formula/amux.rb`
 in the [`zainfathoni/tap`](https://github.com/zainfathoni/homebrew-tap) Homebrew
 tap with the new tag and versioned archive checksums. This requires a repository
-secret named `HOMEBREW_TAP_TOKEN` with write access to the tap. Homebrew users
-can then upgrade with `brew upgrade amux`. Homebrew-managed installs should
-continue to use `brew upgrade`; the in-binary updater is only for user-writable
-manual release installs.
+secret named `HOMEBREW_TAP_DEPLOY_KEY` whose public key has write access to the
+tap. Homebrew users can then upgrade with `brew upgrade amux`.
+Homebrew-managed installs should continue to use `brew upgrade`; the in-binary
+updater is only for user-writable manual release installs.
 
 The standalone `amux` repository owns the installed `~/.local/bin/amux` binary.
 Dotfiles or machine-restore repositories should restore the workspace TSV and
