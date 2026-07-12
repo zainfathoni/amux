@@ -1,9 +1,9 @@
 #!/bin/sh
 set -eu
 
-version=${1:?usage: scripts/update-homebrew-formula.sh <tag> [dist-dir] [formula-path]}
+version=${1:?usage: scripts/update-homebrew-formula.sh <tag> [dist-dir] <formula-path>}
 dist_dir=${2:-dist}
-formula=${3:-Formula/amux.rb}
+formula=${3:?usage: scripts/update-homebrew-formula.sh <tag> [dist-dir] <formula-path>}
 
 case "$version" in
 	v*) formula_version=${version#v} ;;
