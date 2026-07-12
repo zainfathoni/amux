@@ -770,6 +770,66 @@ func TestSelfUpdateWarnsWhenUpToDateInstallIsShadowedOnPath(t *testing.T) {
 	}
 }
 
+func TestSelfUpdateDoesNotDowngradeWhenLatestRedirectIsStale(t *testing.T) {
+	tmp := t.TempDir()
+	exePath := filepath.Join(tmp, "amux")
+	if err := os.WriteFile(exePath, []byte("newer binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldVersion := version
+	version = "v0.1.31"
+	t.Cleanup(func() { version = oldVersion })
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"tag_name":"v0.1.30","assets":[]}`)
+	}))
+	defer server.Close()
+	withSelfUpdateTestState(t, exePath, server.URL, server.Client())
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).run([]string{"update"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "amux is already up to date (v0.1.31)") {
+		t.Fatalf("unexpected output: %q", got)
+	}
+	contents, err := os.ReadFile(exePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "newer binary" {
+		t.Fatalf("stale latest release downgraded executable to %q", contents)
+	}
+}
+
+func TestCompareReleaseVersions(t *testing.T) {
+	tests := []struct {
+		current, latest string
+		want            int
+		comparable      bool
+	}{
+		{current: "v0.1.31", latest: "v0.1.30", want: 1, comparable: true},
+		{current: "v0.1.9", latest: "v0.1.10", want: -1, comparable: true},
+		{current: "v1.0.0", latest: "v1.0.0", want: 0, comparable: true},
+		{current: "dev", latest: "v1.0.0", comparable: false},
+		{current: "1.0.0", latest: "v1.0.0", comparable: false},
+		{current: "v+1.0.0", latest: "v1.0.0", comparable: false},
+		{current: "v01.0.0", latest: "v1.0.0", comparable: false},
+		{current: "v1.0.0", latest: "1.0.0", comparable: false},
+		{current: "v1.0.0", latest: "v+1.0.0", comparable: false},
+		{current: "v1.0.0", latest: "v01.0.0", comparable: false},
+		{current: "v1.0.0", latest: "v1.0.0-beta.1", comparable: false},
+		{current: "v1.0.0-beta.1", latest: "v1.0.0", comparable: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.current+"/"+tt.latest, func(t *testing.T) {
+			got, comparable := compareReleaseVersions(tt.current, tt.latest)
+			if got != tt.want || comparable != tt.comparable {
+				t.Fatalf("compareReleaseVersions(%q, %q) = (%d, %t), want (%d, %t)", tt.current, tt.latest, got, comparable, tt.want, tt.comparable)
+			}
+		})
+	}
+}
+
 func TestSelfUpdateShadowWarningIgnoresSymlinkToInstallPath(t *testing.T) {
 	tmp := t.TempDir()
 	installDir := filepath.Join(tmp, "install")

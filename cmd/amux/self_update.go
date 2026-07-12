@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -83,7 +84,8 @@ func (a app) selfUpdate(opts options, args []string) error {
 	if err != nil {
 		return err
 	}
-	if version == release.TagName {
+	versionComparison, versionsComparable := compareReleaseVersions(version, release.TagName)
+	if version == release.TagName || (versionsComparable && versionComparison >= 0) {
 		fmt.Fprintf(a.stdout, "amux is already up to date (%s)\n", version)
 		if warning := selfUpdateShadowWarning(installPath); warning != "" {
 			fmt.Fprintln(a.stdout, warning)
@@ -281,6 +283,49 @@ func fetchLatestReleaseFromRedirect(ctx context.Context) (githubRelease, error) 
 
 func supportedSelfUpdatePlatform(goos, goarch string) bool {
 	return (goos == "linux" || goos == "darwin") && (goarch == "amd64" || goarch == "arm64")
+}
+
+func compareReleaseVersions(current, latest string) (int, bool) {
+	parse := func(value string) ([3]int, bool) {
+		var parsed [3]int
+		if !strings.HasPrefix(value, "v") {
+			return parsed, false
+		}
+		parts := strings.Split(strings.TrimPrefix(value, "v"), ".")
+		if len(parts) != len(parsed) {
+			return parsed, false
+		}
+		for i, part := range parts {
+			if part == "" || (len(part) > 1 && part[0] == '0') {
+				return parsed, false
+			}
+			for _, digit := range part {
+				if digit < '0' || digit > '9' {
+					return parsed, false
+				}
+			}
+			n, err := strconv.Atoi(part)
+			if err != nil {
+				return parsed, false
+			}
+			parsed[i] = n
+		}
+		return parsed, true
+	}
+	currentParts, currentOK := parse(current)
+	latestParts, latestOK := parse(latest)
+	if !currentOK || !latestOK {
+		return 0, false
+	}
+	for i := range currentParts {
+		if currentParts[i] < latestParts[i] {
+			return -1, true
+		}
+		if currentParts[i] > latestParts[i] {
+			return 1, true
+		}
+	}
+	return 0, true
 }
 
 func findSelfUpdateAssets(release githubRelease, archiveName string) (githubReleaseAsset, githubReleaseAsset, error) {
