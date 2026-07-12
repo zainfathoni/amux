@@ -193,6 +193,10 @@ func parseOptions(args []string) (options, []string, error) {
 	var opts options
 	remaining := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			remaining = append(remaining, args[i:]...)
+			break
+		}
 		switch args[i] {
 		case "--dry-run":
 			opts.dryRun = true
@@ -722,8 +726,9 @@ func (a app) runnerPark(opts options, args []string) error {
 	if !found {
 		return fmt.Errorf("no runner row for %s/%s in %s", workspace, window, config.RunnerPath(opts.configPath))
 	}
-	runner := tmux.Runner{DryRun: opts.dryRun}
-	panes, err := runner.WindowPanesWithCommand(session, row.Window)
+	// Inventory and revalidation are always real, read-only tmux queries. Only the
+	// asynchronous shutdown scheduling is simulated by the dry-run runner.
+	panes, err := (tmux.Runner{}).WindowPanesWithCommand(session, row.Window)
 	if err != nil {
 		return err
 	}
@@ -752,7 +757,16 @@ func (a app) runnerPark(opts options, args []string) error {
 	if revalidated[0].PaneID == "" || revalidated[0].WindowID == "" {
 		return fmt.Errorf("runner tmux window %s/%s has no pane or window id", session, row.Window)
 	}
-	return a.schedulePark(runner, parkPlan{key: workspace + "/" + row.Window, row: config.Row{Workspace: workspace, Window: row.Window}, pane: revalidated[0]})
+	plan := parkPlan{key: workspace + "/" + row.Window, row: config.Row{Workspace: workspace, Window: row.Window}, pane: revalidated[0]}
+	if err := a.schedulePark(tmux.Runner{DryRun: opts.dryRun, Output: a.stdout}, plan); err != nil {
+		return err
+	}
+	if opts.dryRun {
+		fmt.Fprintf(a.stdout, "Planned runner park: %s\n", plan.key)
+	} else {
+		fmt.Fprintf(a.stdout, "Scheduled runner park: %s\n", plan.key)
+	}
+	return nil
 }
 
 func parseRunnerParkArgs(args []string) (workspace, window, session string, err error) {
@@ -789,6 +803,8 @@ func verifyRunnerParkPane(row config.RunnerRow, pane tmux.WindowPane) error {
 	if startCommandMatchesRunner(pane.StartCommand, workdir) {
 		return nil
 	}
+	// Compatibility for runner panes started manually before tmux recorded a
+	// start command: accept only an exact configured path plus the amp process.
 	if pane.StartCommand == "" && pane.Path == workdir && pane.Command == "amp" {
 		return nil
 	}
@@ -953,7 +969,14 @@ type parkPlan struct {
 
 func (a app) park(opts options, args []string) error {
 	workspaceScope := false
-	if len(args) > 0 && strings.HasPrefix(args[0], "--workspace=") {
+	positionalOnly := false
+	if len(args) > 0 && args[0] == "--" {
+		positionalOnly, args = true, args[1:]
+		if len(args) == 0 {
+			return errors.New("park -- requires at least one positional argument")
+		}
+	}
+	if !positionalOnly && len(args) > 0 && strings.HasPrefix(args[0], "--workspace=") {
 		workspaceScope, args = true, append([]string{strings.TrimPrefix(args[0], "--workspace=")}, args[1:]...)
 	} else if len(args) > 0 && args[0] == "--workspace" {
 		if len(args) < 2 {
@@ -965,6 +988,9 @@ func (a app) park(opts options, args []string) error {
 		return errors.New("usage: amux park | amux park --workspace <workspace> | amux park <window> | amux park <workspace> <window> [session]")
 	}
 	for _, arg := range args {
+		if positionalOnly {
+			break
+		}
 		if strings.HasPrefix(arg, "-") {
 			return fmt.Errorf("unknown park flag %q", arg)
 		}
@@ -1076,12 +1102,12 @@ func (a app) park(opts options, args []string) error {
 	for _, plan := range plans {
 		current, e := (tmux.Runner{}).RestartPaneByID(plan.pane.PaneID)
 		if e != nil || current.Dead || current.PaneID != plan.pane.PaneID || current.WindowID != plan.pane.WindowID || current.Session != plan.pane.Session || current.Window != plan.pane.Window || normalizedTmuxStartCommand(current.StartCommand) != normalizedTmuxStartCommand(plan.pane.StartCommand) {
-			return fmt.Errorf("park precondition changed for %s; completed: 0/%d, not attempted: %d", plan.key, len(plans), len(plans))
+			return fmt.Errorf("park precondition changed for %s; scheduled: 0/%d, not scheduled: %d", plan.key, len(plans), len(plans))
 		}
 	}
 	for i, plan := range plans {
 		if err = a.schedulePark(tmux.Runner{DryRun: opts.dryRun, Output: a.stdout}, plan); err != nil {
-			return fmt.Errorf("park failed for %s; completed: %d/%d, not attempted: %d: %w", plan.key, i, len(plans), len(plans)-i-1, err)
+			return fmt.Errorf("park failed for %s; scheduled: %d/%d, not scheduled: %d: %w", plan.key, i, len(plans), len(plans)-i, err)
 		}
 		if opts.dryRun {
 			fmt.Fprintf(a.stdout, "Planned %d/%d: %s\n", i+1, len(plans), plan.key)
@@ -1114,7 +1140,10 @@ func (a app) parkCurrent(opts options, args []string) error {
 		return fmt.Errorf("current tmux target is unavailable: %w", err)
 	}
 	panes, err := (tmux.Runner{}).RestartWindowPanes(pane.Session, pane.Window)
-	if err != nil || len(panes) != 1 {
+	if err != nil {
+		return fmt.Errorf("inspect invoking tmux window %s/%s: %w", pane.Session, pane.Window, err)
+	}
+	if len(panes) != 1 {
 		return fmt.Errorf("park-current requires exactly one pane in invoking tmux window %s/%s; found %d", pane.Session, pane.Window, len(panes))
 	}
 	revalidated := panes[0]
@@ -1376,7 +1405,11 @@ func (a app) schedulePark(runner tmux.Runner, plan parkPlan) error {
 	if err := runner.RunShell(parkShutdownScript(plan.pane, parkShutdownDelay(), parkGracePeriod())); err != nil {
 		return fmt.Errorf("schedule tmux window %s shutdown: %w", plan.pane.WindowID, err)
 	}
-	fmt.Fprintf(a.stdout, "The local Amp process will be asked to exit in %s; tmux will force-close it only if graceful shutdown times out.\n", parkShutdownDelay())
+	wording := "will be asked"
+	if runner.DryRun {
+		wording = "would be asked"
+	}
+	fmt.Fprintf(a.stdout, "The local Amp process %s to exit in %s; tmux will force-close it only if graceful shutdown times out.\n", wording, parkShutdownDelay())
 	return nil
 }
 
@@ -1863,9 +1896,9 @@ func parkShutdownScript(pane tmux.WindowPane, delay, grace time.Duration) string
 		"window=" + shellSingleQuote(pane.WindowID),
 		"session=" + shellSingleQuote(pane.Session),
 		"start=" + shellSingleQuote(pane.StartCommand),
-		"expected=$(printf '%s\\t%s\\t%s\\t%s' \"$session\" \"$window\" \"$pane\" \"$start\")",
+		"expected=$(printf '%s\\t%s\\t%s\\t%s\\t%s' \"$session\" \"$window\" \"$pane\" '1' \"$start\")",
 		"sleep " + shellSeconds(delay),
-		"verify() { [ \"$(tmux display-message -p -t \"$pane\" '#{session_name}\t#{window_id}\t#{pane_id}\t#{pane_start_command}' 2>/dev/null)\" = \"$expected\" ]; }",
+		"verify() { [ \"$(tmux display-message -p -t \"$pane\" '#{session_name}\t#{window_id}\t#{pane_id}\t#{window_panes}\t#{pane_start_command}' 2>/dev/null)\" = \"$expected\" ]; }",
 		"verify || exit 0",
 		"tmux send-keys -t \"$pane\" C-c >/dev/null 2>&1 || exit 0",
 		"sleep 0.200",
@@ -3662,9 +3695,12 @@ Commands:
   park --workspace <workspace>
   park <window>
   park <workspace> <window> [session]
+  park -- <window>
+  park -- <workspace> <window> [session]
       Park every configured client on this machine, every client in one
       workspace, or one workspace window. Positional forms preserve the legacy
       mac/Amp defaults; pass a session to target another tmux session.
+      Put -- before all positional arguments when a name begins with a dash.
       Preflight verifies every selected client.
       Schedule delayed pane shutdown and return before local Amp processes exit.
       The delayed shutdown force-closes tmux only if graceful exit times out.

@@ -34,11 +34,40 @@ func TestParseOptionsAcceptsTerminalLauncher(t *testing.T) {
 	}
 }
 
+func TestParseOptionsPreservesArgumentsAfterTerminator(t *testing.T) {
+	opts, remaining, err := parseOptions([]string{"--dry-run", "park", "--", "--config=window", "--attach"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !opts.dryRun || opts.configPath != "" || opts.attachMode != attachAuto {
+		t.Fatalf("options after terminator were parsed: %+v", opts)
+	}
+	if got, want := strings.Join(remaining, " "), "park -- --config=window --attach"; got != want {
+		t.Fatalf("remaining = %q, want %q", got, want)
+	}
+}
+
+func TestVerifyRunnerParkPaneEmptyStartCommandCompatibilityIsExact(t *testing.T) {
+	row := config.RunnerRow{Workspace: "ws", Window: "runner", Workdir: "/configured"}
+	if err := verifyRunnerParkPane(row, tmux.WindowPane{Path: "/configured", Command: "amp"}); err != nil {
+		t.Fatalf("exact manual runner rejected: %v", err)
+	}
+	for _, pane := range []tmux.WindowPane{
+		{Path: "/other", Command: "amp"},
+		{Path: "/configured", Command: "sh"},
+	} {
+		if err := verifyRunnerParkPane(row, pane); err == nil {
+			t.Fatalf("mismatched empty-start pane accepted: %+v", pane)
+		}
+	}
+}
+
 func TestParkShutdownScriptExecutesAgainstVerifiedTmuxIdentity(t *testing.T) {
 	tests := []struct {
 		name       string
 		start      string
 		changeAt   string
+		panesAt    string
 		wantEvents string
 	}{
 		{
@@ -57,6 +86,12 @@ func TestParkShutdownScriptExecutesAgainstVerifiedTmuxIdentity(t *testing.T) {
 			changeAt:   "4",
 			wantEvents: "send-keys -t %7 C-c\nsend-keys -t %7 C-d\n",
 		},
+		{
+			name:       "split added immediately before kill preserves window",
+			start:      "exec amp threads continue 'single quoted'",
+			panesAt:    "4",
+			wantEvents: "send-keys -t %7 C-c\nsend-keys -t %7 C-d\n",
+		},
 	}
 
 	for _, tt := range tests {
@@ -71,8 +106,10 @@ if [ "$1" = display-message ] && [ "$2" = -p ] && [ "$3" = -t ] && [ "$4" = %7 ]
   n=$((n + 1))
   printf '%s' "$n" >"$COUNTER"
   start=$START
+  panes=1
   if [ -n "$CHANGE_AT" ] && [ "$n" -ge "$CHANGE_AT" ]; then start=changed; fi
-  printf '%s\t%s\t%s\t%s\n' "$SESSION" "$WINDOW" "$PANE" "$start"
+  if [ -n "$PANES_AT" ] && [ "$n" -ge "$PANES_AT" ]; then panes=2; fi
+  printf '%s\t%s\t%s\t%s\t%s\n' "$SESSION" "$WINDOW" "$PANE" "$panes" "$start"
   exit 0
 fi
 case "$1" in
@@ -88,6 +125,7 @@ exit 2
 				"COUNTER="+counter, "EVENTS="+events, "SESSION="+pane.Session,
 				"WINDOW="+pane.WindowID, "PANE="+pane.PaneID, "START="+pane.StartCommand,
 				"CHANGE_AT="+tt.changeAt,
+				"PANES_AT="+tt.panesAt,
 			)
 			if output, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("shutdown script failed: %v\n%s", err, output)
@@ -4140,6 +4178,90 @@ exit 2
 	}
 }
 
+func TestParkReportsPartiallyScheduledJobsAccurately(t *testing.T) {
+	tmp := t.TempDir()
+	configPath, logPath := filepath.Join(tmp, "workspaces.tsv"), filepath.Join(tmp, "tmux.log")
+	if err := os.WriteFile(configPath, []byte("foo\tone\t/tmp/one\tT-one\nfoo\ttwo\t/tmp/two\tT-two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> `+shellSingleQuote(logPath)+`
+if [ "$1" = list-panes ] && [ "$2" = -a ]; then
+ printf 'S1\tone\t@1\t%%1\t/tmp/one\tamp\t%s\t0\n' `+shellSingleQuote(tmux.ContinueCommand("/tmp/one", "T-one"))+`
+ printf 'S2\ttwo\t@2\t%%2\t/tmp/two\tamp\t%s\t0\n' `+shellSingleQuote(tmux.ContinueCommand("/tmp/two", "T-two"))+`; exit 0
+fi
+if [ "$1" = list-panes ] && [ "$2" = -t ]; then
+ case "$3" in
+  %1) printf 'S1\tone\t@1\t%%1\t/tmp/one\tamp\t%s\t0\n' `+shellSingleQuote(tmux.ContinueCommand("/tmp/one", "T-one"))+` ;;
+  %2) printf 'S2\ttwo\t@2\t%%2\t/tmp/two\tamp\t%s\t0\n' `+shellSingleQuote(tmux.ContinueCommand("/tmp/two", "T-two"))+` ;;
+ esac; exit 0
+fi
+if [ "$1" = run-shell ]; then
+ count=$(grep -c 'tmux run-shell' `+shellSingleQuote(logPath)+`)
+ [ "$count" -eq 1 ] && exit 0
+ exit 1
+fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	err := (app{stdout: io.Discard}).run([]string{"--config", configPath, "park", "--workspace", "foo"})
+	if err == nil || !strings.Contains(err.Error(), "scheduled: 1/2, not scheduled: 1") || strings.Contains(err.Error(), "completed") {
+		t.Fatalf("error = %v", err)
+	}
+	if got := strings.Count(readTestFile(t, logPath), "tmux run-shell -b"); got != 2 {
+		t.Fatalf("run-shell attempts = %d, want 2\n%s", got, readTestFile(t, logPath))
+	}
+}
+
+func TestParkPositionalTerminatorAndFlagEdgeCases(t *testing.T) {
+	tmp := t.TempDir()
+	configPath, logPath := filepath.Join(tmp, "workspaces.tsv"), filepath.Join(tmp, "tmux.log")
+	if err := os.WriteFile(configPath, []byte("mac\t-worker\t/tmp/dash\tT-dash\nworkspace\t-window\t/tmp/explicit\tT-explicit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf 'tmux %s\n' "$*" >> `+shellSingleQuote(logPath)+`
+if [ "$1" = list-panes ] && [ "$2" = -a ]; then
+ printf 'Amp\t-worker\t@1\t%%1\t/tmp/dash\tamp\t%s\t0\n' `+shellSingleQuote(tmux.ContinueCommand("/tmp/dash", "T-dash"))+`
+ printf 'Explicit\t-window\t@2\t%%2\t/tmp/explicit\tamp\t%s\t0\n' `+shellSingleQuote(tmux.ContinueCommand("/tmp/explicit", "T-explicit"))+`; exit 0
+fi
+if [ "$1" = list-panes ] && [ "$2" = -t ]; then
+ case "$3" in
+  %1) printf 'Amp\t-worker\t@1\t%%1\t/tmp/dash\tamp\t%s\t0\n' `+shellSingleQuote(tmux.ContinueCommand("/tmp/dash", "T-dash"))+` ;;
+  %2) printf 'Explicit\t-window\t@2\t%%2\t/tmp/explicit\tamp\t%s\t0\n' `+shellSingleQuote(tmux.ContinueCommand("/tmp/explicit", "T-explicit"))+` ;;
+ esac; exit 0
+fi
+if [ "$1" = run-shell ]; then exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	for _, tc := range []struct {
+		args, target []string
+	}{{[]string{"--", "-worker"}, []string{"target='@1'"}}, {[]string{"--", "workspace", "-window", "Explicit"}, []string{"target='@2'"}}} {
+		before := strings.Count(readTestFile(t, logPath), "tmux run-shell -b")
+		if err := (app{stdout: io.Discard}).run(append([]string{"--config", configPath, "park"}, tc.args...)); err != nil {
+			t.Fatalf("park %v: %v", tc.args, err)
+		}
+		log := readTestFile(t, logPath)
+		if strings.Count(log, "tmux run-shell -b") != before+1 || !strings.Contains(log, tc.target[0]) {
+			t.Fatalf("park %v targeted incorrectly:\n%s", tc.args, log)
+		}
+	}
+	for _, args := range [][]string{{"--workspace="}, {"--workspace", "foo", "--workspace", "bar"}, {"foo", "--workspace", "bar"}, {"--"}} {
+		before := readTestFile(t, logPath)
+		err := (app{stdout: io.Discard}).run(append([]string{"--config", configPath, "park"}, args...))
+		if err == nil {
+			t.Fatalf("park %v unexpectedly succeeded", args)
+		}
+		if after := readTestFile(t, logPath); after != before {
+			t.Fatalf("park %v invoked tmux", args)
+		}
+	}
+}
+
 func readTestFile(t *testing.T, path string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)
@@ -7026,6 +7148,23 @@ exit 2
 	}
 	if !strings.Contains(log, "pane='%91'") {
 		t.Fatalf("runner park did not schedule exact pane ID\nlog:\n%s", log)
+	}
+
+	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	if err := (app{stdout: &stdout}).run([]string{"--config", configPath, "--dry-run", "runner", "park", "amux", "amux-runner"}); err != nil {
+		t.Fatal(err)
+	}
+	log = readTestFile(t, logPath)
+	if strings.Contains(log, "tmux run-shell") {
+		t.Fatalf("runner park dry-run executed run-shell\nlog:\n%s", log)
+	}
+	for _, want := range []string{"Would schedule tmux window amux/amux-runner", "Planned runner park: amux/amux-runner", "tmux 'run-shell' '-b'", "would be asked to exit"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("runner park dry-run output missing %q\nstdout:\n%s", want, stdout.String())
+		}
 	}
 }
 

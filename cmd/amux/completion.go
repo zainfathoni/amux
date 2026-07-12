@@ -28,7 +28,7 @@ var completionCommands = []completionCommand{
 	{Name: "remove", Description: "Alias for unpin", Args: "<workspace> <window>"},
 	{Name: "unpin-current", Description: "Remove the current tmux window from restore config", Args: "[workspace]"},
 	{Name: "remove-current", Description: "Alias for unpin-current", Args: "[workspace]"},
-	{Name: "park", Description: "Park all, workspace, or one verified local Amp client", Flags: []string{"--workspace"}, Args: "[window] | [workspace] <window> [session]"},
+	{Name: "park", Description: "Park all, workspace, or one verified local Amp client; -- permits leading-dash names", Flags: []string{"--workspace", "--"}, Args: "[window] | [workspace] <window> [session]"},
 	{Name: "park-current", Description: "Stop the current tmux window without changing restore config", Args: "[workspace]"},
 	{Name: "restart", Description: "Restart all or one verified Amp client in place", Args: "[[workspace] <window> [session]]"},
 	{Name: "shelve-current", Description: "Pin if needed, archive the thread, and stop the current window", Args: "[workspace] [thread-id-or-url]"},

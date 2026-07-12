@@ -21,6 +21,8 @@ amux park
 amux park --workspace <workspace>
 amux park <window>
 amux park <workspace> <window> [session]
+amux park -- <-window>
+amux park -- <workspace> <-window> [session]
 amux park-current [workspace]
 amux restart [[workspace] <window> [session]]
 amux shelve-current [workspace] [thread-id-or-url]
