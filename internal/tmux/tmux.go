@@ -371,7 +371,7 @@ func (r Runner) RespawnPane(target, command string) error {
 func (r Runner) RunShell(command string) error {
 	args := []string{"run-shell", "-b", command}
 	if r.DryRun {
-		fmt.Printf("tmux %s\n", shellJoin(args))
+		fmt.Fprintf(r.output(), "tmux %s\n", shellJoin(args))
 		return nil
 	}
 	return tmuxRun(args...)
