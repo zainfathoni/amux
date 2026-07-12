@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,14 +22,16 @@ import (
 )
 
 const (
-	githubLatestReleaseURL = "https://api.github.com/repos/zainfathoni/amux/releases/latest"
-	selfUpdateTimeout      = 2 * time.Minute
+	githubLatestReleaseURL     = "https://api.github.com/repos/zainfathoni/amux/releases/latest"
+	githubLatestReleasePageURL = "https://github.com/zainfathoni/amux/releases/latest"
+	selfUpdateTimeout          = 2 * time.Minute
 )
 
 var (
-	selfUpdateHTTPClient = http.DefaultClient
-	selfUpdateReleaseURL = githubLatestReleaseURL
-	executablePath       = os.Executable
+	selfUpdateHTTPClient     = http.DefaultClient
+	selfUpdateReleaseURL     = githubLatestReleaseURL
+	selfUpdateReleasePageURL = githubLatestReleasePageURL
+	executablePath           = os.Executable
 )
 
 type githubRelease struct {
@@ -41,11 +44,22 @@ type githubReleaseAsset struct {
 	DownloadURL string `json:"browser_download_url"`
 }
 
+type httpStatusError struct {
+	URL                string
+	Status             string
+	Code               int
+	RateLimitRemaining string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("GET %s returned %s", e.URL, e.Status)
+}
+
 func (a app) selfUpdate(opts options, args []string) error {
 	if len(args) != 0 {
 		return errors.New("usage: amux update")
 	}
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+	if !supportedSelfUpdatePlatform(runtime.GOOS, runtime.GOARCH) {
 		return fmt.Errorf("self-update is unsupported on %s/%s: no release asset is published for this platform", runtime.GOOS, runtime.GOARCH)
 	}
 
@@ -199,7 +213,17 @@ func fetchLatestRelease(ctx context.Context) (githubRelease, error) {
 	var release githubRelease
 	body, err := downloadURL(ctx, selfUpdateReleaseURL)
 	if err != nil {
-		return release, fmt.Errorf("check latest release: %w", err)
+		var statusErr *httpStatusError
+		if !errors.As(err, &statusErr) ||
+			(statusErr.Code != http.StatusForbidden && statusErr.Code != http.StatusTooManyRequests) ||
+			statusErr.RateLimitRemaining != "0" {
+			return release, fmt.Errorf("check latest release: %w", err)
+		}
+		fallbackRelease, fallbackErr := fetchLatestReleaseFromRedirect(ctx)
+		if fallbackErr != nil {
+			return release, fmt.Errorf("check latest release: %w (fallback failed: %v)", err, fallbackErr)
+		}
+		return fallbackRelease, nil
 	}
 	if err := json.Unmarshal(body, &release); err != nil {
 		return release, fmt.Errorf("parse latest release response: %w", err)
@@ -208,6 +232,55 @@ func fetchLatestRelease(ctx context.Context) (githubRelease, error) {
 		return release, errors.New("latest release response did not include tag_name")
 	}
 	return release, nil
+}
+
+func fetchLatestReleaseFromRedirect(ctx context.Context) (githubRelease, error) {
+	var release githubRelease
+	releasePageURL, err := url.Parse(selfUpdateReleasePageURL)
+	if err != nil {
+		return release, fmt.Errorf("parse latest release page URL: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, selfUpdateReleasePageURL, nil)
+	if err != nil {
+		return release, err
+	}
+	req.Header.Set("User-Agent", "amux-self-update")
+	resp, err := selfUpdateHTTPClient.Do(req)
+	if err != nil {
+		return release, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return release, fmt.Errorf("HEAD %s returned %s", selfUpdateReleasePageURL, resp.Status)
+	}
+
+	releasePath := strings.TrimSuffix(releasePageURL.EscapedPath(), "/latest")
+	tagPrefix := releasePath + "/tag/"
+	if resp.Request.URL.Scheme != releasePageURL.Scheme ||
+		resp.Request.URL.Host != releasePageURL.Host ||
+		!strings.HasPrefix(resp.Request.URL.EscapedPath(), tagPrefix) {
+		return release, fmt.Errorf("latest release did not redirect to a tagged release: %s", resp.Request.URL)
+	}
+	escapedTagName := strings.TrimPrefix(resp.Request.URL.EscapedPath(), tagPrefix)
+	if escapedTagName == "" || strings.Contains(escapedTagName, "/") {
+		return release, fmt.Errorf("latest release redirect included invalid tag %q", escapedTagName)
+	}
+	tagName, err := url.PathUnescape(escapedTagName)
+	if err != nil || tagName == "" || strings.Contains(tagName, "/") {
+		return release, fmt.Errorf("latest release redirect included invalid tag %q", tagName)
+	}
+	archiveName := fmt.Sprintf("amux-%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	downloadBase := strings.TrimSuffix(selfUpdateReleasePageURL, "/latest") + "/download/" + url.PathEscape(tagName) + "/"
+	release.TagName = tagName
+	release.Assets = []githubReleaseAsset{
+		{Name: archiveName, DownloadURL: downloadBase + archiveName},
+		{Name: archiveName + ".sha256", DownloadURL: downloadBase + archiveName + ".sha256"},
+	}
+	return release, nil
+}
+
+func supportedSelfUpdatePlatform(goos, goarch string) bool {
+	return (goos == "linux" || goos == "darwin") && (goarch == "amd64" || goarch == "arm64")
 }
 
 func findSelfUpdateAssets(release githubRelease, archiveName string) (githubReleaseAsset, githubReleaseAsset, error) {
@@ -242,7 +315,12 @@ func downloadURL(ctx context.Context, url string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("GET %s returned %s", url, resp.Status)
+		return nil, &httpStatusError{
+			URL:                url,
+			Status:             resp.Status,
+			Code:               resp.StatusCode,
+			RateLimitRemaining: resp.Header.Get("X-RateLimit-Remaining"),
+		}
 	}
 	return io.ReadAll(resp.Body)
 }

@@ -555,6 +555,121 @@ func TestUpdateAliasDryRunPlansLatestReleaseAsset(t *testing.T) {
 	}
 }
 
+func TestSelfUpdateFallsBackWhenGitHubAPIRateLimitIsExhausted(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusTooManyRequests} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			tmp := t.TempDir()
+			exePath := filepath.Join(tmp, "amux")
+			if err := os.WriteFile(exePath, []byte("old binary"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			archiveName := fmt.Sprintf("amux-%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+			archiveBytes := testReleaseArchive(t, "new binary")
+			checksum := sha256.Sum256(archiveBytes)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/latest":
+					w.Header().Set("X-RateLimit-Remaining", "0")
+					http.Error(w, "API rate limit exceeded", status)
+				case "/releases/latest":
+					if r.Method != http.MethodHead {
+						t.Fatalf("latest release request method = %s, want HEAD", r.Method)
+					}
+					http.Redirect(w, r, "/releases/tag/v9.9.9", http.StatusFound)
+				case "/releases/tag/v9.9.9":
+					if r.Method != http.MethodHead {
+						t.Fatalf("tagged release request method = %s, want HEAD", r.Method)
+					}
+				case "/releases/download/v9.9.9/" + archiveName:
+					w.Write(archiveBytes)
+				case "/releases/download/v9.9.9/" + archiveName + ".sha256":
+					fmt.Fprintf(w, "%x  %s\n", checksum, archiveName)
+				default:
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			withSelfUpdateTestState(t, exePath, server.URL+"/api/latest", server.Client())
+			selfUpdateReleasePageURL = server.URL + "/releases/latest"
+
+			var stdout bytes.Buffer
+			if err := (app{stdout: &stdout}).run([]string{"update"}); err != nil {
+				t.Fatal(err)
+			}
+			if got := stdout.String(); !strings.Contains(got, "Updated amux to v9.9.9") {
+				t.Fatalf("unexpected fallback output: %q", got)
+			}
+			contents, err := os.ReadFile(exePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(contents) != "new binary" {
+				t.Fatalf("fallback installed %q, want new binary", contents)
+			}
+		})
+	}
+}
+
+func TestSelfUpdateDoesNotMaskNonRateLimitForbidden(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    int
+		remaining string
+	}{
+		{name: "403 without header", status: http.StatusForbidden},
+		{name: "403 with quota", status: http.StatusForbidden, remaining: "1"},
+		{name: "429 without header", status: http.StatusTooManyRequests},
+		{name: "429 with quota", status: http.StatusTooManyRequests, remaining: "1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			exePath := filepath.Join(tmp, "amux")
+			if err := os.WriteFile(exePath, []byte("old binary"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/latest" {
+					t.Fatalf("non-rate-limit failure unexpectedly requested %s", r.URL.Path)
+				}
+				if tt.remaining != "" {
+					w.Header().Set("X-RateLimit-Remaining", tt.remaining)
+				}
+				http.Error(w, http.StatusText(tt.status), tt.status)
+			}))
+			defer server.Close()
+			withSelfUpdateTestState(t, exePath, server.URL+"/api/latest", server.Client())
+
+			err := (app{}).run([]string{"update"})
+			statusText := fmt.Sprintf("%d %s", tt.status, http.StatusText(tt.status))
+			if err == nil || !strings.Contains(err.Error(), "check latest release:") || !strings.Contains(err.Error(), statusText) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestSupportedSelfUpdatePlatform(t *testing.T) {
+	tests := []struct {
+		goos, goarch string
+		want         bool
+	}{
+		{goos: "darwin", goarch: "amd64", want: true},
+		{goos: "darwin", goarch: "arm64", want: true},
+		{goos: "linux", goarch: "amd64", want: true},
+		{goos: "linux", goarch: "arm64", want: true},
+		{goos: "linux", goarch: "386", want: false},
+		{goos: "windows", goarch: "amd64", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.goos+"/"+tt.goarch, func(t *testing.T) {
+			if got := supportedSelfUpdatePlatform(tt.goos, tt.goarch); got != tt.want {
+				t.Fatalf("supportedSelfUpdatePlatform(%q, %q) = %t, want %t", tt.goos, tt.goarch, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestUpdateAliasUsageUsesPreferredCommandName(t *testing.T) {
 	err := (app{}).run([]string{"update", "extra"})
 	if err == nil {
@@ -6666,13 +6781,16 @@ func withSelfUpdateTestState(t *testing.T, exePath, releaseURL string, client *h
 	t.Helper()
 	oldExecutablePath := executablePath
 	oldReleaseURL := selfUpdateReleaseURL
+	oldReleasePageURL := selfUpdateReleasePageURL
 	oldHTTPClient := selfUpdateHTTPClient
 	executablePath = func() (string, error) { return exePath, nil }
 	selfUpdateReleaseURL = releaseURL
+	selfUpdateReleasePageURL = releaseURL + "/fallback"
 	selfUpdateHTTPClient = client
 	t.Cleanup(func() {
 		executablePath = oldExecutablePath
 		selfUpdateReleaseURL = oldReleaseURL
+		selfUpdateReleasePageURL = oldReleasePageURL
 		selfUpdateHTTPClient = oldHTTPClient
 	})
 }
