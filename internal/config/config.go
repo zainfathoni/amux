@@ -214,6 +214,7 @@ func ParseRunners(r io.Reader) ([]RunnerRow, error) {
 		}
 		seenWindows[windowKey] = true
 		seenWorkdirs[workdir] = row.Workspace + "/" + row.Window
+		row.Workdir = workdir
 		rows = append(rows, row)
 	}
 	if err := scanner.Err(); err != nil {

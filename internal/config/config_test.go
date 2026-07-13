@@ -252,6 +252,33 @@ func TestMigrationIsExplicitIdempotentAndPreservesLegacyFiles(t *testing.T) {
 	}
 }
 
+func TestCompletedMigrationDoesNotRevalidatePreservedLegacyFiles(t *testing.T) {
+	path := t.TempDir()
+	dir := Directory{Path: path}
+	legacyPath := filepath.Join(path, "workspaces.tsv")
+	if err := os.WriteFile(legacyPath, []byte("mac\tworker\t/tmp/project\tT-worker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := PlanMigration(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plan.Apply(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(legacyPath, []byte("preserved rollback data may change independently\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	required, err := MigrationRequired(dir)
+	if err != nil {
+		t.Fatalf("completed migration revalidated preserved legacy file: %v", err)
+	}
+	if required {
+		t.Fatal("completed migration became required again")
+	}
+}
+
 func TestWorkerAndRunnerRegistriesEnforceCanonicalMachineIdentities(t *testing.T) {
 	_, err := Parse(strings.NewReader(
 		"one\tfirst\t/tmp/one\tT-same\n" +
@@ -268,6 +295,13 @@ func TestWorkerAndRunnerRegistriesEnforceCanonicalMachineIdentities(t *testing.T
 	))
 	if err == nil || !strings.Contains(err.Error(), "runner workdir "+workdir+" is already configured") {
 		t.Fatalf("ParseRunners duplicate runner identity error = %v", err)
+	}
+	runners, err := ParseRunners(strings.NewReader("one\tfirst\t" + workdir + "/.\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runners[0].Workdir; got != workdir {
+		t.Fatalf("parsed runner workdir = %q, want canonical identity %q", got, workdir)
 	}
 
 	path := filepath.Join(t.TempDir(), WorkersFile)
@@ -347,7 +381,7 @@ func TestOperationRecordsPersistIdempotencyStateAndRejectKeyReuse(t *testing.T) 
 		Kind:        "worker.spawn",
 		RequestHash: "sha256:abc",
 		State:       OperationStarted,
-		Resource:    OperationResource{Kind: "worker", Thread: "https://ampcode.com/threads/T-worker"},
+		Resource:    OperationResource{Kind: "worker"},
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
@@ -360,6 +394,7 @@ func TestOperationRecordsPersistIdempotencyStateAndRejectKeyReuse(t *testing.T) 
 	}
 
 	record.State = OperationSucceeded
+	record.Resource.Thread = "https://ampcode.com/threads/T-worker"
 	record.UpdatedAt = now.Add(time.Minute)
 	created, err = StoreOperation(path, record)
 	if err != nil {
@@ -387,5 +422,11 @@ func TestOperationRecordsPersistIdempotencyStateAndRejectKeyReuse(t *testing.T) 
 	}
 	if !found || got.RequestHash != record.RequestHash {
 		t.Fatalf("conflicting write changed operation: %+v", got)
+	}
+
+	rebound := record
+	rebound.Resource.Thread = "T-other"
+	if _, err := StoreOperation(path, rebound); err == nil || !strings.Contains(err.Error(), "cannot be rebound") {
+		t.Fatalf("StoreOperation rebound identity error = %v", err)
 	}
 }

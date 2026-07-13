@@ -47,17 +47,26 @@ func PlanMigration(dir Directory) (MigrationPlan, error) {
 		return plan, nil
 	}
 
-	workers, err := migratedWorkers(sources.workers)
-	if err != nil {
-		return plan, fmt.Errorf("prepare workers migration: %w", err)
+	var workers []byte
+	if !fileExists(dir.WorkersPath()) {
+		workers, err = migratedWorkers(sources.workers)
+		if err != nil {
+			return plan, fmt.Errorf("prepare workers migration: %w", err)
+		}
 	}
-	runners, err := migratedRunners(sources.runners)
-	if err != nil {
-		return plan, fmt.Errorf("prepare runners migration: %w", err)
+	var runners []byte
+	if !fileExists(dir.RunnersPath()) {
+		runners, err = migratedRunners(sources.runners)
+		if err != nil {
+			return plan, fmt.Errorf("prepare runners migration: %w", err)
+		}
 	}
-	shelves, err := migratedShelves(sources.shelves)
-	if err != nil {
-		return plan, fmt.Errorf("prepare shelves migration: %w", err)
+	var shelves []byte
+	if !fileExists(dir.ShelvesPath()) {
+		shelves, err = migratedShelves(sources.shelves)
+		if err != nil {
+			return plan, fmt.Errorf("prepare shelves migration: %w", err)
+		}
 	}
 
 	plan.Actions = []MigrationAction{

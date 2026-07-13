@@ -72,11 +72,14 @@ func StoreOperation(path string, operation OperationRecord) (bool, error) {
 			continue
 		}
 		created = false
-		if existing.Kind != operation.Kind || existing.RequestHash != operation.RequestHash || existing.Resource != operation.Resource {
+		if existing.Kind != operation.Kind || existing.RequestHash != operation.RequestHash || existing.Resource.Kind != operation.Resource.Kind {
 			return false, fmt.Errorf("idempotency key %q is already bound to a different request", operation.Key)
 		}
 		if !existing.CreatedAt.Equal(operation.CreatedAt) {
 			return false, fmt.Errorf("idempotency key %q cannot change its creation time", operation.Key)
+		}
+		if operationIdentity(existing.Resource) != "" && existing.Resource != operation.Resource {
+			return false, fmt.Errorf("idempotency key %q resource identity cannot be rebound", operation.Key)
 		}
 		operations[i] = operation
 		break
@@ -111,25 +114,32 @@ func canonicalOperation(operation OperationRecord) (OperationRecord, error) {
 	}
 	switch operation.Resource.Kind {
 	case "worker":
-		thread, err := CanonicalThreadID(operation.Resource.Thread)
-		if err != nil {
-			return operation, err
-		}
 		if operation.Resource.Workdir != "" {
 			return operation, errors.New("worker operation resource must not include workdir")
 		}
-		operation.Resource.Thread = thread
-	case "runner":
-		workdir, err := CanonicalWorkdir(operation.Resource.Workdir)
-		if err != nil {
-			return operation, err
+		if operation.Resource.Thread != "" {
+			thread, err := CanonicalThreadID(operation.Resource.Thread)
+			if err != nil {
+				return operation, err
+			}
+			operation.Resource.Thread = thread
 		}
+	case "runner":
 		if operation.Resource.Thread != "" {
 			return operation, errors.New("runner operation resource must not include thread")
 		}
-		operation.Resource.Workdir = workdir
+		if operation.Resource.Workdir != "" {
+			workdir, err := CanonicalWorkdir(operation.Resource.Workdir)
+			if err != nil {
+				return operation, err
+			}
+			operation.Resource.Workdir = workdir
+		}
 	default:
 		return operation, fmt.Errorf("invalid operation resource kind %q", operation.Resource.Kind)
+	}
+	if operation.State == OperationSucceeded && operationIdentity(operation.Resource) == "" {
+		return operation, errors.New("successful operation requires a canonical resource identity")
 	}
 	if operation.CreatedAt.IsZero() || operation.UpdatedAt.IsZero() {
 		return operation, errors.New("operation timestamps are required")
@@ -138,6 +148,13 @@ func canonicalOperation(operation OperationRecord) (OperationRecord, error) {
 		return operation, errors.New("operation updated_at must not precede created_at")
 	}
 	return operation, nil
+}
+
+func operationIdentity(resource OperationResource) string {
+	if resource.Kind == "worker" {
+		return resource.Thread
+	}
+	return resource.Workdir
 }
 
 func loadOperations(path string) ([]OperationRecord, error) {
