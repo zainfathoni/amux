@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/zainfathoni/amux/internal/config"
+	"github.com/zainfathoni/amux/internal/lock"
 )
 
 const (
@@ -56,8 +57,9 @@ func CommandResource() ResourceID {
 }
 
 type Failure struct {
-	Kind    ErrorKind `json:"kind"`
-	Message string    `json:"message"`
+	Kind    ErrorKind       `json:"kind"`
+	Message string          `json:"message"`
+	Lock    *lock.BusyError `json:"lock,omitempty"`
 }
 
 type Outcome struct {
