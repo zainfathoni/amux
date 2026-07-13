@@ -11,7 +11,8 @@ import (
 )
 
 const (
-	DefaultRelativePath       = ".config/amux/workspaces.tsv"
+	DefaultRelativePath       = ".config/amux/workers.tsv"
+	LegacyAmuxRelativePath    = ".config/amux/workspaces.tsv"
 	LegacyDefaultRelativePath = ".config/amp-tmux/workspaces.tsv"
 	WorkspacesEnv             = "AMUX_WORKSPACES"
 	LegacyWorkspacesEnv       = "AMP_TMUX_WORKSPACES"
@@ -31,51 +32,15 @@ type RunnerRow struct {
 }
 
 func DefaultPath() string {
-	if path := os.Getenv(WorkspacesEnv); path != "" {
-		return path
-	}
-	if path := os.Getenv(LegacyWorkspacesEnv); path != "" {
-		return path
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
+	dir, err := ResolveDirectory("")
+	if err != nil {
 		return DefaultRelativePath
 	}
-	path := filepath.Join(home, DefaultRelativePath)
-	if _, err := os.Stat(path); err == nil {
-		return path
-	}
-	legacyPath := filepath.Join(home, LegacyDefaultRelativePath)
-	if _, err := os.Stat(legacyPath); err == nil {
-		_, _ = MigrateDefaultDir()
-		if _, err := os.Stat(path); err == nil {
-			return path
-		}
-		return legacyPath
-	}
-	return path
+	return dir.WorkersPath()
 }
 
 func DefaultPathReadOnly() string {
-	if path := os.Getenv(WorkspacesEnv); path != "" {
-		return path
-	}
-	if path := os.Getenv(LegacyWorkspacesEnv); path != "" {
-		return path
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return DefaultRelativePath
-	}
-	path := filepath.Join(home, DefaultRelativePath)
-	if _, err := os.Stat(path); err == nil {
-		return path
-	}
-	legacyPath := filepath.Join(home, LegacyDefaultRelativePath)
-	if _, err := os.Stat(legacyPath); err == nil {
-		return legacyPath
-	}
-	return path
+	return DefaultPath()
 }
 
 func RunnerPath(workspacesPath string) string {
@@ -83,60 +48,24 @@ func RunnerPath(workspacesPath string) string {
 }
 
 func MigrateDefaultDir() (bool, error) {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
+	dir, err := ResolveDirectory("")
+	if err != nil {
 		return false, err
 	}
-	legacyDir := filepath.Join(home, filepath.Dir(LegacyDefaultRelativePath))
-	newDir := filepath.Join(home, filepath.Dir(DefaultRelativePath))
-	if _, err := os.Stat(legacyDir); errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	} else if err != nil {
+	plan, err := PlanMigration(dir)
+	if err != nil {
 		return false, err
 	}
-	if err := os.MkdirAll(newDir, 0o755); err != nil {
+	results, err := plan.Apply()
+	if err != nil {
 		return false, err
 	}
-	migrated := false
-	for _, name := range []string{"workspaces.tsv", "runners.tsv", "shelves.tsv"} {
-		copied, err := copyConfigFileIfMissing(filepath.Join(legacyDir, name), filepath.Join(newDir, name))
-		if err != nil {
-			return migrated, err
+	for _, result := range results {
+		if result.Status == MigrationSuccessful {
+			return true, nil
 		}
-		migrated = migrated || copied
 	}
-	return migrated, nil
-}
-
-func copyConfigFileIfMissing(src, dst string) (bool, error) {
-	data, err := os.ReadFile(src)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if _, err := os.Stat(dst); err == nil {
-		return false, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return false, err
-	}
-	file, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return false, err
-	}
-	if _, err := file.Write(data); err != nil {
-		_ = file.Close()
-		return false, err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return false, err
-	}
-	if err := file.Close(); err != nil {
-		return false, err
-	}
-	return true, nil
+	return false, nil
 }
 
 func Ensure(path string) error {
@@ -214,6 +143,8 @@ func LoadRunnersReadOnly(path string) ([]RunnerRow, error) {
 func Parse(r io.Reader) ([]Row, error) {
 	scanner := bufio.NewScanner(r)
 	var rows []Row
+	seenThreads := make(map[string]string)
+	seenWindows := make(map[string]bool)
 	lineNo := 0
 	for scanner.Scan() {
 		lineNo++
@@ -225,10 +156,23 @@ func Parse(r io.Reader) ([]Row, error) {
 		if len(fields) != 4 {
 			return nil, fmt.Errorf("invalid row on line %d: expected 4 tab-separated fields", lineNo)
 		}
-		row := Row{Workspace: fields[0], Window: fields[1], Workdir: fields[2], Thread: fields[3]}
+		thread, err := CanonicalThreadID(fields[3])
+		if err != nil {
+			return nil, fmt.Errorf("invalid row on line %d: %w", lineNo, err)
+		}
+		row := Row{Workspace: fields[0], Window: fields[1], Workdir: fields[2], Thread: thread}
 		if err := row.Validate(); err != nil {
 			return nil, fmt.Errorf("invalid row on line %d: %w", lineNo, err)
 		}
+		windowKey := row.Workspace + "\x00" + row.Window
+		if seenWindows[windowKey] {
+			return nil, fmt.Errorf("duplicate worker row %s/%s", row.Workspace, row.Window)
+		}
+		if previous, exists := seenThreads[row.Thread]; exists {
+			return nil, fmt.Errorf("worker thread %s is already configured as %s", row.Thread, previous)
+		}
+		seenWindows[windowKey] = true
+		seenThreads[row.Thread] = row.Workspace + "/" + row.Window
 		rows = append(rows, row)
 	}
 	if err := scanner.Err(); err != nil {
@@ -240,6 +184,8 @@ func Parse(r io.Reader) ([]Row, error) {
 func ParseRunners(r io.Reader) ([]RunnerRow, error) {
 	scanner := bufio.NewScanner(r)
 	var rows []RunnerRow
+	seenWorkdirs := make(map[string]string)
+	seenWindows := make(map[string]bool)
 	lineNo := 0
 	for scanner.Scan() {
 		lineNo++
@@ -255,6 +201,19 @@ func ParseRunners(r io.Reader) ([]RunnerRow, error) {
 		if err := row.Validate(); err != nil {
 			return nil, fmt.Errorf("invalid runner row on line %d: %w", lineNo, err)
 		}
+		windowKey := row.Workspace + "\x00" + row.Window
+		if seenWindows[windowKey] {
+			return nil, fmt.Errorf("duplicate runner row %s/%s", row.Workspace, row.Window)
+		}
+		workdir, err := CanonicalWorkdir(row.Workdir)
+		if err != nil {
+			return nil, fmt.Errorf("invalid runner row on line %d: %w", lineNo, err)
+		}
+		if previous, exists := seenWorkdirs[workdir]; exists {
+			return nil, fmt.Errorf("runner workdir %s is already configured as %s", workdir, previous)
+		}
+		seenWindows[windowKey] = true
+		seenWorkdirs[workdir] = row.Workspace + "/" + row.Window
 		rows = append(rows, row)
 	}
 	if err := scanner.Err(); err != nil {
@@ -264,6 +223,11 @@ func ParseRunners(r io.Reader) ([]RunnerRow, error) {
 }
 
 func Store(path string, row Row) (bool, error) {
+	thread, err := CanonicalThreadID(row.Thread)
+	if err != nil {
+		return false, err
+	}
+	row.Thread = thread
 	if err := row.Validate(); err != nil {
 		return false, err
 	}
@@ -288,10 +252,18 @@ func Store(path string, row Row) (bool, error) {
 	if !replaced {
 		lines = append(lines, row.String())
 	}
+	if _, err := Parse(strings.NewReader(strings.Join(lines, "\n") + "\n")); err != nil {
+		return false, err
+	}
 	return replaced, writeLinesAtomic(path, lines)
 }
 
 func StoreRunner(path string, row RunnerRow) (bool, error) {
+	workdir, err := CanonicalWorkdir(row.Workdir)
+	if err != nil {
+		return false, err
+	}
+	row.Workdir = workdir
 	if err := row.Validate(); err != nil {
 		return false, err
 	}
@@ -315,6 +287,9 @@ func StoreRunner(path string, row RunnerRow) (bool, error) {
 	}
 	if !replaced {
 		lines = append(lines, row.String())
+	}
+	if _, err := ParseRunners(strings.NewReader(strings.Join(lines, "\n") + "\n")); err != nil {
+		return false, err
 	}
 	return replaced, writeLinesAtomic(path, lines)
 }
@@ -404,6 +379,11 @@ func RemoveRows(path string, shouldRemove func(Row) bool) (int, error) {
 		if err := row.Validate(); err != nil {
 			return 0, err
 		}
+		thread, err := CanonicalThreadID(row.Thread)
+		if err != nil {
+			return 0, err
+		}
+		row.Thread = thread
 		if shouldRemove(row) {
 			removed++
 			continue
@@ -474,7 +454,11 @@ func (r Row) Validate() error {
 	if err := validateField("workdir", r.Workdir); err != nil {
 		return err
 	}
-	return validateField("thread", r.Thread)
+	if err := validateField("thread", r.Thread); err != nil {
+		return err
+	}
+	_, err := CanonicalThreadID(r.Thread)
+	return err
 }
 
 func (r RunnerRow) Validate() error {
@@ -515,19 +499,15 @@ func ExpandHome(path string) string {
 	return path
 }
 
-const defaultConfig = `# workspace	window	workdir	thread-id-or-url
+const defaultConfig = `# amux-schema: workers/v1
+# workspace	window	workdir	thread-id
 #
-# Usage:
-#   amux
-#   amux launch mac
-#
-# Add/remove rows with amux pin/pin-current/unpin/unpin-current/spawn.
-# Compatibility aliases: store/store-current/remove/remove-current.
-# Use either Amp thread IDs or full https://ampcode.com/threads/... URLs.
+# Worker identity is the canonical Amp thread ID.
 `
 
-const defaultRunnerConfig = `# workspace	window	workdir
+const defaultRunnerConfig = `# amux-schema: runners/v1
+# workspace	window	workdir
 #
-# Runner rows describe local amp --no-tui intent only.
-# Add/remove rows with amux runner pin/unpin.
+# Runner identity is the canonical workdir. The window column is retained until
+# the runner lifecycle migration removes it.
 `

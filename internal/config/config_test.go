@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseRows(t *testing.T) {
@@ -20,9 +21,9 @@ func TestParseRows(t *testing.T) {
 	}
 }
 
-func TestEnsureWritesDefaultConfigWithPinUnpinGuidance(t *testing.T) {
+func TestEnsureWritesVersionedWorkersRegistryWithoutRemovedAliases(t *testing.T) {
 	dir := t.TempDir()
-	path := dir + "/workspaces.tsv"
+	path := dir + "/" + WorkersFile
 
 	if err := Ensure(path); err != nil {
 		t.Fatal(err)
@@ -32,32 +33,38 @@ func TestEnsureWritesDefaultConfigWithPinUnpinGuidance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "amux pin/pin-current/unpin/unpin-current/spawn"; !strings.Contains(string(got), want) {
-		t.Fatalf("default config does not prefer pin/unpin guidance\ngot: %q\nwant substring: %q", got, want)
+	if want := "# amux-schema: workers/v1"; !strings.Contains(string(got), want) {
+		t.Fatalf("default workers registry is not versioned\ngot: %q\nwant substring: %q", got, want)
 	}
-	if strings.Contains(string(got), "amux store/store-current/remove/remove-current/spawn") {
-		t.Fatalf("default config still prefers legacy store/remove guidance: %q", got)
-	}
-}
-
-func TestDefaultPathUsesAmuxConfigDir(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv(WorkspacesEnv, "")
-	t.Setenv(LegacyWorkspacesEnv, "")
-
-	got := DefaultPath()
-	want := filepath.Join(home, ".config", "amux", "workspaces.tsv")
-	if got != want {
-		t.Fatalf("DefaultPath() = %q, want %q", got, want)
+	for _, removed := range []string{"store", "store-current", "remove-current"} {
+		if strings.Contains(string(got), removed) {
+			t.Fatalf("default workers registry mentions removed command %q: %q", removed, got)
+		}
 	}
 }
 
-func TestDefaultPathMigratesLegacyConfigFiles(t *testing.T) {
+func TestResolveDirectoryUsesExplicitFlagBeforeEnvironment(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv(WorkspacesEnv, "")
-	t.Setenv(LegacyWorkspacesEnv, "")
+	t.Setenv(ConfigDirEnv, filepath.Join(home, "from-env"))
+
+	dir, err := ResolveDirectory(filepath.Join(home, "from-flag"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := dir.Path, filepath.Join(home, "from-flag"); got != want {
+		t.Fatalf("ResolveDirectory() path = %q, want %q", got, want)
+	}
+	if got, want := dir.WorkersPath(), filepath.Join(home, "from-flag", WorkersFile); got != want {
+		t.Fatalf("WorkersPath() = %q, want %q", got, want)
+	}
+}
+
+func TestDefaultPathDoesNotMigrateLegacyConfigFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv(ConfigDirEnv, "")
 	legacyDir := filepath.Join(home, ".config", "amp-tmux")
 	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -72,53 +79,40 @@ func TestDefaultPathMigratesLegacyConfigFiles(t *testing.T) {
 	}
 
 	got := DefaultPath()
-	want := filepath.Join(home, ".config", "amux", "workspaces.tsv")
+	want := filepath.Join(home, ".config", "amux", WorkersFile)
 	if got != want {
-		t.Fatalf("DefaultPath() = %q, want migrated path %q", got, want)
+		t.Fatalf("DefaultPath() = %q, want %q", got, want)
 	}
-	for _, tc := range []struct {
-		path string
-		want string
-	}{
-		{filepath.Join(home, ".config", "amux", "workspaces.tsv"), "mac\told\t/tmp\tT-old\n"},
-		{filepath.Join(home, ".config", "amux", "runners.tsv"), "mac\trunner\t/tmp\n"},
-		{legacyWorkspace, "mac\told\t/tmp\tT-old\n"},
-	} {
-		gotBytes, err := os.ReadFile(tc.path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(gotBytes) != tc.want {
-			t.Fatalf("%s = %q, want %q", tc.path, gotBytes, tc.want)
-		}
+	if _, err := os.Stat(filepath.Dir(want)); !os.IsNotExist(err) {
+		t.Fatalf("DefaultPath created or migrated config: %v", err)
+	}
+	gotBytes, err := os.ReadFile(legacyWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(gotBytes), "mac\told\t/tmp\tT-old\n"; got != want {
+		t.Fatalf("legacy config changed: got %q, want %q", got, want)
 	}
 }
 
-func TestDefaultPathDoesNotOverwriteExistingAmuxConfig(t *testing.T) {
+func TestDefaultPathUsesExistingWorkersConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv(WorkspacesEnv, "")
-	t.Setenv(LegacyWorkspacesEnv, "")
-	legacyDir := filepath.Join(home, ".config", "amp-tmux")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv(ConfigDirEnv, "")
 	newDir := filepath.Join(home, ".config", "amux")
-	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.MkdirAll(newDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	newWorkspace := filepath.Join(newDir, "workspaces.tsv")
-	if err := os.WriteFile(filepath.Join(legacyDir, "workspaces.tsv"), []byte("mac\told\t/tmp\tT-old\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(newWorkspace, []byte("mac\tnew\t/tmp\tT-new\n"), 0o600); err != nil {
+	workers := filepath.Join(newDir, WorkersFile)
+	if err := os.WriteFile(workers, []byte("mac\tnew\t/tmp\tT-new\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	if got := DefaultPath(); got != newWorkspace {
-		t.Fatalf("DefaultPath() = %q, want %q", got, newWorkspace)
+	if got := DefaultPath(); got != workers {
+		t.Fatalf("DefaultPath() = %q, want %q", got, workers)
 	}
-	gotBytes, err := os.ReadFile(newWorkspace)
+	gotBytes, err := os.ReadFile(workers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,16 +121,11 @@ func TestDefaultPathDoesNotOverwriteExistingAmuxConfig(t *testing.T) {
 	}
 }
 
-func TestDefaultPathEnvironmentPrecedence(t *testing.T) {
+func TestDefaultPathUsesConfigDirectoryEnvironment(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv(WorkspacesEnv, "/tmp/amux.tsv")
-	t.Setenv(LegacyWorkspacesEnv, "/tmp/legacy.tsv")
-	if got, want := DefaultPath(), "/tmp/amux.tsv"; got != want {
-		t.Fatalf("DefaultPath() = %q, want %q", got, want)
-	}
-	t.Setenv(WorkspacesEnv, "")
-	if got, want := DefaultPath(), "/tmp/legacy.tsv"; got != want {
+	t.Setenv(ConfigDirEnv, "/tmp/amux-config")
+	if got, want := DefaultPath(), "/tmp/amux-config/"+WorkersFile; got != want {
 		t.Fatalf("DefaultPath() = %q, want %q", got, want)
 	}
 }
@@ -199,5 +188,204 @@ func TestRemoveKeepsOtherRows(t *testing.T) {
 	want := "# header\nother\twin\t/tmp\tT-other\n"
 	if string(got) != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestMigrationIsExplicitIdempotentAndPreservesLegacyFiles(t *testing.T) {
+	path := t.TempDir()
+	dir := Directory{Path: path}
+	legacyPath := filepath.Join(path, "workspaces.tsv")
+	legacy := "mac\tworker\t/tmp/project\thttps://ampcode.com/threads/T-worker\n"
+	if err := os.WriteFile(legacyPath, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := PlanMigration(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(plan.Actions), 3; got != want {
+		t.Fatalf("migration actions = %d, want %d", got, want)
+	}
+	for _, target := range []string{dir.WorkersPath(), dir.RunnersPath(), dir.ShelvesPath()} {
+		if _, err := os.Stat(target); !os.IsNotExist(err) {
+			t.Fatalf("planning migration wrote %s: %v", target, err)
+		}
+	}
+
+	results, err := plan.Apply()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range results {
+		if result.Status != MigrationSuccessful {
+			t.Fatalf("migration result for %s = %s, want %s", result.Registry, result.Status, MigrationSuccessful)
+		}
+	}
+	workers, err := os.ReadFile(dir.WorkersPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(workers), "# amux-schema: workers/v1\nmac\tworker\t/tmp/project\tT-worker\n"; got != want {
+		t.Fatalf("workers migration = %q, want %q", got, want)
+	}
+	legacyAfter, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(legacyAfter); got != legacy {
+		t.Fatalf("legacy config changed: got %q, want %q", got, legacy)
+	}
+
+	second, err := PlanMigration(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err = second.Apply()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range results {
+		if result.Status != MigrationSkipped {
+			t.Fatalf("second migration result for %s = %s, want %s", result.Registry, result.Status, MigrationSkipped)
+		}
+	}
+}
+
+func TestWorkerAndRunnerRegistriesEnforceCanonicalMachineIdentities(t *testing.T) {
+	_, err := Parse(strings.NewReader(
+		"one\tfirst\t/tmp/one\tT-same\n" +
+			"two\tsecond\t/tmp/two\thttps://ampcode.com/threads/T-same\n",
+	))
+	if err == nil || !strings.Contains(err.Error(), "worker thread T-same is already configured") {
+		t.Fatalf("Parse duplicate worker identity error = %v", err)
+	}
+
+	workdir := t.TempDir()
+	_, err = ParseRunners(strings.NewReader(
+		"one\tfirst\t" + workdir + "\n" +
+			"two\tsecond\t" + filepath.Join(workdir, ".") + "\n",
+	))
+	if err == nil || !strings.Contains(err.Error(), "runner workdir "+workdir+" is already configured") {
+		t.Fatalf("ParseRunners duplicate runner identity error = %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), WorkersFile)
+	if _, err := Store(path, Row{
+		Workspace: "one",
+		Window:    "worker",
+		Workdir:   "/tmp/project",
+		Thread:    "https://ampcode.com/threads/T-worker",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(contents), "\thttps://") || !strings.Contains(string(contents), "\tT-worker\n") {
+		t.Fatalf("stored worker identity was not canonicalized: %q", contents)
+	}
+}
+
+func TestMigrationRejectsDuplicateCanonicalIdentityBeforeWriting(t *testing.T) {
+	path := t.TempDir()
+	dir := Directory{Path: path}
+	legacy := "one\tfirst\t/tmp/one\tT-same\ntwo\tsecond\t/tmp/two\thttps://ampcode.com/threads/T-same\n"
+	if err := os.WriteFile(filepath.Join(path, "workspaces.tsv"), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := PlanMigration(dir)
+	if err == nil || !strings.Contains(err.Error(), "worker thread T-same is already configured") {
+		t.Fatalf("PlanMigration duplicate identity error = %v", err)
+	}
+	for _, target := range []string{dir.WorkersPath(), dir.RunnersPath(), dir.ShelvesPath()} {
+		if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+			t.Fatalf("failed migration planning wrote %s: %v", target, statErr)
+		}
+	}
+}
+
+func TestShelfRegistryPersistsCanonicalWorkerIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ShelvesFile)
+	added, err := StoreShelf(path, "https://ampcode.com/threads/T-worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !added {
+		t.Fatal("first StoreShelf reported an existing shelf")
+	}
+	added, err = StoreShelf(path, "T-worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added {
+		t.Fatal("second StoreShelf duplicated canonical worker identity")
+	}
+	threads, err := LoadShelvesReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(threads, ","), "T-worker"; got != want {
+		t.Fatalf("shelves = %q, want %q", got, want)
+	}
+	removed, err := RemoveShelf(path, "T-worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !removed {
+		t.Fatal("RemoveShelf did not remove canonical worker identity")
+	}
+}
+
+func TestOperationRecordsPersistIdempotencyStateAndRejectKeyReuse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), OperationsFile)
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	record := OperationRecord{
+		Key:         "request-123",
+		Kind:        "worker.spawn",
+		RequestHash: "sha256:abc",
+		State:       OperationStarted,
+		Resource:    OperationResource{Kind: "worker", Thread: "https://ampcode.com/threads/T-worker"},
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	created, err := StoreOperation(path, record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Fatal("first StoreOperation reported an existing operation")
+	}
+
+	record.State = OperationSucceeded
+	record.UpdatedAt = now.Add(time.Minute)
+	created, err = StoreOperation(path, record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created {
+		t.Fatal("operation update reported a new operation")
+	}
+	got, found, err := LoadOperation(path, record.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || got.State != OperationSucceeded || got.Resource.Thread != "T-worker" {
+		t.Fatalf("loaded operation = %+v, found=%v", got, found)
+	}
+
+	conflict := record
+	conflict.RequestHash = "sha256:different"
+	if _, err := StoreOperation(path, conflict); err == nil || !strings.Contains(err.Error(), "idempotency key") {
+		t.Fatalf("StoreOperation conflicting key error = %v", err)
+	}
+	got, found, err = LoadOperation(path, record.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || got.RequestHash != record.RequestHash {
+		t.Fatalf("conflicting write changed operation: %+v", got)
 	}
 }
