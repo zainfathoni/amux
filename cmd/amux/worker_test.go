@@ -1007,7 +1007,7 @@ func TestWorkerRemoveAllCleansShelfOnlyIntentAndEmptyInventoryIsNoOp(t *testing.
 	}
 }
 
-func TestBareAmuxLaunchesWorkersButExplicitAggregateLaunchStaysReserved(t *testing.T) {
+func TestBareAmuxAndExplicitAggregateLaunchPreserveWorkerOnlyWorkspace(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkerRegistry(t, dir, "alpha\ta\t/tmp/a\tT-a\n")
 	if err := os.WriteFile(filepath.Join(dir, config.ShelvesFile), []byte("# amux-schema: shelves/v1\nT-a\n"), 0o600); err != nil {
@@ -1028,8 +1028,11 @@ func TestBareAmuxLaunchesWorkersButExplicitAggregateLaunchStaysReserved(t *testi
 	if _, err := os.Stat(called); !os.IsNotExist(err) {
 		t.Fatalf("shelved bare launch invoked amp or tmux: %v", err)
 	}
-	if err := (app{}).execute([]string{"launch"}); err == nil || !strings.Contains(err.Error(), "reserved") {
-		t.Fatalf("explicit aggregate launch error = %v", err)
+	if err := (app{}).execute([]string{"launch"}); err != nil {
+		t.Fatalf("explicit aggregate launch: %v", err)
+	}
+	if _, err := os.Stat(called); !os.IsNotExist(err) {
+		t.Fatalf("shelved aggregate launch invoked amp or tmux: %v", err)
 	}
 }
 
