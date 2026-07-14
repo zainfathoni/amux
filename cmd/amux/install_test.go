@@ -55,14 +55,15 @@ func TestUpdateRejectsManagedAndNoncanonicalTargetsBeforeNetwork(t *testing.T) {
 func TestUpdateAndDoctorRejectCanonicalSymlinks(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
-		parentLink bool
+		linkLevels int
 	}{
 		{name: "executable symlink"},
-		{name: "parent directory symlink", parentLink: true},
+		{name: "bin directory symlink", linkLevels: 1},
+		{name: ".local directory symlink", linkLevels: 2},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			tmp := t.TempDir()
-			realDir := filepath.Join(tmp, "real-bin")
+			realDir := filepath.Join(tmp, "real", ".local", "bin")
 			if err := os.MkdirAll(realDir, 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -72,20 +73,22 @@ func TestUpdateAndDoctorRejectCanonicalSymlinks(t *testing.T) {
 			}
 			canonicalDir := filepath.Join(tmp, "home", ".local", "bin")
 			canonical := filepath.Join(canonicalDir, "amux")
-			if tt.parentLink {
-				if err := os.MkdirAll(filepath.Dir(canonicalDir), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(realDir, canonicalDir); err != nil {
-					t.Skipf("symlink unavailable: %v", err)
-				}
-			} else {
+			link := canonical
+			target := real
+			for range tt.linkLevels {
+				link = filepath.Dir(link)
+				target = filepath.Dir(target)
+			}
+			if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tt.linkLevels == 0 {
 				if err := os.MkdirAll(canonicalDir, 0o755); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Symlink(real, canonical); err != nil {
-					t.Skipf("symlink unavailable: %v", err)
-				}
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
 			}
 			withInstallTestPaths(t, canonical, canonical)
 			t.Setenv("PATH", canonicalDir)
@@ -106,9 +109,18 @@ func TestUpdateAndDoctorRejectCanonicalSymlinks(t *testing.T) {
 }
 
 func TestInstallDoctorReportsEveryPATHCandidateAndDrift(t *testing.T) {
-	tmp := t.TempDir()
-	shadowDir := filepath.Join(tmp, "mise", "bin")
-	canonical := filepath.Join(tmp, "home", ".local", "bin", "amux")
+	realRoot := t.TempDir()
+	configuredRoot := filepath.Join(t.TempDir(), "configured-root")
+	if err := os.Symlink(realRoot, configuredRoot); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(realRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shadowDir := filepath.Join(configuredRoot, "mise", "bin")
+	canonical := filepath.Join(configuredRoot, "home", ".local", "bin", "amux")
+	canonicalTarget := filepath.Join(resolvedRoot, "home", ".local", "bin", "amux")
 	for path, body := range map[string]string{
 		filepath.Join(shadowDir, "amux"): "#!/bin/sh\necho 'amux v0.1.33'\n",
 		canonical:                        "#!/bin/sh\necho 'amux v0.1.12'\n",
@@ -120,7 +132,7 @@ func TestInstallDoctorReportsEveryPATHCandidateAndDrift(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	running := filepath.Join(tmp, "running", "amux")
+	running := filepath.Join(configuredRoot, "running", "amux")
 	if err := os.MkdirAll(filepath.Dir(running), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -136,10 +148,10 @@ func TestInstallDoctorReportsEveryPATHCandidateAndDrift(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		"Canonical self-update target: " + canonical + " -> " + canonical + " (amux v0.1.12)",
+		"Canonical self-update target: " + canonical + " -> " + canonicalTarget + " (amux v0.1.12)",
 		"Running executable: " + running,
-		filepath.Join(shadowDir, "amux") + " -> " + filepath.Join(shadowDir, "amux") + " (amux v0.1.33) [selected]",
-		canonical + " -> " + canonical + " (amux v0.1.12)",
+		filepath.Join(shadowDir, "amux") + " -> " + filepath.Join(resolvedRoot, "mise", "bin", "amux") + " (amux v0.1.33) [selected]",
+		canonical + " -> " + canonicalTarget + " (amux v0.1.12)",
 		"canonical executable is shadowed",
 		"running executable drift",
 	} {
@@ -147,11 +159,23 @@ func TestInstallDoctorReportsEveryPATHCandidateAndDrift(t *testing.T) {
 			t.Fatalf("diagnostics missing %q:\n%s", want, out)
 		}
 	}
+	if strings.Contains(out, "self-update refused for noncanonical install") {
+		t.Fatalf("doctor rejected a canonical configured path whose resolved target differs:\n%s", out)
+	}
 }
 
 func TestInstallDoctorJSONUsesResultEnvelope(t *testing.T) {
-	tmp := t.TempDir()
-	canonical := filepath.Join(tmp, ".local", "bin", "amux")
+	realRoot := t.TempDir()
+	configuredRoot := filepath.Join(t.TempDir(), "configured-root")
+	if err := os.Symlink(realRoot, configuredRoot); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(realRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical := filepath.Join(configuredRoot, ".local", "bin", "amux")
+	canonicalTarget := filepath.Join(resolvedRoot, ".local", "bin", "amux")
 	if err := os.MkdirAll(filepath.Dir(canonical), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -180,11 +204,21 @@ func TestInstallDoctorJSONUsesResultEnvelope(t *testing.T) {
 				Selected bool     `json:"selected"`
 			} `json:"executable"`
 		} `json:"successful"`
+		Skipped []json.RawMessage `json:"skipped"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &document); err != nil {
 		t.Fatal(err)
 	}
-	if document.SchemaVersion != result.SchemaVersion || len(document.Successful) != 3 || document.Successful[0].Resource.Kind != "executable" || document.Successful[0].Resource.Path != canonical || document.Successful[0].Executable.Target != canonical || document.Successful[0].Executable.Version != "amux dev" || strings.Join(document.Successful[0].Executable.Roles, ",") != "running" {
+	if document.SchemaVersion != result.SchemaVersion || len(document.Successful) != 3 || len(document.Skipped) != 0 {
+		t.Fatalf("unexpected diagnostic envelope: %+v", document)
+	}
+	for i, roles := range []string{"running", "canonical,scheduled-maintenance", "path"} {
+		outcome := document.Successful[i]
+		if outcome.Resource.Kind != "executable" || outcome.Resource.Path != canonical || outcome.Executable.Target != canonicalTarget || outcome.Executable.Version != "amux dev" || strings.Join(outcome.Executable.Roles, ",") != roles {
+			t.Fatalf("unexpected diagnostic outcome %d: %+v", i, outcome)
+		}
+	}
+	if !document.Successful[2].Executable.Selected {
 		t.Fatalf("unexpected diagnostic envelope: %+v", document)
 	}
 }

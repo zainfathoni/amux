@@ -142,6 +142,7 @@ func validateCanonicalSelfUpdateTarget(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve current executable path: %w", err)
 	}
+	installPath = filepath.Clean(installPath)
 	installPath, err = resolveSelfUpdateTarget(installPath)
 	if err != nil {
 		return "", err
@@ -150,11 +151,28 @@ func validateCanonicalSelfUpdateTarget(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	canonicalPath, err = filepath.Abs(canonicalPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve canonical executable path: %w", err)
+	}
 	canonicalPath = filepath.Clean(canonicalPath)
-	if installPath != canonicalPath {
+	if canonicalInstallPathHasSymlink(canonicalPath) || installPath != resolvePathForComparison(canonicalPath) {
 		return "", fmt.Errorf("self-update refused for noncanonical install at %s; bootstrap the canonical self-updating install at %s", installPath, canonicalPath)
 	}
-	return installPath, nil
+	return canonicalPath, nil
+}
+
+func canonicalInstallPathHasSymlink(path string) bool {
+	// The canonical install owns .local/bin/amux, but the configured home path
+	// itself may have an equivalent system-resolved spelling.
+	for range 3 {
+		info, err := os.Lstat(path)
+		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+		path = filepath.Dir(path)
+	}
+	return false
 }
 
 func selfUpdateShadowWarning(installPath string) string {
