@@ -176,7 +176,7 @@ func TestExecuteRejectsReservedMutationWithoutCreatingLock(t *testing.T) {
 	runtimeDir := filepath.Join(t.TempDir(), "missing-runtime")
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
-	err := (app{}).execute([]string{"--config-dir", configDir, "worker", "park", "--all"})
+	err := (app{}).execute([]string{"--config-dir", configDir, "runner", "park", "--all"})
 	if err == nil || !strings.Contains(err.Error(), "reserved for its lifecycle implementation phase") {
 		t.Fatalf("reserved lifecycle error = %v", err)
 	}

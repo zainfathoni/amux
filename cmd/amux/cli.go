@@ -27,13 +27,18 @@ type cliOptions struct {
 }
 
 type selectors struct {
-	Workspace string
-	Window    string
-	Workdir   string
-	Thread    string
-	Mode      string
-	Current   bool
-	All       bool
+	Workspace      string
+	Window         string
+	Workdir        string
+	Thread         string
+	Mode           string
+	Current        bool
+	All            bool
+	Shelf          string
+	IdempotencyKey string
+	Message        string
+	MessageFile    string
+	MessageStdin   bool
 }
 
 type commandSpec struct {
@@ -71,7 +76,7 @@ var rootCommand = &commandSpec{
 		runnerCommand(),
 		workspaceCommand(),
 		lifecycleCommand("workspaces", "Exact alias for workspace list", false),
-		lifecycleCommand("spawn", "Spawn an interactive worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>"),
+		lifecycleCommand("spawn", "Spawn an interactive worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>"),
 		lifecycleCommand("shelve", "Shelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		lifecycleCommand("unshelve", "Unshelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		lifecycleCommand("teardown", "Teardown workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
@@ -112,14 +117,14 @@ func lifecycleCommand(name, summary string, mutating bool, flags ...string) *com
 func workerCommand() *commandSpec {
 	worker := &commandSpec{Name: "worker", Summary: "Manage interactive thread-bound clients", Usage: "amux worker <command>"}
 	worker.Children = []*commandSpec{
-		workerLeaf("list", "List configured workers", false, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
+		workerLeaf("list", "List configured workers", false, "--workspace, -w <name>", "--thread, -t <id>", "--shelf <shelved|unshelved>", "--current", "--all"),
 		workerLeaf("pin", "Pin a worker without launching it", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--thread, -t <id>", "--current"),
 		workerLeaf("unpin", "Unpin a worker without stopping it", true, "--thread, -t <id>", "--current"),
 		workerLeaf("launch", "Launch workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("park", "Park workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("restart", "Restart workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("remove", "Remove workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
-		workerLeaf("spawn", "Spawn a worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>"),
+		workerLeaf("spawn", "Spawn a worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>"),
 		workerLeaf("shelve", "Shelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("unshelve", "Unshelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("teardown", "Teardown workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
@@ -234,7 +239,7 @@ func parseInvocation(args []string) (invocation, error) {
 			parsed.Path = []string{"amux"}
 			return parsed, nil
 		}
-		words = []string{"launch"}
+		words = []string{"worker", "launch"}
 	}
 
 	if words[0] == "help" {
@@ -447,6 +452,45 @@ func parseSelectors(args []string) (selectors, []string, error) {
 			if err := setSelector(&parsed.Mode, value, "--mode"); err != nil {
 				return parsed, nil, err
 			}
+		case "--shelf":
+			value, next, err := selectorValue(args, i, name, inline, hasInline)
+			if err != nil {
+				return parsed, nil, err
+			}
+			i = next
+			if err := setSelector(&parsed.Shelf, value, "--shelf"); err != nil {
+				return parsed, nil, err
+			}
+		case "--idempotency-key":
+			value, next, err := selectorValue(args, i, name, inline, hasInline)
+			if err != nil {
+				return parsed, nil, err
+			}
+			i = next
+			if err := setSelector(&parsed.IdempotencyKey, value, "--idempotency-key"); err != nil {
+				return parsed, nil, err
+			}
+		case "--message", "--message-file":
+			value, next, err := selectorValue(args, i, name, inline, hasInline)
+			if err != nil {
+				return parsed, nil, err
+			}
+			i = next
+			target := &parsed.Message
+			if name == "--message-file" {
+				target = &parsed.MessageFile
+			}
+			if err := setSelector(target, value, name); err != nil {
+				return parsed, nil, err
+			}
+		case "--message-stdin":
+			if hasInline {
+				return parsed, nil, errors.New("--message-stdin does not accept a value")
+			}
+			if parsed.MessageStdin {
+				return parsed, nil, errors.New("--message-stdin may be specified only once")
+			}
+			parsed.MessageStdin = true
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return parsed, nil, fmt.Errorf("unknown option %s", arg)
@@ -502,6 +546,10 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 		{"--workdir", parsed.Workdir},
 		{"--thread", parsed.Thread},
 		{"--mode", parsed.Mode},
+		{"--shelf", parsed.Shelf},
+		{"--idempotency-key", parsed.IdempotencyKey},
+		{"--message", parsed.Message},
+		{"--message-file", parsed.MessageFile},
 	}
 	for _, test := range tests {
 		if test.value != "" && !commandAcceptsFlag(command, test.name) {
@@ -543,6 +591,30 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 			return err
 		}
 	}
+	if parsed.Shelf != "" && parsed.Shelf != "shelved" && parsed.Shelf != "unshelved" {
+		return errors.New("--shelf must be shelved or unshelved")
+	}
+	if parsed.IdempotencyKey != "" {
+		if err := config.ValidateField("idempotency key", parsed.IdempotencyKey); err != nil {
+			return err
+		}
+	}
+	if parsed.MessageStdin && !commandAcceptsFlag(command, "--message-stdin") {
+		return fmt.Errorf("%s does not accept --message-stdin; run `amux help %s`", command.UsageName(), command.UsageName())
+	}
+	messageInputs := 0
+	if parsed.Message != "" {
+		messageInputs++
+	}
+	if parsed.MessageFile != "" {
+		messageInputs++
+	}
+	if parsed.MessageStdin {
+		messageInputs++
+	}
+	if messageInputs > 1 {
+		return errors.New("--message, --message-file, and --message-stdin are mutually exclusive")
+	}
 	return nil
 }
 
@@ -571,8 +643,8 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 		a.printCommandHelp(parsed.Command)
 		return nil, nil
 	}
-	if parsed.Options.JSON && parsed.Command.Name != "migrate-config" {
-		return nil, result.Preflight(fmt.Errorf("--json is not yet available for %s", strings.Join(parsed.Path, " ")))
+	if parsed.Options.JSON && parsed.Command.FoundationOnly && parsed.Command.Name != "migrate-config" {
+		return nil, result.Request(fmt.Errorf("--json is not supported with %s", strings.Join(parsed.Path, " ")))
 	}
 
 	var dir config.Directory
@@ -594,7 +666,7 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 		}
 	}
 
-	if !parsed.Command.FoundationOnly {
+	if !parsed.Command.FoundationOnly && (len(parsed.Path) != 2 || parsed.Path[0] != "worker") && !isWorkerConvenience(parsed.Path) {
 		return nil, result.Preflight(fmt.Errorf("%s is reserved for its lifecycle implementation phase and is not available in the CLI foundations", strings.Join(parsed.Path, " ")))
 	}
 
@@ -608,6 +680,11 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 	}
 
 	switch parsed.Command.Name {
+	case "list", "pin", "unpin", "launch", "park", "restart", "remove", "spawn", "shelve", "unshelve", "teardown", "doctor", "reconcile":
+		if !parsed.Command.FoundationOnly {
+			return a.executeWorker(parsed, dir)
+		}
+		return nil, result.Preflight(fmt.Errorf("%s is reserved for its lifecycle implementation phase", strings.Join(parsed.Path, " ")))
 	case "migrate-config":
 		if len(parsed.Args) != 0 || parsed.Selectors != (selectors{}) {
 			return nil, result.Request(errors.New("usage: amux migrate-config"))
