@@ -173,37 +173,30 @@ func TestCompletionGeneratesShellScripts(t *testing.T) {
 			shell: "bash",
 			want: []string{
 				"complete -F _amux_complete amux",
-				"launch list workspaces shelved pin store pin-current store-current unpin remove unpin-current remove-current park park-current restart shelve-current shelve unshelve spawn teardown prune-archived migrate-config runner completion update self-update version path doctor help",
-				"--config --dry-run --attach --no-attach --terminal-launcher --help -h --version",
-				"--mode -m --title-prefix --message-file --message-stdin",
-				"compgen -W \"low medium high ultra\"",
-				"--include-runners",
-				"park)\n      COMPREPLY=( $(compgen -W \"--workspace\"",
-				"list pin unpin launch park restart",
+				"worker spawn shelve unshelve teardown migrate-config completion update version path help",
+				"--config-dir --json --dry-run --help -h --version",
+				"list pin unpin launch park restart remove spawn shelve unshelve teardown doctor reconcile",
 			},
 		},
 		{
 			shell: "zsh",
 			want: []string{
 				"#compdef amux",
-				"\"self-update:Alias for update\"",
-				"\"shelve-current:Pin if needed, archive the thread, and stop the current window\"",
-				"'--terminal-launcher[terminal launcher command]:command:'",
+				"\"worker:Manage interactive thread-bound clients\"",
+				"worker_commands=(",
+				"'--config-dir[path to config directory]:directory:_directories'",
 				"'--mode[thread mode]:mode:(low medium high ultra)'",
 				"'--message-file[read initial message from file]:message file:_files'",
-				"'--include-runners[include runner-only workspaces]'",
-				"'--workspace[park all clients in workspace]:workspace:'",
 				"_values 'shell' bash zsh fish",
 			},
 		},
 		{
 			shell: "fish",
 			want: []string{
-				"complete -c amux -f -n '__fish_use_subcommand' -a 'self-update' -d 'Alias for update'",
+				"complete -c amux -f -n '__fish_use_subcommand' -a 'worker' -d 'Manage interactive thread-bound clients'",
 				"complete -c amux -n '__fish_seen_subcommand_from spawn' -r -f -a 'low medium high ultra' -l 'mode' -d 'Amp thread mode'",
 				"complete -c amux -n '__fish_seen_subcommand_from spawn' -r -l 'message-file' -d 'Read initial message from file'",
-				"complete -c amux -n '__fish_seen_subcommand_from list' -f -l 'status' -d 'Append thread status'",
-				"complete -c amux -f -n '__fish_seen_subcommand_from runner; and not __fish_seen_subcommand_from list pin unpin launch park restart' -a 'restart' -d 'Restart all or one verified runner in place'",
+				"complete -c amux -f -n '__fish_seen_subcommand_from worker; and not __fish_seen_subcommand_from list pin unpin launch park restart remove spawn shelve unshelve teardown doctor reconcile' -a 'restart'",
 				"complete -c amux -f -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'",
 			},
 		},
@@ -212,7 +205,7 @@ func TestCompletionGeneratesShellScripts(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.shell, func(t *testing.T) {
 			var stdout bytes.Buffer
-			if err := (app{stdout: &stdout}).run([]string{"completion", tt.shell}); err != nil {
+			if err := (app{stdout: &stdout}).execute([]string{"completion", tt.shell}); err != nil {
 				t.Fatal(err)
 			}
 			got := stdout.String()

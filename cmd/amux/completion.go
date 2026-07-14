@@ -16,50 +16,38 @@ type completionCommand struct {
 }
 
 var completionCommands = []completionCommand{
-	{Name: "launch", Description: "Launch all workspaces or one selected tmux session", Args: "[workspace] [session]"},
-	{Name: "list", Description: "Print configured restore rows", Flags: []string{"--status", "--active", "--shelved"}, Args: "[workspace]"},
-	{Name: "workspaces", Description: "Print configured workspace names", Flags: []string{"--include-runners"}},
-	{Name: "shelved", Description: "Shortcut for list --shelved", Args: "[workspace]"},
-	{Name: "pin", Description: "Add or replace one restore row", Args: "<workspace> <window> <workdir> <thread-id-or-url>"},
-	{Name: "store", Description: "Alias for pin", Args: "<workspace> <window> <workdir> <thread-id-or-url>"},
-	{Name: "pin-current", Description: "Pin the current tmux window", Args: "<thread-id-or-url> | <workspace> <thread-id-or-url> [window] [workdir]"},
-	{Name: "store-current", Description: "Alias for pin-current", Args: "<thread-id-or-url> | <workspace> <thread-id-or-url> [window] [workdir]"},
-	{Name: "unpin", Description: "Remove one restore row", Args: "<workspace> <window>"},
-	{Name: "remove", Description: "Alias for unpin", Args: "<workspace> <window>"},
-	{Name: "unpin-current", Description: "Remove the current tmux window from restore config", Args: "[workspace]"},
-	{Name: "remove-current", Description: "Alias for unpin-current", Args: "[workspace]"},
-	{Name: "park", Description: "Park all, workspace, or one verified local Amp client; -- permits leading-dash names", Flags: []string{"--workspace", "--"}, Args: "[window] | [workspace] <window> [session]"},
-	{Name: "park-current", Description: "Stop the current tmux window without changing restore config", Args: "[workspace]"},
-	{Name: "restart", Description: "Restart all or one verified Amp client in place", Args: "[[workspace] <window> [session]]"},
-	{Name: "shelve-current", Description: "Pin if needed, archive the thread, and stop the current window", Args: "[workspace] [thread-id-or-url]"},
-	{Name: "shelve", Description: "Archive thread rows while preserving restore config", Flags: []string{"--thread", "--workspace", "--session"}, Args: "[workspace] <window> [session]"},
-	{Name: "unshelve", Description: "Unarchive shelved thread rows", Flags: []string{"--thread", "--workspace"}, Args: "[workspace] <window>"},
-	{Name: "spawn", Description: "Create a new Amp thread in a tmux window", Flags: []string{"--mode", "-m", "--title-prefix", "--message-file", "--message-stdin"}, Args: "<window> <workdir> [initial-message] [workspace] [session]"},
-	{Name: "teardown", Description: "Archive a thread, remove its row, and stop its window", Flags: []string{"--thread", "--session"}, Args: "[workspace] <window> [session]"},
-	{Name: "prune-archived", Description: "Remove restore rows whose threads are archived", Args: "[workspace]"},
-	{Name: "migrate-config", Description: "Copy legacy config files into ~/.config/amux"},
 	{
-		Name:        "runner",
-		Description: "Manage amp --no-tui runner rows",
+		Name:        "worker",
+		Description: "Manage interactive thread-bound clients",
 		Subcommands: []completionCommand{
-			{Name: "list", Description: "Print configured runner rows", Args: "[workspace]"},
-			{Name: "pin", Description: "Add or replace one runner row", Args: "<workspace> <window> <workdir>"},
-			{Name: "unpin", Description: "Remove one runner row", Args: "<workspace> <window>"},
-			{Name: "launch", Description: "Start configured runner windows", Args: "[workspace] [session]"},
-			{Name: "park", Description: "Stop a live local runner window", Args: "[workspace] <window>"},
-			{Name: "restart", Description: "Restart all or one verified runner in place", Args: "[[workspace] <window> [session]]"},
+			{Name: "list", Description: "List configured workers", Flags: []string{"--workspace", "--thread", "--shelf", "--current", "--all"}},
+			{Name: "pin", Description: "Pin a worker", Flags: []string{"--workspace", "--window", "--workdir", "--thread", "--current"}},
+			{Name: "unpin", Description: "Unpin a worker", Flags: []string{"--thread", "--current"}},
+			{Name: "launch", Description: "Launch workers", Flags: []string{"--workspace", "--thread", "--current", "--all"}},
+			{Name: "park", Description: "Park workers", Flags: []string{"--workspace", "--thread", "--current", "--all"}},
+			{Name: "restart", Description: "Restart workers", Flags: []string{"--workspace", "--thread", "--current", "--all"}},
+			{Name: "remove", Description: "Remove workers", Flags: []string{"--workspace", "--thread", "--current", "--all"}},
+			{Name: "spawn", Description: "Spawn a worker", Flags: []string{"--workspace", "--window", "--workdir", "--mode", "-m", "--message", "--message-file", "--message-stdin", "--idempotency-key"}},
+			{Name: "shelve", Description: "Shelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all"}},
+			{Name: "unshelve", Description: "Unshelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all"}},
+			{Name: "teardown", Description: "Teardown workers", Flags: []string{"--workspace", "--thread", "--current", "--all"}},
+			{Name: "doctor", Description: "Diagnose workers", Flags: []string{"--workspace", "--thread", "--current", "--all"}},
+			{Name: "reconcile", Description: "Reconcile workers", Flags: []string{"--workspace", "--thread", "--current", "--all"}},
 		},
 	},
+	{Name: "spawn", Description: "Spawn a worker", Flags: []string{"--workspace", "--window", "--workdir", "--mode", "-m", "--message", "--message-file", "--message-stdin", "--idempotency-key"}},
+	{Name: "shelve", Description: "Shelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all"}},
+	{Name: "unshelve", Description: "Unshelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all"}},
+	{Name: "teardown", Description: "Teardown workers", Flags: []string{"--workspace", "--thread", "--current", "--all"}},
+	{Name: "migrate-config", Description: "Copy legacy config files into ~/.config/amux"},
 	{Name: "completion", Description: "Print shell completion script", Args: "<bash|zsh|fish>"},
 	{Name: "update", Description: "Update a user-local amux release install"},
-	{Name: "self-update", Description: "Alias for update"},
 	{Name: "version", Description: "Print version and build metadata"},
-	{Name: "path", Description: "Print the config path"},
-	{Name: "doctor", Description: "Check dependencies, config, and live tmux drift", Args: "[workspace] [session]"},
+	{Name: "path", Description: "Print the config directory"},
 	{Name: "help", Description: "Print help"},
 }
 
-var globalCompletionFlags = []string{"--config", "--dry-run", "--attach", "--no-attach", "--terminal-launcher", "--help", "-h", "--version"}
+var globalCompletionFlags = []string{"--config-dir", "--json", "--dry-run", "--help", "-h", "--version"}
 
 const ampDialModeCompletions = "low medium high ultra"
 
@@ -83,96 +71,28 @@ func (a app) completion(args []string) error {
 func writeBashCompletion(w io.Writer) {
 	fmt.Fprintf(w, `# bash completion for amux; generated by amux completion bash
 _amux_complete() {
-  local cur prev command subcommand word i skip_next
+  local cur command
   cur="${COMP_WORDS[COMP_CWORD]}"
-  prev="${COMP_WORDS[COMP_CWORD-1]}"
-
-  case "$cur" in
-    --mode=*)
-      COMPREPLY=( $(compgen -W "%s" -P "--mode=" -- "${cur#--mode=}") )
-      return 0
-      ;;
-  esac
-
-  case "$prev" in
-    --config|--message-file)
-      COMPREPLY=( $(compgen -f -- "$cur") )
-      return 0
-      ;;
-    --mode|-m)
-      COMPREPLY=( $(compgen -W "%s" -- "$cur") )
-      return 0
-      ;;
-    --terminal-launcher|--title-prefix|--thread|--workspace|--session)
-      return 0
-      ;;
-  esac
-
-  skip_next=0
-  for ((i = 1; i < COMP_CWORD; i++)); do
-    word="${COMP_WORDS[i]}"
-    if (( skip_next )); then
-      skip_next=0
-      continue
-    fi
-    case "$word" in
-      --config|--terminal-launcher|--mode|-m|--title-prefix|--message-file|--thread|--workspace|--session)
-        skip_next=1
-        continue
-        ;;
-      --config=*|--terminal-launcher=*|--mode=*|--title-prefix=*|--message-file=*|--thread=*|--workspace=*|--session=*|--dry-run|--attach|--no-attach|--status|--active|--shelved|--include-runners|--message-stdin|--help|-h|--version)
-        continue
-        ;;
-    esac
-    if [[ -z "$command" ]]; then
-      command="$word"
-      continue
-    fi
-    if [[ "$command" == "runner" && -z "$subcommand" ]]; then
-      subcommand="$word"
-      continue
-    fi
-  done
-
-  if [[ -z "$command" ]]; then
+  command="${COMP_WORDS[1]}"
+  if [[ $COMP_CWORD -eq 1 ]]; then
     COMPREPLY=( $(compgen -W "%s %s" -- "$cur") )
     return 0
   fi
-
   case "$command" in
-    list)
-      COMPREPLY=( $(compgen -W "--status --active --shelved" -- "$cur") )
-      ;;
-    workspaces)
-      COMPREPLY=( $(compgen -W "--include-runners" -- "$cur") )
-      ;;
-    park)
-      COMPREPLY=( $(compgen -W "--workspace" -- "$cur") )
-      ;;
-    shelve)
-      COMPREPLY=( $(compgen -W "--thread --workspace --session" -- "$cur") )
-      ;;
-    unshelve)
-      COMPREPLY=( $(compgen -W "--thread --workspace" -- "$cur") )
-      ;;
-    spawn)
-      COMPREPLY=( $(compgen -W "--mode -m --title-prefix --message-file --message-stdin" -- "$cur") )
-      ;;
-    teardown)
-      COMPREPLY=( $(compgen -W "--thread --session" -- "$cur") )
-      ;;
-    runner)
-      if [[ -z "$subcommand" ]]; then
-        COMPREPLY=( $(compgen -W "list pin unpin launch park restart" -- "$cur") )
+    worker)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "%s" -- "$cur") )
+      else
+        COMPREPLY=( $(compgen -W "%s" -- "$cur") )
       fi
       ;;
-    completion)
-      COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
-      ;;
+    spawn) COMPREPLY=( $(compgen -W "--workspace --window --workdir --mode -m --message --message-file --message-stdin --idempotency-key" -- "$cur") ) ;;
+    shelve|unshelve|teardown) COMPREPLY=( $(compgen -W "--workspace --thread --current --all" -- "$cur") ) ;;
+    completion) COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") ) ;;
   esac
 }
 complete -F _amux_complete amux
-`, ampDialModeCompletions, ampDialModeCompletions, strings.Join(commandNames(completionCommands), " "), strings.Join(globalCompletionFlags, " "))
+`, strings.Join(commandNames(completionCommands), " "), strings.Join(globalCompletionFlags, " "), strings.Join(commandNames(completionCommands[0].Subcommands), " "), strings.Join(workerCompletionFlags(), " "))
 }
 
 func writeZshCompletion(w io.Writer) {
@@ -186,19 +106,17 @@ func writeZshCompletion(w io.Writer) {
 	}
 	fmt.Fprintln(w, ")")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "local -a runner_commands")
-	fmt.Fprintln(w, "runner_commands=(")
-	for _, command := range runnerCompletionCommands() {
+	fmt.Fprintln(w, "local -a worker_commands")
+	fmt.Fprintln(w, "worker_commands=(")
+	for _, command := range completionCommands[0].Subcommands {
 		fmt.Fprintf(w, "  %q\n", command.Name+":"+command.Description)
 	}
 	fmt.Fprintln(w, ")")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, `_arguments -C \
-  '--config[path to restore config]:config file:_files' \
+  '--config-dir[path to config directory]:directory:_directories' \
+  '--json[emit exactly one JSON result document]' \
   '--dry-run[print intended actions without mutating]' \
-  '--attach[always attach after launch]' \
-  '--no-attach[never attach after launch]' \
-  '--terminal-launcher[terminal launcher command]:command:' \
   '--help[print help]' \
   '-h[print help]' \
   '--version[print version]' \
@@ -211,31 +129,24 @@ case $state in
     ;;
   args)
     case $words[2] in
-      list)
-        _arguments '--status[append thread status]' '--active[only confirmed active rows]' '--shelved[only confirmed shelved rows]' '*:workspace:'
-        ;;
-      workspaces)
-        _arguments '--include-runners[include runner-only workspaces]'
-        ;;
-      park)
-        _arguments '--workspace[park all clients in workspace]:workspace:' '*:arg:'
+      worker)
+        if (( CURRENT == 3 )); then
+          _describe -t worker-commands 'worker command' worker_commands
+        else
+          _arguments '--workspace[workspace]:workspace:' '--window[window]:window:' '--workdir[working directory]:directory:_directories' '--thread[thread id or URL]:thread:' '--shelf[shelf intent]:intent:(shelved unshelved)' '--mode[thread mode]:mode:(low medium high ultra)' '-m[thread mode]:mode:(low medium high ultra)' '--message[initial message]:message:' '--message-file[read initial message from file]:message file:_files' '--message-stdin[read initial message from stdin]' '--idempotency-key[operation key]:key:' '--current[current worker]' '--all[all workers]'
+        fi
         ;;
       shelve)
-        _arguments '--thread[select by thread id or URL]:thread:' '--workspace[select all rows in workspace]:workspace:' '--session[tmux session]:session:' '*:arg:'
+        _arguments '--thread[select by thread id or URL]:thread:' '--workspace[select workspace]:workspace:' '--current[current worker]' '--all[all workers]'
         ;;
       unshelve)
-        _arguments '--thread[select by thread id or URL]:thread:' '--workspace[select all rows in workspace]:workspace:' '*:arg:'
+        _arguments '--thread[select by thread id or URL]:thread:' '--workspace[select workspace]:workspace:' '--current[current worker]' '--all[all workers]'
         ;;
       spawn)
-        _arguments '--mode[thread mode]:mode:(low medium high ultra)' '-m[thread mode]:mode:(low medium high ultra)' '--title-prefix[window/thread title prefix]:prefix:' '--message-file[read initial message from file]:message file:_files' '--message-stdin[read initial message from stdin]' '*:arg:'
+        _arguments '--workspace[workspace]:workspace:' '--window[window]:window:' '--workdir[working directory]:directory:_directories' '--mode[thread mode]:mode:(low medium high ultra)' '-m[thread mode]:mode:(low medium high ultra)' '--message[initial message]:message:' '--message-file[read initial message from file]:message file:_files' '--message-stdin[read initial message from stdin]' '--idempotency-key[operation key]:key:'
         ;;
       teardown)
-        _arguments '--thread[select by thread id or URL]:thread:' '--session[tmux session]:session:' '*:arg:'
-        ;;
-      runner)
-        if (( CURRENT == 3 )); then
-          _describe -t runner-commands 'runner command' runner_commands
-        fi
+        _arguments '--thread[select by thread id or URL]:thread:' '--workspace[select workspace]:workspace:' '--current[current worker]' '--all[all workers]'
         ;;
       completion)
         _values 'shell' bash zsh fish
@@ -258,9 +169,13 @@ func writeFishCompletion(w io.Writer) {
 		for _, flag := range command.Flags {
 			writeFishFlag(w, condition, flag, flagDescription(flag), flagTakesValue(flag))
 		}
-		if command.Name == "runner" {
+		if command.Name == "worker" {
 			for _, subcommand := range command.Subcommands {
-				fmt.Fprintf(w, "complete -c amux -f -n '__fish_seen_subcommand_from runner; and not __fish_seen_subcommand_from %s' -a %s -d %s\n", strings.Join(commandNames(command.Subcommands), " "), fishQuote(subcommand.Name), fishQuote(subcommand.Description))
+				fmt.Fprintf(w, "complete -c amux -f -n '__fish_seen_subcommand_from worker; and not __fish_seen_subcommand_from %s' -a %s -d %s\n", strings.Join(commandNames(command.Subcommands), " "), fishQuote(subcommand.Name), fishQuote(subcommand.Description))
+				condition := fmt.Sprintf("__fish_seen_subcommand_from worker; and __fish_seen_subcommand_from %s", subcommand.Name)
+				for _, flag := range subcommand.Flags {
+					writeFishFlag(w, condition, flag, flagDescription(flag), flagTakesValue(flag))
+				}
 			}
 		}
 		if command.Name == "completion" {
@@ -298,6 +213,20 @@ func commandNames(commands []completionCommand) []string {
 	return names
 }
 
+func workerCompletionFlags() []string {
+	seen := make(map[string]bool)
+	var flags []string
+	for _, command := range completionCommands[0].Subcommands {
+		for _, flag := range command.Flags {
+			if !seen[flag] {
+				seen[flag] = true
+				flags = append(flags, flag)
+			}
+		}
+	}
+	return flags
+}
+
 func runnerCompletionCommands() []completionCommand {
 	for _, command := range completionCommands {
 		if command.Name == "runner" {
@@ -309,8 +238,10 @@ func runnerCompletionCommands() []completionCommand {
 
 func flagDescription(flag string) string {
 	switch flag {
-	case "--config":
-		return "Path to restore config"
+	case "--config-dir":
+		return "Path to config directory"
+	case "--json":
+		return "Emit one JSON result document"
 	case "--dry-run":
 		return "Print intended actions without mutating"
 	case "--attach":
@@ -329,6 +260,12 @@ func flagDescription(flag string) string {
 		return "Select by thread id or URL"
 	case "--workspace":
 		return "Select workspace rows"
+	case "--window":
+		return "Select worker window"
+	case "--workdir":
+		return "Select working directory"
+	case "--shelf":
+		return "Filter shelf intent"
 	case "--session":
 		return "Tmux session"
 	case "--mode", "-m":
@@ -337,8 +274,12 @@ func flagDescription(flag string) string {
 		return "Window and thread title prefix"
 	case "--message-file":
 		return "Read initial message from file"
+	case "--message":
+		return "Initial worker message"
 	case "--message-stdin":
 		return "Read initial message from stdin"
+	case "--idempotency-key":
+		return "Stable spawn operation key"
 	case "--include-runners":
 		return "Include runner-only workspaces"
 	case "--help", "-h":
@@ -352,7 +293,7 @@ func flagDescription(flag string) string {
 
 func flagTakesValue(flag string) bool {
 	switch flag {
-	case "--config", "--terminal-launcher", "--thread", "--workspace", "--session", "--mode", "-m", "--title-prefix", "--message-file":
+	case "--config-dir", "--thread", "--workspace", "--window", "--workdir", "--shelf", "--mode", "-m", "--message", "--message-file", "--idempotency-key":
 		return true
 	default:
 		return false
