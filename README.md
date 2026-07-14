@@ -1,500 +1,253 @@
 # amux
 
-`amux` is the local tmux workspace and lifecycle layer for [Amp](https://ampcode.com/). It restores named Amp workspaces from a small TSV config file, and gives agents safe commands for pinning, parking, spawning, and tearing down work.
+`amux` is the local tmux lifecycle layer for [Amp](https://ampcode.com/). It manages interactive **workers**, non-interactive **runners**, and named **workspaces** with explicit, agent-safe side effects.
 
-It is built for people who keep long-running Amp threads and local Amp processes around while moving between projects. Instead of manually reopening tmux windows and continuing threads, you store the windows you care about and let `amux` restore them later.
+- A **worker** is an interactive Amp client identified machine-wide by its canonical thread ID.
+- A **runner** is an `amp --no-tui` client identified machine-wide by its canonical workdir. It enables Amp Agents Anywhere but does not own remote agent threads.
+- A **workspace** groups workers and runners in one same-named tmux session.
 
-Website: [amux.zainf.dev](https://amux.zainf.dev)
+Website: [amux.zainf.dev](https://amux.zainf.dev) · Skill guide: [amux.zainf.dev/skill/](https://amux.zainf.dev/skill/)
 
-## Status
+## Install
 
-`amux` is an early public release. The core CLI is tested and used daily, but a few defaults still reflect the author's setup:
-
-- default workspace: `mac`
-- default tmux session: `Amp`
-- default config path: `~/.config/amux/workspaces.tsv`
-- fallback terminal launching is tuned for Omarchy/Alacritty environments
-
-If you already use Amp in tmux, the main workflow is ready to try. Start with `--dry-run`, keep the bundled `/amux` skill installed for agent operation, and file issues for rough edges.
-
-## Features
-
-- Complement Amp Agents Anywhere with a local tmux workspace layer.
-- Restore Amp threads into named tmux windows.
-- Store and launch per-directory `amp --no-tui` runner intent separately from thread rows.
-- Pin or unpin the current tmux window in the restore config.
-- Spawn a fresh Amp thread in a new tmux window.
-- Tear down an `amux spawn` worker from its injected identity.
-- Validate planned restore actions with `--dry-run`.
-- Inspect config/live tmux drift with `doctor`.
-- Build versioned release artifacts through GitHub Actions.
-
-## Amp Agents Anywhere
-
-Amp's [Agents Anywhere](https://ampcode.com/news/agents-anywhere) gives Amp first-party remote thread creation and per-directory runner mode with `amp --no-tui`. `amux` does not replace that. It manages the local tmux side of an Amp workflow: named windows, restore config, live-local parking, verified teardown, and an agent skill that keeps those side effects explicit.
-
-`amux launch` restores known Amp threads with `amp threads continue <thread-id-or-url>`, and `amux spawn` creates an interactive tmux-backed worker with a known thread identity. `amux runner ...` commands manage first-class `amp --no-tui` runner intent separately in `runners.tsv` so runner rows are not confused with thread restore rows.
-
-## Requirements
-
-- `tmux`, for workspace/session management.
-- Amp CLI, for continuing and creating Amp threads.
-
-For building from source, you also need Go.
-
-Optional:
-
-- Omarchy/Alacritty, used only as fallback terminal launchers when `amux` is asked to attach but the caller is not an interactive terminal.
-
-## Install from a release
+Requirements: Amp CLI and tmux. Building from source also requires the Go version in `go.mod`.
 
 ### Homebrew
 
-On macOS or Linux, install the release binary with Homebrew:
-
 ```sh
 brew install zainfathoni/tap/amux
-```
-
-Update Homebrew installs with Homebrew, not `amux update`:
-
-```sh
-brew update
 brew upgrade amux
 ```
 
-Homebrew installs live under Homebrew-managed Cellar paths, which are treated as
-immutable. `amux update` refuses to replace binaries from those paths so package
-management stays owned by Homebrew.
+Homebrew owns that installation. `amux update` deliberately refuses Homebrew, mise, asdf, Nix, and system-package paths.
 
-### Manual release archive
+### Manual release
 
-Download the archive for your platform from the [latest release](https://github.com/zainfathoni/amux/releases/latest), verify its checksum, and install the binary somewhere on your `PATH`:
+Release archives are available for Linux and macOS on amd64 and arm64. Verify the checksum, then install the matching binary at the canonical self-updating path:
 
 ```sh
 curl -LO https://github.com/zainfathoni/amux/releases/latest/download/amux-linux-amd64.tar.gz
 curl -LO https://github.com/zainfathoni/amux/releases/latest/download/amux-linux-amd64.tar.gz.sha256
 sha256sum -c amux-linux-amd64.tar.gz.sha256
 tar -xzf amux-linux-amd64.tar.gz
-install -m 0755 amux-linux-amd64/amux ~/.local/bin/amux
+install -D -m 0755 amux-linux-amd64/amux ~/.local/bin/amux
 ```
 
-Release archives are published for Linux and macOS on amd64 and arm64.
-
-`~/.local/bin/amux` is the canonical self-updating installation. Keep
-`~/.local/bin` before toolchain and package-manager directories on `PATH`.
-`amux update` refuses every other target, including mise, asdf, Nix, Homebrew,
-and system package paths, before checking GitHub or replacing a binary. Those
-installations must be updated by their owning tool.
-
-Update a user-local release install with:
+Keep `~/.local/bin` early on `PATH`. Then:
 
 ```sh
 amux update
-```
-
-Preview the update without replacing the binary:
-
-```sh
-amux update --dry-run
-```
-
-Inspect every `amux` executable on `PATH`, its resolved target and version, and
-any canonical shadowing or scheduled-maintenance executable drift with:
-
-```sh
 amux install doctor
 amux --json install doctor
 ```
 
-### One-time bootstrap from an old client
+`install doctor` reports the running executable, canonical target, every PATH candidate and version, shadowing, and scheduled-maintenance drift. Clients older than the agent-first CLI must be bootstrapped by replacing `~/.local/bin/amux` directly rather than invoking removed `self-update` syntax.
 
-Clients predating the agent-first CLI may interpret `amux update` as workspace
-launch arguments, and some only recognize `amux self-update`. Do not use either
-command for this one-time migration. Download and verify the current release as
-shown above, install it directly at `~/.local/bin/amux`, put that directory
-first on `PATH`, then clear your shell's command cache and diagnose the result:
-
-```sh
-install -d ~/.local/bin
-install -m 0755 amux-linux-amd64/amux ~/.local/bin/amux
-export PATH="$HOME/.local/bin:$PATH"
-hash -r
-~/.local/bin/amux install doctor
-```
-
-Use the archive directory matching your operating system and architecture. Once
-bootstrapped, use only `amux update` for this canonical release installation.
-
-## Shell completions
-
-`amux` can print static shell completions for bash, zsh, and fish. These cover
-commands, aliases, flags, runner subcommands, and common positional forms. They
-do not inspect tmux sessions, configured workspaces, or Amp threads.
-
-Install bash completions:
-
-```sh
-mkdir -p ~/.local/share/bash-completion/completions
-amux completion bash > ~/.local/share/bash-completion/completions/amux
-```
-
-Install zsh completions:
-
-```sh
-mkdir -p ~/.zfunc
-amux completion zsh > ~/.zfunc/_amux
-```
-
-Then ensure `~/.zfunc` is on your `fpath`, for example in `~/.zshrc`:
-
-```sh
-fpath=(~/.zfunc $fpath)
-autoload -Uz compinit
-compinit
-```
-
-Install fish completions:
-
-```fish
-mkdir -p ~/.config/fish/completions
-amux completion fish > ~/.config/fish/completions/amux.fish
-```
-
-## Install from source
-
-Build and install the CLI from this repository:
+### Source
 
 ```sh
 make build
-install -m 0755 amux ~/.local/bin/amux
+install -D -m 0755 amux ~/.local/bin/amux
 ```
 
-`make build` writes `./amux` by default. Override the output path with `BUILD_OUTPUT`:
+## Install the `/amux` skill
+
+Install globally from the public repository with [skills.sh](https://skills.sh/):
 
 ```sh
-BUILD_OUTPUT=/tmp/amux make build
+npx skills add zainfathoni/amux --skill amux --global
 ```
 
-Builds made through `make build` or `scripts/build-amux.sh` inject version metadata into `amux version`:
-
-- tag releases use the tag name, for example `v0.1.1`
-- `main` branch CI builds use `main.<github-run-number>` so every main build has a unique version
-- pull request CI builds use `pr.<pull-request-number>.<github-run-number>`
-- local scripted builds use `dev.<short-sha>` unless `VERSION=...` is provided
-- `commit` is the short commit SHA
-- `built` is the UTC build time, or `SOURCE_DATE_EPOCH` converted to UTC when set
+The skill teaches agents the canonical selectors, side-effect boundaries, and skill-only health/sprawl/finish workflows. See the [dedicated skill guide](https://amux.zainf.dev/skill/). Local symlinking is only for contributors developing the bundled skill; see [CONTRIBUTING.md](CONTRIBUTING.md#develop-the-bundled-skill).
 
 ## Quick start
 
-Create a config file:
+The CLI writes schema-marked registries under `~/.config/amux` by default. Select another directory with `--config-dir` (`-c`) or `AMUX_CONFIG_DIR`. Do not create or edit registry rows manually when a command exists.
+
+Pin a known worker explicitly, then manage it by canonical thread identity:
 
 ```sh
-mkdir -p ~/.config/amux
-cat > ~/.config/amux/workspaces.tsv <<'EOF'
-# workspace	window	workdir	thread-id-or-url
-mac	my-project	~/Code/my-project	https://ampcode.com/threads/T-example
-EOF
+amux worker pin --workspace amux --window docs --workdir ~/Code/amux --thread T-example
+amux worker list --thread T-example
+amux worker park --thread T-example
+amux worker launch --thread T-example
 ```
 
-Use a real Amp thread ID or thread URL from your own Amp history in place of
-`https://ampcode.com/threads/T-example`.
+Pin and unpin change configuration only. Park stops a verified local client but preserves configuration and remote state. Launch restores local execution without changing remote thread state.
 
-Preview the restore plan:
+For a locked Git worktree runner:
 
 ```sh
-amux launch mac --dry-run
+amux runner pin --workspace amux --workdir ~/Code/amux-runner
+amux runner launch --workdir ~/Code/amux-runner
 ```
 
-Restore the workspace:
+amux verifies that a runner worktree is already locked; it never owns Git worktree lock/unlock.
+
+## Command model
+
+Run `amux help`, `amux help worker`, or `amux help runner <command>` for current contextual help.
+
+### Aggregate routes
+
+Top-level lifecycle routes operate on workers and runners:
 
 ```sh
-amux launch mac
+amux list --all
+amux launch --workspace amux
+amux park --all
+amux restart --all
+amux remove --all
+amux doctor --all
+amux reconcile --workspace amux
 ```
 
-Pin the current tmux window in the restore config for future restores:
+`list`, `launch`, `park`, `restart`, `remove`, `doctor`, and `reconcile` aggregate both modes. Use `amux worker ...` or `amux runner ...` to narrow. Bare `amux` remains a convenience that launches all configured workers only; `amux launch` launches both modes. Launch is the no-selector bulk exception; other machine-wide mutations require explicit `--all`.
+
+### Canonical selectors
+
+Agents should use long flags:
+
+| Selector | Meaning |
+| --- | --- |
+| `--thread`, `-t` | canonical worker identity |
+| `--workdir`, `-d` | canonical runner identity |
+| `--workspace`, `-w` | worker/runner lifecycle group and same-named tmux session |
+| `--window`, `-W` | worker creation placement metadata |
+| `--mode`, `-m` | spawn mode or workspace-list filter |
+| `--current` | resource owning the invoking pane/workdir |
+| `--all` | explicit machine-wide scope |
+
+Worker and runner pin/unpin require a namespace because their identities differ:
 
 ```sh
-amux pin-current https://ampcode.com/threads/T-example
+amux worker pin --workspace amux --window docs --workdir ~/Code/amux --thread T-example
+amux worker unpin --thread T-example
+amux runner pin --workspace amux --workdir ~/Code/amux-runner
+amux runner unpin --workdir ~/Code/amux-runner
 ```
 
-Unpin the current tmux window from the restore config without stopping it:
+`amux workspace list` and its exact `amux workspaces` alias list the worker/runner workspace union. Add `--mode worker` or `--mode runner` to filter.
+
+Removed aliases and positional forms fail with remediation. In particular, do not use `store`, top-level `pin`, `pin-current`, `unpin-current`, `park-current`, `shelve-current`, `shelved`, `prune-archived`, `self-update`, positional session selectors, `--config`, or legacy config environment variables.
+
+## Worker-only lifecycle
+
+`spawn`, `shelve`, `unshelve`, and `teardown` are worker-only and have concise top-level routes.
 
 ```sh
-amux unpin-current
+amux --dry-run spawn --workspace amux --window install-diagnostics --workdir ~/Code/amux-issue-110 --mode medium --title-prefix '#110' --message-file /tmp/issue-110.md --idempotency-key issue-110
 ```
 
-## Commands
+An exact `#<issue>` title prefix owns issue identity. The window must be an issue-unprefixed semantic slug; obvious duplicates such as `issue-110-install-diagnostics` are rejected before side effects. `--message`, `--message-file`, and `--message-stdin` are mutually exclusive. Spawn requires a stable idempotency key; if interrupted external creation cannot be recovered, the operation becomes indeterminate and is never blindly retried.
 
 ```sh
-amux                         # launch every configured workspace in a same-named session
-amux launch [workspace] [session] # one workspace arg also selects the same-named tmux session
-amux --attach launch mac Amp
-amux --no-attach launch mac Amp
-amux --terminal-launcher "kitty -e" --attach launch mac Amp
-amux launch mac --dry-run
-amux list [--status] [--active|--shelved] [workspace]
-amux shelved [workspace]
-amux pin <workspace> <window> <workdir> <thread-id-or-url>
-amux pin-current <thread-id-or-url>
-amux pin-current <workspace> <thread-id-or-url> [window] [workdir]
-amux unpin <workspace> <window>
-amux unpin-current [workspace]
-amux park
-amux park --workspace <workspace>
-amux park <window>
-amux park <workspace> <window> [session]
-amux park -- <-window>
-amux park -- <workspace> <-window> [session]
-amux park-current [workspace]
-amux restart [[workspace] <window> [session]]
-amux shelve-current [workspace] [thread-id-or-url]
-amux shelve [workspace] <window> [session]
-amux shelve --thread <thread-id-or-url> [--session <session>]
-amux shelve --workspace <workspace> [--session <session>]
-amux unshelve [workspace] <window>
-amux unshelve --thread <thread-id-or-url>
-amux unshelve --workspace <workspace>
-amux spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] <window> <workdir> <initial-message> [workspace] [session]
-amux spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] --message-file <path> <window> <workdir> [workspace] [session]
-amux spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] --message-stdin <window> <workdir> [workspace] [session]
-amux teardown
-amux teardown --thread <thread-id-or-url> [--session <session>]
-amux teardown <workspace> <window> [session]
-amux prune-archived [workspace]
-amux workspaces [--include-runners]
-amux runner list [workspace]
-amux runner pin <workspace> <window> <workdir>
-amux runner unpin <workspace> <window>
-amux runner launch [workspace] [session]
-amux runner park [workspace] <window> [session]
-amux runner restart [[workspace] <window> [session]]
-amux completion <bash|zsh|fish>
-amux version
-amux update
-amux install doctor
-amux path
-amux doctor [workspace] [session]
+amux shelve --thread T-example
+amux worker list --shelf shelved
+amux unshelve --thread T-example
+amux worker launch --thread T-example
+amux teardown --thread T-example
 ```
 
-The legacy `self-update` command has been removed; bootstrap old clients once as
-described in [Install from a release](#install-from-a-release), then use
-`amux update`.
+- Shelve records local shelf intent before archiving and parking, preserving worker configuration.
+- Unshelve unarchives and removes intent only after success; it does not launch.
+- Teardown archives the verified thread, removes worker and shelf configuration, and stops the verified local client. A verified already-absent local process is a benign skip; ambiguity still fails closed.
+- Remove stops a worker and deletes local configuration without archiving. Unpin only deletes configuration and does not stop it.
+- Reconcile explicitly synchronizes worker shelf/remote drift or repairs stale runner ownership. Launch never performs hidden reconciliation.
 
-`amux spawn --mode <mode>` (or `-m <mode>`) creates the new Amp thread with the selected Amp mode. Amp's built-in Dial modes are `low`, `medium`, `high`, and `ultra`; shell completions suggest those built-ins. Custom/plugin mode names are still passed through unchanged, so amux does not restrict `--mode` to the built-in list. Omitting `--mode` preserves the default Amp thread behavior. For old Amp mode names, use `medium` instead of `smart` or `deep`, `low` instead of `rush`, and `high` or `ultra` instead of `deep**3`.
+## Side effects
 
-The positional `amux spawn ... <initial-message>` remains intentionally single-line: tabs and newlines are rejected before any Amp thread is created. For structured prompts, use `--message-file prompt.md` or `--message-stdin < prompt.md`; these explicit sources allow multi-line content, are mutually exclusive with each other and with positional `<initial-message>`, and are read and validated before `spawn` creates the new Amp thread. Multi-line content is delivered through a tmux paste buffer with bracketed paste enabled when the Amp composer requests it, then verified against the newly created Amp thread before the restore row is stored. Prompts larger than 1 MiB are rejected.
-
-`amux spawn --title-prefix <prefix>` names the spawned tmux window `"<prefix> <window>"` and renames only the newly created Amp thread to that same name after the initial message is submitted, so Amp sees a non-empty thread. For issue-oriented work, an exact prefix such as `--title-prefix '#255'` owns issue identity; pass an issue-unprefixed semantic window such as `booking-timezone` to get the final tmux window, restore row, `AMUX_WINDOW`, and Amp thread title `#255 booking-timezone`. Obvious duplicates such as `issue-255-booking-timezone` and `#255 booking-timezone` are rejected before spawn side effects with a corrected window suggestion; amux never silently strips them. Generic non-issue prefixes are unaffected. If the authoritative Amp thread rename fails, canonical worker spawn returns an error and leaves the operation at `message_verified` without storing a worker row; retrying the same idempotency key retries only that rename instead of creating another thread or resubmitting the assignment. Omitting `--title-prefix` preserves the existing spawn behavior and does not rename any Amp thread or prefix the tmux window.
-
-`amux spawn` injects a stable identity contract into the spawned Amp process: `AMUX_WORKSPACE`, `AMUX_SESSION`, `AMUX_WINDOW`, `AMUX_THREAD_ID`, and `AMUX_WORKDIR`. From that spawned process, no-arg `amux teardown` verifies the `AMUX_WORKSPACE`/`AMUX_SESSION`/`AMUX_WINDOW`/`AMUX_THREAD_ID` identity against the restore config and live tmux window, archives the matching Amp thread, removes the restore row, and stops the uniquely matched tmux window. If the identity, config row, or tmux window is missing, mismatched, or ambiguous, teardown refuses to archive or stop anything.
-
-`amux list [workspace]` prints local restore rows only, without calling Amp, so it remains instant even with many remote threads. Use `amux list --status [workspace]` when you want a trailing `status` column: `active` when the thread is in Amp's active list, `shelved` when it is archived remotely but preserved in `workspaces.tsv`, `missing` when Amp confirms it is in neither active nor archived lists, and `unknown` when Amp thread status cannot be read. Use `amux list --active [workspace]` for only confirmed active rows, `amux list --shelved [workspace]` or `amux shelved [workspace]` for only confirmed shelved rows. Filtered listing fails closed if Amp status is unavailable instead of guessing.
-
-`amux workspaces` prints unique workspace names from `workspaces.tsv`, sorted one per line, without calling Amp or tmux and without creating missing config files. It intentionally excludes runner-only workspaces by default because interactive health checks target restore workspaces. Use `amux workspaces --include-runners` when machine-level inventory should also include workspace names that exist only in `runners.tsv`.
-
-`amux` keeps four side-effect domains separate:
-
-- **Restore config**: rows in `workspaces.tsv` that describe what should be restored later.
-- **Runner config**: rows in `runners.tsv` that describe local `amp --no-tui` runners to keep restorable by workspace/window/workdir.
-- **Live local tmux/Amp**: tmux sessions/windows and the local Amp CLI processes running inside them.
-- **Remote Amp thread state**: hosted Amp threads, including creation by `spawn` and archival by verified `teardown`.
-
-Command side effects:
-
-| Command | Restore config | Runner config | Live local tmux/Amp | Remote Amp thread state |
+| Operation | Worker config / shelf | Runner config | Local clients | Remote worker thread |
 | --- | --- | --- | --- | --- |
-| `launch` | Read only | No change | Creates missing thread tmux windows/processes for unshelved rows only | Inspect archive state and continue active threads; skips shelved/archived rows |
-| `list` / `shelved` | Read only | No change | Inspect only | Plain `list` is local-only; `list --status`, filtered list, and `shelved` inspect remote thread status |
-| `workspaces` | Read only | Inspect only with `--include-runners` | No change | No change |
-| `path`, `version` | Read only | No change | Inspect only | No change |
-| `doctor` | Read only | Read only | Inspect only | Inspect only |
-| `pin`, `pin-current` (`store`, `store-current`) | Add or replace rows | No change | No change | No change |
-| `unpin`, `unpin-current` (`remove`, `remove-current`) | Remove rows | No change | No change | No change |
-| `park`, `park-current` | No change; rows are preserved for future restore | No change | Gracefully stop the resolved local tmux/Amp window | No change; Amp thread history is not archived or deleted |
-| `restart` | No change; rows are preserved | No change | Force-restart the verified local Amp client in place | No change |
-| `shelve-current` | Add or update the current window's restore row before archiving | No change | Stop the current tmux/Amp window | Archive the identified current Amp thread so it leaves the Amp sidebar |
-| `shelve` | No change; rows are preserved for future restore | No change | Stop verified matching local tmux/Amp windows when present | Archive the selected thread, thread row, or workspace's threads so they leave the Amp sidebar |
-| `unshelve` | No change; rows are preserved for future restore | No change | No change | Unarchive the selected thread, thread row, or workspace's threads |
-| `spawn` | Store the new row under the final window name | No change | Create/select a tmux window and submit the initial message | Create a new Amp thread, optionally with `--mode`; optionally rename the new thread with `--title-prefix` |
-| `teardown` | Remove the verified row | No change | Stop the verified tmux window | Archive the verified thread |
-| `prune-archived` | Remove rows whose threads are confirmed archived | No change | No change | Inspect only; does not archive/delete threads |
-| `runner pin`, `runner unpin` | No change | Add/replace/remove runner rows | No change | No change |
-| `runner launch` | No change | Read only | Creates missing `amp --no-tui` runner windows | No change |
-| `runner park` | No change | No change; rows are preserved for future restore | Gracefully stop the resolved local runner window | No change |
-| `runner restart` | No change | No change; rows are preserved | Force-restart the verified local runner in place | No change |
+| `list`, `workspace list` | inspect | inspect | none | none |
+| `doctor` | inspect | inspect | inspect | inspect only |
+| `launch` | read; skip shelved | read | create/verify | none |
+| `pin` / `unpin` | pin worker; unpin worker and shelf intent | mutate runner registry | none | none |
+| `park` / `restart` | preserve | preserve | stop/restart verified | none |
+| `remove` | remove worker/shelf | remove runner | stop verified | none |
+| `shelve` / `unshelve` | preserve worker; mutate intent | none | shelve parks only | archive/unarchive |
+| `spawn` | add worker after verification | none | create worker | create/rename |
+| `teardown` | remove worker/shelf | none | stop verified worker | archive |
+| `reconcile` | synchronize drift | repair stale ownership | verified repairs only | worker sync only |
 
-Compatibility decision: keep workspace-named sessions when a workspace is explicitly provided and the session is omitted. For `launch`, `doctor`, `runner launch`, and `runner park`, explicit workspace commands target that workspace's same-named tmux session, for example `amux launch amux`, `amux doctor amux`, `amux runner launch amux`, and `amux runner park amux runner-window`. For `spawn`, the optional trailing workspace does the same: `amux spawn worker ~/Code/repo "prompt" amux` or `amux spawn --message-file prompt.md worker ~/Code/repo amux`. For workspace-based `shelve`, use `amux shelve amux worker` or `amux shelve --workspace amux`; for explicit `teardown`, use `amux teardown amux worker`. This is the preferred layout for new per-workspace sessions. Older shared-session layouts remain supported by passing the session explicitly, for example `amux launch mac Amp`, `amux spawn worker ~/Code/repo "prompt" mac Amp`, `amux spawn --message-file prompt.md worker ~/Code/repo mac Amp`, `amux shelve mac worker Amp`, `amux shelve --workspace mac --session Amp`, `amux teardown mac worker Amp`, `amux runner launch mac Amp`, `amux runner park mac runner-window Amp`, or `amux doctor mac Amp`. With no workspace argument, `amux launch` and `amux runner launch` launch every workspace in their respective config into same-named tmux sessions. Other commands that support an omitted workspace retain the compatibility default of workspace `mac` and session `Amp`.
+Runner lifecycle never creates, continues, archives, or manages remote agent threads.
 
-`amux doctor [workspace] [session]` is read-only and compares the selected workspace against the selected live tmux session. It also reports restore rows whose Amp threads are confirmed archived or missing, and runner registry drift when `runners.tsv` is present.
+## JSON v1, dry-run, exits, and locking
 
-For `launch`, `--dry-run` validates restore inputs and prints planned tmux commands without inspecting existing tmux conflicts or creating windows. For `spawn`, dry-run validates inputs and checks tmux window conflicts without creating or renaming an Amp thread, creating tmux windows, sending keys, or updating `workspaces.tsv`; it only prints the intended actions, including the selected mode and planned title rename when provided.
+`--json` (`-j`) emits exactly one versioned document. Schema v1 contains:
 
-Launch uses auto-attach by default when a workspace is specified: cold restores create the tmux session and return, while an already-running session attaches only when its live window set and pane paths match the configured workspace. Plain `amux launch` restores every configured workspace in sorted order into its same-named session without attaching. It stops at the first workspace failure, so earlier workspaces may already be restored; the error identifies the failed workspace. Use `--attach` with an explicit workspace to always attach after restoring, or `--no-attach` to never attach.
-
-When launch attaches from inside an existing tmux client, `amux` switches that client to the target session. From a normal interactive terminal, it attaches in-place. If tmux reports that the caller is not a terminal, `amux` opens the target session through the configured terminal launcher, then Omarchy's terminal launcher, then direct Alacritty fallback. Configure the first launcher with `--terminal-launcher "kitty -e"` or `AMUX_TERMINAL_LAUNCHER="kitty -e"`; `amux` appends `tmux attach -t <session>` to the launcher command. Quoted launcher arguments are supported. Without that option or env var, the existing Omarchy/Alacritty order is unchanged.
-
-`park` and `park-current [workspace]` are live-local-only. With no arguments, `park` targets all configured interactive clients on the machine; `park --workspace <workspace>` targets one workspace across tmux sessions; `park <window>` preserves the legacy `mac` workspace and `Amp` session defaults; and `park <workspace> <window> [session]` targets one configured client, also defaulting to the legacy `Amp` session when session is omitted. Put `--` before all positional arguments for leading-dash names, for example `park -- -worker` or `park -- workspace -window Amp`; the bulk `--workspace` form remains separate. Bulk parking preflights and then revalidates every selected client before scheduling any shutdown, skips configured clients that are not running, rejects split windows, and excludes runners. Parking schedules a delayed graceful terminal shutdown sequence and returns immediately. In dry-run mode it performs read-only inventory and revalidation but only prints the shutdown that would be scheduled. The delayed job revalidates pane identity and the one-pane window invariant before sending keys and again before force-closing its window. Parking preserves restore config rows and never archives the remote Amp thread. Use `unpin`/`unpin-current` when you only want to stop restoring a row, `shelve-current` or `shelve` when you want to hide/defer a thread while keeping it restorable, and `teardown` when you intentionally want to archive the verified remote Amp thread, remove the row, and stop the local window.
-
-`shelve-current [workspace] [thread-id-or-url]` is the current-window path for live tmux/Amp work that may not be pinned yet. Run it from the pane you want to defer; it derives the current window and workdir, requires an explicit thread ID/URL unless `AMUX_THREAD_ID` is already set, writes or preserves a useful restore row, archives the thread so it leaves the Amp sidebar, and stops the current tmux window. It refuses to guess a thread and does not replace an existing same workspace/window row that points at a different thread.
-
-`shelve` is deferral without forgetting for existing restore rows. It archives Amp thread(s) so they leave the Amp sidebar, preserves the restore row(s), and stops verified matching local tmux/Amp windows when they are live. Target one row with `amux shelve <workspace> <window> [session]`, one thread regardless of workspace with `amux shelve --thread <thread-id-or-url> [--session <session>]`, or every row in a workspace with `amux shelve --workspace <workspace> [--session <session>]`. Workspace-based shelving uses the workspace-named session unless a session is passed; thread shelving searches all tmux sessions unless `--session` is provided. If the current live window is unpinned, `shelve` fails closed and points you to `shelve-current` or `pin-current` rather than treating live tmux state as enough to archive. `amux launch <workspace> [session]` skips shelved rows; run `amux unshelve <workspace> <window>`, `amux unshelve --thread <thread-id-or-url>`, or `amux unshelve --workspace <workspace>` explicitly before launching deferred work again.
-
-`teardown` is explicit full lifecycle cleanup: archive the verified Amp thread, remove the restore row, and stop the uniquely verified local tmux window. With no args it only runs from an `amux spawn` worker that has matching `AMUX_*` identity. From a restored worker that does not have `AMUX_*` but whose thread is stored and live, use `amux teardown --thread <thread-id-or-url> [--session <session>]`; it resolves the restore row by thread, then cross-checks the live tmux start command before mutating anything. From outside the worker when you know the row, use `amux teardown <workspace> <window> [session]`; if `[session]` is omitted, it defaults to the workspace name. All teardown forms fail closed if the target is missing, mismatched, or ambiguous.
-
-`prune-archived [workspace]` is explicit stale-restore cleanup. It removes confirmed archived rows only when you truly want to forget them; archived rows may also represent intentionally shelved work. Active rows are kept; missing threads, Amp CLI failures, or unreadable thread-list output fail closed without changing config. Unlike `teardown`, it does not archive/delete remote threads or stop live tmux windows.
-
-`amux runner ...` commands manage local runner intent for Amp Agents Anywhere. Runner rows live in `runners.tsv` next to `workspaces.tsv` and use `workspace<TAB>window<TAB>workdir`; they intentionally contain no thread ID. `amux runner launch` starts every configured runner workspace with `amp --no-tui` inside same-named tmux sessions, skips already-running windows that verify as the expected runner, and fails closed on same-name mismatches; pass `[workspace] [session]` to launch only one workspace or target an older shared-session layout. `amux runner park [workspace] <window> [session]` stops only the verified live local runner window for the configured workdir while preserving runner config; with a workspace and no session, it targets the workspace-named session, and older shared-session layouts can pass the session explicitly. Runner commands never create, continue, archive, or list remote Amp threads.
-
-When local clients stop responding, `amux restart` discovers and force-restarts every uniquely verified configured thread client across all tmux sessions, while `amux runner restart` does the same for configured `amp --no-tui` runners. Both preflight every configured row before mutation, skip rows that are not currently running, reject duplicate or ambiguous ownership, process live panes in sorted config order, and stop at the first runtime failure with progress counts. Pass `[workspace] <window> [session]` to either command to restart only one client. Both use tmux's in-place pane respawn, preserve config, and fail closed if a live command does not match its configured target.
-
-## Post-merge worker cleanup
-
-`amux teardown` intentionally does not merge PRs, publish releases, remove git worktrees, or delete branches. For a finished worker, use the bundled `/amux` skill's **Finish a merged worker** workflow so agents perform the broader GitHub/git lifecycle before the final amux cleanup:
-
-1. Verify the PR is merged with `gh pr view <pr-number> --json merged,mergeCommit,headRefName,url`.
-2. If a release is expected, make the release type or tag explicit, update `main`, confirm the tag does not already exist, then create/push the tag and watch the release workflow.
-3. Remove the worker worktree only after the worker worktree is clean, the PR is merged, and the main worktree is updated; do not force-remove dirty worktrees as routine cleanup.
-4. Delete local and remote worker branches only when they are confirmed merged, confirmed merged by the PR, or already deleted by the PR merge; prefer `git branch -d`, not `-D`, and require explicit confirmation before force-deleting a squash-merged local branch.
-5. Run `amux teardown` or `amux teardown --thread <thread-id-or-url> [--session <session>]` last, after git/GitHub cleanup is complete.
-
-This differs from parking and shelving: `park` stops only the live local tmux/Amp process while preserving the restore row and active remote thread; `shelve` archives/hides deferred Amp threads while preserving restore rows; `teardown` archives the verified thread, removes the row, and stops the verified local window.
-
-## Configuration
-
-Defaults:
-
-- workspace: `mac`
-- session: `Amp`
-- when a workspace is explicitly passed without a session, that workspace name is used as the tmux session
-- config: `~/.config/amux/workspaces.tsv`
-- runner config: `~/.config/amux/runners.tsv`
-
-Override the config path with either `--config <path>` or `AMUX_WORKSPACES`. The legacy `AMP_TMUX_WORKSPACES` variable remains supported for older installs and scripts.
-
-Override the non-interactive attach terminal launcher with either `--terminal-launcher <command>` or `AMUX_TERMINAL_LAUNCHER`. The launcher command is parsed into shell-style words and `amux` appends `tmux attach -t <session>`. For example, `AMUX_TERMINAL_LAUNCHER="foot -e"` launches `foot -e tmux attach -t <session>`. If the configured launcher is unset or fails to start, `amux` keeps the default fallback order: Omarchy (`uwsm-app -- xdg-terminal-exec -e`) when available, then `alacritty -e`.
-
-Older amux releases used `~/.config/amp-tmux`. Current amux uses `~/.config/amux` and automatically copies `workspaces.tsv`, `runners.tsv`, and future config files from the legacy directory when the new files do not exist. The old directory is left in place for rollback and older binaries. Run `amux migrate-config` explicitly to perform the same copy and print the resolved path.
-
-The TSV format is:
-
-```text
-workspace<TAB>window<TAB>workdir<TAB>thread-id-or-url
+```json
+{
+  "schema_version": 1,
+  "command": "park",
+  "dry_run": true,
+  "planned": [],
+  "successful": [],
+  "skipped": [],
+  "failed": []
+}
 ```
 
-Runner TSV format is separate:
+Workers are identified by `{ "kind": "worker", "thread": "T-..." }`; runners by `{ "kind": "runner", "workdir": "/canonical/path" }`. Agents must ignore unknown optional fields within schema v1.
+
+- `--dry-run` (`-n`) validates and plans without mutation. Prospective changes appear under `planned`, never `successful`.
+- Exit `0`: no failures. Exit `1`: runtime failure; some independent actions may have completed. Exit `2`: request/preflight rejection before mutation.
+- Bulk operations preflight the complete plan, then continue independent actions after runtime failures.
+- Lifecycle commands are idempotent desired-state operations. Known no-ops are `skipped`, not errors.
+- Mutations and scheduled maintenance share one bounded machine-level lock. Contention fails with structured owner metadata and no mutation.
+
+## Configuration migration
+
+Current config is directory-based:
 
 ```text
-workspace<TAB>window<TAB>workdir
+~/.config/amux/workers.tsv
+~/.config/amux/runners.tsv
+~/.config/amux/shelves.tsv
 ```
 
-Example:
-
-```text
-# workspace	window	workdir	thread-id-or-url
-mac	my-project	~/Code/my-project	https://ampcode.com/threads/T-example
-mac	docs	~/Code/docs	T-docs-example
-```
-
-Example runner config:
-
-```text
-# workspace	window	workdir
-mac	my-project-runner	~/Code/my-project
-```
-
-Do not store secrets in workspace names, window names, workdirs, or thread identifiers. Treat the config as shareable operational metadata, not a secret store.
-
-## Agent skill
-
-`amux` is designed to be agent-operated. For best results, install the bundled Amp skill before asking agents to manage sessions. The skill teaches agents the safe command vocabulary: when to **pin** restore config, **park** only a live local tmux/Amp session, **teardown** a verified worker, and run `doctor` before guessing.
-
-Install or refresh the skill globally:
+Ordinary commands never migrate legacy config implicitly. They reject with guidance. Preview and run explicit migration:
 
 ```sh
-ln -sfn "$PWD/skills/amux" ~/.agents/skills/amux
+amux --dry-run migrate-config
+amux migrate-config
 ```
 
-Run that command from a checkout of this repository. If you installed only a
-release archive, clone the repo or copy the `skills/amux` directory first.
+Legacy files remain available for rollback.
 
-Then reload or restart Amp if needed so the skill index picks up the new skill.
+## Runner maintenance
 
-After installing it, ask Amp for the `/amux` skill or use natural trigger phrases:
+Runner maintenance is a short-lived machine-level systemd user timer on Linux or LaunchAgent on macOS—not a resident supervisor. It checks every six hours with bounded jitter, updates Amp once according to declared ownership, and restarts verified running runners only when the Amp executable changed.
 
-```text
-Pin it                 -> amux pin-current <thread-id-or-url>
-Unpin it               -> amux unpin-current
-Park it                -> amux park-current
-Shelve this            -> amux shelve-current [workspace] [thread-id-or-url] / amux shelve <workspace> <window> / --thread / --workspace
-Show shelved work      -> amux shelved [workspace] / amux list --shelved [workspace]
-Unshelve this          -> amux unshelve <workspace> <window> / --thread / --workspace
-Restore my workspace   -> amux launch
-Spawn a worker for ... -> amux spawn --mode medium [--title-prefix <prefix>] ...
-/amux sprawl #1 #2     -> skill-only fan-out after issue dependency inspection; not a CLI command
-/amux finish           -> post-merge GitHub/git cleanup, then final amux teardown
-Teardown this worker   -> amux teardown / teardown --thread / teardown <workspace> <window>
-Doctor amux            -> amux doctor
+```sh
+amux --dry-run runner maintenance install --update-owner self
+amux runner maintenance install --update-owner external
+amux runner maintenance run
+amux runner maintenance remove
 ```
 
-`/amux sprawl` is a higher-level skill workflow for independent issue work: the agent reads each requested issue, refuses to fan out dependent or likely-conflicting issues, creates one issue-scoped worktree/branch per independent issue from current `origin/main`, and then uses `amux spawn --mode medium --title-prefix '#<issue>' <semantic-window>` to start one restorable worker per worktree unless the user explicitly requested another mode. The semantic window omits `issue-<number>` because the title prefix owns that identity. Skill-driven spawns never infer `high` or `ultra` from task complexity, size, urgency, or expected duration. Completed spawned workers should use `/amux finish` / the skill's post-merge finish workflow so GitHub/git cleanup happens before final `amux teardown`.
+Use `self` when Amp's updater owns updates and `external` when a package manager does. Installation is explicit and dry-runnable. Maintenance uses the same operation lock and records diagnostics consumed by `amux install doctor`.
 
-The skill source lives at [`skills/amux/SKILL.md`](skills/amux/SKILL.md). Keep it in sync with command semantics when adding new lifecycle behavior; for agent use, the skill is part of the product surface, not just documentation.
+## Shell completions
+
+```sh
+amux completion bash > ~/.local/share/bash-completion/completions/amux
+amux completion zsh > ~/.zfunc/_amux
+amux completion fish > ~/.config/fish/completions/amux.fish
+```
 
 ## Development
 
-Run the test suite:
+See [CONTRIBUTING.md](CONTRIBUTING.md). The standard checks are:
 
 ```sh
 go test ./...
-```
-
-Run the same build script CI uses:
-
-```sh
+go vet ./...
 make build
-```
-
-Check formatting:
-
-```sh
 gofmt -l .
+git diff --check
 ```
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
-
-## Release
-
-GitHub publishes release artifacts when a pushed tag matches `v*`:
-
-```sh
-git tag -a v0.1.1 -m "v0.1.1"
-git push origin v0.1.1
-```
-
-The tag push starts the Release workflow. The workflow builds platform archives and injects the tag name as the `amux version` value.
-Each release publishes versioned artifacts such as `amux-v0.1.1-linux-amd64.tar.gz` and stable aliases such as `amux-linux-amd64.tar.gz` for `releases/latest/download` links.
-After the release assets are published, the workflow updates `Formula/amux.rb`
-in the [`zainfathoni/tap`](https://github.com/zainfathoni/homebrew-tap) Homebrew
-tap with the new tag and versioned archive checksums. This requires a repository
-secret named `HOMEBREW_TAP_DEPLOY_KEY` whose public key has write access to the
-tap. Homebrew users can then upgrade with `brew upgrade amux`.
-Homebrew-managed installs should continue to use `brew upgrade`; the in-binary
-updater is only for user-writable manual release installs.
-
-The standalone `amux` repository owns the installed `~/.local/bin/amux` binary.
-Dotfiles or machine-restore repositories should restore the workspace TSV and
-ensure `~/.local/bin` is on `PATH`, but should not track the compiled binary or
-install `amux` through an immutable package-manager store if self-update is the
-desired update flow.
-
-## Roadmap
-
-- Shell completions.
-- More portable attach/open-terminal behavior outside the author's environment.
-- Expanded examples for common Amp/tmux workflows.
-- Config migration/versioning if the TSV contract changes.
 
 ## License
 
-`amux` is available under the [MIT License](LICENSE).
+[MIT](LICENSE)
