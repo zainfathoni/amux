@@ -49,7 +49,7 @@ When uncertain, prefer sequencing or ask the user which issue should go first. I
 
 For each accepted independent issue:
 
-1. Choose unique names that include the issue number, for example branch `feature/issue-123-short-slug`, worktree `../<repo>-issue-123`, tmux window `issue-123`, and title prefix `#123`.
+1. Choose unique branch and worktree names that include the issue number, for example branch `feature/issue-123-short-slug` and worktree `../<repo>-issue-123`. The title prefix `#123` owns the issue identity, so use an issue-unprefixed tmux window `short-semantic-slug`. Never repeat the identity as `issue-123`, `issue-123-...`, `#123`, or `#123 ...` in the window.
 2. Create the issue worktree from current `origin/main`:
 
    ```sh
@@ -59,10 +59,10 @@ For each accepted independent issue:
 3. Spawn one interactive worker for that worktree, using an issue prefix so the tmux window, restore row, `AMUX_WINDOW`, and Amp thread title are recognizable:
 
    ```sh
-   amux spawn --mode medium --title-prefix '#<issue>' <window> <worktree-path> "<initial-message>" <workspace> [session]
+   amux spawn --mode medium --title-prefix '#<issue>' <semantic-window> <worktree-path> "<initial-message>" <workspace> [session]
    ```
 
-   Use `--mode medium` for every sprawled worker unless the user explicitly requested another mode for that worker or the whole sprawl. Do not raise the mode based on issue complexity or expected duration. The initial message should identify the issue URL/number, state that this worker owns only that issue/worktree, require dependency re-checking if it discovers overlap, and tell the worker to open a PR against `main` and report the PR URL plus blockers back to the originating thread.
+   Use `--mode medium` for every sprawled worker unless the user explicitly requested another mode for that worker or the whole sprawl. Do not raise the mode based on issue complexity or expected duration. Keep `<semantic-window>` issue-unprefixed; for example, issue 123 about install diagnostics uses `--title-prefix '#123' install-diagnostics`, producing the final title `#123 install-diagnostics`. The initial message should identify the issue URL/number, state that this worker owns only that issue/worktree, require dependency re-checking if it discovers overlap, and tell the worker to open a PR against `main` and report the PR URL plus blockers back to the originating thread.
 
 4. Verify and capture the restore row/thread identity:
 

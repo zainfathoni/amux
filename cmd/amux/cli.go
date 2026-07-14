@@ -32,6 +32,7 @@ type selectors struct {
 	Workdir        string
 	Thread         string
 	Mode           string
+	TitlePrefix    string
 	Current        bool
 	All            bool
 	Shelf          string
@@ -77,7 +78,7 @@ var rootCommand = &commandSpec{
 		workspaceCommand(),
 		installCommand(),
 		lifecycleCommand("workspaces", "Exact alias for workspace list", false),
-		lifecycleCommand("spawn", "Spawn an interactive worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>"),
+		lifecycleCommand("spawn", "Spawn an interactive worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>"),
 		lifecycleCommand("shelve", "Shelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		lifecycleCommand("unshelve", "Unshelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		lifecycleCommand("teardown", "Teardown workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
@@ -125,7 +126,7 @@ func workerCommand() *commandSpec {
 		workerLeaf("park", "Park workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("restart", "Restart workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("remove", "Remove workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
-		workerLeaf("spawn", "Spawn a worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>"),
+		workerLeaf("spawn", "Spawn a worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>"),
 		workerLeaf("shelve", "Shelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("unshelve", "Unshelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("teardown", "Teardown workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
@@ -464,6 +465,15 @@ func parseSelectors(args []string) (selectors, []string, error) {
 			if err := setSelector(&parsed.Mode, value, "--mode"); err != nil {
 				return parsed, nil, err
 			}
+		case "--title-prefix":
+			value, next, err := selectorValue(args, i, name, inline, hasInline)
+			if err != nil {
+				return parsed, nil, err
+			}
+			i = next
+			if err := setSelector(&parsed.TitlePrefix, value, "--title-prefix"); err != nil {
+				return parsed, nil, err
+			}
 		case "--shelf":
 			value, next, err := selectorValue(args, i, name, inline, hasInline)
 			if err != nil {
@@ -558,6 +568,7 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 		{"--workdir", parsed.Workdir},
 		{"--thread", parsed.Thread},
 		{"--mode", parsed.Mode},
+		{"--title-prefix", parsed.TitlePrefix},
 		{"--shelf", parsed.Shelf},
 		{"--idempotency-key", parsed.IdempotencyKey},
 		{"--message", parsed.Message},
@@ -601,6 +612,14 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 	if parsed.Mode != "" {
 		if err := config.ValidateField("mode", parsed.Mode); err != nil {
 			return err
+		}
+	}
+	if parsed.TitlePrefix != "" {
+		if err := config.ValidateField("title-prefix", parsed.TitlePrefix); err != nil {
+			return err
+		}
+		if strings.TrimSpace(parsed.TitlePrefix) == "" {
+			return errors.New("title-prefix must not be blank")
 		}
 	}
 	if parsed.Shelf != "" && parsed.Shelf != "shelved" && parsed.Shelf != "unshelved" {
