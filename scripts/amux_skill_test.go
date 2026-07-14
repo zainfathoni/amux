@@ -8,6 +8,9 @@ import (
 	"testing"
 )
 
+// These static contract tests run under the repository's existing `go test ./...`
+// CI step. They inspect the bundled Markdown skill directly because agents execute
+// that guidance; no live Amp thread, tmux window, or amux configuration is needed.
 func TestWorkerSpawnGuidanceRequiresExplicitMode(t *testing.T) {
 	t.Parallel()
 
