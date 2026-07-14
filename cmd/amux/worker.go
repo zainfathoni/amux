@@ -121,6 +121,9 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 		}
 		return &env, result.Preflight(errors.New("no configured worker matches the selector"))
 	}
+	if in.Command.Name == "teardown" && len(rows) != 1 {
+		return &env, result.Preflight(fmt.Errorf("teardown requires exactly one configured worker; selector matched %d", len(rows)))
+	}
 	inspections := make(map[string]workerInspection, len(rows))
 	if in.Command.Name == "launch" || in.Command.Name == "restart" {
 		for _, row := range rows {
@@ -148,9 +151,6 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			}
 			if inspection.state == workerPaneConflict || inspection.state == workerPaneAmbiguous {
 				return &env, result.Preflight(fmt.Errorf("worker %s/%s has %s tmux identity", row.Workspace, row.Window, inspection.state))
-			}
-			if in.Command.Name == "teardown" && inspection.state == workerPaneAbsent {
-				return &env, result.Preflight(fmt.Errorf("no live tmux window for thread %s matches restore row %s/%s", row.Thread, row.Workspace, row.Window))
 			}
 			inspections[row.Thread] = inspection
 		}
@@ -283,7 +283,7 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			if err == nil {
 				_, err = config.RemoveShelf(dir.ShelvesPath(), row.Thread)
 			}
-			if err == nil {
+			if err == nil && inspections[row.Thread].state == workerPaneExact {
 				err = revalidateWorkerBeforeMutation(row, inspections[row.Thread])
 				if err == nil {
 					err = tmux.Runner{}.KillWindow(inspections[row.Thread].pane.WindowID)
@@ -312,6 +312,11 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 		if err != nil {
 			out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: err.Error()}
 			env.Failed = append(env.Failed, out)
+			continue
+		}
+		if in.Command.Name == "teardown" && inspections[row.Thread].state == workerPaneAbsent {
+			out.Message = "already_stopped"
+			env.Skipped = append(env.Skipped, out)
 			continue
 		}
 		if changed {

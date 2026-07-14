@@ -575,7 +575,7 @@ func TestWorkerSpawnRecoversCanonicalExactRow(t *testing.T) {
 	}
 }
 
-func TestWorkerRemoveDoesNotArchiveAndTeardownRequiresLiveWorker(t *testing.T) {
+func TestWorkerRemoveDoesNotArchive(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkerRegistry(t, dir, "alpha\ta\t/tmp/a\tT-a\n")
 	bin := t.TempDir()
@@ -592,14 +592,168 @@ func TestWorkerRemoveDoesNotArchiveAndTeardownRequiresLiveWorker(t *testing.T) {
 	if _, err := os.Stat(called); !os.IsNotExist(err) {
 		t.Fatalf("worker remove changed remote archive state: %v", err)
 	}
+}
 
-	writeWorkerRegistry(t, dir, "alpha\ta\t/tmp/a\tT-a\n")
-	err := executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "teardown", "--thread", "T-a")
-	if err == nil || !strings.Contains(err.Error(), "no live tmux window") {
-		t.Fatalf("missing-window teardown error = %v", err)
+func TestWorkerTeardownRequiresExactlyOneConfiguredWorker(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkerRegistry(t, dir, "alpha\ta\t/tmp/a\tT-a\nalpha\tb\t/tmp/b\tT-b\n")
+	shelvesPath := filepath.Join(dir, config.ShelvesFile)
+	if err := os.WriteFile(shelvesPath, []byte("# amux-schema: shelves/v1\nT-a\nT-b\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(called); !os.IsNotExist(err) {
-		t.Fatalf("missing-window teardown archived before preflight: %v", err)
+	workersBefore, err := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	shelvesBefore, err := os.ReadFile(shelvesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	called := filepath.Join(bin, "called")
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	var stdout bytes.Buffer
+	err = (app{stdout: &stdout}).execute([]string{"--json", "--config-dir", dir, "worker", "teardown", "--workspace", "alpha"})
+	if err == nil || !strings.Contains(err.Error(), "exactly one configured worker") || result.ExitCode(err) != result.ExitRejected {
+		t.Fatalf("multi-worker teardown error = %v, want rejected exact-one preflight", err)
+	}
+	var got result.Envelope
+	if decodeErr := json.NewDecoder(&stdout).Decode(&got); decodeErr != nil {
+		t.Fatalf("decode multi-worker teardown: %v\nstdout: %s", decodeErr, stdout.String())
+	}
+	if len(got.Failed) != 1 || got.Failed[0].Error == nil || got.Failed[0].Error.Kind != result.ErrorPreflight {
+		t.Fatalf("multi-worker teardown result = %+v", got)
+	}
+	if _, statErr := os.Stat(called); !os.IsNotExist(statErr) {
+		t.Fatalf("multi-worker teardown called amp or tmux: %v", statErr)
+	}
+	workersAfter, err := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+	if err != nil || !bytes.Equal(workersBefore, workersAfter) {
+		t.Fatalf("multi-worker teardown changed workers: err=%v\nbefore=%s\nafter=%s", err, workersBefore, workersAfter)
+	}
+	shelvesAfter, err := os.ReadFile(shelvesPath)
+	if err != nil || !bytes.Equal(shelvesBefore, shelvesAfter) {
+		t.Fatalf("multi-worker teardown changed shelves: err=%v\nbefore=%s\nafter=%s", err, shelvesBefore, shelvesAfter)
+	}
+}
+
+func TestWorkerTeardownCompletesWhenLocalWorkerIsAlreadyStopped(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkerRegistry(t, dir, "alpha\ta\t/tmp/a\tT-a\n")
+	if err := os.WriteFile(filepath.Join(dir, config.ShelvesFile), []byte("# amux-schema: shelves/v1\nT-a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\necho \"amp $*\" >> '"+logPath+"'\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\necho \"tmux $*\" >> '"+logPath+"'\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "teardown", "--thread", "T-a")
+	if len(got.Successful) != 0 || len(got.Skipped) != 1 || got.Skipped[0].Message != "already_stopped" {
+		t.Fatalf("missing-window teardown result = %+v", got)
+	}
+	rows, err := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("missing-window teardown workers = %+v err=%v", rows, err)
+	}
+	shelves, err := config.LoadShelvesReadOnly(filepath.Join(dir, config.ShelvesFile))
+	if err != nil || len(shelves) != 0 {
+		t.Fatalf("missing-window teardown shelves = %+v err=%v", shelves, err)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "amp threads archive T-a") || strings.Contains(string(log), "tmux kill-window") {
+		t.Fatalf("missing-window teardown calls:\n%s", log)
+	}
+}
+
+func TestWorkerTeardownFailsClosedForUnverifiedLiveWorker(t *testing.T) {
+	row := config.Row{Workspace: "alpha", Window: "a", Workdir: "/tmp/a", Thread: "T-a"}
+	exact := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "a", Thread: "T-a"}, row)
+	for _, tt := range []struct {
+		name  string
+		panes string
+		want  string
+	}{
+		{name: "mismatched", panes: "a\t@1\tamp threads continue T-other\n", want: "conflict tmux identity"},
+		{name: "ambiguous", panes: "a\t@1\t" + exact + "\na\t@1\t" + exact + "\n", want: "ambiguous tmux identity"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeWorkerRegistry(t, dir, row.String()+"\n")
+			if err := os.WriteFile(filepath.Join(dir, config.ShelvesFile), []byte("# amux-schema: shelves/v1\nT-a\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			bin := t.TempDir()
+			logPath := filepath.Join(bin, "calls.log")
+			writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\necho \"amp $*\" >> '"+logPath+"'\n")
+			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\necho \"tmux $*\" >> '"+logPath+"'\nif [ \"$1\" = has-session ]; then exit 0; fi\nif [ \"$1\" = list-panes ]; then printf %s "+shellSingleQuote(tt.panes)+"; exit 0; fi\nexit 2\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+			err := executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "teardown", "--thread", "T-a")
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("teardown error = %v, want %q", err, tt.want)
+			}
+			log, readErr := os.ReadFile(logPath)
+			if readErr != nil || strings.Contains(string(log), "amp threads archive") || strings.Contains(string(log), "tmux kill-window") {
+				t.Fatalf("unverified teardown performed mutation: err=%v\n%s", readErr, log)
+			}
+			rows, loadErr := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
+			if loadErr != nil || len(rows) != 1 {
+				t.Fatalf("unverified teardown workers = %+v err=%v", rows, loadErr)
+			}
+			shelves, loadErr := config.LoadShelvesReadOnly(filepath.Join(dir, config.ShelvesFile))
+			if loadErr != nil || len(shelves) != 1 {
+				t.Fatalf("unverified teardown shelves = %+v err=%v", shelves, loadErr)
+			}
+		})
+	}
+}
+
+func TestWorkerTeardownArchivesRemovesAndStopsLiveWorker(t *testing.T) {
+	dir := t.TempDir()
+	row := config.Row{Workspace: "alpha", Window: "a", Workdir: "/tmp/a", Thread: "T-a"}
+	writeWorkerRegistry(t, dir, row.String()+"\n")
+	if err := os.WriteFile(filepath.Join(dir, config.ShelvesFile), []byte("# amux-schema: shelves/v1\nT-a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "a", Thread: "T-a"}, row)
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\necho \"amp $*\" >> '"+logPath+"'\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\necho \"tmux $*\" >> '"+logPath+"'\nif [ \"$1\" = has-session ]; then exit 0; fi\nif [ \"$1\" = list-panes ]; then printf '%s\\n' "+shellSingleQuote("a\t@1\t"+start)+"; exit 0; fi\nif [ \"$1\" = kill-window ]; then exit 0; fi\nexit 2\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "teardown", "--thread", "T-a")
+	if len(got.Successful) != 1 || len(got.Skipped) != 0 {
+		t.Fatalf("live-window teardown result = %+v", got)
+	}
+	rows, err := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("live-window teardown workers = %+v err=%v", rows, err)
+	}
+	shelves, err := config.LoadShelvesReadOnly(filepath.Join(dir, config.ShelvesFile))
+	if err != nil || len(shelves) != 0 {
+		t.Fatalf("live-window teardown shelves = %+v err=%v", shelves, err)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"amp threads archive T-a", "tmux kill-window -t @1"} {
+		if !strings.Contains(string(log), want) {
+			t.Fatalf("live-window teardown missing %q:\n%s", want, log)
+		}
 	}
 }
 
