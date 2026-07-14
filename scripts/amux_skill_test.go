@@ -87,7 +87,7 @@ func TestSkillDrivenSpawnRoutesUseExplicitMediumMode(t *testing.T) {
 		{
 			name:     "sprawl trigger",
 			path:     filepath.Join("skills", "amux", "reference", "trigger-phrases.md"),
-			required: "`/amux sprawl #12 #34 ...` | Load [`workflows.md#sprawl-independent-issue-workers`](workflows.md#sprawl-independent-issue-workers), inspect dependencies, then spawn each accepted worker with `amux spawn --mode medium --title-prefix '#<issue>' ...`",
+			required: "`/amux sprawl #12 #34 ...` | Load [`workflows.md#sprawl-independent-issue-workers`](workflows.md#sprawl-independent-issue-workers), inspect dependencies, then spawn each accepted worker with `amux spawn --mode medium --title-prefix '#<issue>' <semantic-window> ...`",
 		},
 		{
 			name:     "sprawl workflow",
@@ -107,7 +107,7 @@ func TestSkillDrivenSpawnRoutesUseExplicitMediumMode(t *testing.T) {
 		{
 			name:     "README sprawl",
 			path:     "README.md",
-			required: "uses `amux spawn --mode medium --title-prefix '#<issue>'`",
+			required: "uses `amux spawn --mode medium --title-prefix '#<issue>' <semantic-window>`",
 		},
 	} {
 		route := route
@@ -119,6 +119,24 @@ func TestSkillDrivenSpawnRoutesUseExplicitMediumMode(t *testing.T) {
 				t.Errorf("%s does not preserve required skill-driven spawn route %q", route.path, route.required)
 			}
 		})
+	}
+}
+
+func TestSprawlUsesSemanticIssueUnprefixedWindowSlugs(t *testing.T) {
+	t.Parallel()
+
+	workflow := readSkillFile(t, repoRoot(t), filepath.Join("skills", "amux", "reference", "workflows.md"))
+	for _, required := range []string{
+		"tmux window `short-semantic-slug`",
+		"title prefix `#123`",
+		"amux spawn --mode medium --title-prefix '#<issue>' <semantic-window>",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("sprawl workflow does not contain semantic-window guidance %q", required)
+		}
+	}
+	if strings.Contains(workflow, "tmux window `issue-123`") {
+		t.Error("sprawl workflow still recommends an issue-prefixed tmux window")
 	}
 }
 

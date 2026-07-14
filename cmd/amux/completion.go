@@ -27,7 +27,7 @@ var completionCommands = []completionCommand{
 			{Name: "park", Description: "Park workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "restart", Description: "Restart workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "remove", Description: "Remove workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
-			{Name: "spawn", Description: "Spawn a worker", Flags: []string{"--workspace", "--window", "--workdir", "--mode", "-m", "--message", "--message-file", "--message-stdin", "--idempotency-key", "-w", "-W", "-d"}},
+			{Name: "spawn", Description: "Spawn a worker", Flags: []string{"--workspace", "--window", "--workdir", "--mode", "-m", "--title-prefix", "--message", "--message-file", "--message-stdin", "--idempotency-key", "-w", "-W", "-d"}},
 			{Name: "shelve", Description: "Shelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "unshelve", Description: "Unshelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "teardown", Description: "Teardown workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
@@ -35,7 +35,7 @@ var completionCommands = []completionCommand{
 			{Name: "reconcile", Description: "Reconcile workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 		},
 	},
-	{Name: "spawn", Description: "Spawn a worker", Flags: []string{"--workspace", "--window", "--workdir", "--mode", "-m", "--message", "--message-file", "--message-stdin", "--idempotency-key", "-w", "-W", "-d"}},
+	{Name: "spawn", Description: "Spawn a worker", Flags: []string{"--workspace", "--window", "--workdir", "--mode", "-m", "--title-prefix", "--message", "--message-file", "--message-stdin", "--idempotency-key", "-w", "-W", "-d"}},
 	{Name: "shelve", Description: "Shelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 	{Name: "unshelve", Description: "Unshelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 	{Name: "teardown", Description: "Teardown workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
@@ -92,7 +92,7 @@ _amux_complete() {
         COMPREPLY=( $(compgen -W "%s" -- "$cur") )
       else
         case "$leaf" in
-          spawn) COMPREPLY=( $(compgen -W "--workspace --window --workdir --mode -m --message --message-file --message-stdin --idempotency-key -w -W -d" -- "$cur") ) ;;
+          spawn) COMPREPLY=( $(compgen -W "--workspace --window --workdir --mode -m --title-prefix --message --message-file --message-stdin --idempotency-key -w -W -d" -- "$cur") ) ;;
           pin) COMPREPLY=( $(compgen -W "--workspace --window --workdir --thread --current -w -W -d -t" -- "$cur") ) ;;
           unpin) COMPREPLY=( $(compgen -W "--thread --current -t" -- "$cur") ) ;;
           list) COMPREPLY=( $(compgen -W "--workspace --thread --shelf --current --all -w -t" -- "$cur") ) ;;
@@ -103,7 +103,7 @@ _amux_complete() {
     install)
       if [[ -z "$leaf" ]]; then COMPREPLY=( $(compgen -W "doctor" -- "$cur") ); fi
       ;;
-    spawn) COMPREPLY=( $(compgen -W "--workspace --window --workdir --mode -m --message --message-file --message-stdin --idempotency-key -w -W -d" -- "$cur") ) ;;
+    spawn) COMPREPLY=( $(compgen -W "--workspace --window --workdir --mode -m --title-prefix --message --message-file --message-stdin --idempotency-key -w -W -d" -- "$cur") ) ;;
     shelve|unshelve|teardown) COMPREPLY=( $(compgen -W "--workspace --thread --current --all -w -t" -- "$cur") ) ;;
     completion) COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") ) ;;
   esac
@@ -168,7 +168,7 @@ case $state in
           _describe -t worker-commands 'worker command' worker_commands
         else
           case $leaf in
-            spawn) _arguments '--workspace[workspace]:workspace:' '--window[window]:window:' '--workdir[working directory]:directory:_directories' '--mode[thread mode]:mode:(low medium high ultra)' '-m[thread mode]:mode:(low medium high ultra)' '--message[initial message]:message:' '--message-file[read initial message from file]:message file:_files' '--message-stdin[read initial message from stdin]' '--idempotency-key[operation key]:key:' '-w[workspace]:workspace:' '-W[window]:window:' '-d[working directory]:directory:_directories' ;;
+            spawn) _arguments '--workspace[workspace]:workspace:' '--window[window]:window:' '--workdir[working directory]:directory:_directories' '--mode[thread mode]:mode:(low medium high ultra)' '-m[thread mode]:mode:(low medium high ultra)' '--title-prefix[window and thread title prefix]:prefix:' '--message[initial message]:message:' '--message-file[read initial message from file]:message file:_files' '--message-stdin[read initial message from stdin]' '--idempotency-key[operation key]:key:' '-w[workspace]:workspace:' '-W[window]:window:' '-d[working directory]:directory:_directories' ;;
             pin) _arguments '--workspace[workspace]:workspace:' '--window[window]:window:' '--workdir[working directory]:directory:_directories' '--thread[thread id or URL]:thread:' '--current[current worker]' '-w[workspace]:workspace:' '-W[window]:window:' '-d[working directory]:directory:_directories' '-t[thread id or URL]:thread:' ;;
             unpin) _arguments '--thread[thread id or URL]:thread:' '--current[current worker]' '-t[thread id or URL]:thread:' ;;
             list) _arguments '--workspace[workspace]:workspace:' '--thread[thread id or URL]:thread:' '--shelf[shelf intent]:intent:(shelved unshelved)' '--current[current worker]' '--all[all workers]' '-w[workspace]:workspace:' '-t[thread id or URL]:thread:' ;;
@@ -188,7 +188,7 @@ case $state in
         _arguments '--thread[select by thread id or URL]:thread:' '--workspace[select workspace]:workspace:' '--current[current worker]' '--all[all workers]' '-t[select by thread id or URL]:thread:' '-w[select workspace]:workspace:'
         ;;
       spawn)
-        _arguments '--workspace[workspace]:workspace:' '--window[window]:window:' '--workdir[working directory]:directory:_directories' '--mode[thread mode]:mode:(low medium high ultra)' '-m[thread mode]:mode:(low medium high ultra)' '--message[initial message]:message:' '--message-file[read initial message from file]:message file:_files' '--message-stdin[read initial message from stdin]' '--idempotency-key[operation key]:key:' '-w[workspace]:workspace:' '-W[window]:window:' '-d[working directory]:directory:_directories'
+        _arguments '--workspace[workspace]:workspace:' '--window[window]:window:' '--workdir[working directory]:directory:_directories' '--mode[thread mode]:mode:(low medium high ultra)' '-m[thread mode]:mode:(low medium high ultra)' '--title-prefix[window and thread title prefix]:prefix:' '--message[initial message]:message:' '--message-file[read initial message from file]:message file:_files' '--message-stdin[read initial message from stdin]' '--idempotency-key[operation key]:key:' '-w[workspace]:workspace:' '-W[window]:window:' '-d[working directory]:directory:_directories'
         ;;
       teardown)
         _arguments '--thread[select by thread id or URL]:thread:' '--workspace[select workspace]:workspace:' '--current[current worker]' '--all[all workers]' '-t[select by thread id or URL]:thread:' '-w[select workspace]:workspace:'
@@ -397,7 +397,7 @@ func flagDescription(flag string) string {
 
 func flagTakesValue(flag string) bool {
 	switch flag {
-	case "--config-dir", "-c", "--thread", "-t", "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--shelf", "--mode", "-m", "--message", "--message-file", "--idempotency-key":
+	case "--config-dir", "-c", "--thread", "-t", "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--shelf", "--mode", "-m", "--title-prefix", "--message", "--message-file", "--idempotency-key":
 		return true
 	default:
 		return false

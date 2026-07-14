@@ -2087,6 +2087,9 @@ func (a app) spawn(opts options, args []string) error {
 		if strings.TrimSpace(spawnOpts.titlePrefix) == "" {
 			return errors.New("title-prefix must not be blank")
 		}
+		if err := validateIssueWindowTitle(spawnOpts.titlePrefix, window); err != nil {
+			return err
+		}
 		window = spawnOpts.prefixedName(window)
 	}
 	row := config.Row{Workspace: workspace, Window: window, Workdir: workdir}
@@ -3208,7 +3211,7 @@ func parseSpawnOptions(args []string) (spawnOptions, []string, error) {
 }
 
 func (opts spawnOptions) prefixedName(window string) string {
-	return strings.TrimSpace(strings.TrimSpace(opts.titlePrefix) + " " + window)
+	return prefixedSpawnName(opts.titlePrefix, window)
 }
 
 func spawnUsage() string {

@@ -56,6 +56,68 @@ func TestWorkerSpawnDryRunDoesNotResumeStartedOperation(t *testing.T) {
 	}
 }
 
+func TestWorkerSpawnRejectsDuplicateIssueIdentityBeforeSideEffects(t *testing.T) {
+	for _, test := range []struct {
+		window     string
+		suggestion string
+	}{
+		{window: "issue-119", suggestion: "<semantic-slug>"},
+		{window: "issue-119-install-update-diagnostics", suggestion: "install-update-diagnostics"},
+		{window: "#119", suggestion: "<semantic-slug>"},
+		{window: "#119 install-update-diagnostics", suggestion: "install-update-diagnostics"},
+	} {
+		t.Run(test.window, func(t *testing.T) {
+			dir := t.TempDir()
+			workdir := t.TempDir()
+			bin := t.TempDir()
+			called := filepath.Join(bin, "called")
+			writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+			var stdout bytes.Buffer
+			err := (app{stdout: &stdout}).execute([]string{"--json", "--dry-run", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", test.window, "--workdir", workdir, "--mode", "medium", "--title-prefix", "#119", "--message", "hello", "--idempotency-key", "duplicate-title"})
+			if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), "duplicates issue identity #119") || !strings.Contains(err.Error(), test.suggestion) {
+				t.Fatalf("duplicate title error = %v, exit = %d", err, result.ExitCode(err))
+			}
+			var envelope result.Envelope
+			if decodeErr := json.NewDecoder(&stdout).Decode(&envelope); decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			if len(envelope.Failed) != 1 || envelope.Failed[0].Error == nil || envelope.Failed[0].Error.Kind != result.ErrorPreflight {
+				t.Fatalf("duplicate title JSON = %+v", envelope)
+			}
+			if _, statErr := os.Stat(called); !os.IsNotExist(statErr) {
+				t.Fatalf("duplicate title called amp or tmux: %v", statErr)
+			}
+			for _, name := range []string{config.WorkersFile, config.OperationsFile} {
+				if _, statErr := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(statErr) {
+					t.Fatalf("duplicate title created %s: %v", name, statErr)
+				}
+			}
+		})
+	}
+}
+
+func TestWorkerSpawnIssueTitleDryRunUsesSemanticWindow(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	got := executeWorkerJSON(t, "--json", "--dry-run", "--config-dir", dir, "spawn", "--workspace", "alpha", "--window", "install-update-diagnostics", "--workdir", workdir, "--mode", "medium", "--title-prefix", "#119", "--message", "hello", "--idempotency-key", "issue-title")
+	if len(got.Planned) != 1 || !strings.Contains(got.Planned[0].Message, "alpha/#119 install-update-diagnostics") {
+		t.Fatalf("issue title dry-run = %+v", got)
+	}
+}
+
+func TestWorkerSpawnGenericTitlePrefixDoesNotApplyIssueRules(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	got := executeWorkerJSON(t, "--json", "--dry-run", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "issue-119-install", "--workdir", workdir, "--title-prefix", "release", "--message", "hello", "--idempotency-key", "generic-title")
+	if len(got.Planned) != 1 || !strings.Contains(got.Planned[0].Message, "alpha/release issue-119-install") {
+		t.Fatalf("generic title dry-run = %+v", got)
+	}
+}
+
 func TestWorkerSpawnDeliveryReplayNeverResubmitsOrSearchesOtherThreads(t *testing.T) {
 	dir := t.TempDir()
 	workdir := t.TempDir()
@@ -306,8 +368,9 @@ func TestWorkerSpawnPersistsOperationAndReplaysWithoutDuplicateCreation(t *testi
 	logPath := filepath.Join(bin, "calls.log")
 	running := filepath.Join(bin, "running")
 	delivered := filepath.Join(bin, "delivered")
-	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-spawned"}
-	start := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "worker", Thread: "T-spawned"}, row)
+	renameAttempted := filepath.Join(bin, "rename-attempted")
+	row := config.Row{Workspace: "alpha", Window: "#119 worker", Workdir: workdir, Thread: "T-spawned"}
+	start := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "#119 worker", Thread: "T-spawned"}, row)
 	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
 echo "amp $*" >> "`+logPath+`"
 if [ "$1 $2" = "threads new" ]; then echo T-spawned; exit 0; fi
@@ -317,13 +380,17 @@ if [ "$1 $2 $3" = "threads export T-spawned" ]; then
 fi
 if [ "$1 $2" = "threads list" ]; then printf '%s\n' '[{"id":"T-spawned"}]'; exit 0; fi
 if [ "$1 $2" = "threads search" ]; then printf '%s\n' '[{"id":"T-spawned"}]'; exit 0; fi
+if [ "$1 $2 $3" = "threads rename T-spawned" ] && [ "$4" = "#119 worker" ]; then
+  if [ ! -e "`+renameAttempted+`" ]; then touch "`+renameAttempted+`"; exit 42; fi
+  exit 0
+fi
 exit 2
 `)
 	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
 echo "tmux $*" >> "`+logPath+`"
 if [ "$1" = has-session ]; then test -e "`+running+`"; exit $?; fi
 if [ "$1" = new-session ]; then touch "`+running+`"; exit 0; fi
-if [ "$1" = list-panes ]; then printf '%s\t@1\t%s\n' worker `+shellSingleQuote(start)+`; exit 0; fi
+if [ "$1" = list-panes ]; then printf '%s\t@1\t%s\n' '#119 worker' `+shellSingleQuote(start)+`; exit 0; fi
 if [ "$1" = display-message ]; then echo %1; exit 0; fi
 if [ "$1" = capture-pane ]; then printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; exit 0; fi
 if [ "$1" = send-keys ]; then if [ "$4" = Enter ]; then touch "`+delivered+`"; fi; exit 0; fi
@@ -332,7 +399,18 @@ exit 2
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
-	args := []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", "spawn-1"}
+	args := []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--title-prefix", "#119", "--message", "hello", "--idempotency-key", "spawn-1"}
+
+	if err := executeWorkerJSONError(t, args...); err == nil || !strings.Contains(err.Error(), "rename") {
+		t.Fatalf("first spawn rename error = %v", err)
+	}
+	failedRecord, found, err := config.LoadOperation(filepath.Join(dir, config.OperationsFile), "spawn-1")
+	if err != nil || !found || failedRecord.State != config.OperationStarted || failedRecord.Phase != config.OperationPhaseMessageVerified {
+		t.Fatalf("rename-failed operation = %+v found=%t err=%v", failedRecord, found, err)
+	}
+	if rows, loadErr := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile)); loadErr != nil || len(rows) != 0 {
+		t.Fatalf("rename failure stored worker rows = %+v err=%v", rows, loadErr)
+	}
 
 	first := executeWorkerJSON(t, args...)
 	if len(first.Successful) != 1 || first.Successful[0].Resource.Thread != "T-spawned" {
@@ -352,6 +430,22 @@ exit 2
 	}
 	if got := strings.Count(string(log), "amp threads new"); got != 1 {
 		t.Fatalf("spawn creation calls = %d\n%s", got, log)
+	}
+	if got := strings.Count(string(log), "amp threads rename T-spawned #119 worker"); got != 2 {
+		t.Fatalf("spawn rename calls = %d\n%s", got, log)
+	}
+	withoutPrefix := append([]string(nil), args...)
+	for i := 0; i < len(withoutPrefix); i++ {
+		if withoutPrefix[i] == "--window" {
+			withoutPrefix[i+1] = "#119 worker"
+		}
+		if withoutPrefix[i] == "--title-prefix" {
+			withoutPrefix = append(withoutPrefix[:i], withoutPrefix[i+2:]...)
+			break
+		}
+	}
+	if err := executeWorkerJSONError(t, withoutPrefix...); err == nil || !strings.Contains(err.Error(), "different request") {
+		t.Fatalf("prefix rename intent key mismatch error = %v", err)
 	}
 
 	mismatch := append([]string(nil), args...)
@@ -974,11 +1068,13 @@ func TestCanonicalWorkerCompletionsAreLeafSpecific(t *testing.T) {
 			}
 			idempotencyFlag := "--idempotency-key"
 			messageFileFlag := "--message-file"
+			titlePrefixFlag := "--title-prefix"
 			if shell == "fish" {
 				idempotencyFlag = "-l 'idempotency-key'"
 				messageFileFlag = "-l 'message-file'"
+				titlePrefixFlag = "-r -l 'title-prefix'"
 			}
-			for _, want := range []string{idempotencyFlag, messageFileFlag} {
+			for _, want := range []string{idempotencyFlag, messageFileFlag, titlePrefixFlag} {
 				if !strings.Contains(output, want) {
 					t.Fatalf("%s completion missing %q\n%s", shell, want, output)
 				}
@@ -1002,6 +1098,9 @@ func TestCanonicalWorkerCompletionsAreLeafSpecific(t *testing.T) {
 			}
 			if shell == "zsh" && !strings.Contains(output, `unpin) _arguments '--thread[thread id or URL]:thread:' '--current[current worker]'`) {
 				t.Fatalf("zsh unpin completion is not leaf-specific:\n%s", output)
+			}
+			if shell == "zsh" && strings.Count(output, `'--title-prefix[window and thread title prefix]:prefix:'`) != 2 {
+				t.Fatalf("zsh worker and top-level spawn completions do not both require --title-prefix values:\n%s", output)
 			}
 			if shell == "zsh" && (!strings.Contains(output, `'-c[path to config directory]:directory:_directories'`) || !strings.Contains(output, `--config-dir|-c) (( i += 2 )); continue`)) {
 				t.Fatalf("zsh completion does not resolve short global prefixes:\n%s", output)
