@@ -39,6 +39,9 @@ var completionCommands = []completionCommand{
 	{Name: "shelve", Description: "Shelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 	{Name: "unshelve", Description: "Unshelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 	{Name: "teardown", Description: "Teardown workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
+	{Name: "install", Description: "Inspect the amux client installation", Subcommands: []completionCommand{
+		{Name: "doctor", Description: "Diagnose executable targets, versions, and PATH drift"},
+	}},
 	{Name: "migrate-config", Description: "Copy legacy config files into ~/.config/amux"},
 	{Name: "completion", Description: "Print shell completion script", Args: "<bash|zsh|fish>"},
 	{Name: "update", Description: "Update a user-local amux release install"},
@@ -77,7 +80,7 @@ _amux_complete() {
     word="${COMP_WORDS[i]}"
     if [[ "$word" == --config-dir || "$word" == -c ]]; then ((i++)); continue; fi
     if [[ "$word" == --config-dir=* || "$word" == -c=* || "$word" == --json || "$word" == -j || "$word" == --dry-run || "$word" == -n ]]; then continue; fi
-    if [[ -z "$command" ]]; then command="$word"; elif [[ "$command" == worker && -z "$leaf" ]]; then leaf="$word"; fi
+    if [[ -z "$command" ]]; then command="$word"; elif [[ ( "$command" == worker || "$command" == install ) && -z "$leaf" ]]; then leaf="$word"; fi
   done
   if [[ -z "$command" ]]; then
     COMPREPLY=( $(compgen -W "%s %s" -- "$cur") )
@@ -96,6 +99,9 @@ _amux_complete() {
           *) COMPREPLY=( $(compgen -W "--workspace --thread --current --all -w -t" -- "$cur") ) ;;
         esac
       fi
+      ;;
+    install)
+      if [[ -z "$leaf" ]]; then COMPREPLY=( $(compgen -W "doctor" -- "$cur") ); fi
       ;;
     spawn) COMPREPLY=( $(compgen -W "--workspace --window --workdir --mode -m --message --message-file --message-stdin --idempotency-key -w -W -d" -- "$cur") ) ;;
     shelve|unshelve|teardown) COMPREPLY=( $(compgen -W "--workspace --thread --current --all -w -t" -- "$cur") ) ;;
@@ -124,6 +130,9 @@ func writeZshCompletion(w io.Writer) {
 	}
 	fmt.Fprintln(w, ")")
 	fmt.Fprintln(w)
+	fmt.Fprintln(w, "local -a install_commands")
+	fmt.Fprintln(w, "install_commands=(\n  \"doctor:Diagnose executable targets, versions, and PATH drift\"\n)")
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, `local command leaf i word
 i=2
 while (( i <= CURRENT )); do
@@ -131,7 +140,7 @@ while (( i <= CURRENT )); do
   case $word in
     --config-dir|-c) (( i += 2 )); continue ;;
     --config-dir=*|-c=*|--json|-j|--dry-run|-n) (( i++ )); continue ;;
-    *) command=$word; (( i++ )); if [[ $command == worker ]]; then leaf=$words[$i]; fi; break ;;
+    *) command=$word; (( i++ )); if [[ $command == worker || $command == install ]]; then leaf=$words[$i]; fi; break ;;
   esac
 done`)
 	fmt.Fprintln(w)
@@ -165,6 +174,11 @@ case $state in
             list) _arguments '--workspace[workspace]:workspace:' '--thread[thread id or URL]:thread:' '--shelf[shelf intent]:intent:(shelved unshelved)' '--current[current worker]' '--all[all workers]' '-w[workspace]:workspace:' '-t[thread id or URL]:thread:' ;;
             *) _arguments '--workspace[workspace]:workspace:' '--thread[thread id or URL]:thread:' '--current[current worker]' '--all[all workers]' '-w[workspace]:workspace:' '-t[thread id or URL]:thread:' ;;
           esac
+        fi
+        ;;
+      install)
+        if [[ -z $leaf ]]; then
+          _describe -t install-commands 'install command' install_commands
         fi
         ;;
       shelve)
@@ -230,6 +244,14 @@ function __fish_amux_worker_leaf
                 return
         end
     end
+end
+
+function __fish_amux_install_leaf
+    set -l words (commandline -opc)
+    set -l index (contains -i -- install $words)
+    if test -n "$index"; and test (math $index + 1) -le (count $words)
+        echo $words[(math $index + 1)]
+    end
 end`)
 	for _, flag := range globalCompletionFlags {
 		writeFishFlag(w, "__fish_use_subcommand", flag, flagDescription(flag), flagTakesValue(flag))
@@ -250,6 +272,9 @@ end`)
 					writeFishFlag(w, condition, flag, flagDescription(flag), flagTakesValue(flag))
 				}
 			}
+		}
+		if command.Name == "install" {
+			fmt.Fprintln(w, "complete -c amux -f -n 'test (__fish_amux_root_command) = install; and test -z (__fish_amux_install_leaf)' -a doctor -d 'Diagnose executable targets, versions, and PATH drift'")
 		}
 		if command.Name == "completion" {
 			fmt.Fprintln(w, "complete -c amux -f -n 'test (__fish_amux_root_command) = completion' -a 'bash zsh fish'")

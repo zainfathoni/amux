@@ -52,6 +52,10 @@ func ConfigResource(path string) ResourceID {
 	return ResourceID{Kind: "config", Path: path}
 }
 
+func ExecutableResource(path string) ResourceID {
+	return ResourceID{Kind: "executable", Path: path}
+}
+
 func CommandResource() ResourceID {
 	return ResourceID{Kind: "command"}
 }
@@ -62,11 +66,20 @@ type Failure struct {
 	Lock    *lock.BusyError `json:"lock,omitempty"`
 }
 
+type ExecutableDetails struct {
+	Roles        []string `json:"roles"`
+	Target       string   `json:"target"`
+	Version      string   `json:"version,omitempty"`
+	VersionError string   `json:"version_error,omitempty"`
+	Selected     bool     `json:"selected,omitempty"`
+}
+
 type Outcome struct {
-	Resource ResourceID `json:"resource"`
-	Action   string     `json:"action"`
-	Message  string     `json:"message,omitempty"`
-	Error    *Failure   `json:"error,omitempty"`
+	Resource   ResourceID         `json:"resource"`
+	Action     string             `json:"action"`
+	Message    string             `json:"message,omitempty"`
+	Executable *ExecutableDetails `json:"executable,omitempty"`
+	Error      *Failure           `json:"error,omitempty"`
 }
 
 type Envelope struct {

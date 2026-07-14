@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/zainfathoni/amux/internal/result"
 )
 
 const (
@@ -33,6 +35,7 @@ var (
 	selfUpdateReleaseURL     = githubLatestReleaseURL
 	selfUpdateReleasePageURL = githubLatestReleasePageURL
 	executablePath           = os.Executable
+	canonicalSelfUpdatePath  = defaultCanonicalSelfUpdatePath
 )
 
 type githubRelease struct {
@@ -61,20 +64,12 @@ func (a app) selfUpdate(opts options, args []string) error {
 		return errors.New("usage: amux update")
 	}
 	if !supportedSelfUpdatePlatform(runtime.GOOS, runtime.GOARCH) {
-		return fmt.Errorf("self-update is unsupported on %s/%s: no release asset is published for this platform", runtime.GOOS, runtime.GOARCH)
+		return result.Preflight(fmt.Errorf("self-update is unsupported on %s/%s: no release asset is published for this platform", runtime.GOOS, runtime.GOARCH))
 	}
 
-	exe, err := executablePath()
+	installPath, err := currentSelfUpdateTarget()
 	if err != nil {
-		return fmt.Errorf("find current executable: %w", err)
-	}
-	installPath, err := filepath.Abs(exe)
-	if err != nil {
-		return fmt.Errorf("resolve current executable path: %w", err)
-	}
-	installPath, err = resolveSelfUpdateTarget(installPath)
-	if err != nil {
-		return err
+		return result.Preflight(err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), selfUpdateTimeout)
@@ -134,6 +129,34 @@ func (a app) selfUpdate(opts options, args []string) error {
 	return nil
 }
 
+func currentSelfUpdateTarget() (string, error) {
+	exe, err := executablePath()
+	if err != nil {
+		return "", fmt.Errorf("find current executable: %w", err)
+	}
+	return validateCanonicalSelfUpdateTarget(exe)
+}
+
+func validateCanonicalSelfUpdateTarget(path string) (string, error) {
+	installPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve current executable path: %w", err)
+	}
+	installPath, err = resolveSelfUpdateTarget(installPath)
+	if err != nil {
+		return "", err
+	}
+	canonicalPath, err := canonicalSelfUpdatePath()
+	if err != nil {
+		return "", err
+	}
+	canonicalPath = filepath.Clean(canonicalPath)
+	if installPath != canonicalPath {
+		return "", fmt.Errorf("self-update refused for noncanonical install at %s; bootstrap the canonical self-updating install at %s", installPath, canonicalPath)
+	}
+	return installPath, nil
+}
+
 func selfUpdateShadowWarning(installPath string) string {
 	pathTarget, err := exec.LookPath("amux")
 	if err != nil || pathTarget == "" {
@@ -164,10 +187,10 @@ func resolvePathForComparison(path string) string {
 func resolveSelfUpdateTarget(path string) (string, error) {
 	resolved := path
 	if target, err := filepath.EvalSymlinks(path); err == nil {
-		resolved = target
+		resolved = resolvePathForComparison(target)
 	}
 	if managedInstallPath(resolved) {
-		return "", fmt.Errorf("self-update refused for package-managed install at %s; install amux to a user-writable path such as ~/.local/bin/amux to use self-update", resolved)
+		return "", fmt.Errorf("self-update refused for package-managed install or toolchain-managed install at %s; bootstrap the canonical self-updating install at ~/.local/bin/amux", resolved)
 	}
 	info, err := os.Stat(resolved)
 	if err != nil {
@@ -188,13 +211,37 @@ func managedInstallPath(path string) bool {
 		"/home/linuxbrew/.linuxbrew/Cellar/",
 		"/usr/local/Cellar/",
 		"/snap/",
+		"/usr/bin/",
+		"/opt/local/",
 	}
 	for _, prefix := range prefixes {
 		if strings.HasPrefix(clean+string(os.PathSeparator), prefix) {
 			return true
 		}
 	}
+	slashed := filepath.ToSlash(clean) + "/"
+	for _, marker := range []string{
+		"/.mise/",
+		"/.local/share/mise/",
+		"/.asdf/",
+		"/.local/share/asdf/",
+		"/.goenv/",
+		"/.local/share/aquaproj-aqua/",
+		"/.cargo/bin/",
+	} {
+		if strings.Contains(slashed, marker) {
+			return true
+		}
+	}
 	return false
+}
+
+func defaultCanonicalSelfUpdatePath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("find home directory for canonical install: %w", err)
+	}
+	return filepath.Join(home, ".local", "bin", "amux"), nil
 }
 
 func ensureDirectoryWritable(dir string) error {

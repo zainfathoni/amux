@@ -56,7 +56,7 @@ On macOS or Linux, install the release binary with Homebrew:
 brew install zainfathoni/tap/amux
 ```
 
-Update Homebrew installs with Homebrew, not `amux update` or `amux self-update`:
+Update Homebrew installs with Homebrew, not `amux update`:
 
 ```sh
 brew update
@@ -81,12 +81,11 @@ install -m 0755 amux-linux-amd64/amux ~/.local/bin/amux
 
 Release archives are published for Linux and macOS on amd64 and arm64.
 
-To let `amux` manage future updates itself, install the binary to a user-owned
-path such as `~/.local/bin/amux` and keep that directory on your `PATH`.
-Package-managed locations such as the Nix store or Homebrew Cellar are treated
-as immutable; `amux self-update` refuses to replace binaries from those paths.
-If multiple `amux` binaries exist on `PATH`, self-update warns when the binary
-it updates is shadowed by another install.
+`~/.local/bin/amux` is the canonical self-updating installation. Keep
+`~/.local/bin` before toolchain and package-manager directories on `PATH`.
+`amux update` refuses every other target, including mise, asdf, Nix, Homebrew,
+and system package paths, before checking GitHub or replacing a binary. Those
+installations must be updated by their owning tool.
 
 Update a user-local release install with:
 
@@ -100,7 +99,32 @@ Preview the update without replacing the binary:
 amux update --dry-run
 ```
 
-The older `amux self-update` command remains available as a compatibility alias.
+Inspect every `amux` executable on `PATH`, its resolved target and version, and
+any canonical shadowing or scheduled-maintenance executable drift with:
+
+```sh
+amux install doctor
+amux --json install doctor
+```
+
+### One-time bootstrap from an old client
+
+Clients predating the agent-first CLI may interpret `amux update` as workspace
+launch arguments, and some only recognize `amux self-update`. Do not use either
+command for this one-time migration. Download and verify the current release as
+shown above, install it directly at `~/.local/bin/amux`, put that directory
+first on `PATH`, then clear your shell's command cache and diagnose the result:
+
+```sh
+install -d ~/.local/bin
+install -m 0755 amux-linux-amd64/amux ~/.local/bin/amux
+export PATH="$HOME/.local/bin:$PATH"
+hash -r
+~/.local/bin/amux install doctor
+```
+
+Use the archive directory matching your operating system and architecture. Once
+bootstrapped, use only `amux update` for this canonical release installation.
 
 ## Shell completions
 
@@ -248,11 +272,14 @@ amux runner restart [[workspace] <window> [session]]
 amux completion <bash|zsh|fish>
 amux version
 amux update
+amux install doctor
 amux path
 amux doctor [workspace] [session]
 ```
 
-Compatibility aliases remain available: `store` for `pin`, `store-current` for `pin-current`, `remove` for `unpin`, `remove-current` for `unpin-current`, and `self-update` for `update`.
+The legacy `self-update` command has been removed; bootstrap old clients once as
+described in [Install from a release](#install-from-a-release), then use
+`amux update`.
 
 `amux spawn --mode <mode>` (or `-m <mode>`) creates the new Amp thread with the selected Amp mode. Amp's built-in Dial modes are `low`, `medium`, `high`, and `ultra`; shell completions suggest those built-ins. Custom/plugin mode names are still passed through unchanged, so amux does not restrict `--mode` to the built-in list. Omitting `--mode` preserves the default Amp thread behavior. For old Amp mode names, use `medium` instead of `smart` or `deep`, `low` instead of `rush`, and `high` or `ultra` instead of `deep**3`.
 

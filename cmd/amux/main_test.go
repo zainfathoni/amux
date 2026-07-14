@@ -173,9 +173,10 @@ func TestCompletionGeneratesShellScripts(t *testing.T) {
 			shell: "bash",
 			want: []string{
 				"complete -F _amux_complete amux",
-				"worker spawn shelve unshelve teardown migrate-config completion update version path help",
+				"worker spawn shelve unshelve teardown install migrate-config completion update version path help",
 				"--config-dir --json --dry-run --help -h --version",
 				"list pin unpin launch park restart remove spawn shelve unshelve teardown doctor reconcile",
+				"compgen -W \"doctor\"",
 			},
 		},
 		{
@@ -184,6 +185,7 @@ func TestCompletionGeneratesShellScripts(t *testing.T) {
 				"#compdef amux",
 				"\"worker:Manage interactive thread-bound clients\"",
 				"worker_commands=(",
+				"install_commands=(",
 				"'--config-dir[path to config directory]:directory:_directories'",
 				"'--mode[thread mode]:mode:(low medium high ultra)'",
 				"'--message-file[read initial message from file]:message file:_files'",
@@ -197,6 +199,7 @@ func TestCompletionGeneratesShellScripts(t *testing.T) {
 				"complete -c amux -n 'test (__fish_amux_root_command) = spawn' -r -f -a 'low medium high ultra' -l 'mode' -d 'Amp thread mode'",
 				"complete -c amux -n 'test (__fish_amux_root_command) = spawn' -r -l 'message-file' -d 'Read initial message from file'",
 				"complete -c amux -f -n 'test (__fish_amux_root_command) = worker; and test -z (__fish_amux_worker_leaf)' -a 'restart'",
+				"test (__fish_amux_root_command) = install; and test -z (__fish_amux_install_leaf)' -a doctor",
 				"complete -c amux -n 'test (__fish_amux_root_command) = worker; and test (__fish_amux_worker_leaf) = spawn' -r -l 'message-file'",
 				"complete -c amux -f -n 'test (__fish_amux_root_command) = completion' -a 'bash zsh fish'",
 			},
@@ -7399,15 +7402,18 @@ func runCapturingStdout(t *testing.T, args []string) (string, error) {
 func withSelfUpdateTestState(t *testing.T, exePath, releaseURL string, client *http.Client) {
 	t.Helper()
 	oldExecutablePath := executablePath
+	oldCanonicalSelfUpdatePath := canonicalSelfUpdatePath
 	oldReleaseURL := selfUpdateReleaseURL
 	oldReleasePageURL := selfUpdateReleasePageURL
 	oldHTTPClient := selfUpdateHTTPClient
 	executablePath = func() (string, error) { return exePath, nil }
+	canonicalSelfUpdatePath = func() (string, error) { return resolvePathForComparison(exePath), nil }
 	selfUpdateReleaseURL = releaseURL
 	selfUpdateReleasePageURL = releaseURL + "/fallback"
 	selfUpdateHTTPClient = client
 	t.Cleanup(func() {
 		executablePath = oldExecutablePath
+		canonicalSelfUpdatePath = oldCanonicalSelfUpdatePath
 		selfUpdateReleaseURL = oldReleaseURL
 		selfUpdateReleasePageURL = oldReleasePageURL
 		selfUpdateHTTPClient = oldHTTPClient

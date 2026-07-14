@@ -75,6 +75,7 @@ var rootCommand = &commandSpec{
 		workerCommand(),
 		runnerCommand(),
 		workspaceCommand(),
+		installCommand(),
 		lifecycleCommand("workspaces", "Exact alias for workspace list", false),
 		lifecycleCommand("spawn", "Spawn an interactive worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>"),
 		lifecycleCommand("shelve", "Shelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
@@ -165,6 +166,17 @@ func workspaceCommand() *commandSpec {
 		Usage:   "amux workspace <command>",
 		Children: []*commandSpec{
 			{Name: "list", Summary: "List worker and runner workspaces", Usage: "amux workspace list", NeedsConfig: true},
+		},
+	}
+}
+
+func installCommand() *commandSpec {
+	return &commandSpec{
+		Name:    "install",
+		Summary: "Inspect the amux client installation",
+		Usage:   "amux install <command>",
+		Children: []*commandSpec{
+			{Name: "doctor", Summary: "Diagnose executable targets, versions, and PATH drift", Usage: "amux install doctor", FoundationOnly: true},
 		},
 	}
 }
@@ -643,7 +655,7 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 		a.printCommandHelp(parsed.Command)
 		return nil, nil
 	}
-	if parsed.Options.JSON && parsed.Command.FoundationOnly && parsed.Command.Name != "migrate-config" {
+	if parsed.Options.JSON && parsed.Command.FoundationOnly && parsed.Command.Name != "migrate-config" && strings.Join(parsed.Path, " ") != "install doctor" {
 		return nil, result.Request(fmt.Errorf("--json is not supported with %s", strings.Join(parsed.Path, " ")))
 	}
 
@@ -681,6 +693,12 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 
 	switch parsed.Command.Name {
 	case "list", "pin", "unpin", "launch", "park", "restart", "remove", "spawn", "shelve", "unshelve", "teardown", "doctor", "reconcile":
+		if strings.Join(parsed.Path, " ") == "install doctor" {
+			if len(parsed.Args) != 0 || parsed.Selectors != (selectors{}) {
+				return nil, result.Request(errors.New("usage: amux install doctor"))
+			}
+			return a.installDoctor(parsed)
+		}
 		if !parsed.Command.FoundationOnly {
 			return a.executeWorker(parsed, dir)
 		}
