@@ -149,9 +149,6 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			if inspection.state == workerPaneConflict || inspection.state == workerPaneAmbiguous {
 				return &env, result.Preflight(fmt.Errorf("worker %s/%s has %s tmux identity", row.Workspace, row.Window, inspection.state))
 			}
-			if in.Command.Name == "teardown" && inspection.state == workerPaneAbsent {
-				return &env, result.Preflight(fmt.Errorf("no live tmux window for thread %s matches restore row %s/%s", row.Thread, row.Workspace, row.Window))
-			}
 			inspections[row.Thread] = inspection
 		}
 	}
@@ -283,7 +280,7 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			if err == nil {
 				_, err = config.RemoveShelf(dir.ShelvesPath(), row.Thread)
 			}
-			if err == nil {
+			if err == nil && inspections[row.Thread].state == workerPaneExact {
 				err = revalidateWorkerBeforeMutation(row, inspections[row.Thread])
 				if err == nil {
 					err = tmux.Runner{}.KillWindow(inspections[row.Thread].pane.WindowID)
@@ -312,6 +309,11 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 		if err != nil {
 			out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: err.Error()}
 			env.Failed = append(env.Failed, out)
+			continue
+		}
+		if in.Command.Name == "teardown" && inspections[row.Thread].state == workerPaneAbsent {
+			out.Message = "already_stopped"
+			env.Skipped = append(env.Skipped, out)
 			continue
 		}
 		if changed {
