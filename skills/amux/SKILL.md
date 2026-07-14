@@ -1,64 +1,52 @@
 ---
 name: amux
-description: "Manages local Amp tmux workspace lifecycle with amux: restore, inspect, pin/unpin, park, shelve/unshelve, spawn interactive workers, runner lifecycle, health checks, and verified teardown. Use for local tmux/Amp restore orchestration and skill-only /amux health and /amux sprawl; not for Amp-native Agents Anywhere remote creation except runner setup. Triggers: 'Pin it', 'Unpin it', 'forget this on restore', 'Park it', 'Shelve this', 'defer this workspace', 'hide it for now', 'Restore my workspace', 'Spawn a worker for', 'Teardown this worker', 'Doctor amux', '/amux health', '/amux sprawl', '/amux finish'."
+description: "Manage local Amp worker, runner, and workspace lifecycle with amux. Use for 'Pin it', 'Unpin it', 'forget this on restore', 'Park it', 'Restart unresponsive clients', 'Shelve this', 'defer this workspace', 'hide it for now', 'Show shelved work', 'Unshelve this', 'Restore my workspace', 'Spawn a worker for', 'Teardown this worker', 'Doctor amux', '/amux health', '/amux sprawl', and '/amux finish'. Health, sprawl, and finish are skill-only workflows, not CLI commands."
 ---
 
 # amux
 
-Use `amux` to manage local Amp/tmux workspace restore state instead of editing TSV files manually. Current config lives in `~/.config/amux/workspaces.tsv` and `~/.config/amux/runners.tsv`; legacy installs may still have `~/.config/amp-tmux`, migratable with `amux migrate-config`.
+Use `amux` for local Amp/tmux lifecycle. A **worker** is an interactive thread-bound client. A **runner** is a non-interactive `amp --no-tui` client bound to a canonical workdir. A **workspace** groups workers and runners in one same-named tmux session.
 
-## Route by side-effect domain
+Do not edit `workers.tsv`, `runners.tsv`, or `shelves.tsv` directly when the CLI can express the change. Use `--config-dir` or `AMUX_CONFIG_DIR` to select their directory. Run `amux help [command ...]` before assuming syntax.
 
-Keep these domains separate and choose the smallest command that mutates only the requested domain:
+## Preserve the agent contract
 
-- **Restore config**: `workspaces.tsv` rows describing what should be restored later.
-- **Runner config**: `runners.tsv` rows describing local `amp --no-tui` runner intent.
-- **Live local tmux/Amp**: tmux sessions/windows and local Amp CLI processes.
-- **Remote Amp thread state**: hosted Amp threads; `spawn` creates one, `shelve`/`unshelve` archive-state toggles deferred work, verified `teardown` archives one.
-
-Use `amux` for local tmux workspace lifecycle: list, doctor, launch, pin/unpin, park, shelve/unshelve, spawn, teardown, prune stale rows, and runner setup. If the user wants to create or control a new remote agent from ampcode.com, prefer Amp-native Agents Anywhere after a runner exists for the target machine/workdir.
-
-Runner rows are not restore rows. Runner commands manage local `amp --no-tui` runner intent and windows; they do not create, continue, archive, or list remote Amp threads.
-
-## Always preserve these invariants
-
-- Plain `amux list [workspace]` is local-only and must stay instant; it does not call Amp.
-- `amux workspaces` is the local-only discovery step for all-workspace health checks. It lists restore workspace names only by default; use `--include-runners` only for machine inventory that should include runner-only workspace names.
-- `amux list --status`, `--active`, `--shelved`, and `amux shelved` inspect remote Amp archive state. Unfiltered `--status` may show `unknown`; filtered modes fail closed when Amp status cannot be confirmed.
-- `amux launch` skips archived/shelved rows. Deferred work resumes only after explicit `amux unshelve ...`, then `amux launch ...` if live tmux restoration is desired.
+- Canonical worker identity is `--thread`; canonical runner identity is `--workdir`; `--workspace` selects a lifecycle group. Use long selectors in agent commands.
+- Top-level `list`, `launch`, `park`, `restart`, `remove`, `doctor`, and `reconcile` aggregate workers and runners. Use `amux worker ...` or `amux runner ...` to narrow by mode.
+- Bare `amux` launches workers only. `amux launch` launches both modes. Launch is the no-selector bulk exception; other machine-wide mutations require explicit `--all`.
+- `spawn`, `shelve`, `unshelve`, and `teardown` are worker-only. `pin` and `unpin` require `worker` or `runner` namespace.
 - Every skill-driven worker spawn MUST pass `--mode medium` unless the user explicitly requests another mode. An explicitly requested mode always wins. Do not infer `high` or `ultra` from task complexity, size, urgency, or expected duration.
-- A single explicit workspace argument defaults the tmux session to that workspace: `amux launch amux`, `amux doctor amux`, `amux runner launch amux`, `amux runner park amux <window>`, and `amux spawn --mode medium ... amux` target workspace/session `amux`. Older shared-session layouts still pass an explicit session, e.g. `amux launch mac Amp` or `amux runner park mac <window> Amp`. Plain `amux launch` and `amux runner launch` start every configured workspace in same-named sessions; other no-arg legacy defaults may still use workspace `mac` and session `Amp`.
-- `pin`/`unpin` mutate restore config only. `park` stops all verified local tmux/Amp clients on the machine, `park --workspace <workspace>` scopes that operation to one workspace, and the positional forms target one window while preserving legacy `mac`/`Amp` defaults. Parking preserves restore rows and remote threads and excludes runners. `shelve` archives/hides deferred remote thread(s), preserves restore rows, and stops verified local windows. `teardown` is full cleanup: archive verified thread, remove row, stop verified local window.
-- Prefer `pin-current`, `unpin-current`, `park-current`, and `shelve-current` from inside the target tmux pane because they resolve `$TMUX_PANE` rather than the currently focused tmux client.
-- Do not edit `workspaces.tsv` or `runners.tsv` manually unless the CLI cannot express the needed change.
+- `/amux health`, `/amux sprawl`, and `/amux finish` are skill-only workflows. Never invoke or document `amux health`, `amux sprawl`, or `amux finish` as CLI commands.
+- Prefer `--dry-run`; prefer `--json` for parsing. Treat exit `2` as request/preflight rejection and exit `1` as runtime failure. Never retry an indeterminate spawn blindly.
 
-## Common trigger routing
+## Route triggers to the smallest side effect
 
-- **Park it**: `amux park-current`. This preserves the restore row and active remote thread; verify local disappearance if needed.
-- **Restart unresponsive clients**: use `amux restart` for all pinned thread clients or `amux runner restart` for all `amp --no-tui` runners; pass `<workspace> <window> [session]` to restart only one. Both preserve config and remote thread state.
-- **Pin it**: `amux pin-current <thread-id-or-url>`. Ask for the current thread ID/URL if it is not available.
-- **Unpin it** / **forget this on restore**: `amux unpin-current`; do not stop tmux and do not archive the thread.
-- **Shelve this** / **defer this workspace** / **hide it for now**: use `amux shelve-current [workspace] <thread-id-or-url>` from the pane, or `amux shelve --thread ...`, `amux shelve <workspace> <window> [session]`, or `amux shelve --workspace ...` for already-pinned work. Do not substitute `park-current` when the intended outcome is hidden/deferred remote work.
-- **Show shelved work** / **list deferred work**: `amux shelved [workspace]` or `amux list --shelved [workspace]`.
-- **Unshelve this** / **resume deferred work**: `amux unshelve ...`, then `amux launch <workspace> [session]` if tmux windows should be restored.
-- **Restore my workspace**: `amux launch` for every configured workspace, `amux launch <workspace>` for one same-named session, or `amux launch <workspace> <session>` for shared-session layouts.
-- **Check amux** / **doctor amux**: `amux doctor`, `amux doctor <workspace>`, or `amux doctor <workspace> <session>` with the same session-defaulting rules.
-- **/amux health <workspace>** / **check worker responsiveness before replacement**: load [`reference/workflows.md`](reference/workflows.md), then run the skill-only health workflow. For all-workspace health checks, start with `amux workspaces`. Inspect amux/tmux state, ping only verified Amp panes with one submitted read-only prompt using unique `AMUX_HEALTH_CHECK` tokens, report classifications first, and do not replace anything.
-- **Spawn a worker for ...**: load [`reference/workflows.md`](reference/workflows.md), then use `amux spawn --mode medium ...` only for fresh interactive local Amp/tmux workers, substituting another mode only when the user explicitly requested it; prefer Amp-native Agents Anywhere for remote agent creation after a runner exists.
-- **Teardown this worker** / **archive and clean this up**: use `amux teardown` only when the user wants full verified worker cleanup.
-- **/amux sprawl #12 #34 ...**: skill-only orchestration around `gh`, `git worktree`, and `amux spawn --mode medium`; inspect dependencies before creating branches, worktrees, tmux windows, restore rows, or remote threads, and use another mode only when the user explicitly requests it.
-- **/amux finish** / **post-merge cleanup**: finish GitHub/git/release/worktree cleanup first, then run `amux teardown` last.
+- **Pin it**: `amux worker pin --current` when complete `AMUX_*` identity is available; otherwise use explicit `--workspace`, `--window`, `--workdir`, and `--thread` selectors. Pin changes worker configuration only. Never combine `--current` with another selector.
+- **Unpin it** / **forget this on restore**: `amux worker unpin --current`. Worker unpin removes worker configuration and matching shelf intent; it does not stop or archive.
+- **Park it**: `amux worker park --current`. Park stops the verified local worker while preserving configuration, shelf intent, and remote thread state.
+- **Restart unresponsive clients**: use aggregate `amux restart --all`, or mode-specific `amux worker restart ...` / `amux runner restart ...`. Restart preserves configuration and remote state.
+- **Shelve this** / **defer this workspace** / **hide it for now**: `amux shelve --current`, `amux shelve --thread <id>`, or `amux shelve --workspace <name>`. Shelve records shelf intent, archives the remote thread, and parks verified local workers while preserving worker configuration.
+- **Show shelved work**: `amux worker list --shelf shelved` with optional `--workspace` or `--thread`.
+- **Unshelve this**: `amux unshelve --current` or `--thread <id>`. Unshelve unarchives first and removes shelf intent only after success; launch separately.
+- **Restore my workspace**: `amux launch --workspace <name>` for both modes, `amux worker launch --workspace <name>` for workers only, or bare `amux` for all configured workers.
+- **Doctor amux**: `amux doctor --all`, `amux doctor --workspace <name>`, or a mode-specific doctor route. Doctor inspects only.
+- **Spawn a worker for ...**: load [`reference/workflows.md`](reference/workflows.md), then use `amux spawn --mode medium ...` unless the user explicitly requested another mode.
+- **Teardown this worker**: `amux teardown --current` or `amux teardown --thread <id>`. Teardown archives the verified thread, removes worker and shelf configuration, and stops its verified local client.
+- **/amux health**: load [`reference/workflows.md`](reference/workflows.md); aggregate worker responsiveness and runner process probes, with optional workspace/mode filters.
+- **/amux sprawl #12 #34 ...**: load [`reference/workflows.md`](reference/workflows.md); worker-only issue orchestration with dependency inspection before side effects.
+- **/amux finish**: load [`reference/workflows.md`](reference/workflows.md); verify merge and runner ownership, clean Git/worktree state safely, then teardown the worker last.
 
-## Load detailed reference only for the active branch
+## Load only the needed reference
 
-- For exact CLI forms, session-defaulting examples, command semantics, self-update behavior, and the side-effect matrix, read [`reference/commands.md`](reference/commands.md).
-- For health checks, spawn, sprawl, teardown, finish, current-session, and explicit workspace procedures, read [`reference/workflows.md`](reference/workflows.md).
-- For stuck/misplaced worker replacement, verification commands, and mutation safety checks, read [`reference/troubleshooting.md`](reference/troubleshooting.md).
-- To check whether trigger phrases still map to the intended behavior, read [`reference/trigger-phrases.md`](reference/trigger-phrases.md).
+- Exact routes, selectors, output, side effects, installation, and maintenance: [`reference/commands.md`](reference/commands.md).
+- Spawn, health, sprawl, teardown, callback, and finish procedures: [`reference/workflows.md`](reference/workflows.md).
+- Partial failures, stuck clients, and safe replacement: [`reference/troubleshooting.md`](reference/troubleshooting.md).
+- Complete activation/routing checklist: [`reference/trigger-phrases.md`](reference/trigger-phrases.md).
 
-## Safety guardrails
+## Safety
 
-- Do not store secrets in window names, workdirs, or thread identifiers; prefer thread IDs or `https://ampcode.com/threads/...` URLs.
-- Before testing mutations, prefer a temp config with `--config "$tmp/workspaces.tsv"` so live restore rows are not changed accidentally.
-- Do not run live `amux spawn`, `teardown`, `park-current`, `pin-current`/`store-current`, or `unpin-current`/`remove-current` against the default config unless the user asked to change that side-effect domain.
-- If a thread/window looks missing, start with `amux doctor <workspace>` and `amux list <workspace>`. Prefer tmux window/pane metadata over `ps`; do not treat the tmux server command line as proof of a live Amp thread.
+- Do not store secrets in names, workdirs, or thread identifiers.
+- Do not mutate the default config merely to test a command; use a temporary `--config-dir` and `--dry-run`.
+- Mutations are idempotent desired-state operations under one bounded machine lock. Lock contention and preflight errors authorize no mutation.
+- On partial failure, inspect JSON outcomes and external state before retrying. Do not duplicate threads, windows, worktrees, or operation keys.
+- Runner commands never own remote agent threads. Teardown never applies to runners.

@@ -32,6 +32,20 @@ gofmt -l .
 
 CI runs formatting, tests, a build, and a Destructive Command Guard scan.
 
+## Develop the bundled skill
+
+Normal users install the published skill globally with `skills` as documented in
+the README. Contributors editing `skills/amux` may symlink this checkout so Amp
+loads the worktree copy:
+
+```sh
+ln -sfn "$PWD/skills/amux" ~/.agents/skills/amux
+```
+
+Reload Amp after changing the link. Run the skill consistency tests directly
+with `go test ./scripts`; they also run as part of `go test ./...`. Do not
+document this development symlink as the primary installation path.
+
 ## Pull request guidelines
 
 - Keep pull requests focused on one behavior or documentation improvement.
@@ -46,14 +60,14 @@ Use a temporary config while experimenting:
 
 ```sh
 tmp=$(mktemp -d)
-AMUX_WORKSPACES="$tmp/workspaces.tsv" amux list mac
+amux --config-dir "$tmp" worker list --all
 ```
 
 Prefer `--dry-run` before mutating tmux or workspace config:
 
 ```sh
-amux launch mac Amp --dry-run
-amux spawn --dry-run demo ~/Code/demo "Start here"
+amux --dry-run launch --workspace demo
+amux --dry-run spawn --workspace demo --window worker --workdir ~/Code/demo --mode medium --message "Start here" --idempotency-key contributor-demo
 ```
 
 Do not use real private thread IDs in tests or examples. Use placeholders such as `T-example` or `https://ampcode.com/threads/T-example`.
