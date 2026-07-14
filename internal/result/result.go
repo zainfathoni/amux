@@ -79,12 +79,48 @@ type ExecutableDetails struct {
 	Selected     bool     `json:"selected,omitempty"`
 }
 
+type MaintenanceDetails struct {
+	Owner               string                     `json:"update_owner,omitempty"`
+	Schedule            string                     `json:"schedule,omitempty"`
+	Platform            string                     `json:"platform,omitempty"`
+	Path                string                     `json:"path,omitempty"`
+	Status              string                     `json:"latest_status,omitempty"`
+	Time                string                     `json:"latest_time,omitempty"`
+	Error               string                     `json:"latest_error,omitempty"`
+	AmpPath             string                     `json:"amp_path,omitempty"`
+	AmpVersion          string                     `json:"amp_version,omitempty"`
+	AmuxPath            string                     `json:"amux_path,omitempty"`
+	AmpTarget           string                     `json:"amp_target,omitempty"`
+	ArtifactPaths       []string                   `json:"artifact_paths,omitempty"`
+	SchedulerState      string                     `json:"scheduler_state,omitempty"`
+	Changed             bool                       `json:"changed,omitempty"`
+	ObservedFingerprint string                     `json:"observed_fingerprint,omitempty"`
+	AppliedFingerprint  string                     `json:"applied_fingerprint,omitempty"`
+	AppliedVersion      string                     `json:"applied_version,omitempty"`
+	RunnerOutcomes      []MaintenanceRunnerDetails `json:"runner_outcomes,omitempty"`
+}
+
+type MaintenanceRunnerDetails struct {
+	Workdir string `json:"workdir"`
+	Status  string `json:"status"`
+	Phase   string `json:"phase,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+type RunnerDetails struct {
+	LocalState        string `json:"local_state"`
+	ProcessStart      int64  `json:"process_start,omitempty"`
+	ProcessAgeSeconds int64  `json:"process_age_seconds,omitempty"`
+}
+
 type Outcome struct {
-	Resource   ResourceID         `json:"resource"`
-	Action     string             `json:"action"`
-	Message    string             `json:"message,omitempty"`
-	Executable *ExecutableDetails `json:"executable,omitempty"`
-	Error      *Failure           `json:"error,omitempty"`
+	Resource    ResourceID          `json:"resource"`
+	Action      string              `json:"action"`
+	Message     string              `json:"message,omitempty"`
+	Executable  *ExecutableDetails  `json:"executable,omitempty"`
+	Maintenance *MaintenanceDetails `json:"maintenance,omitempty"`
+	Runner      *RunnerDetails      `json:"runner,omitempty"`
+	Error       *Failure            `json:"error,omitempty"`
 }
 
 type Envelope struct {

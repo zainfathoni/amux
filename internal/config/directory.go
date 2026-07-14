@@ -13,6 +13,8 @@ const (
 	RunnersFile                  = "runners.tsv"
 	ShelvesFile                  = "shelves.tsv"
 	OperationsFile               = "operations.json"
+	MaintenanceFile              = "runner-maintenance.json"
+	MaintenanceResultFile        = "runner-maintenance-result.json"
 )
 
 // Directory is the complete on-disk configuration selected for one invocation.
@@ -56,4 +58,9 @@ func (d Directory) ShelvesPath() string {
 
 func (d Directory) OperationsPath() string {
 	return filepath.Join(d.Path, OperationsFile)
+}
+
+func (d Directory) MaintenancePath() string { return filepath.Join(d.Path, MaintenanceFile) }
+func (d Directory) MaintenanceResultPath() string {
+	return filepath.Join(d.Path, MaintenanceResultFile)
 }

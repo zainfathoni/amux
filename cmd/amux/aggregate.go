@@ -34,6 +34,16 @@ func (a app) executeAggregate(in invocation, dir config.Directory) (*result.Enve
 	if err != nil {
 		return &env, result.Preflight(err)
 	}
+	// Maintenance is machine-level rather than runner-level. Keep it visible to
+	// aggregate doctor even when the runner registry is empty.
+	if in.Command.Name == "doctor" && in.Selectors.All && !useRunner {
+		_, metadataErr := os.Stat(dir.MaintenancePath())
+		_, resultErr := os.Stat(dir.MaintenanceResultPath())
+		if metadataErr == nil || resultErr == nil {
+			useRunner = true
+			runnerIn.Selectors.All = true
+		}
+	}
 	if !useWorker && !useRunner {
 		switch {
 		case in.Command.Name == "list":

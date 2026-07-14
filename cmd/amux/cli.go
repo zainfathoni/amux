@@ -56,11 +56,13 @@ type commandSpec struct {
 }
 
 type invocation struct {
-	Options   cliOptions
-	Command   *commandSpec
-	Path      []string
-	Selectors selectors
-	Args      []string
+	Options          cliOptions
+	Command          *commandSpec
+	Path             []string
+	Selectors        selectors
+	Args             []string
+	MaintenanceOwner string
+	Scheduled        bool
 }
 
 var rootCommand = &commandSpec{
@@ -145,6 +147,7 @@ func workerLeaf(name, summary string, mutating bool, flags ...string) *commandSp
 func runnerCommand() *commandSpec {
 	runner := &commandSpec{Name: "runner", Summary: "Manage non-interactive workdir-bound clients", Usage: "amux runner <command>"}
 	runner.Children = []*commandSpec{
+		maintenanceCommand(),
 		runnerLeaf("list", "List configured runners", false, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
 		runnerLeaf("pin", "Pin a runner without launching it", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current"),
 		runnerLeaf("unpin", "Unpin a runner without stopping it", true, "--workdir, -d <path>", "--current"),
@@ -156,6 +159,14 @@ func runnerCommand() *commandSpec {
 		runnerLeaf("reconcile", "Reconcile runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
 	}
 	return runner
+}
+
+func maintenanceCommand() *commandSpec {
+	return &commandSpec{Name: "maintenance", Summary: "Manage scheduled runner maintenance", Usage: "amux runner maintenance <command>", Children: []*commandSpec{
+		{Name: "install", Summary: "Install scheduled maintenance", Usage: "amux runner maintenance install --update-owner <self|external>", Flags: []string{"--update-owner <self|external>"}, NeedsConfig: true, Mutating: true},
+		{Name: "remove", Summary: "Remove scheduled maintenance", Usage: "amux runner maintenance remove", NeedsConfig: true, Mutating: true},
+		{Name: "run", Summary: "Run maintenance", Usage: "amux runner maintenance run", Flags: []string{"--scheduled"}, NeedsConfig: true, Mutating: true},
+	}}
 }
 
 func runnerLeaf(name, summary string, mutating bool, flags ...string) *commandSpec {
@@ -290,6 +301,19 @@ func parseInvocation(args []string) (invocation, error) {
 		}
 		return parsed, nil
 	}
+	if isMaintenancePath(path) {
+		commandArgs, parsed.MaintenanceOwner, parsed.Scheduled, err = parseMaintenanceFlags(commandArgs)
+		if err != nil {
+			return parsed, err
+		}
+		leaf := path[len(path)-1]
+		if parsed.Scheduled && leaf != "run" {
+			return parsed, errors.New("--scheduled is only valid for runner maintenance run")
+		}
+		if parsed.MaintenanceOwner != "" && leaf != "install" {
+			return parsed, errors.New("--update-owner is only valid for runner maintenance install")
+		}
+	}
 	parsed.Selectors, parsed.Args, err = parseSelectors(commandArgs)
 	if err != nil {
 		return parsed, err
@@ -300,7 +324,7 @@ func parseInvocation(args []string) (invocation, error) {
 	if !spec.FoundationOnly && len(parsed.Args) != 0 {
 		return parsed, fmt.Errorf("positional selectors were removed from %s; use named selectors shown by `amux help %s`", strings.Join(path, " "), strings.Join(path, " "))
 	}
-	if !spec.FoundationOnly && spec.Mutating && spec.Name != "launch" && !hasResourceScope(parsed.Selectors) {
+	if !spec.FoundationOnly && spec.Mutating && spec.Name != "launch" && !isMaintenancePath(path) && !hasResourceScope(parsed.Selectors) {
 		return parsed, fmt.Errorf("%s requires a resource scope; use an explicit selector or --all", strings.Join(path, " "))
 	}
 	if isAggregateLifecycle(path) && parsed.Selectors.Thread != "" && parsed.Selectors.Workdir != "" {
@@ -318,6 +342,44 @@ func parseInvocation(args []string) (invocation, error) {
 		return parsed, errors.New("--terminal-launcher requires --attach")
 	}
 	return parsed, nil
+}
+
+func parseMaintenanceFlags(args []string) ([]string, string, bool, error) {
+	remaining := make([]string, 0, len(args))
+	owner := ""
+	scheduled := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--scheduled":
+			if scheduled {
+				return nil, "", false, errors.New("duplicate --scheduled")
+			}
+			scheduled = true
+		case "--update-owner":
+			if owner != "" {
+				return nil, "", false, errors.New("duplicate --update-owner")
+			}
+			i++
+			if i >= len(args) {
+				return nil, "", false, errors.New("--update-owner requires self or external")
+			}
+			owner = args[i]
+		default:
+			if strings.HasPrefix(args[i], "--update-owner=") {
+				if owner != "" {
+					return nil, "", false, errors.New("duplicate --update-owner")
+				}
+				owner = strings.TrimPrefix(args[i], "--update-owner=")
+			} else {
+				remaining = append(remaining, args[i])
+			}
+		}
+	}
+	return remaining, owner, scheduled, nil
+}
+
+func isMaintenancePath(path []string) bool {
+	return len(path) == 3 && path[0] == "runner" && path[1] == "maintenance"
 }
 
 func parseCLIOptions(args []string) (cliOptions, []string, error) {
@@ -417,12 +479,17 @@ func resolveCommand(words []string) (*commandSpec, []string, []string, error) {
 	if len(remaining) == 0 || strings.HasPrefix(remaining[0], "-") {
 		return root, path, remaining, nil
 	}
-	child := commandChild(root, remaining[0])
-	if child == nil {
-		return nil, nil, nil, fmt.Errorf("unknown %s command %q; run `amux help %s`", root.Name, remaining[0], root.Name)
+	current := root
+	for len(current.Children) > 0 && len(remaining) > 0 && !strings.HasPrefix(remaining[0], "-") {
+		child := commandChild(current, remaining[0])
+		if child == nil {
+			return nil, nil, nil, fmt.Errorf("unknown %s command %q; run `amux help %s`", current.Name, remaining[0], strings.Join(path, " "))
+		}
+		current = child
+		path = append(path, child.Name)
+		remaining = remaining[1:]
 	}
-	path = append(path, child.Name)
-	return child, path, remaining[1:], nil
+	return current, path, remaining, nil
 }
 
 func commandChild(parent *commandSpec, name string) *commandSpec {
@@ -735,6 +802,20 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 		if required {
 			return nil, result.Preflight(fmt.Errorf("configuration migration required for %s; run `amux migrate-config --config-dir %s`", dir.Path, dir.Path))
 		}
+	}
+	if isMaintenancePath(parsed.Path) {
+		if parsed.Command.Name == "run" && parsed.Scheduled && maintenanceGOOS == "darwin" && !parsed.Options.DryRun {
+			maintenanceSleep(time.Duration(maintenanceRandom(int64(maintenanceJitter))))
+		}
+		var held *lock.Lock
+		if parsed.Command.Mutating {
+			held, err = acquireMutationLock(parsed.Path)
+			if err != nil {
+				return nil, result.Preflight(err)
+			}
+			defer held.Release()
+		}
+		return a.executeMaintenance(parsed, dir)
 	}
 
 	if !parsed.Command.FoundationOnly && !isAggregateLifecycle(parsed.Path) && !isWorkspaceList(parsed.Path) && (len(parsed.Path) != 2 || parsed.Path[0] != "worker" && parsed.Path[0] != "runner") && !isWorkerConvenience(parsed.Path) {
