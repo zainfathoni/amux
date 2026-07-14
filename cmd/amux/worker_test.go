@@ -105,11 +105,54 @@ exit 2
 		t.Fatalf("delivery operation = %+v found=%t err=%v", updated, found, loadErr)
 	}
 	log, readErr := os.ReadFile(logPath)
-	if readErr != nil {
+	if readErr != nil && !os.IsNotExist(readErr) {
 		t.Fatal(readErr)
 	}
-	if strings.Contains(string(log), "send-keys") || strings.Contains(string(log), "threads search") {
-		t.Fatalf("delivery replay resubmitted or searched alternate threads:\n%s", log)
+	if len(log) != 0 {
+		t.Fatalf("delivery replay performed external work:\n%s", log)
+	}
+}
+
+func TestWorkerSpawnInterruptedAdoptionReplayFailsClosedWithBothThreadIdentities(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	request := strings.Join([]string{"alpha", "worker", workdir, "", "hello"}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Now().UTC()
+	record := config.OperationRecord{
+		Key:         "adoption-started",
+		Kind:        "worker-spawn",
+		RequestHash: hex.EncodeToString(sum[:]),
+		State:       config.OperationStarted,
+		Phase:       config.OperationPhaseDeliveryStarted,
+		Resource:    config.OperationResource{Kind: "worker", Thread: "T-provisioned"},
+		ThreadAdoption: &config.OperationThreadAdoption{
+			ProvisionedThread: "T-provisioned",
+			ReceivingThread:   "T-receiving",
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if _, err := config.StoreOperation(filepath.Join(dir, config.OperationsFile), record); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	called := filepath.Join(bin, "called")
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	err := executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", "adoption-started")
+	if err == nil || !strings.Contains(err.Error(), "T-provisioned") || !strings.Contains(err.Error(), "T-receiving") || !strings.Contains(err.Error(), "do not resubmit") {
+		t.Fatalf("interrupted adoption replay error = %v", err)
+	}
+	updated, found, loadErr := config.LoadOperation(filepath.Join(dir, config.OperationsFile), record.Key)
+	if loadErr != nil || !found || updated.State != config.OperationIndeterminate || updated.ThreadAdoption == nil {
+		t.Fatalf("interrupted adoption operation = %+v found=%t err=%v", updated, found, loadErr)
+	}
+	if _, err := os.Stat(called); !os.IsNotExist(err) {
+		t.Fatalf("interrupted adoption replay called amp or tmux: %v", err)
 	}
 }
 
@@ -272,6 +315,8 @@ if [ "$1 $2 $3" = "threads export T-spawned" ]; then
   if [ -e "`+delivered+`" ]; then printf '%s\n' '{"id":"T-spawned","messages":[{"role":"user","content":"hello"}]}'; else printf '%s\n' '{"id":"T-spawned","messages":[]}'; fi
   exit 0
 fi
+if [ "$1 $2" = "threads list" ]; then printf '%s\n' '[{"id":"T-spawned"}]'; exit 0; fi
+if [ "$1 $2" = "threads search" ]; then printf '%s\n' '[{"id":"T-spawned"}]'; exit 0; fi
 exit 2
 `)
 	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
@@ -317,6 +362,185 @@ exit 2
 	}
 	if err := executeWorkerJSONError(t, mismatch...); err == nil || !strings.Contains(err.Error(), "different request") {
 		t.Fatalf("spawn key mismatch error = %v", err)
+	}
+}
+
+func TestWorkerSpawnAdoptsSoleFreshActiveReceivingThread(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	running := filepath.Join(bin, "running")
+	delivered := filepath.Join(bin, "delivered")
+	identity := filepath.Join(bin, "identity")
+	oldRow := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-created"}
+	newRow := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-receiver"}
+	oldStart := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "worker", Thread: oldRow.Thread}, oldRow)
+	newStart := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "worker", Thread: newRow.Thread}, newRow)
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+echo "amp $*" >> "`+logPath+`"
+if [ "$1 $2" = "threads new" ]; then echo T-created; exit 0; fi
+if [ "$1 $2" = "threads list" ]; then
+  if [ -e "`+delivered+`" ]; then printf '%s\n' '[{"id":"T-created"},{"id":"T-receiver"}]'; else printf '%s\n' '[{"id":"T-created"}]'; fi
+  exit 0
+fi
+if [ "$1 $2 $3" = "threads export T-created" ]; then printf '%s\n' '{"id":"T-created","messages":[]}'; exit 0; fi
+if [ "$1 $2 $3" = "threads export T-receiver" ]; then printf '%s\n' '{"id":"T-receiver","env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[{"role":"user","content":"hello"}]}'; exit 0; fi
+if [ "$1 $2" = "threads search" ]; then printf '%s\n' '[{"id":"T-receiver"}]'; exit 0; fi
+if [ "$1 $2 $3" = "threads archive T-created" ]; then exit 0; fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "tmux $*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then test -e "`+running+`"; exit $?; fi
+if [ "$1" = new-session ]; then touch "`+running+`"; echo T-created > "`+identity+`"; exit 0; fi
+if [ "$1" = list-panes ]; then
+  if grep -q T-receiver "`+identity+`"; then printf 'worker\t@1\t%s\n' `+shellSingleQuote(newStart)+`; else printf 'worker\t@1\t%s\n' `+shellSingleQuote(oldStart)+`; fi
+  exit 0
+fi
+if [ "$1" = display-message ]; then echo %1; exit 0; fi
+if [ "$1" = capture-pane ]; then printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; exit 0; fi
+if [ "$1" = send-keys ]; then if [ "$4" = Enter ]; then touch "`+delivered+`"; fi; exit 0; fi
+if [ "$1" = respawn-pane ]; then echo T-receiver > "`+identity+`"; exit 0; fi
+if [ "$1" = kill-window ]; then rm -f "`+running+`"; exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+	args := []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", "adopt-1"}
+
+	first := executeWorkerJSON(t, args...)
+	if len(first.Successful) != 1 || first.Successful[0].Resource.Thread != "T-receiver" {
+		t.Fatalf("adopted spawn result = %+v", first)
+	}
+	rows, err := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
+	if err != nil || len(rows) != 1 || rows[0].Thread != "T-receiver" {
+		t.Fatalf("adopted worker registry = %+v err=%v", rows, err)
+	}
+	record, found, err := config.LoadOperation(filepath.Join(dir, config.OperationsFile), "adopt-1")
+	if err != nil || !found || record.State != config.OperationSucceeded || record.Resource.Thread != "T-receiver" {
+		t.Fatalf("adopted operation = %+v found=%t err=%v", record, found, err)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"tmux respawn-pane -k -t @1", "amp threads archive T-created"} {
+		if !strings.Contains(string(log), want) {
+			t.Fatalf("adoption log missing %q:\n%s", want, log)
+		}
+	}
+	beforeReplay := string(log)
+	second := executeWorkerJSON(t, args...)
+	if len(second.Skipped) != 1 || second.Skipped[0].Resource.Thread != "T-receiver" {
+		t.Fatalf("adopted spawn replay = %+v", second)
+	}
+	afterReplay, err := os.ReadFile(logPath)
+	if err != nil || string(afterReplay) != beforeReplay {
+		t.Fatalf("adopted replay performed external work: err=%v\nbefore=%s\nafter=%s", err, beforeReplay, afterReplay)
+	}
+}
+
+func TestWorkerSpawnAlternateDeliveryFailsClosedWhenOwnershipIsAmbiguous(t *testing.T) {
+	tests := []struct {
+		name    string
+		wantErr string
+	}{
+		{name: "archived", wantErr: "is archived"},
+		{name: "duplicate", wantErr: "multiple fresh receiving threads T-receiver, T-second"},
+		{name: "bound-duplicate", wantErr: "identity conflict between provisioned thread T-created and fresh receiving thread(s) T-receiver"},
+		{name: "delayed-bound-duplicate", wantErr: "identity conflict between provisioned thread T-created and fresh receiving thread(s) T-receiver"},
+		{name: "timeout", wantErr: "list fresh receiving threads after delivery"},
+		{name: "identity-conflict", wantErr: "receiving thread T-receiver is already configured as beta/existing"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			workdir := t.TempDir()
+			bin := t.TempDir()
+			logPath := filepath.Join(bin, "calls.log")
+			running := filepath.Join(bin, "running")
+			delivered := filepath.Join(bin, "delivered")
+			listCount := filepath.Join(bin, "list-count")
+			row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-created"}
+			start := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "worker", Thread: row.Thread}, row)
+			if tt.name == "identity-conflict" {
+				writeWorkerRegistry(t, dir, config.Row{Workspace: "beta", Window: "existing", Workdir: workdir, Thread: "T-receiver"}.String()+"\n")
+			}
+			writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+echo "amp $*" >> "`+logPath+`"
+if [ "$1 $2" = "threads new" ]; then echo T-created; exit 0; fi
+if [ "$1 $2" = "threads list" ]; then
+  count=0; if [ -f "`+listCount+`" ]; then count=$(cat "`+listCount+`"); fi; count=$((count + 1)); printf '%s\n' "$count" > "`+listCount+`"
+  if [ ! -e "`+delivered+`" ]; then printf '%s\n' '[{"id":"T-created"}]'; exit 0; fi
+  if [ "`+tt.name+`" = timeout ]; then echo 'thread list timed out' >&2; exit 1; fi
+  if [ "`+tt.name+`" = delayed-bound-duplicate ] && [ "$count" -lt 4 ]; then printf '%s\n' '[{"id":"T-created"}]'; exit 0; fi
+  if [ "`+tt.name+`" = archived ] && ! echo "$*" | grep -q -- --include-archived; then printf '%s\n' '[{"id":"T-created"}]'; exit 0; fi
+  if [ "`+tt.name+`" = duplicate ]; then printf '%s\n' '[{"id":"T-created"},{"id":"T-receiver"},{"id":"T-second"}]'; else printf '%s\n' '[{"id":"T-created"},{"id":"T-receiver"}]'; fi
+  exit 0
+fi
+if [ "$1 $2 $3" = "threads export T-created" ]; then
+  if { [ "`+tt.name+`" = bound-duplicate ] || [ "`+tt.name+`" = delayed-bound-duplicate ]; } && [ -e "`+delivered+`" ]; then printf '%s\n' '{"id":"T-created","messages":[{"role":"user","content":"hello"}]}'; else printf '%s\n' '{"id":"T-created","messages":[]}'; fi
+  exit 0
+fi
+if [ "$1 $2 $3" = "threads export T-receiver" ] || [ "$1 $2 $3" = "threads export T-second" ]; then
+  printf '%s\n' '{"env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[{"role":"user","content":"hello"}]}'
+  exit 0
+fi
+if [ "$1 $2" = "threads search" ]; then
+  if [ "`+tt.name+`" = timeout ]; then echo 'search timed out' >&2; exit 1; fi
+  if [ "`+tt.name+`" = duplicate ]; then printf '%s\n' '[{"id":"T-receiver"},{"id":"T-second"}]'; else printf '%s\n' '[{"id":"T-receiver"}]'; fi
+  exit 0
+fi
+if [ "$1 $2 $3" = "threads archive T-created" ]; then exit 0; fi
+exit 2
+`)
+			writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "tmux $*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then test -e "`+running+`"; exit $?; fi
+if [ "$1" = new-session ]; then touch "`+running+`"; exit 0; fi
+if [ "$1" = list-panes ]; then printf 'worker\t@1\t%s\n' `+shellSingleQuote(start)+`; exit 0; fi
+if [ "$1" = display-message ]; then echo %1; exit 0; fi
+if [ "$1" = capture-pane ]; then printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; exit 0; fi
+if [ "$1" = send-keys ]; then if [ "$4" = Enter ]; then touch "`+delivered+`"; fi; exit 0; fi
+if [ "$1" = kill-window ]; then rm -f "`+running+`"; exit 0; fi
+exit 2
+`)
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+			args := []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", "ambiguous-1"}
+
+			err := executeWorkerJSONError(t, args...)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) || !strings.Contains(err.Error(), "recovery:") {
+				t.Fatalf("ambiguous spawn error = %v, want %q with recovery", err, tt.wantErr)
+			}
+			rows, loadErr := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
+			wantRows := 0
+			if tt.name == "identity-conflict" {
+				wantRows = 1
+			}
+			if loadErr != nil || len(rows) != wantRows {
+				t.Fatalf("ambiguous spawn registry = %+v err=%v", rows, loadErr)
+			}
+			record, found, loadErr := config.LoadOperation(filepath.Join(dir, config.OperationsFile), "ambiguous-1")
+			if loadErr != nil || !found || record.State != config.OperationIndeterminate {
+				t.Fatalf("ambiguous operation = %+v found=%t err=%v", record, found, loadErr)
+			}
+			log, readErr := os.ReadFile(logPath)
+			if readErr != nil || !strings.Contains(string(log), "tmux kill-window -t @1") || strings.Contains(string(log), "amp threads archive") {
+				t.Fatalf("ambiguous spawn did not stop unconfigured window: err=%v\n%s", readErr, log)
+			}
+			beforeReplay := string(log)
+			if replayErr := executeWorkerJSONError(t, args...); replayErr == nil || !strings.Contains(replayErr.Error(), "terminal in state indeterminate") {
+				t.Fatalf("ambiguous replay error = %v", replayErr)
+			}
+			afterReplay, readErr := os.ReadFile(logPath)
+			if readErr != nil || string(afterReplay) != beforeReplay {
+				t.Fatalf("ambiguous replay performed external work: err=%v\nbefore=%s\nafter=%s", readErr, beforeReplay, afterReplay)
+			}
+		})
 	}
 }
 

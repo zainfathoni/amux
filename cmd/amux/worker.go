@@ -3,12 +3,15 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -510,8 +513,11 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.Envelope, record config.OperationRecord, workspace, workdir, message string) (*result.Envelope, error) {
 	row := config.Row{Workspace: workspace, Window: in.Selectors.Window, Workdir: workdir, Thread: record.Resource.Thread}
 	var err error
+	var preDeliveryThreads map[string]bool
+	var inspection workerInspection
 	if record.Phase == config.OperationPhaseThreadBound {
-		inspection, inspectErr := inspectWorker(row)
+		var inspectErr error
+		inspection, inspectErr = inspectWorker(row)
 		err = inspectErr
 		if err == nil && inspection.state == workerPaneAbsent {
 			err = createWorkerPane(row)
@@ -521,6 +527,12 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 		}
 		if err == nil && inspection.state != workerPaneExact {
 			err = fmt.Errorf("spawned worker tmux identity is %s", inspection.state)
+		}
+		if err == nil {
+			preDeliveryThreads, err = strictAmpThreadIDSet(true)
+			if err != nil {
+				err = fmt.Errorf("snapshot Amp threads before initial-message delivery: %w", err)
+			}
 		}
 		if err != nil {
 			record.Error = err.Error()
@@ -538,10 +550,59 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 		}
 	}
 	if err == nil && record.Phase == config.OperationPhaseDeliveryStarted {
-		var delivered bool
-		delivered, err = verifyBoundThreadMessage(row.Thread, message)
-		if err == nil && !delivered {
-			err = errors.New("initial message delivery was not verified in the bound thread")
+		if preDeliveryThreads == nil {
+			if record.ThreadAdoption != nil {
+				err = fmt.Errorf("thread adoption was interrupted between provisioned thread %s and receiving thread %s; recovery: inspect both threads and the tmux window, then pin only the authoritative receiver; do not resubmit", record.ThreadAdoption.ProvisionedThread, record.ThreadAdoption.ReceivingThread)
+			} else {
+				err = fmt.Errorf("initial message delivery was not verified before interruption; recovery: inspect bound thread %s and any fresh receiving threads, and do not resubmit this idempotency key", row.Thread)
+			}
+		} else {
+			var authoritative string
+			provisionedRow := row
+			authoritative, err = resolveSpawnReceivingThread(row.Thread, message, workdir, preDeliveryThreads)
+			if err == nil && authoritative != row.Thread {
+				provisioned := row.Thread
+				var rows []config.Row
+				rows, err = config.LoadReadOnly(dir.WorkersPath())
+				if err == nil {
+					for _, configured := range rows {
+						if configured.Thread == authoritative {
+							err = fmt.Errorf("receiving thread %s is already configured as %s/%s; recovery: keep that existing worker authoritative and do not create another managed identity", authoritative, configured.Workspace, configured.Window)
+							break
+						}
+					}
+				}
+				if err == nil {
+					record, err = config.BeginOperationThreadAdoption(dir.OperationsPath(), record.Key, provisioned, authoritative)
+				}
+				if err == nil {
+					row.Thread = authoritative
+					command := teardownExpectedStartCommand(teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}, row)
+					err = tmux.Runner{}.RespawnPane(inspection.pane.WindowID, command)
+				}
+				if err == nil {
+					var adopted workerInspection
+					adopted, err = inspectWorker(row)
+					if err == nil && adopted.state != workerPaneExact {
+						err = fmt.Errorf("adopted worker tmux identity is %s", adopted.state)
+					}
+				}
+				if err == nil {
+					err = archiveAmpThread(provisioned)
+				}
+				if err == nil {
+					record, err = config.CompleteOperationThreadAdoption(dir.OperationsPath(), record.Key)
+				}
+				if err != nil {
+					err = fmt.Errorf("adopt receiving thread %s for provisioned thread %s: %w; recovery: receiving assignment remains in %s; do not retry with a new idempotency key", authoritative, provisioned, err, authoritative)
+				}
+			}
+			if err != nil {
+				cleanup := cleanupFailedCanonicalSpawn(provisionedRow, row, inspection)
+				if cleanup != "" {
+					err = fmt.Errorf("%w; cleanup warning: %s", err, cleanup)
+				}
+			}
 		}
 		if err == nil {
 			record.Phase = config.OperationPhaseMessageVerified
@@ -576,23 +637,216 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 	return env, nil
 }
 
-func verifyBoundThreadMessage(thread, message string) (bool, error) {
+func resolveSpawnReceivingThread(boundThread, message, workdir string, preDeliveryThreads map[string]bool) (string, error) {
 	deadline := time.Now().Add(spawnSubmitTimeout())
-	var lastErr error
+	var authoritative string
 	for {
-		contains, _, err := ampThreadContainsMessage(thread, message)
-		if err == nil && contains {
-			return true, nil
+		boundContainsMessage, _, err := ampThreadContainsExactAssignment(boundThread, message, workdir, false)
+		if err != nil {
+			return "", fmt.Errorf("verify provisioned thread %s: %w; recovery: inspect thread %s and do not resubmit", boundThread, err, boundThread)
 		}
-		lastErr = err
+		allThreads, err := strictAmpThreadIDSet(true)
+		if err != nil {
+			return "", fmt.Errorf("list fresh receiving threads after delivery: %w; recovery: inspect provisioned thread %s and do not resubmit", err, boundThread)
+		}
+		activeThreads, err := strictAmpThreadIDSet(false)
+		if err != nil {
+			return "", fmt.Errorf("confirm fresh receiving threads are active: %w; recovery: inspect provisioned thread %s and do not resubmit", err, boundThread)
+		}
+		var fresh []string
+		for candidate := range allThreads {
+			if candidate == canonicalThreadID(boundThread) || preDeliveryThreads[candidate] {
+				continue
+			}
+			matches, _, exportErr := ampThreadContainsExactAssignment(candidate, message, workdir, true)
+			if exportErr != nil {
+				return "", fmt.Errorf("verify fresh receiving candidate %s: %w; recovery: inspect %s and provisioned thread %s before choosing an identity", candidate, exportErr, candidate, boundThread)
+			}
+			if matches {
+				fresh = append(fresh, candidate)
+			}
+		}
+		sort.Strings(fresh)
+		if boundContainsMessage && len(fresh) > 0 {
+			return "", fmt.Errorf("initial assignment has an identity conflict between provisioned thread %s and fresh receiving thread(s) %s; recovery: stop duplicate work and choose the authoritative thread manually", boundThread, strings.Join(fresh, ", "))
+		}
+		if len(fresh) > 1 {
+			return "", fmt.Errorf("initial assignment has multiple fresh receiving threads %s; recovery: stop duplicate work and choose the authoritative thread manually", strings.Join(fresh, ", "))
+		}
+		authoritative = ""
+		if boundContainsMessage {
+			authoritative = boundThread
+		} else if len(fresh) == 1 {
+			candidate := fresh[0]
+			if !activeThreads[candidate] {
+				return "", fmt.Errorf("fresh receiving thread %s contains the exact assignment but is archived; recovery: inspect and unarchive %s before pinning it manually", candidate, candidate)
+			}
+			authoritative = candidate
+		}
 		if !sleepUntilNextSpawnPoll(deadline) {
 			break
 		}
 	}
-	if lastErr != nil {
-		return false, fmt.Errorf("verify initial message in bound thread %s: %w", thread, lastErr)
+	if authoritative == "" {
+		return "", fmt.Errorf("initial assignment was not found in provisioned thread %s or one unambiguous fresh receiving thread; recovery: inspect thread %s and do not resubmit", boundThread, boundThread)
 	}
-	return false, nil
+	return authoritative, nil
+}
+
+func strictAmpThreadIDSet(includeArchived bool) (map[string]bool, error) {
+	const pageSize = 500
+	ids := make(map[string]bool)
+	for offset := 0; ; offset += pageSize {
+		args := []string{"threads", "list", "--json"}
+		if includeArchived {
+			args = append(args, "--include-archived")
+		}
+		args = append(args, "--limit", strconv.Itoa(pageSize), "--offset", strconv.Itoa(offset))
+		out, err := exec.Command("amp", args...).CombinedOutput()
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+		}
+		var page []map[string]any
+		if err := json.Unmarshal(out, &page); err != nil {
+			return nil, fmt.Errorf("parse amp threads list: %w", err)
+		}
+		for i, item := range page {
+			raw, ok := item["id"].(string)
+			if !ok {
+				return nil, fmt.Errorf("amp threads list item %d has no string id", offset+i)
+			}
+			id, err := config.CanonicalThreadID(raw)
+			if err != nil {
+				return nil, fmt.Errorf("amp threads list item %d: %w", offset+i, err)
+			}
+			ids[id] = true
+		}
+		if len(page) < pageSize {
+			return ids, nil
+		}
+	}
+}
+
+func ampThreadContainsExactAssignment(thread, message, workdir string, requireWorkdir bool) (bool, bool, error) {
+	cmd := exec.Command("amp", "threads", "export", thread)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, false, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return false, false, fmt.Errorf("parse amp threads export for %s: %w", thread, err)
+	}
+	if !messagesContainExactUserAssignment(payload["messages"], message) {
+		return false, true, nil
+	}
+	if requireWorkdir && !threadEnvironmentContainsWorkdir(payload["env"], workdir) {
+		return false, true, nil
+	}
+	return true, true, nil
+}
+
+func messagesContainExactUserAssignment(value any, message string) bool {
+	messages, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range messages {
+		entry, ok := item.(map[string]any)
+		if !ok || entry["role"] != "user" {
+			continue
+		}
+		if jsonValueContainsExactText(entry["content"], message) {
+			return true
+		}
+	}
+	return false
+}
+
+func jsonValueContainsExactText(value any, want string) bool {
+	switch value := value.(type) {
+	case string:
+		return want != "" && value == want
+	case []any:
+		for _, item := range value {
+			if jsonValueContainsExactText(item, want) {
+				return true
+			}
+		}
+	case map[string]any:
+		text, ok := value["text"].(string)
+		kind, _ := value["type"].(string)
+		if ok && (kind == "" || kind == "text") {
+			return text == want
+		}
+	}
+	return false
+}
+
+func threadEnvironmentContainsWorkdir(value any, workdir string) bool {
+	env, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	initial, ok := env["initial"].(map[string]any)
+	if !ok {
+		return false
+	}
+	trees, ok := initial["trees"].([]any)
+	if !ok {
+		return false
+	}
+	want, err := config.CanonicalWorkdir(workdir)
+	if err != nil {
+		return false
+	}
+	for _, item := range trees {
+		tree, ok := item.(map[string]any)
+		uri, uriOK := tree["uri"].(string)
+		if !ok || !uriOK {
+			continue
+		}
+		parsed, err := url.Parse(uri)
+		if err != nil || parsed.Scheme != "file" || parsed.Host != "" {
+			continue
+		}
+		candidate, err := config.CanonicalWorkdir(filepath.FromSlash(parsed.Path))
+		if err == nil && candidate == want {
+			return true
+		}
+	}
+	return false
+}
+
+func cleanupFailedCanonicalSpawn(provisionedRow, currentRow config.Row, inspection workerInspection) string {
+	var failures []string
+	stopped := false
+	for _, expected := range []config.Row{currentRow, provisionedRow} {
+		if stopped || expected.Thread == "" {
+			continue
+		}
+		after, err := inspectWorker(expected)
+		if err != nil {
+			failures = append(failures, "revalidate unconfigured worker window: "+err.Error())
+			continue
+		}
+		if after.state == workerPaneAbsent {
+			stopped = true
+			continue
+		}
+		if after.state != workerPaneExact || after.pane.WindowID != inspection.pane.WindowID {
+			continue
+		}
+		if err := (tmux.Runner{}).KillWindow(after.pane.WindowID); err != nil {
+			failures = append(failures, "stop unconfigured worker window "+after.pane.WindowID+": "+err.Error())
+		} else {
+			stopped = true
+		}
+	}
+	if !stopped && inspection.pane.WindowID != "" {
+		failures = append(failures, "unconfigured worker window identity changed; left it running for manual recovery")
+	}
+	return strings.Join(failures, "; ")
 }
 
 func selectWorkerRows(rows []config.Row, s selectors) []config.Row {

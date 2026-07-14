@@ -522,3 +522,37 @@ func TestOperationRecordsRejectTerminalStateRegression(t *testing.T) {
 		})
 	}
 }
+
+func TestAdoptOperationThreadOnlyRebindsAwaitingSpawnDelivery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), OperationsFile)
+	now := time.Now().UTC()
+	record := OperationRecord{
+		Key:         "adopt",
+		Kind:        "worker-spawn",
+		RequestHash: "request",
+		State:       OperationStarted,
+		Phase:       OperationPhaseDeliveryStarted,
+		Resource:    OperationResource{Kind: "worker", Thread: "T-provisioned"},
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if _, err := StoreOperation(path, record); err != nil {
+		t.Fatal(err)
+	}
+
+	pending, err := BeginOperationThreadAdoption(path, record.Key, "T-provisioned", "T-receiving")
+	if err != nil || pending.Resource.Thread != "T-provisioned" || pending.ThreadAdoption == nil || pending.ThreadAdoption.ReceivingThread != "T-receiving" {
+		t.Fatalf("pending adoption = %+v err=%v", pending, err)
+	}
+	if _, err := BeginOperationThreadAdoption(path, record.Key, "T-provisioned", "T-other"); err == nil || !strings.Contains(err.Error(), "already has thread-adoption evidence") {
+		t.Fatalf("second adoption error = %v", err)
+	}
+	adopted, err := CompleteOperationThreadAdoption(path, record.Key)
+	if err != nil || adopted.Resource.Thread != "T-receiving" {
+		t.Fatalf("completed adoption = %+v err=%v", adopted, err)
+	}
+	stored, found, err := LoadOperation(path, record.Key)
+	if err != nil || !found || stored.Resource.Thread != "T-receiving" {
+		t.Fatalf("stored adopted operation = %+v found=%t err=%v", stored, found, err)
+	}
+}

@@ -36,17 +36,23 @@ type OperationResource struct {
 	Workdir string `json:"workdir,omitempty"`
 }
 
+type OperationThreadAdoption struct {
+	ProvisionedThread string `json:"provisioned_thread"`
+	ReceivingThread   string `json:"receiving_thread"`
+}
+
 type OperationRecord struct {
-	SchemaVersion int               `json:"schema_version"`
-	Key           string            `json:"key"`
-	Kind          string            `json:"kind"`
-	RequestHash   string            `json:"request_hash"`
-	State         OperationState    `json:"state"`
-	Phase         OperationPhase    `json:"phase,omitempty"`
-	Resource      OperationResource `json:"resource"`
-	Error         string            `json:"error,omitempty"`
-	CreatedAt     time.Time         `json:"created_at"`
-	UpdatedAt     time.Time         `json:"updated_at"`
+	SchemaVersion  int                      `json:"schema_version"`
+	Key            string                   `json:"key"`
+	Kind           string                   `json:"kind"`
+	RequestHash    string                   `json:"request_hash"`
+	State          OperationState           `json:"state"`
+	Phase          OperationPhase           `json:"phase,omitempty"`
+	Resource       OperationResource        `json:"resource"`
+	ThreadAdoption *OperationThreadAdoption `json:"thread_adoption,omitempty"`
+	Error          string                   `json:"error,omitempty"`
+	CreatedAt      time.Time                `json:"created_at"`
+	UpdatedAt      time.Time                `json:"updated_at"`
 }
 
 type operationFile struct {
@@ -104,6 +110,73 @@ func StoreOperation(path string, operation OperationRecord) (bool, error) {
 	return created, writeOperations(path, operations)
 }
 
+func BeginOperationThreadAdoption(path, key, provisionedThread, receivingThread string) (OperationRecord, error) {
+	provisionedThread, err := CanonicalThreadID(provisionedThread)
+	if err != nil {
+		return OperationRecord{}, err
+	}
+	receivingThread, err = CanonicalThreadID(receivingThread)
+	if err != nil {
+		return OperationRecord{}, err
+	}
+	operations, err := loadOperations(path)
+	if err != nil {
+		return OperationRecord{}, err
+	}
+	for i, operation := range operations {
+		if operation.Key != key {
+			continue
+		}
+		if operation.Kind != "worker-spawn" || operation.State != OperationStarted || operation.Phase != OperationPhaseDeliveryStarted {
+			return OperationRecord{}, fmt.Errorf("idempotency key %q is not awaiting worker-spawn delivery verification", key)
+		}
+		if operation.Resource.Thread != provisionedThread {
+			return OperationRecord{}, fmt.Errorf("idempotency key %q is bound to thread %s, not provisioned thread %s", key, operation.Resource.Thread, provisionedThread)
+		}
+		if provisionedThread == receivingThread {
+			return OperationRecord{}, fmt.Errorf("receiving thread %s is already bound to idempotency key %q", receivingThread, key)
+		}
+		if operation.ThreadAdoption != nil {
+			return OperationRecord{}, fmt.Errorf("idempotency key %q already has thread-adoption evidence", key)
+		}
+		operation.ThreadAdoption = &OperationThreadAdoption{ProvisionedThread: provisionedThread, ReceivingThread: receivingThread}
+		operation.UpdatedAt = time.Now().UTC()
+		operations[i] = operation
+		if err := writeOperations(path, operations); err != nil {
+			return OperationRecord{}, err
+		}
+		return operation, nil
+	}
+	return OperationRecord{}, fmt.Errorf("idempotency key %q was not found", key)
+}
+
+func CompleteOperationThreadAdoption(path, key string) (OperationRecord, error) {
+	operations, err := loadOperations(path)
+	if err != nil {
+		return OperationRecord{}, err
+	}
+	for i, operation := range operations {
+		if operation.Key != key {
+			continue
+		}
+		adoption := operation.ThreadAdoption
+		if operation.Kind != "worker-spawn" || operation.State != OperationStarted || operation.Phase != OperationPhaseDeliveryStarted || adoption == nil {
+			return OperationRecord{}, fmt.Errorf("idempotency key %q has no pending worker-spawn thread adoption", key)
+		}
+		if operation.Resource.Thread != adoption.ProvisionedThread {
+			return OperationRecord{}, fmt.Errorf("idempotency key %q no longer binds provisioned thread %s", key, adoption.ProvisionedThread)
+		}
+		operation.Resource.Thread = adoption.ReceivingThread
+		operation.UpdatedAt = time.Now().UTC()
+		operations[i] = operation
+		if err := writeOperations(path, operations); err != nil {
+			return OperationRecord{}, err
+		}
+		return operation, nil
+	}
+	return OperationRecord{}, fmt.Errorf("idempotency key %q was not found", key)
+}
+
 func operationTransitionAllowed(from, to OperationState) bool {
 	return from == to || from == OperationStarted
 }
@@ -136,6 +209,27 @@ func canonicalOperation(operation OperationRecord) (OperationRecord, error) {
 	}
 	if operation.Phase != "" && operation.Kind != "worker-spawn" {
 		return operation, fmt.Errorf("operation phase %q is only valid for worker-spawn", operation.Phase)
+	}
+	if operation.ThreadAdoption != nil {
+		if operation.Kind != "worker-spawn" || operation.Phase != OperationPhaseDeliveryStarted && operation.Phase != OperationPhaseMessageVerified && operation.Phase != OperationPhaseConfigured {
+			return operation, errors.New("thread adoption is only valid after worker-spawn delivery starts")
+		}
+		provisioned, err := CanonicalThreadID(operation.ThreadAdoption.ProvisionedThread)
+		if err != nil {
+			return operation, fmt.Errorf("invalid provisioned adoption thread: %w", err)
+		}
+		receiving, err := CanonicalThreadID(operation.ThreadAdoption.ReceivingThread)
+		if err != nil {
+			return operation, fmt.Errorf("invalid receiving adoption thread: %w", err)
+		}
+		if provisioned == receiving {
+			return operation, errors.New("thread adoption requires different provisioned and receiving identities")
+		}
+		operation.ThreadAdoption.ProvisionedThread = provisioned
+		operation.ThreadAdoption.ReceivingThread = receiving
+		if operation.Resource.Thread != provisioned && operation.Resource.Thread != receiving {
+			return operation, errors.New("worker operation resource must match one thread-adoption identity")
+		}
 	}
 	switch operation.Resource.Kind {
 	case "worker":
