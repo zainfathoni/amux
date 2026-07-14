@@ -144,7 +144,7 @@ If the row still appears in `amux list` and the thread still appears in Amp hist
 - It must use `amp threads new` plus `amp threads continue` inside tmux; do not use `amp -x` or piped stdin for this workflow.
 - `spawn --mode <mode>` or `spawn -m <mode>` creates the new remote Amp thread with a specific Amp mode. Built-in Dial modes are `low`, `medium`, `high`, and `ultra`. For old Amp mode names, choose `medium` instead of `smart`/`deep`, `low` instead of `rush`, and `high` or `ultra` instead of `deep**3`. Custom/plugin mode strings are allowed and passed through unchanged.
 - Skill-driven invocations MUST explicitly use `--mode medium` unless the user requested another mode. The user's explicit mode always wins; task complexity, size, urgency, and expected duration never justify inferring `high` or `ultra`.
-- `spawn --title-prefix <prefix>` renames the tmux window and new Amp thread with an issue/task prefix such as `#255 worker`.
+- `spawn --title-prefix <prefix>` renames the tmux window and new Amp thread with a task prefix such as `#255 booking-timezone`. An exact `#<number>` prefix owns issue identity, so the supplied window must be an issue-unprefixed semantic slug. Obvious duplicates such as `issue-255-booking-timezone` or `#255 booking-timezone` are rejected before spawn side effects rather than silently normalized. Generic non-issue prefixes are unaffected.
 - If a workspace is passed without a session, the spawned worker receives `AMUX_SESSION` set to the workspace name.
 - `spawn --dry-run` validates inputs and checks live tmux window conflicts, but must not create or rename an Amp thread, mutate tmux, send keys, or update restore config.
 

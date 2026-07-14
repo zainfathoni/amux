@@ -344,6 +344,13 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	if workspace == "" {
 		workspace = defaultWorkspace
 	}
+	if err := validateIssueWindowTitle(s.TitlePrefix, s.Window); err != nil {
+		return env, result.Preflight(err)
+	}
+	if s.TitlePrefix != "" {
+		s.Window = prefixedSpawnName(s.TitlePrefix, s.Window)
+		in.Selectors.Window = s.Window
+	}
 	message := s.Message
 	if s.MessageFile != "" {
 		file, err := os.Open(s.MessageFile)
@@ -385,7 +392,11 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 			return env, result.Preflight(err)
 		}
 	}
-	request := strings.Join([]string{workspace, s.Window, s.Workdir, s.Mode, message}, "\x00")
+	requestFields := []string{workspace, s.Window, s.Workdir, s.Mode, message}
+	if s.TitlePrefix != "" {
+		requestFields = append(requestFields, s.TitlePrefix)
+	}
+	request := strings.Join(requestFields, "\x00")
 	sum := sha256.Sum256([]byte(request))
 	hash := hex.EncodeToString(sum[:])
 	existing, found, err := config.LoadOperation(dir.OperationsPath(), s.IdempotencyKey)
@@ -405,7 +416,7 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		return env, result.Preflight(fmt.Errorf("spawn operation is terminal in state %s; refusing new work", existing.State))
 	}
 	if in.Options.DryRun {
-		message := "would create worker"
+		message := fmt.Sprintf("would create worker %s/%s", workspace, s.Window)
 		resource := result.CommandResource()
 		if found {
 			message = fmt.Sprintf("would resume worker spawn from %s", existing.Phase)
@@ -414,6 +425,9 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 			}
 		}
 		env.Planned = append(env.Planned, result.Outcome{Resource: resource, Action: "spawn", Message: message})
+		if !in.Options.JSON {
+			fmt.Fprintln(a.stdout, message)
+		}
 		return env, nil
 	}
 	if found {
@@ -616,6 +630,13 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 		}
 	}
 	if err == nil && record.Phase == config.OperationPhaseMessageVerified {
+		if in.Selectors.TitlePrefix != "" {
+			if renameErr := renameAmpThread(row.Thread, row.Window); renameErr != nil {
+				err = fmt.Errorf("rename Amp thread %s to %q: %w", row.Thread, row.Window, renameErr)
+			}
+		}
+	}
+	if err == nil && record.Phase == config.OperationPhaseMessageVerified {
 		_, err = config.Store(dir.WorkersPath(), row)
 		if err == nil {
 			record.Phase = config.OperationPhaseConfigured
@@ -640,6 +661,48 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 	}
 	env.Successful = append(env.Successful, workerOutcome(row, "spawn", "spawned worker"))
 	return env, nil
+}
+
+func validateIssueWindowTitle(titlePrefix, window string) error {
+	issue, issuePrefix := issueNumberTitlePrefix(titlePrefix)
+	if !issuePrefix {
+		return nil
+	}
+	issueWindow := "issue-" + issue
+	hashWindow := "#" + issue
+	suggestion := ""
+	switch {
+	case window == issueWindow:
+		suggestion = "<semantic-slug>"
+	case strings.HasPrefix(window, issueWindow+"-"):
+		suggestion = strings.TrimPrefix(window, issueWindow+"-")
+	case window == hashWindow:
+		suggestion = "<semantic-slug>"
+	case strings.HasPrefix(window, hashWindow+" "):
+		suggestion = strings.TrimPrefix(window, hashWindow+" ")
+	default:
+		return nil
+	}
+	if suggestion == "" {
+		suggestion = "<semantic-slug>"
+	}
+	return fmt.Errorf("window %q duplicates issue identity %s owned by --title-prefix; use corrected issue-unprefixed window %q instead", window, titlePrefix, suggestion)
+}
+
+func issueNumberTitlePrefix(titlePrefix string) (string, bool) {
+	if len(titlePrefix) < 2 || titlePrefix[0] != '#' {
+		return "", false
+	}
+	for _, digit := range titlePrefix[1:] {
+		if digit < '0' || digit > '9' {
+			return "", false
+		}
+	}
+	return titlePrefix[1:], true
+}
+
+func prefixedSpawnName(titlePrefix, window string) string {
+	return strings.TrimSpace(strings.TrimSpace(titlePrefix) + " " + window)
 }
 
 func resolveSpawnReceivingThread(boundThread, message, workdir string, preDeliveryThreads map[string]bool) (string, error) {

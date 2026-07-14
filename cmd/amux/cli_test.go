@@ -79,9 +79,25 @@ func TestExecuteProvidesContextualHelpAndStableSelectorFlags(t *testing.T) {
 	}
 }
 
+func TestWorkerSpawnHelpDocumentsIssueTitleOwnership(t *testing.T) {
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).execute([]string{"help", "worker", "spawn"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"--title-prefix <prefix>",
+		"exact #<number> prefix owns issue identity",
+		"issue-unprefixed semantic slug",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("worker spawn help missing %q\n%s", want, stdout.String())
+		}
+	}
+}
+
 func TestParseSelectorsSupportsFixedShorthandsAndExplicitScopes(t *testing.T) {
 	selectors, remaining, err := parseSelectors([]string{
-		"-w", "workspace", "-W=window", "-d", "/tmp/project", "-t=T-worker", "-m", "high",
+		"-w", "workspace", "-W=window", "-d", "/tmp/project", "-t=T-worker", "-m", "high", "--title-prefix", "#119",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +105,7 @@ func TestParseSelectorsSupportsFixedShorthandsAndExplicitScopes(t *testing.T) {
 	if len(remaining) != 0 {
 		t.Fatalf("remaining selectors = %q", remaining)
 	}
-	if selectors.Workspace != "workspace" || selectors.Window != "window" || selectors.Workdir != "/tmp/project" || selectors.Thread != "T-worker" || selectors.Mode != "high" {
+	if selectors.Workspace != "workspace" || selectors.Window != "window" || selectors.Workdir != "/tmp/project" || selectors.Thread != "T-worker" || selectors.Mode != "high" || selectors.TitlePrefix != "#119" {
 		t.Fatalf("selectors = %+v", selectors)
 	}
 	current, _, err := parseSelectors([]string{"--current"})
