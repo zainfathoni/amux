@@ -26,10 +26,11 @@ const (
 )
 
 type ResourceID struct {
-	Kind    string `json:"kind"`
-	Thread  string `json:"thread,omitempty"`
-	Workdir string `json:"workdir,omitempty"`
-	Path    string `json:"path,omitempty"`
+	Kind      string `json:"kind"`
+	Thread    string `json:"thread,omitempty"`
+	Workdir   string `json:"workdir,omitempty"`
+	Workspace string `json:"workspace,omitempty"`
+	Path      string `json:"path,omitempty"`
 }
 
 func WorkerResource(value string) (ResourceID, error) {
@@ -46,6 +47,10 @@ func RunnerResource(value string) (ResourceID, error) {
 		return ResourceID{}, err
 	}
 	return ResourceID{Kind: "runner", Workdir: workdir}, nil
+}
+
+func WorkspaceResource(name string) ResourceID {
+	return ResourceID{Kind: "workspace", Workspace: name}
 }
 
 func ConfigResource(path string) ResourceID {

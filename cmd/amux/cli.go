@@ -19,11 +19,13 @@ import (
 var mutationLockWait = 2 * time.Second
 
 type cliOptions struct {
-	ConfigDir string
-	JSON      bool
-	DryRun    bool
-	Help      bool
-	Version   bool
+	ConfigDir        string
+	JSON             bool
+	DryRun           bool
+	Help             bool
+	Version          bool
+	AttachMode       attachMode
+	TerminalLauncher string
 }
 
 type selectors struct {
@@ -77,7 +79,7 @@ var rootCommand = &commandSpec{
 		runnerCommand(),
 		workspaceCommand(),
 		installCommand(),
-		lifecycleCommand("workspaces", "Exact alias for workspace list", false),
+		lifecycleCommand("workspaces", "Exact alias for workspace list", false, "--mode, -m <worker|runner>"),
 		lifecycleCommand("spawn", "Spawn an interactive worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>"),
 		lifecycleCommand("shelve", "Shelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		lifecycleCommand("unshelve", "Unshelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
@@ -166,7 +168,7 @@ func workspaceCommand() *commandSpec {
 		Summary: "Inspect configured workspaces",
 		Usage:   "amux workspace <command>",
 		Children: []*commandSpec{
-			{Name: "list", Summary: "List worker and runner workspaces", Usage: "amux workspace list", NeedsConfig: true},
+			{Name: "list", Summary: "List worker and runner workspaces", Usage: "amux workspace list", Flags: []string{"--mode, -m <worker|runner>"}, NeedsConfig: true},
 		},
 	}
 }
@@ -200,6 +202,9 @@ func (a app) execute(args []string) error {
 		return a.finishInvocation(invocation{Options: cliOptions{JSON: wantsJSON}, Path: guessedCommandPath(args)}, nil, err)
 	}
 	envelope, err := a.dispatch(parsed)
+	if err == nil {
+		err = a.attachAfterAggregateLaunch(parsed)
+	}
 	return a.finishInvocation(parsed, envelope, err)
 }
 
@@ -298,6 +303,20 @@ func parseInvocation(args []string) (invocation, error) {
 	if !spec.FoundationOnly && spec.Mutating && spec.Name != "launch" && !hasResourceScope(parsed.Selectors) {
 		return parsed, fmt.Errorf("%s requires a resource scope; use an explicit selector or --all", strings.Join(path, " "))
 	}
+	if isAggregateLifecycle(path) && parsed.Selectors.Thread != "" && parsed.Selectors.Workdir != "" {
+		return parsed, errors.New("--thread and --workdir select different resource kinds and cannot be combined")
+	}
+	if opts.AttachMode == attachAlways {
+		if strings.Join(path, " ") != "launch" || parsed.Selectors.Workspace == "" {
+			return parsed, errors.New("--attach requires top-level amux launch with an explicit --workspace")
+		}
+		if opts.JSON {
+			return parsed, errors.New("--attach cannot be combined with --json")
+		}
+	}
+	if opts.TerminalLauncher != "" && opts.AttachMode != attachAlways {
+		return parsed, errors.New("--terminal-launcher requires --attach")
+	}
 	return parsed, nil
 }
 
@@ -325,6 +344,22 @@ func parseCLIOptions(args []string) (cliOptions, []string, error) {
 			opts.Help = true
 		case "--version":
 			opts.Version = true
+		case "--attach":
+			if opts.AttachMode == attachNever {
+				return opts, nil, errors.New("--attach and --no-attach are mutually exclusive")
+			}
+			opts.AttachMode = attachAlways
+		case "--no-attach":
+			if opts.AttachMode == attachAlways {
+				return opts, nil, errors.New("--attach and --no-attach are mutually exclusive")
+			}
+			opts.AttachMode = attachNever
+		case "--terminal-launcher":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return opts, nil, errors.New("--terminal-launcher requires a command")
+			}
+			opts.TerminalLauncher = args[i]
 		case "--config":
 			return opts, nil, errors.New("--config was removed; select a directory with --config-dir or -c")
 		case "--config-dir", "-c":
@@ -350,6 +385,11 @@ func parseCLIOptions(args []string) (cliOptions, []string, error) {
 					return opts, nil, errors.New("config directory may be selected only once")
 				}
 				opts.ConfigDir = strings.TrimPrefix(arg, "-c=")
+			case strings.HasPrefix(arg, "--terminal-launcher="):
+				opts.TerminalLauncher = strings.TrimPrefix(arg, "--terminal-launcher=")
+				if opts.TerminalLauncher == "" {
+					return opts, nil, errors.New("--terminal-launcher requires a command")
+				}
 			default:
 				words = append(words, arg)
 			}
@@ -697,7 +737,7 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 		}
 	}
 
-	if !parsed.Command.FoundationOnly && (len(parsed.Path) != 2 || parsed.Path[0] != "worker" && parsed.Path[0] != "runner") && !isWorkerConvenience(parsed.Path) {
+	if !parsed.Command.FoundationOnly && !isAggregateLifecycle(parsed.Path) && !isWorkspaceList(parsed.Path) && (len(parsed.Path) != 2 || parsed.Path[0] != "worker" && parsed.Path[0] != "runner") && !isWorkerConvenience(parsed.Path) {
 		return nil, result.Preflight(fmt.Errorf("%s is reserved for its lifecycle implementation phase and is not available in the CLI foundations", strings.Join(parsed.Path, " ")))
 	}
 
@@ -719,12 +759,20 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 			return a.installDoctor(parsed)
 		}
 		if !parsed.Command.FoundationOnly {
+			if isWorkspaceList(parsed.Path) {
+				return a.executeWorkspaceList(parsed, dir)
+			}
+			if isAggregateLifecycle(parsed.Path) {
+				return a.executeAggregate(parsed, dir)
+			}
 			if len(parsed.Path) == 2 && parsed.Path[0] == "runner" {
 				return a.executeRunner(parsed, dir)
 			}
 			return a.executeWorker(parsed, dir)
 		}
 		return nil, result.Preflight(fmt.Errorf("%s is reserved for its lifecycle implementation phase", strings.Join(parsed.Path, " ")))
+	case "workspaces":
+		return a.executeWorkspaceList(parsed, dir)
 	case "migrate-config":
 		if len(parsed.Args) != 0 || parsed.Selectors != (selectors{}) {
 			return nil, result.Request(errors.New("usage: amux migrate-config"))
@@ -855,6 +903,9 @@ func (a app) printCommandHelp(command *commandSpec) {
 			"--config-dir, -c <path>  Select the directory containing all config registries",
 			"--json, -j               Emit one versioned JSON document",
 			"--dry-run, -n            Plan without mutation",
+			"--attach                  Attach after a complete explicit-workspace aggregate launch",
+			"--no-attach               Never attach after launch",
+			"--terminal-launcher <cmd> Terminal launcher used with --attach",
 			"--help, -h               Show contextual help",
 		} {
 			fmt.Fprintf(a.stdout, "  %s\n", flag)
