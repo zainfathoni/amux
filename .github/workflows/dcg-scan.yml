@@ -16,7 +16,7 @@ jobs:
       - name: Install dcg
         run: |
           set -euo pipefail
-          curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/main/install.sh --output /tmp/install-dcg.sh
+          curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/3423576da804a2578990d9a62791fc9fe46c5f3b/install.sh --output /tmp/install-dcg.sh
           bash /tmp/install-dcg.sh --no-configure
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
