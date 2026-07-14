@@ -697,7 +697,7 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 		}
 	}
 
-	if !parsed.Command.FoundationOnly && (len(parsed.Path) != 2 || parsed.Path[0] != "worker") && !isWorkerConvenience(parsed.Path) {
+	if !parsed.Command.FoundationOnly && (len(parsed.Path) != 2 || parsed.Path[0] != "worker" && parsed.Path[0] != "runner") && !isWorkerConvenience(parsed.Path) {
 		return nil, result.Preflight(fmt.Errorf("%s is reserved for its lifecycle implementation phase and is not available in the CLI foundations", strings.Join(parsed.Path, " ")))
 	}
 
@@ -719,6 +719,9 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 			return a.installDoctor(parsed)
 		}
 		if !parsed.Command.FoundationOnly {
+			if len(parsed.Path) == 2 && parsed.Path[0] == "runner" {
+				return a.executeRunner(parsed, dir)
+			}
 			return a.executeWorker(parsed, dir)
 		}
 		return nil, result.Preflight(fmt.Errorf("%s is reserved for its lifecycle implementation phase", strings.Join(parsed.Path, " ")))

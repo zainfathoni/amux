@@ -1,11 +1,15 @@
 package config
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+var runnerWindowUnsafe = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
 
 func CanonicalThreadID(value string) (string, error) {
 	thread := value
@@ -35,4 +39,20 @@ func CanonicalWorkdir(value string) (string, error) {
 		return "", fmt.Errorf("resolve workdir %q: %w", value, err)
 	}
 	return filepath.Clean(abs), nil
+}
+
+// RunnerWindow derives the private tmux window name from canonical runner
+// identity. The hash makes equal basenames collision-safe across the machine.
+func RunnerWindow(workdir string) string {
+	canonical, err := CanonicalWorkdir(workdir)
+	if err != nil {
+		canonical = filepath.Clean(workdir)
+	}
+	base := runnerWindowUnsafe.ReplaceAllString(filepath.Base(canonical), "-")
+	base = strings.Trim(base, "-")
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		base = "workdir"
+	}
+	sum := sha256.Sum256([]byte(canonical))
+	return fmt.Sprintf("runner-%s-%x", base, sum[:6])
 }

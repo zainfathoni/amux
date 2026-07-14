@@ -303,6 +303,29 @@ func (r Runner) NewWindowID(session, window, command string) (string, error) {
 	return strings.TrimRight(string(out), "\r\n"), nil
 }
 
+func (r Runner) NewRunnerPane(session, window, command string, createSession bool) (WindowPane, error) {
+	format := "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}"
+	var args []string
+	if createSession {
+		args = []string{"new-session", "-d", "-P", "-F", format, "-s", session, "-n", window, command}
+	} else {
+		args = []string{"new-window", "-d", "-P", "-F", format, "-t", nextWindowTarget(session), "-n", window, command}
+	}
+	if r.DryRun {
+		fmt.Fprintf(r.output(), "tmux %s\n", shellJoin(args))
+		return WindowPane{Session: session, Window: window}, nil
+	}
+	out, err := tmuxOutput(args...)
+	if err != nil {
+		return WindowPane{}, err
+	}
+	fields := strings.Split(strings.TrimRight(string(out), "\r\n"), "\t")
+	if len(fields) != 4 || fields[0] != session || fields[1] != window || fields[2] == "" || fields[3] == "" {
+		return WindowPane{}, fmt.Errorf("unexpected tmux runner creation identity %q", strings.TrimSpace(string(out)))
+	}
+	return WindowPane{Session: fields[0], Window: fields[1], WindowID: fields[2], PaneID: fields[3]}, nil
+}
+
 func (r Runner) SendLiteral(target, text string) error {
 	args := []string{"send-keys", "-t", target, "-l", text}
 	if r.DryRun {
@@ -352,6 +375,15 @@ func (r Runner) CapturePane(target string) (string, error) {
 		fmt.Printf("tmux %s\n", shellJoin(args))
 		return "", nil
 	}
+	out, err := tmuxOutput(args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(string(out), "\r\n"), nil
+}
+
+func (r Runner) CapturePaneHistory(target string, lines int) (string, error) {
+	args := []string{"capture-pane", "-J", "-p", "-S", fmt.Sprintf("-%d", lines), "-t", target}
 	out, err := tmuxOutput(args...)
 	if err != nil {
 		return "", err
@@ -536,6 +568,10 @@ func (r Runner) CurrentWindow() (string, error) {
 
 func (r Runner) CurrentTarget() (string, error) {
 	return displayCurrentMessage("#S:#I")
+}
+
+func (r Runner) CurrentSession() (string, error) {
+	return displayCurrentMessage("#{session_name}")
 }
 
 func (r Runner) CurrentWindowID() (string, error) {
