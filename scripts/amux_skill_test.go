@@ -57,18 +57,65 @@ func TestWorkerSpawnExamplesAlwaysPassMediumMode(t *testing.T) {
 	}
 }
 
-func TestSprawlAndTriggerRoutesUseExplicitMediumMode(t *testing.T) {
+func TestSkillDrivenSpawnRoutesUseExplicitMediumMode(t *testing.T) {
 	t.Parallel()
 
-	skillDir := filepath.Join(repoRoot(t), "skills", "amux")
-	workflows := readSkillFile(t, skillDir, filepath.Join("reference", "workflows.md"))
-	if !strings.Contains(workflows, "amux spawn --mode medium --title-prefix '#<issue>'") {
-		t.Error("sprawl does not spawn every issue worker with explicit --mode medium")
-	}
+	root := repoRoot(t)
+	for _, route := range []struct {
+		name     string
+		path     string
+		required string
+	}{
+		{
+			name:     "top-level direct spawn",
+			path:     filepath.Join("skills", "amux", "SKILL.md"),
+			required: "**Spawn a worker for ...**: load [`reference/workflows.md`](reference/workflows.md), then use `amux spawn --mode medium ...`",
+		},
+		{
+			name:     "top-level sprawl",
+			path:     filepath.Join("skills", "amux", "SKILL.md"),
+			required: "**/amux sprawl #12 #34 ...**: skill-only orchestration around `gh`, `git worktree`, and `amux spawn --mode medium`",
+		},
+		{
+			name:     "direct spawn trigger",
+			path:     filepath.Join("skills", "amux", "reference", "trigger-phrases.md"),
+			required: "use `amux spawn --mode medium ...`",
+		},
+		{
+			name:     "sprawl trigger",
+			path:     filepath.Join("skills", "amux", "reference", "trigger-phrases.md"),
+			required: "`/amux sprawl #12 #34 ...` | Load [`workflows.md#sprawl-independent-issue-workers`](workflows.md#sprawl-independent-issue-workers), inspect dependencies, then spawn each accepted worker with `amux spawn --mode medium --title-prefix '#<issue>' ...`",
+		},
+		{
+			name:     "sprawl workflow",
+			path:     filepath.Join("skills", "amux", "reference", "workflows.md"),
+			required: "amux spawn --mode medium --title-prefix '#<issue>'",
+		},
+		{
+			name:     "command reference example",
+			path:     filepath.Join("skills", "amux", "reference", "commands.md"),
+			required: "amux spawn --mode medium worker ~/Code/repo \"prompt\" amux",
+		},
+		{
+			name:     "README direct spawn",
+			path:     "README.md",
+			required: "Spawn a worker for ... -> amux spawn --mode medium [--title-prefix <prefix>] ...",
+		},
+		{
+			name:     "README sprawl",
+			path:     "README.md",
+			required: "uses `amux spawn --mode medium --title-prefix '#<issue>'`",
+		},
+	} {
+		route := route
+		t.Run(route.name, func(t *testing.T) {
+			t.Parallel()
 
-	triggers := readSkillFile(t, skillDir, filepath.Join("reference", "trigger-phrases.md"))
-	if !strings.Contains(triggers, "use `amux spawn --mode medium ...`") {
-		t.Error("natural-language worker spawn route omits explicit --mode medium")
+			contents := readSkillFile(t, root, route.path)
+			if !strings.Contains(contents, route.required) {
+				t.Errorf("%s does not preserve required skill-driven spawn route %q", route.path, route.required)
+			}
+		})
 	}
 }
 
