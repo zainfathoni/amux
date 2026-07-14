@@ -34,9 +34,5 @@ func CanonicalWorkdir(value string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve workdir %q: %w", value, err)
 	}
-	canonical := filepath.Clean(abs)
-	if resolved, err := filepath.EvalSymlinks(canonical); err == nil {
-		canonical = resolved
-	}
-	return canonical, nil
+	return filepath.Clean(abs), nil
 }

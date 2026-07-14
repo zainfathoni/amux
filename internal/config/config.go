@@ -11,8 +11,7 @@ import (
 )
 
 const (
-	DefaultRelativePath       = ".config/amux/workers.tsv"
-	LegacyAmuxRelativePath    = ".config/amux/workspaces.tsv"
+	DefaultRelativePath       = DefaultDirectoryRelativePath + "/workers.tsv"
 	LegacyDefaultRelativePath = ".config/amp-tmux/workspaces.tsv"
 	WorkspacesEnv             = "AMUX_WORKSPACES"
 	LegacyWorkspacesEnv       = "AMP_TMUX_WORKSPACES"

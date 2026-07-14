@@ -171,6 +171,20 @@ func TestExecuteRequiresExplicitMigrationWithoutWritingConfig(t *testing.T) {
 	}
 }
 
+func TestExecuteRejectsReservedMutationWithoutCreatingLock(t *testing.T) {
+	configDir := t.TempDir()
+	runtimeDir := filepath.Join(t.TempDir(), "missing-runtime")
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	err := (app{}).execute([]string{"--config-dir", configDir, "worker", "park", "--all"})
+	if err == nil || !strings.Contains(err.Error(), "reserved for its lifecycle implementation phase") {
+		t.Fatalf("reserved lifecycle error = %v", err)
+	}
+	if _, err := os.Stat(runtimeDir); !os.IsNotExist(err) {
+		t.Fatalf("reserved lifecycle command created mutation lock directory: %v", err)
+	}
+}
+
 func TestExecuteMigrationDryRunJSONIsOneDocumentAndWritesNothing(t *testing.T) {
 	dir := t.TempDir()
 	legacyPath := filepath.Join(dir, "workspaces.tsv")

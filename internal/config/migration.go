@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -285,14 +286,24 @@ func parseOptionalRunners(path string) ([]RunnerRow, error) {
 }
 
 func writeMigrationFile(path string, contents []byte) error {
+	return writeMigrationFileFrom(path, bytes.NewReader(contents))
+}
+
+func writeMigrationFileFrom(path string, contents io.Reader) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp.")
 	if err != nil {
 		return err
 	}
-	if _, err := file.Write(contents); err != nil {
+	tmp := file.Name()
+	defer os.Remove(tmp)
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if _, err := io.Copy(file, contents); err != nil {
 		_ = file.Close()
 		return err
 	}
@@ -300,7 +311,10 @@ func writeMigrationFile(path string, contents []byte) error {
 		_ = file.Close()
 		return err
 	}
-	return file.Close()
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Link(tmp, path)
 }
 
 func fileExists(path string) bool {

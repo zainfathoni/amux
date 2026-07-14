@@ -53,7 +53,6 @@ type invocation struct {
 	Path      []string
 	Selectors selectors
 	Args      []string
-	Bare      bool
 }
 
 var rootCommand = &commandSpec{
@@ -236,7 +235,6 @@ func parseInvocation(args []string) (invocation, error) {
 			return parsed, nil
 		}
 		words = []string{"launch"}
-		parsed.Bare = true
 	}
 
 	if words[0] == "help" {
@@ -586,15 +584,6 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 		}
 	}
 
-	var held *lock.Lock
-	if parsed.Command.Mutating {
-		held, err = acquireMutationLock(parsed.Path)
-		if err != nil {
-			return nil, result.Preflight(err)
-		}
-		defer held.Release()
-	}
-
 	if parsed.Command.NeedsConfig && parsed.Command.Name != "migrate-config" && parsed.Command.Name != "path" {
 		required, err := config.MigrationRequired(dir)
 		if err != nil {
@@ -607,6 +596,15 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 
 	if !parsed.Command.FoundationOnly {
 		return nil, result.Preflight(fmt.Errorf("%s is reserved for its lifecycle implementation phase and is not available in the CLI foundations", strings.Join(parsed.Path, " ")))
+	}
+
+	var held *lock.Lock
+	if parsed.Command.Mutating {
+		held, err = acquireMutationLock(parsed.Path)
+		if err != nil {
+			return nil, result.Preflight(err)
+		}
+		defer held.Release()
 	}
 
 	switch parsed.Command.Name {

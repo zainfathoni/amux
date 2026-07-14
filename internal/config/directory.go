@@ -7,11 +7,12 @@ import (
 )
 
 const (
-	ConfigDirEnv   = "AMUX_CONFIG_DIR"
-	WorkersFile    = "workers.tsv"
-	RunnersFile    = "runners.tsv"
-	ShelvesFile    = "shelves.tsv"
-	OperationsFile = "operations.json"
+	ConfigDirEnv                 = "AMUX_CONFIG_DIR"
+	DefaultDirectoryRelativePath = ".config/amux"
+	WorkersFile                  = "workers.tsv"
+	RunnersFile                  = "runners.tsv"
+	ShelvesFile                  = "shelves.tsv"
+	OperationsFile               = "operations.json"
 )
 
 // Directory is the complete on-disk configuration selected for one invocation.
@@ -25,11 +26,14 @@ func ResolveDirectory(explicit string) (Directory, error) {
 		path = os.Getenv(ConfigDirEnv)
 	}
 	if path == "" {
-		base, err := os.UserConfigDir()
+		home, err := os.UserHomeDir()
 		if err != nil {
-			return Directory{}, fmt.Errorf("resolve user config directory: %w", err)
+			return Directory{}, fmt.Errorf("resolve user home directory: %w", err)
 		}
-		path = filepath.Join(base, "amux")
+		if home == "" {
+			return Directory{}, fmt.Errorf("resolve user home directory: HOME is empty")
+		}
+		path = filepath.Join(home, DefaultDirectoryRelativePath)
 	}
 	abs, err := filepath.Abs(ExpandHome(path))
 	if err != nil {

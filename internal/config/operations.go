@@ -78,6 +78,9 @@ func StoreOperation(path string, operation OperationRecord) (bool, error) {
 		if !existing.CreatedAt.Equal(operation.CreatedAt) {
 			return false, fmt.Errorf("idempotency key %q cannot change its creation time", operation.Key)
 		}
+		if !operationTransitionAllowed(existing.State, operation.State) {
+			return false, fmt.Errorf("idempotency key %q cannot transition from %s to %s", operation.Key, existing.State, operation.State)
+		}
 		if operationIdentity(existing.Resource) != "" && existing.Resource != operation.Resource {
 			return false, fmt.Errorf("idempotency key %q resource identity cannot be rebound", operation.Key)
 		}
@@ -89,6 +92,10 @@ func StoreOperation(path string, operation OperationRecord) (bool, error) {
 	}
 	sort.Slice(operations, func(i, j int) bool { return operations[i].Key < operations[j].Key })
 	return created, writeOperations(path, operations)
+}
+
+func operationTransitionAllowed(from, to OperationState) bool {
+	return from == to || from == OperationStarted
 }
 
 func canonicalOperation(operation OperationRecord) (OperationRecord, error) {

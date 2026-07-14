@@ -1,6 +1,7 @@
 package config
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,21 @@ func TestResolveDirectoryUsesExplicitFlagBeforeEnvironment(t *testing.T) {
 	}
 	if got, want := dir.WorkersPath(), filepath.Join(home, "from-flag", WorkersFile); got != want {
 		t.Fatalf("WorkersPath() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveDirectoryPreservesExistingPlatformIndependentDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "platform-config"))
+	t.Setenv(ConfigDirEnv, "")
+
+	dir, err := ResolveDirectory("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := dir.Path, filepath.Join(home, ".config", "amux"); got != want {
+		t.Fatalf("ResolveDirectory() path = %q, want existing default %q", got, want)
 	}
 }
 
@@ -279,6 +295,39 @@ func TestCompletedMigrationDoesNotRevalidatePreservedLegacyFiles(t *testing.T) {
 	}
 }
 
+func TestMigrationFileAppearsOnlyAfterCompleteWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), WorkersFile)
+	reader, writer := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		done <- writeMigrationFileFrom(path, reader)
+	}()
+	t.Cleanup(func() {
+		_ = writer.Close()
+		_ = reader.Close()
+	})
+
+	if _, err := writer.Write([]byte("complete")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("migration exposed destination before input completed: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "complete" {
+		t.Fatalf("migration contents = %q, want complete input", got)
+	}
+}
+
 func TestWorkerAndRunnerRegistriesEnforceCanonicalMachineIdentities(t *testing.T) {
 	_, err := Parse(strings.NewReader(
 		"one\tfirst\t/tmp/one\tT-same\n" +
@@ -319,6 +368,22 @@ func TestWorkerAndRunnerRegistriesEnforceCanonicalMachineIdentities(t *testing.T
 	}
 	if strings.Contains(string(contents), "\thttps://") || !strings.Contains(string(contents), "\tT-worker\n") {
 		t.Fatalf("stored worker identity was not canonicalized: %q", contents)
+	}
+}
+
+func TestCanonicalWorkdirUsesStableLexicalIdentity(t *testing.T) {
+	real := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := CanonicalWorkdir(alias + "/.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Clean(alias); got != want {
+		t.Fatalf("CanonicalWorkdir() = %q, want stable lexical identity %q", got, want)
 	}
 }
 
@@ -428,5 +493,32 @@ func TestOperationRecordsPersistIdempotencyStateAndRejectKeyReuse(t *testing.T) 
 	rebound.Resource.Thread = "T-other"
 	if _, err := StoreOperation(path, rebound); err == nil || !strings.Contains(err.Error(), "cannot be rebound") {
 		t.Fatalf("StoreOperation rebound identity error = %v", err)
+	}
+}
+
+func TestOperationRecordsRejectTerminalStateRegression(t *testing.T) {
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	for _, state := range []OperationState{OperationSucceeded, OperationFailed, OperationIndeterminate} {
+		t.Run(string(state), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), OperationsFile)
+			record := OperationRecord{
+				Key:         "request-123",
+				Kind:        "worker.spawn",
+				RequestHash: "sha256:abc",
+				State:       state,
+				Resource:    OperationResource{Kind: "worker", Thread: "T-worker"},
+				CreatedAt:   now,
+				UpdatedAt:   now,
+			}
+			if _, err := StoreOperation(path, record); err != nil {
+				t.Fatal(err)
+			}
+
+			record.State = OperationStarted
+			record.UpdatedAt = now.Add(time.Minute)
+			if _, err := StoreOperation(path, record); err == nil || !strings.Contains(err.Error(), "cannot transition") {
+				t.Fatalf("StoreOperation(%s -> started) error = %v", state, err)
+			}
+		})
 	}
 }
