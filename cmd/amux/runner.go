@@ -65,6 +65,29 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 		return &env, result.Preflight(err)
 	}
 	rows = selectRunnerRows(rows, in.Selectors)
+	if in.Command.Name == "doctor" && len(rows) == 0 && in.Selectors.All {
+		details, doctorErr := maintenanceDoctorDetails(dir)
+		if doctorErr != nil {
+			return &env, result.Runtime(doctorErr)
+		}
+		if details == nil {
+			return &env, result.Preflight(errors.New("no configured runner matches the selector"))
+		}
+		out := result.Outcome{Resource: result.ConfigResource(dir.MaintenancePath()), Action: "doctor", Maintenance: details, Message: maintenanceDoctorMessage(details)}
+		if details.Error != "" {
+			out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: details.Error}
+			env.Failed = append(env.Failed, out)
+		} else {
+			env.Successful = append(env.Successful, out)
+		}
+		if !in.Options.JSON {
+			fmt.Fprintln(a.stdout, out.Message)
+		}
+		if out.Error != nil {
+			return &env, result.Runtime(errors.New(details.Error))
+		}
+		return &env, nil
+	}
 	if in.Command.Name == "list" {
 		for _, row := range rows {
 			env.Successful = append(env.Successful, runnerOutcome(row, "list", row.Workspace))
@@ -138,7 +161,34 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 				lockState = lockErr.Error()
 			}
 			out.Message = fmt.Sprintf("local=%s worktree=%s%s", inspection.state, lockState, staleAmpPIDDiagnostic(row.Workdir))
-			env.Successful = append(env.Successful, out)
+			out.Runner = &result.RunnerDetails{LocalState: string(inspection.state), ProcessStart: inspection.pane.StartTime}
+			if inspection.pane.StartTime > 0 {
+				out.Runner.ProcessAgeSeconds = time.Now().Unix() - inspection.pane.StartTime
+			}
+			out.Maintenance, err = maintenanceDoctorDetails(dir)
+			if err != nil {
+				out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: err.Error()}
+				env.Failed = append(env.Failed, out)
+				continue
+			}
+			if out.Maintenance != nil {
+				out.Message += fmt.Sprintf("; maintenance owner=%s schedule=%s amp=%s version=%s latest=%s time=%s", out.Maintenance.Owner, out.Maintenance.Schedule, out.Maintenance.AmpPath, out.Maintenance.AmpVersion, out.Maintenance.Status, out.Maintenance.Time)
+				if out.Maintenance.Error != "" {
+					out.Message += fmt.Sprintf(" error=%q; remediate with `amux runner maintenance run`", out.Maintenance.Error)
+					out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: out.Maintenance.Error}
+				}
+			}
+			if inspection.pane.StartTime > 0 {
+				out.Message += fmt.Sprintf("; process age=%ds", out.Runner.ProcessAgeSeconds)
+			}
+			if !in.Options.JSON {
+				fmt.Fprintln(a.stdout, out.Message)
+			}
+			if out.Error != nil {
+				env.Failed = append(env.Failed, out)
+			} else {
+				env.Successful = append(env.Successful, out)
+			}
 			continue
 		}
 		if in.Command.Name == "launch" && inspection.state == runnerPaneExact {
@@ -206,6 +256,14 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 		return &env, result.Runtime(errors.New("one or more runner operations failed"))
 	}
 	return &env, nil
+}
+
+func maintenanceDoctorMessage(d *result.MaintenanceDetails) string {
+	message := fmt.Sprintf("maintenance owner=%s schedule=%s amux=%s amp=%s target=%s version=%s scheduler=%s latest=%s time=%s artifacts=%s", d.Owner, d.Schedule, d.AmuxPath, d.AmpPath, d.AmpTarget, d.AmpVersion, d.SchedulerState, d.Status, d.Time, strings.Join(d.ArtifactPaths, ","))
+	if d.Error != "" {
+		message += fmt.Sprintf(" error=%q; remediation: reinstall or run maintenance", d.Error)
+	}
+	return message
 }
 
 func runnerCommandNeedsTmux(name string) bool {

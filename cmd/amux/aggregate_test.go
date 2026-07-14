@@ -353,6 +353,109 @@ esac
 	}
 }
 
+func TestAggregateDoctorAllReportsOutcomeWithoutMaintenanceMetadata(t *testing.T) {
+	dir := t.TempDir()
+	configDir := config.Directory{Path: dir}
+	if err := atomicJSON(configDir.MaintenanceResultPath(), maintenanceOutcome{SchemaVersion: 1, Status: "successful", AmpPath: "/amp", AmpVersion: "amp 2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, jsonOutput := range []bool{false, true} {
+		t.Run(map[bool]string{false: "human", true: "json"}[jsonOutput], func(t *testing.T) {
+			args := []string{"--config-dir", dir, "doctor", "--all"}
+			if jsonOutput {
+				args = append([]string{"--json"}, args...)
+			}
+			var stdout bytes.Buffer
+			err := (app{stdout: &stdout}).execute(args)
+			if err == nil || result.ExitCode(err) == 0 {
+				t.Fatalf("outcome-only doctor err=%v output=%s", err, stdout.String())
+			}
+			if !strings.Contains(stdout.String(), "without installation metadata") || !strings.Contains(stdout.String(), "runner maintenance remove") {
+				t.Fatalf("doctor lacks actionable orphan diagnostic: %s", stdout.String())
+			}
+			if jsonOutput {
+				var env result.Envelope
+				if decodeErr := json.NewDecoder(&stdout).Decode(&env); decodeErr != nil {
+					t.Fatal(decodeErr)
+				}
+				if len(env.Failed) != 1 || env.Failed[0].Maintenance == nil || env.Failed[0].Maintenance.AmpVersion != "amp 2" {
+					t.Fatalf("JSON orphan diagnostic = %+v", env)
+				}
+			}
+		})
+	}
+}
+
+func TestAggregateDoctorFailsForIncompleteMaintenanceCheckpoint(t *testing.T) {
+	oldExec := maintenanceExec
+	t.Cleanup(func() { maintenanceExec = oldExec })
+	maintenanceExec = healthyMaintenanceScheduler
+
+	for _, tc := range []struct {
+		name    string
+		outcome *maintenanceOutcome
+		want    string
+	}{
+		{name: "failed pending runner without top-level error", outcome: &maintenanceOutcome{SchemaVersion: 1, Status: "failed", Runners: []maintenanceRunnerOutcome{{Workdir: "/runner", Status: "failed", Phase: "pending_launch"}}}, want: "pending_launch"},
+		{name: "installed metadata without outcome", want: "has no outcome"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := maintenanceDoctorFixture(t, tc.outcome)
+			var stdout bytes.Buffer
+			err := (app{stdout: &stdout}).execute([]string{"--json", "--config-dir", dir.Path, "doctor", "--all"})
+			if err == nil || result.ExitCode(err) != 1 || result.ErrorKindOf(err) != result.ErrorRuntime {
+				t.Fatalf("aggregate doctor err=%v exit=%d output=%s", err, result.ExitCode(err), stdout.String())
+			}
+			var env result.Envelope
+			if decodeErr := json.NewDecoder(&stdout).Decode(&env); decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			if len(env.Failed) != 1 || env.Failed[0].Maintenance == nil || !strings.Contains(env.Failed[0].Maintenance.Error, tc.want) || !strings.Contains(env.Failed[0].Maintenance.Error, "amux runner maintenance run") {
+				t.Fatalf("aggregate doctor diagnostic = %+v", env)
+			}
+		})
+	}
+}
+
+func TestAggregateDoctorAllContinuesWorkerAfterOutcomeOnlyMaintenanceFailure(t *testing.T) {
+	dir := t.TempDir()
+	workerDir := t.TempDir()
+	workerRow := config.Row{Workspace: "alpha", Window: "worker", Workdir: workerDir, Thread: "T-worker"}
+	workerStart := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "worker", Thread: "T-worker"}, workerRow)
+	writeWorkerRegistry(t, dir, workerRow.String()+"\n")
+	configDir := config.Directory{Path: dir}
+	if err := atomicJSON(configDir.MaintenanceResultPath(), maintenanceOutcome{SchemaVersion: 1, Status: "failed", AmpPath: "/old/amp", AmpVersion: "amp 1", Error: "scheduled maintenance unhealthy"}); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\nprintf '%s\\n' '[{\"id\":\"T-worker\"}]'\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) exit 0 ;;
+  list-panes) printf 'worker\t@2\t%s\n' `+shellSingleQuote(workerStart)+` ;;
+  *) exit 99 ;;
+esac
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	err := (app{stdout: &stdout}).execute([]string{"--json", "--config-dir", dir, "doctor", "--all"})
+	if err == nil || result.ExitCode(err) != result.ExitRuntimeFailure || result.ExitCode(err) != 1 || result.ErrorKindOf(err) != result.ErrorRuntime {
+		t.Fatalf("aggregate doctor err=%v exit=%d output=%s", err, result.ExitCode(err), stdout.String())
+	}
+	var env result.Envelope
+	if decodeErr := json.NewDecoder(&stdout).Decode(&env); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if env.ExitCode() != result.ExitRuntimeFailure || len(env.Failed) != 1 || env.Failed[0].Error == nil || env.Failed[0].Error.Kind != result.ErrorRuntime || env.Failed[0].Maintenance == nil || !strings.Contains(env.Failed[0].Maintenance.Error, "without installation metadata") {
+		t.Fatalf("maintenance runtime JSON semantics = %+v", env)
+	}
+	if len(env.Successful) != 1 || env.Successful[0].Resource.Kind != "worker" || env.Successful[0].Resource.Thread != "T-worker" || env.Successful[0].Action != "doctor" || env.Successful[0].Message == "" {
+		t.Fatalf("worker diagnostic missing after maintenance failure: %+v", env)
+	}
+}
+
 func TestAggregateReadOnlyLateWorkerRejectionRemainsPreflight(t *testing.T) {
 	dir := t.TempDir()
 	runnerDir := lockedTestWorktree(t)

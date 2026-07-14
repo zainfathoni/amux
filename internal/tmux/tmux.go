@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -37,9 +38,10 @@ type WindowPane struct {
 	Command      string
 	StartCommand string
 	Dead         bool
+	StartTime    int64
 }
 
-const restartPaneFormat = "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}\t#{pane_dead}"
+const restartPaneFormat = "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}\t#{pane_dead}\t#{pane_created}"
 
 func parseRestartPanes(out []byte) ([]WindowPane, error) {
 	text := strings.TrimSuffix(string(out), "\n")
@@ -48,11 +50,15 @@ func parseRestartPanes(out []byte) ([]WindowPane, error) {
 	}
 	var panes []WindowPane
 	for _, line := range strings.Split(text, "\n") {
-		fields := strings.SplitN(line, "\t", 8)
-		if len(fields) != 8 || (fields[7] != "0" && fields[7] != "1") {
+		fields := strings.Split(line, "\t")
+		if (len(fields) != 8 && len(fields) != 9) || (fields[7] != "0" && fields[7] != "1") {
 			return nil, fmt.Errorf("unexpected tmux restart pane row %q", line)
 		}
-		panes = append(panes, WindowPane{Session: fields[0], Window: fields[1], WindowID: fields[2], PaneID: fields[3], Path: fields[4], Command: fields[5], StartCommand: fields[6], Dead: fields[7] == "1"})
+		pane := WindowPane{Session: fields[0], Window: fields[1], WindowID: fields[2], PaneID: fields[3], Path: fields[4], Command: fields[5], StartCommand: fields[6], Dead: fields[7] == "1"}
+		if len(fields) == 9 {
+			pane.StartTime, _ = strconv.ParseInt(fields[8], 10, 64)
+		}
+		panes = append(panes, pane)
 	}
 	return panes, nil
 }
