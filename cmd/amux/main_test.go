@@ -232,9 +232,11 @@ func TestCompletionRejectsUnsupportedShell(t *testing.T) {
 	}
 }
 
-func TestPathMigratesLegacyDefaultConfig(t *testing.T) {
+func TestPathDoesNotMigrateLegacyDefaultConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("AMUX_CONFIG_DIR", "")
 	t.Setenv("AMUX_WORKSPACES", "")
 	t.Setenv("AMP_TMUX_WORKSPACES", "")
 	legacyDir := filepath.Join(home, ".config", "amp-tmux")
@@ -249,22 +251,20 @@ func TestPathMigratesLegacyDefaultConfig(t *testing.T) {
 	if err := (app{stdout: &stdout}).run([]string{"path"}); err != nil {
 		t.Fatal(err)
 	}
-	newPath := filepath.Join(home, ".config", "amux", "workspaces.tsv")
+	newPath := filepath.Join(home, ".config", "amux", "workers.tsv")
 	if got, want := stdout.String(), newPath+"\n"; got != want {
 		t.Fatalf("path output = %q, want %q", got, want)
 	}
-	got, err := os.ReadFile(newPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "mac\twin\t/tmp\tT-old\n" {
-		t.Fatalf("migrated config = %q", got)
+	if _, err := os.Stat(newPath); !os.IsNotExist(err) {
+		t.Fatalf("path command migrated config: %v", err)
 	}
 }
 
 func TestMigrateConfigCommandReportsMigration(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("AMUX_CONFIG_DIR", "")
 	t.Setenv("AMUX_WORKSPACES", "")
 	t.Setenv("AMP_TMUX_WORKSPACES", "")
 	legacyDir := filepath.Join(home, ".config", "amp-tmux")
@@ -283,7 +283,7 @@ func TestMigrateConfigCommandReportsMigration(t *testing.T) {
 	if !strings.Contains(out, "Migrated config from ~/.config/amp-tmux to ~/.config/amux") {
 		t.Fatalf("missing migration message: %q", out)
 	}
-	if !strings.Contains(out, filepath.Join(home, ".config", "amux", "workspaces.tsv")) {
+	if !strings.Contains(out, filepath.Join(home, ".config", "amux", "workers.tsv")) {
 		t.Fatalf("missing migrated path: %q", out)
 	}
 }
@@ -394,6 +394,8 @@ func TestWorkspacesMissingConfigDoesNotCreateFiles(t *testing.T) {
 func TestWorkspacesDefaultPathDoesNotMigrateLegacyConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("AMUX_CONFIG_DIR", "")
 	t.Setenv("AMUX_WORKSPACES", "")
 	t.Setenv("AMP_TMUX_WORKSPACES", "")
 	legacyDir := filepath.Join(home, ".config", "amp-tmux")
@@ -408,7 +410,7 @@ func TestWorkspacesDefaultPathDoesNotMigrateLegacyConfig(t *testing.T) {
 	if err := (app{stdout: &stdout}).run([]string{"workspaces"}); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := stdout.String(), "legacy\n"; got != want {
+	if got, want := stdout.String(), ""; got != want {
 		t.Fatalf("workspaces output = %q, want %q", got, want)
 	}
 	if _, err := os.Stat(filepath.Join(home, ".config", "amux")); !os.IsNotExist(err) {
@@ -4619,8 +4621,8 @@ exit 2
 	if err == nil {
 		t.Fatal("shelve-current succeeded with ambiguous restore rows, want error")
 	}
-	if !strings.Contains(err.Error(), "ambiguous restore rows for thread T-current") || !strings.Contains(err.Error(), "Use amux shelve <workspace> <window>") {
-		t.Fatalf("got error %q, want ambiguous restore row guidance", err)
+	if !strings.Contains(err.Error(), "worker thread T-current is already configured") {
+		t.Fatalf("got error %q, want duplicate canonical worker identity", err)
 	}
 	configBytes, err := os.ReadFile(configPath)
 	if err != nil {
@@ -4792,8 +4794,8 @@ func TestShelveByThreadArchivesPreservesConfigAndStopsUniqueVerifiedWindow(t *te
 		t.Fatal(err)
 	}
 	startCommand := teardownExpectedStartCommand(
-		teardownIdentity{Workspace: "kelas", Session: "Kelas", Window: "mailgun", Thread: "https://ampcode.com/threads/T-worker"},
-		config.Row{Workspace: "kelas", Window: "mailgun", Workdir: "/tmp/project", Thread: "https://ampcode.com/threads/T-worker"},
+		teardownIdentity{Workspace: "kelas", Session: "Kelas", Window: "mailgun", Thread: "T-worker"},
+		config.Row{Workspace: "kelas", Window: "mailgun", Workdir: "/tmp/project", Thread: "T-worker"},
 	)
 
 	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
@@ -5614,8 +5616,8 @@ func TestTeardownByThreadArchivesRemovesAndStopsVerifiedWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	startCommand := teardownExpectedStartCommand(
-		teardownIdentity{Workspace: "kelas", Session: "Kelas", Window: "mailgun-258-failures", Thread: threadURL},
-		config.Row{Workspace: "kelas", Window: "mailgun-258-failures", Workdir: "/tmp/project", Thread: threadURL},
+		teardownIdentity{Workspace: "kelas", Session: "Kelas", Window: "mailgun-258-failures", Thread: "T-worker"},
+		config.Row{Workspace: "kelas", Window: "mailgun-258-failures", Workdir: "/tmp/project", Thread: "T-worker"},
 	)
 
 	writeExecutable(t, filepath.Join(tmp, "amp"), `#!/bin/sh
@@ -5826,7 +5828,7 @@ exit 0
 	}
 }
 
-func TestTeardownByThreadFailsClosedWhenRestoreRowsAreAmbiguous(t *testing.T) {
+func TestTeardownByThreadFailsClosedWhenWorkerIdentityIsDuplicated(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
 	logPath := filepath.Join(tmp, "calls.log")
@@ -5845,10 +5847,10 @@ exit 0
 
 	err := run([]string{"--config", configPath, "teardown", "--thread", "T-worker"})
 	if err == nil {
-		t.Fatal("thread teardown succeeded, want ambiguous rows")
+		t.Fatal("thread teardown succeeded, want duplicate worker identity error")
 	}
-	if !strings.Contains(err.Error(), "ambiguous restore rows for thread T-worker") {
-		t.Fatalf("got error %q, want ambiguous rows", err)
+	if !strings.Contains(err.Error(), "worker thread T-worker is already configured") {
+		t.Fatalf("got error %q, want duplicate canonical worker identity", err)
 	}
 	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
 		logBytes, _ := os.ReadFile(logPath)
@@ -6645,10 +6647,14 @@ func TestRunnerLaunchStartsNoTUIWindowsAndRefusesExistingWindow(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
 	workdir := filepath.Join(tmp, "project")
+	otherWorkdir := filepath.Join(tmp, "other-project")
 	if err := os.Mkdir(workdir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte("mac\tamux-runner\t"+workdir+"\nmac\tother-runner\t"+workdir+"\n"), 0o644); err != nil {
+	if err := os.Mkdir(otherWorkdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte("mac\tamux-runner\t"+workdir+"\nmac\tother-runner\t"+otherWorkdir+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	logPath := filepath.Join(tmp, "tmux.log")
@@ -6672,7 +6678,7 @@ exit 0
 	if !strings.Contains(log, "tmux new-session -d -s Amp -n amux-runner cd '"+workdir+"' && exec amp --no-tui") {
 		t.Fatalf("runner launch did not create first no-tui session\nlog:\n%s", log)
 	}
-	if !strings.Contains(log, "tmux new-window -t =Amp: -n other-runner cd '"+workdir+"' && exec amp --no-tui") {
+	if !strings.Contains(log, "tmux new-window -t =Amp: -n other-runner cd '"+otherWorkdir+"' && exec amp --no-tui") {
 		t.Fatalf("runner launch did not create second no-tui window\nlog:\n%s", log)
 	}
 
@@ -6854,11 +6860,15 @@ exit 0
 func TestRunnerRestartNoArgsRestartsAllConfiguredRunners(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "workspaces.tsv")
-	workdir := filepath.Join(tmp, "project")
-	if err := os.Mkdir(workdir, 0o755); err != nil {
+	workdirA := filepath.Join(tmp, "project-a")
+	workdirB := filepath.Join(tmp, "project-b")
+	if err := os.Mkdir(workdirA, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	runnerText := "zeta\trunner-b\t" + workdir + "\nalpha\trunner-a\t" + workdir + "\n"
+	if err := os.Mkdir(workdirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runnerText := "zeta\trunner-b\t" + workdirB + "\nalpha\trunner-a\t" + workdirA + "\n"
 	if err := os.WriteFile(filepath.Join(tmp, "runners.tsv"), []byte(runnerText), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -6866,12 +6876,12 @@ func TestRunnerRestartNoArgsRestartsAllConfiguredRunners(t *testing.T) {
 	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
 printf 'tmux %s\n' "$*" >> "`+logPath+`"
 if [ "$2" = -a ]; then
-  printf 'Shared\trunner-a\t@1\t%%1\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`
-  printf 'Legacy\trunner-b\t@2\t%%2\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`
+  printf 'Shared\trunner-a\t@1\t%%1\t`+workdirA+`\tamp\t%s\t0\n' `+shellSingleQuote(tmux.RunnerCommand(workdirA))+`
+  printf 'Legacy\trunner-b\t@2\t%%2\t`+workdirB+`\tamp\t%s\t0\n' `+shellSingleQuote(tmux.RunnerCommand(workdirB))+`
 elif [ "$3" = "%1" ]; then
-  printf 'Shared\trunner-a\t@1\t%%1\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`
+  printf 'Shared\trunner-a\t@1\t%%1\t`+workdirA+`\tamp\t%s\t0\n' `+shellSingleQuote(tmux.RunnerCommand(workdirA))+`
 elif [ "$3" = "%2" ]; then
-  printf 'Legacy\trunner-b\t@2\t%%2\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(tmux.RunnerCommand(workdir))+`
+  printf 'Legacy\trunner-b\t@2\t%%2\t`+workdirB+`\tamp\t%s\t0\n' `+shellSingleQuote(tmux.RunnerCommand(workdirB))+`
 fi
 exit 0
 `)
@@ -6922,7 +6932,7 @@ exit 0
 		t.Fatalf("bulk runner restart error = %v, want duplicate-row preflight failure", err)
 	}
 	logBytes, readErr := os.ReadFile(logPath)
-	if readErr != nil {
+	if readErr != nil && !os.IsNotExist(readErr) {
 		t.Fatal(readErr)
 	}
 	if strings.Contains(string(logBytes), "respawn-pane") {
