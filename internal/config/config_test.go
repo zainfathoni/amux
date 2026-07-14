@@ -387,6 +387,16 @@ func TestCanonicalWorkdirUsesStableLexicalIdentity(t *testing.T) {
 	}
 }
 
+func TestRunnerWindowUsesCanonicalPathHashToAvoidBasenameCollisions(t *testing.T) {
+	one := filepath.Join(t.TempDir(), "project")
+	two := filepath.Join(t.TempDir(), "project")
+	first := RunnerWindow(one)
+	second := RunnerWindow(two)
+	if first == second || !strings.HasPrefix(first, "runner-project-") || first != RunnerWindow(filepath.Join(one, ".")) {
+		t.Fatalf("runner windows first=%q second=%q", first, second)
+	}
+}
+
 func TestMigrationRejectsDuplicateCanonicalIdentityBeforeWriting(t *testing.T) {
 	path := t.TempDir()
 	dir := Directory{Path: path}
@@ -403,6 +413,21 @@ func TestMigrationRejectsDuplicateCanonicalIdentityBeforeWriting(t *testing.T) {
 		if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
 			t.Fatalf("failed migration planning wrote %s: %v", target, statErr)
 		}
+	}
+}
+
+func TestMigratedRunnerPreservesLegacyWindowForRuntimeOwnership(t *testing.T) {
+	legacy := filepath.Join(t.TempDir(), RunnersFile)
+	workdir := filepath.Join(t.TempDir(), "project")
+	if err := os.WriteFile(legacy, []byte("alpha\tlegacy-runner\t"+workdir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := migratedRunners(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "alpha\tlegacy-runner\t"+workdir+"\n") {
+		t.Fatalf("migrated runner lost legacy runtime window: %q", got)
 	}
 }
 

@@ -26,8 +26,11 @@ type Row struct {
 
 type RunnerRow struct {
 	Workspace string
-	Window    string
 	Workdir   string
+	// Window is derived from Workdir for compatibility with legacy internal
+	// callers. It is never persisted or accepted as a public runner identity.
+	Window       string
+	LegacyWindow bool
 }
 
 func DefaultPath() string {
@@ -184,7 +187,7 @@ func ParseRunners(r io.Reader) ([]RunnerRow, error) {
 	scanner := bufio.NewScanner(r)
 	var rows []RunnerRow
 	seenWorkdirs := make(map[string]string)
-	seenWindows := make(map[string]bool)
+	seenLegacyWindows := make(map[string]bool)
 	lineNo := 0
 	for scanner.Scan() {
 		lineNo++
@@ -193,16 +196,22 @@ func ParseRunners(r io.Reader) ([]RunnerRow, error) {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 3 {
-			return nil, fmt.Errorf("invalid runner row on line %d: expected 3 tab-separated fields", lineNo)
+		if len(fields) != 2 && len(fields) != 3 {
+			return nil, fmt.Errorf("invalid runner row on line %d: expected 2 tab-separated fields", lineNo)
 		}
-		row := RunnerRow{Workspace: fields[0], Window: fields[1], Workdir: fields[2]}
+		row := RunnerRow{Workspace: fields[0], Workdir: fields[1]}
+		if len(fields) == 3 {
+			row.Window, row.Workdir, row.LegacyWindow = fields[1], fields[2], true
+		}
 		if err := row.Validate(); err != nil {
 			return nil, fmt.Errorf("invalid runner row on line %d: %w", lineNo, err)
 		}
-		windowKey := row.Workspace + "\x00" + row.Window
-		if seenWindows[windowKey] {
-			return nil, fmt.Errorf("duplicate runner row %s/%s", row.Workspace, row.Window)
+		if row.LegacyWindow {
+			key := row.Workspace + "\x00" + row.Window
+			if seenLegacyWindows[key] {
+				return nil, fmt.Errorf("duplicate runner row %s/%s", row.Workspace, row.Window)
+			}
+			seenLegacyWindows[key] = true
 		}
 		workdir, err := CanonicalWorkdir(row.Workdir)
 		if err != nil {
@@ -211,9 +220,11 @@ func ParseRunners(r io.Reader) ([]RunnerRow, error) {
 		if previous, exists := seenWorkdirs[workdir]; exists {
 			return nil, fmt.Errorf("runner workdir %s is already configured as %s", workdir, previous)
 		}
-		seenWindows[windowKey] = true
-		seenWorkdirs[workdir] = row.Workspace + "/" + row.Window
+		seenWorkdirs[workdir] = row.Workspace
 		row.Workdir = workdir
+		if !row.LegacyWindow {
+			row.Window = RunnerWindow(workdir)
+		}
 		rows = append(rows, row)
 	}
 	if err := scanner.Err(); err != nil {
@@ -264,6 +275,9 @@ func StoreRunner(path string, row RunnerRow) (bool, error) {
 		return false, err
 	}
 	row.Workdir = workdir
+	if row.Window != "" && row.Window != RunnerWindow(workdir) {
+		row.LegacyWindow = true
+	}
 	if err := row.Validate(); err != nil {
 		return false, err
 	}
@@ -280,9 +294,16 @@ func StoreRunner(path string, row RunnerRow) (bool, error) {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) >= 2 && fields[0] == row.Workspace && fields[1] == row.Window {
-			lines[i] = row.String()
-			replaced = true
+		if len(fields) == 2 || len(fields) == 3 {
+			identityField := fields[1]
+			if len(fields) == 3 {
+				identityField = fields[2]
+			}
+			identity, identityErr := CanonicalWorkdir(identityField)
+			if identityErr == nil && identity == row.Workdir {
+				lines[i] = row.String()
+				replaced = true
+			}
 		}
 	}
 	if !replaced {
@@ -356,6 +377,42 @@ func RemoveRunner(path, workspace, window string) (bool, error) {
 	return removed, writeLinesAtomic(path, kept)
 }
 
+func RemoveRunnerWorkdir(path, workdir string) (bool, error) {
+	canonical, err := CanonicalWorkdir(workdir)
+	if err != nil {
+		return false, err
+	}
+	if err := EnsureRunners(path); err != nil {
+		return false, err
+	}
+	lines, err := readLines(path)
+	if err != nil {
+		return false, err
+	}
+	kept := lines[:0]
+	removed := false
+	for _, line := range lines {
+		if line == "" || strings.HasPrefix(line, "#") {
+			kept = append(kept, line)
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) == 2 || len(fields) == 3 {
+			identityField := fields[1]
+			if len(fields) == 3 {
+				identityField = fields[2]
+			}
+			candidate, candidateErr := CanonicalWorkdir(identityField)
+			if candidateErr == nil && candidate == canonical {
+				removed = true
+				continue
+			}
+		}
+		kept = append(kept, line)
+	}
+	return removed, writeLinesAtomic(path, kept)
+}
+
 func RemoveRows(path string, shouldRemove func(Row) bool) (int, error) {
 	if err := Ensure(path); err != nil {
 		return 0, err
@@ -398,7 +455,10 @@ func (r Row) String() string {
 }
 
 func (r RunnerRow) String() string {
-	return strings.Join([]string{r.Workspace, r.Window, r.Workdir}, "\t")
+	if r.LegacyWindow {
+		return strings.Join([]string{r.Workspace, r.Window, r.Workdir}, "\t")
+	}
+	return strings.Join([]string{r.Workspace, r.Workdir}, "\t")
 }
 
 func readLines(path string) ([]string, error) {
@@ -465,8 +525,10 @@ func (r RunnerRow) Validate() error {
 	if err := validateField("workspace", r.Workspace); err != nil {
 		return err
 	}
-	if err := validateField("window", r.Window); err != nil {
-		return err
+	if r.LegacyWindow {
+		if err := validateField("window", r.Window); err != nil {
+			return err
+		}
 	}
 	return validateField("workdir", r.Workdir)
 }
@@ -506,8 +568,7 @@ const defaultConfig = `# amux-schema: workers/v1
 `
 
 const defaultRunnerConfig = `# amux-schema: runners/v1
-# workspace	window	workdir
+# workspace	workdir
 #
-# Runner identity is the canonical workdir. The window column is retained until
-# the runner lifecycle migration removes it.
+# Runner identity is the canonical workdir. Runtime window names are derived.
 `

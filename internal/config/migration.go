@@ -210,21 +210,15 @@ func migratedRunners(path string) ([]byte, error) {
 	var out bytes.Buffer
 	out.WriteString("# amux-schema: runners/v1\n")
 	seenWorkdirs := make(map[string]string)
-	seenWindows := make(map[string]bool)
 	for _, row := range rows {
 		workdir, err := CanonicalWorkdir(row.Workdir)
 		if err != nil {
 			return nil, err
 		}
-		key := row.Workspace + "\x00" + row.Window
-		if seenWindows[key] {
-			return nil, fmt.Errorf("duplicate runner row %s/%s", row.Workspace, row.Window)
-		}
 		if previous, exists := seenWorkdirs[workdir]; exists {
 			return nil, fmt.Errorf("runner workdir %s is already configured as %s", workdir, previous)
 		}
-		seenWindows[key] = true
-		seenWorkdirs[workdir] = row.Workspace + "/" + row.Window
+		seenWorkdirs[workdir] = row.Workspace
 		row.Workdir = workdir
 		out.WriteString(row.String())
 		out.WriteByte('\n')
