@@ -135,7 +135,8 @@ func (r Runner) SessionExists(session string) (bool, error) {
 		return false, fmt.Errorf("tmux has-session: %w", err)
 	}
 	message := strings.TrimSpace(stderr.String())
-	if message == "" || strings.Contains(message, "can't find session") || strings.Contains(message, "no server running") {
+	if message == "" || strings.Contains(message, "can't find session") || strings.Contains(message, "no server running") ||
+		(strings.Contains(message, "error connecting to ") && strings.Contains(message, "No such file or directory")) {
 		return false, nil
 	}
 	return false, fmt.Errorf("tmux has-session: %s", message)

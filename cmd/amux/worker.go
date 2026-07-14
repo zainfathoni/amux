@@ -60,6 +60,19 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 		}
 	}
 	rows = selectWorkerRows(rows, in.Selectors)
+	var shelfOnly []string
+	if in.Command.Name == "remove" && in.Selectors.All {
+		configured := make(map[string]bool, len(rows))
+		for _, row := range rows {
+			configured[row.Thread] = true
+		}
+		for _, thread := range shelves {
+			if !configured[thread] {
+				shelfOnly = append(shelfOnly, thread)
+			}
+		}
+		sort.Strings(shelfOnly)
+	}
 	if in.Command.Name == "list" {
 		for _, row := range rows {
 			if in.Selectors.Shelf == "shelved" && !shelved[row.Thread] || in.Selectors.Shelf == "unshelved" && shelved[row.Thread] {
@@ -76,7 +89,12 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 	if in.Command.Name == "pin" {
 		return a.workerPin(in, dir, rows, &env)
 	}
-	if len(rows) == 0 {
+	if len(rows) == 0 && in.Command.Name == "remove" && in.Selectors.All && len(shelfOnly) == 0 {
+		out := result.Outcome{Resource: result.CommandResource(), Action: "remove", Message: "already in desired state"}
+		env.Skipped = append(env.Skipped, out)
+		return &env, nil
+	}
+	if len(rows) == 0 && !(in.Command.Name == "remove" && in.Selectors.All) {
 		if (in.Command.Name == "unpin" || in.Command.Name == "remove") && in.Selectors.Thread != "" {
 			resource, _ := result.WorkerResource(in.Selectors.Thread)
 			out := result.Outcome{Resource: resource, Action: in.Command.Name}
@@ -103,7 +121,7 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 	inspections := make(map[string]workerInspection, len(rows))
 	if in.Command.Name == "launch" || in.Command.Name == "restart" {
 		for _, row := range rows {
-			if in.Command.Name == "launch" && shelved[row.Thread] {
+			if (in.Command.Name == "launch" || in.Command.Name == "restart") && shelved[row.Thread] {
 				continue
 			}
 			workdir, canonicalErr := config.CanonicalWorkdir(row.Workdir)
@@ -118,7 +136,7 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 	}
 	if workerCommandNeedsTmux(in.Command.Name) {
 		for _, row := range rows {
-			if in.Command.Name == "launch" && shelved[row.Thread] {
+			if (in.Command.Name == "launch" || in.Command.Name == "restart") && shelved[row.Thread] {
 				continue
 			}
 			inspection, inspectErr := inspectWorker(row)
@@ -134,15 +152,38 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			inspections[row.Thread] = inspection
 		}
 	}
+	for _, thread := range shelfOnly {
+		resource, _ := result.WorkerResource(thread)
+		out := result.Outcome{Resource: resource, Action: "remove"}
+		if in.Options.DryRun {
+			env.Planned = append(env.Planned, out)
+			continue
+		}
+		changed, removeErr := config.RemoveShelf(dir.ShelvesPath(), thread)
+		if removeErr != nil {
+			out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: removeErr.Error()}
+			env.Failed = append(env.Failed, out)
+		} else if changed {
+			env.Successful = append(env.Successful, out)
+		} else {
+			out.Message = "already in desired state"
+			env.Skipped = append(env.Skipped, out)
+		}
+	}
 	for _, row := range rows {
 		out := workerOutcome(row, in.Command.Name, "")
-		if in.Command.Name == "launch" && shelved[row.Thread] {
+		if (in.Command.Name == "launch" || in.Command.Name == "restart") && shelved[row.Thread] {
 			out.Message = "worker is locally shelved"
 			env.Skipped = append(env.Skipped, out)
 			continue
 		}
 		if in.Command.Name == "launch" && inspections[row.Thread].state == workerPaneExact {
 			out.Message = "already running"
+			env.Skipped = append(env.Skipped, out)
+			continue
+		}
+		if in.Command.Name == "restart" && inspections[row.Thread].state == workerPaneAbsent {
+			out.Message = "worker is not running"
 			env.Skipped = append(env.Skipped, out)
 			continue
 		}
@@ -383,7 +424,8 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 			return env, result.Preflight(loadErr)
 		}
 		for _, row := range rows {
-			if row.Thread == existing.Resource.Thread && row.Workspace == workspace && row.Window == s.Window && row.Workdir == s.Workdir {
+			requested := config.Row{Workspace: workspace, Window: s.Window, Workdir: s.Workdir, Thread: existing.Resource.Thread}
+			if workerRowsEquivalent(row, requested) {
 				switch existing.Phase {
 				case "", config.OperationPhaseMessageVerified, config.OperationPhaseConfigured:
 					existing.Phase = config.OperationPhaseConfigured
@@ -580,6 +622,17 @@ func workerOutcome(r config.Row, action, message string) result.Outcome {
 	return result.Outcome{Resource: id, Action: action, Message: message}
 }
 
+func workerRowsEquivalent(left, right config.Row) bool {
+	if left.Workspace != right.Workspace || left.Window != right.Window {
+		return false
+	}
+	leftThread, leftThreadErr := config.CanonicalThreadID(left.Thread)
+	rightThread, rightThreadErr := config.CanonicalThreadID(right.Thread)
+	leftWorkdir, leftWorkdirErr := config.CanonicalWorkdir(left.Workdir)
+	rightWorkdir, rightWorkdirErr := config.CanonicalWorkdir(right.Workdir)
+	return leftThreadErr == nil && rightThreadErr == nil && leftWorkdirErr == nil && rightWorkdirErr == nil && leftThread == rightThread && leftWorkdir == rightWorkdir
+}
+
 func (a app) workerPin(in invocation, dir config.Directory, existing []config.Row, env *result.Envelope) (*result.Envelope, error) {
 	s := in.Selectors
 	if s.Thread == "" || s.Workspace == "" || s.Window == "" || s.Workdir == "" {
@@ -587,7 +640,7 @@ func (a app) workerPin(in invocation, dir config.Directory, existing []config.Ro
 	}
 	r := config.Row{Workspace: s.Workspace, Window: s.Window, Workdir: s.Workdir, Thread: s.Thread}
 	out := workerOutcome(r, "pin", "")
-	if len(existing) == 1 && existing[0] == r {
+	if len(existing) == 1 && workerRowsEquivalent(existing[0], r) {
 		out.Message = "already pinned"
 		env.Skipped = append(env.Skipped, out)
 		return env, nil

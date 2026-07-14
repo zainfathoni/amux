@@ -18,6 +18,7 @@ func TestSessionExistsDistinguishesAbsenceFromInspectionFailure(t *testing.T) {
 		{name: "exists", script: "#!/bin/sh\nexit 0\n", wantExists: true},
 		{name: "absent", script: "#!/bin/sh\nexit 1\n"},
 		{name: "missing server", script: "#!/bin/sh\necho 'no server running on /tmp/tmux.sock' >&2\nexit 1\n"},
+		{name: "missing server socket", script: "#!/bin/sh\necho 'error connecting to /tmp/tmux-1000/default (No such file or directory)' >&2\nexit 1\n"},
 		{name: "inspection failure", script: "#!/bin/sh\necho 'permission denied' >&2\nexit 1\n", wantError: "permission denied"},
 		{name: "unexpected exit", script: "#!/bin/sh\nexit 2\n", wantError: "tmux has-session"},
 	} {

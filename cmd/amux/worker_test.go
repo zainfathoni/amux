@@ -155,6 +155,7 @@ func TestWorkerShelveWritesIntentBeforeArchiveAndRetriesRemoteRepair(t *testing.
 	attempt := filepath.Join(bin, "attempt")
 	script := "#!/bin/sh\ngrep -q '^T-a$' '" + filepath.Join(dir, "shelves.tsv") + "' || exit 88\necho \"$*\" >> '" + log + "'\nif [ ! -e '" + attempt + "' ]; then touch '" + attempt + "'; exit 42; fi\n"
 	writeExecutable(t, filepath.Join(bin, "amp"), script)
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
@@ -203,6 +204,26 @@ func TestWorkerPinIsIdempotentAndDryRunDoesNotWrite(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dryDir, config.WorkersFile)); !os.IsNotExist(err) {
 		t.Fatalf("dry-run pin wrote workers registry: %v", err)
+	}
+}
+
+func TestWorkerPinTreatsCanonicalWorkdirAsAlreadyPinned(t *testing.T) {
+	home := t.TempDir()
+	workdir := filepath.Join(home, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	writeWorkerRegistry(t, dir, "alpha\tworker\t~/project\tT-a\n")
+	t.Setenv("HOME", home)
+
+	result := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "pin", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--thread", "T-a")
+	if len(result.Skipped) != 1 || result.Skipped[0].Message != "already pinned" || len(result.Successful) != 0 {
+		t.Fatalf("canonical pin result = %+v", result)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+	if err != nil || !strings.Contains(string(data), "~/project") {
+		t.Fatalf("canonical pin rewrote row: data=%q err=%v", data, err)
 	}
 }
 
@@ -299,6 +320,37 @@ exit 2
 	}
 }
 
+func TestWorkerSpawnRecoversCanonicalExactRow(t *testing.T) {
+	home := t.TempDir()
+	workdir := filepath.Join(home, "project")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	writeWorkerRegistry(t, dir, "alpha\tworker\t~/project\tT-bound\n")
+	t.Setenv("HOME", home)
+	request := strings.Join([]string{"alpha", "worker", workdir, "", "hello"}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Now().UTC()
+	record := config.OperationRecord{Key: "canonical-recovery", Kind: "worker-spawn", RequestHash: hex.EncodeToString(sum[:]), State: config.OperationStarted, Phase: config.OperationPhaseMessageVerified, Resource: config.OperationResource{Kind: "worker", Thread: "T-bound"}, CreatedAt: now, UpdatedAt: now}
+	if _, err := config.StoreOperation(filepath.Join(dir, config.OperationsFile), record); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	called := filepath.Join(bin, "called")
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	result := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", "canonical-recovery")
+	if len(result.Skipped) != 1 || result.Skipped[0].Message != "recovered completed spawn" {
+		t.Fatalf("canonical recovery result = %+v", result)
+	}
+	if _, err := os.Stat(called); !os.IsNotExist(err) {
+		t.Fatalf("canonical recovery called amp or tmux: %v", err)
+	}
+}
+
 func TestWorkerRemoveDoesNotArchiveAndTeardownRequiresLiveWorker(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkerRegistry(t, dir, "alpha\ta\t/tmp/a\tT-a\n")
@@ -390,6 +442,44 @@ func TestWorkerDryRunKeepsKnownNoOpsSkipped(t *testing.T) {
 	}
 }
 
+func TestWorkerRestartSkipsAbsentAndShelvedWorkers(t *testing.T) {
+	for _, dryRun := range []bool{false, true} {
+		for _, state := range []string{"absent", "shelved"} {
+			t.Run(state+map[bool]string{true: "-dry-run", false: ""}[dryRun], func(t *testing.T) {
+				dir := t.TempDir()
+				workdir := t.TempDir()
+				writeWorkerRegistry(t, dir, "alpha\tworker\t"+workdir+"\tT-a\n")
+				if state == "shelved" {
+					if err := os.WriteFile(filepath.Join(dir, config.ShelvesFile), []byte("# amux-schema: shelves/v1\nT-a\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				bin := t.TempDir()
+				logPath := filepath.Join(bin, "tmux.log")
+				writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\necho \"$*\" >> '"+logPath+"'\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				args := []string{"--json", "--config-dir", dir, "worker", "restart", "--thread", "T-a"}
+				if dryRun {
+					args = append([]string{"--dry-run"}, args...)
+				}
+
+				result := executeWorkerJSON(t, args...)
+				if len(result.Skipped) != 1 || len(result.Planned) != 0 || len(result.Successful) != 0 {
+					t.Fatalf("restart result = %+v", result)
+				}
+				log, err := os.ReadFile(logPath)
+				if state == "shelved" {
+					if !os.IsNotExist(err) {
+						t.Fatalf("shelved restart touched tmux: %q err=%v", log, err)
+					}
+				} else if err != nil || strings.Contains(string(log), "new-session") || strings.Contains(string(log), "new-window") || strings.Contains(string(log), "kill-window") {
+					t.Fatalf("absent restart mutated tmux: %q err=%v", log, err)
+				}
+			})
+		}
+	}
+}
+
 func TestWorkerRemovePlansAndReportsStaleShelfCleanup(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, config.ShelvesFile), []byte("# amux-schema: shelves/v1\nT-stale\n"), 0o600); err != nil {
@@ -409,6 +499,39 @@ func TestWorkerRemovePlansAndReportsStaleShelfCleanup(t *testing.T) {
 	shelves, err := config.LoadShelvesReadOnly(filepath.Join(dir, config.ShelvesFile))
 	if err != nil || len(shelves) != 0 {
 		t.Fatalf("remaining shelves = %v err=%v", shelves, err)
+	}
+}
+
+func TestWorkerRemoveAllCleansShelfOnlyIntentAndEmptyInventoryIsNoOp(t *testing.T) {
+	for _, dryRun := range []bool{false, true} {
+		t.Run(map[bool]string{true: "dry-run", false: "apply"}[dryRun], func(t *testing.T) {
+			dir := t.TempDir()
+			shelfPath := filepath.Join(dir, config.ShelvesFile)
+			if err := os.WriteFile(shelfPath, []byte("# amux-schema: shelves/v1\nT-stale-b\nT-stale-a\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"--json", "--config-dir", dir, "worker", "remove", "--all"}
+			if dryRun {
+				args = append([]string{"--dry-run"}, args...)
+			}
+			result := executeWorkerJSON(t, args...)
+			outcomes := result.Successful
+			if dryRun {
+				outcomes = result.Planned
+			}
+			if len(outcomes) != 2 || outcomes[0].Resource.Thread != "T-stale-a" || outcomes[1].Resource.Thread != "T-stale-b" {
+				t.Fatalf("remove --all result = %+v", result)
+			}
+			shelves, err := config.LoadShelvesReadOnly(shelfPath)
+			if err != nil || dryRun && len(shelves) != 2 || !dryRun && len(shelves) != 0 {
+				t.Fatalf("remaining shelves = %v err=%v", shelves, err)
+			}
+		})
+	}
+
+	empty := executeWorkerJSON(t, "--json", "--config-dir", t.TempDir(), "worker", "remove", "--all")
+	if len(empty.Skipped) != 1 || empty.Skipped[0].Message != "already in desired state" {
+		t.Fatalf("empty remove --all = %+v", empty)
 	}
 }
 
@@ -482,8 +605,17 @@ func TestCanonicalWorkerCompletionsAreLeafSpecific(t *testing.T) {
 					t.Fatalf("%s completion missing %q\n%s", shell, want, output)
 				}
 			}
+			aliases := []string{"-w", "-W", "-d", "-t"}
+			if shell == "fish" {
+				aliases = []string{"-s 'w'", "-s 'W'", "-s 'd'", "-s 't'"}
+			}
+			for _, want := range aliases {
+				if !strings.Contains(output, want) {
+					t.Fatalf("%s completion missing selector alias %q\n%s", shell, want, output)
+				}
+			}
 			if shell == "bash" {
-				if !strings.Contains(output, `unpin) COMPREPLY=( $(compgen -W "--thread --current"`) {
+				if !strings.Contains(output, `unpin) COMPREPLY=( $(compgen -W "--thread --current -t"`) {
 					t.Fatalf("bash unpin completion is not leaf-specific:\n%s", output)
 				}
 				if !strings.Contains(output, `if [[ "$word" == --config-dir || "$word" == -c ]]; then ((i++)); continue; fi`) {
