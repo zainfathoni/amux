@@ -121,6 +121,9 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 		}
 		return &env, result.Preflight(errors.New("no configured worker matches the selector"))
 	}
+	if in.Command.Name == "teardown" && len(rows) != 1 {
+		return &env, result.Preflight(fmt.Errorf("teardown requires exactly one configured worker; selector matched %d", len(rows)))
+	}
 	inspections := make(map[string]workerInspection, len(rows))
 	if in.Command.Name == "launch" || in.Command.Name == "restart" {
 		for _, row := range rows {

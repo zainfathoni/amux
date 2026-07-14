@@ -594,6 +594,53 @@ func TestWorkerRemoveDoesNotArchive(t *testing.T) {
 	}
 }
 
+func TestWorkerTeardownRequiresExactlyOneConfiguredWorker(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkerRegistry(t, dir, "alpha\ta\t/tmp/a\tT-a\nalpha\tb\t/tmp/b\tT-b\n")
+	shelvesPath := filepath.Join(dir, config.ShelvesFile)
+	if err := os.WriteFile(shelvesPath, []byte("# amux-schema: shelves/v1\nT-a\nT-b\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workersBefore, err := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	shelvesBefore, err := os.ReadFile(shelvesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	called := filepath.Join(bin, "called")
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	var stdout bytes.Buffer
+	err = (app{stdout: &stdout}).execute([]string{"--json", "--config-dir", dir, "worker", "teardown", "--workspace", "alpha"})
+	if err == nil || !strings.Contains(err.Error(), "exactly one configured worker") || result.ExitCode(err) != result.ExitRejected {
+		t.Fatalf("multi-worker teardown error = %v, want rejected exact-one preflight", err)
+	}
+	var got result.Envelope
+	if decodeErr := json.NewDecoder(&stdout).Decode(&got); decodeErr != nil {
+		t.Fatalf("decode multi-worker teardown: %v\nstdout: %s", decodeErr, stdout.String())
+	}
+	if len(got.Failed) != 1 || got.Failed[0].Error == nil || got.Failed[0].Error.Kind != result.ErrorPreflight {
+		t.Fatalf("multi-worker teardown result = %+v", got)
+	}
+	if _, statErr := os.Stat(called); !os.IsNotExist(statErr) {
+		t.Fatalf("multi-worker teardown called amp or tmux: %v", statErr)
+	}
+	workersAfter, err := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+	if err != nil || !bytes.Equal(workersBefore, workersAfter) {
+		t.Fatalf("multi-worker teardown changed workers: err=%v\nbefore=%s\nafter=%s", err, workersBefore, workersAfter)
+	}
+	shelvesAfter, err := os.ReadFile(shelvesPath)
+	if err != nil || !bytes.Equal(shelvesBefore, shelvesAfter) {
+		t.Fatalf("multi-worker teardown changed shelves: err=%v\nbefore=%s\nafter=%s", err, shelvesBefore, shelvesAfter)
+	}
+}
+
 func TestWorkerTeardownCompletesWhenLocalWorkerIsAlreadyStopped(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkerRegistry(t, dir, "alpha\ta\t/tmp/a\tT-a\n")
