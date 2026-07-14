@@ -8,6 +8,38 @@ import (
 	"time"
 )
 
+func TestSessionExistsDistinguishesAbsenceFromInspectionFailure(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		script     string
+		wantExists bool
+		wantError  string
+	}{
+		{name: "exists", script: "#!/bin/sh\nexit 0\n", wantExists: true},
+		{name: "absent", script: "#!/bin/sh\nexit 1\n"},
+		{name: "missing server", script: "#!/bin/sh\necho 'no server running on /tmp/tmux.sock' >&2\nexit 1\n"},
+		{name: "inspection failure", script: "#!/bin/sh\necho 'permission denied' >&2\nexit 1\n", wantError: "permission denied"},
+		{name: "unexpected exit", script: "#!/bin/sh\nexit 2\n", wantError: "tmux has-session"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bin := t.TempDir()
+			writeExecutable(t, filepath.Join(bin, "tmux"), test.script)
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			exists, err := (Runner{}).SessionExists("alpha")
+			if exists != test.wantExists {
+				t.Fatalf("SessionExists() exists = %t, want %t", exists, test.wantExists)
+			}
+			if test.wantError == "" && err != nil {
+				t.Fatalf("SessionExists() error = %v", err)
+			}
+			if test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("SessionExists() error = %v, want %q", err, test.wantError)
+			}
+		})
+	}
+}
+
 func TestDryRunWritesPlannedCommandToConfiguredOutput(t *testing.T) {
 	var output strings.Builder
 	runner := Runner{DryRun: true, Output: &output}

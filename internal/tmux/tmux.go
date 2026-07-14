@@ -116,6 +116,31 @@ func (r Runner) HasSession(session string) bool {
 	return exec.Command("tmux", "has-session", "-t", exactSessionTarget(session)).Run() == nil
 }
 
+// SessionExists distinguishes a confirmed missing session from failures to
+// contact tmux. Callers which mutate state must not treat those failures as
+// absence.
+func (r Runner) SessionExists(session string) (bool, error) {
+	if r.DryRun {
+		return false, nil
+	}
+	cmd := exec.Command("tmux", "has-session", "-t", exactSessionTarget(session))
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		return false, fmt.Errorf("tmux has-session: %w", err)
+	}
+	message := strings.TrimSpace(stderr.String())
+	if message == "" || strings.Contains(message, "can't find session") || strings.Contains(message, "no server running") {
+		return false, nil
+	}
+	return false, fmt.Errorf("tmux has-session: %s", message)
+}
+
 func (r Runner) WindowNames(session string) ([]string, error) {
 	if r.DryRun {
 		return nil, nil

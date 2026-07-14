@@ -194,10 +194,11 @@ func TestCompletionGeneratesShellScripts(t *testing.T) {
 			shell: "fish",
 			want: []string{
 				"complete -c amux -f -n '__fish_use_subcommand' -a 'worker' -d 'Manage interactive thread-bound clients'",
-				"complete -c amux -n '__fish_seen_subcommand_from spawn' -r -f -a 'low medium high ultra' -l 'mode' -d 'Amp thread mode'",
-				"complete -c amux -n '__fish_seen_subcommand_from spawn' -r -l 'message-file' -d 'Read initial message from file'",
-				"complete -c amux -f -n '__fish_seen_subcommand_from worker; and not __fish_seen_subcommand_from list pin unpin launch park restart remove spawn shelve unshelve teardown doctor reconcile' -a 'restart'",
-				"complete -c amux -f -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'",
+				"complete -c amux -n 'test (__fish_amux_root_command) = spawn' -r -f -a 'low medium high ultra' -l 'mode' -d 'Amp thread mode'",
+				"complete -c amux -n 'test (__fish_amux_root_command) = spawn' -r -l 'message-file' -d 'Read initial message from file'",
+				"complete -c amux -f -n 'test (__fish_amux_root_command) = worker; and test -z (__fish_amux_worker_leaf)' -a 'restart'",
+				"complete -c amux -n 'test (__fish_amux_root_command) = worker; and test (__fish_amux_worker_leaf) = spawn' -r -l 'message-file'",
+				"complete -c amux -f -n 'test (__fish_amux_root_command) = completion' -a 'bash zsh fish'",
 			},
 		},
 	}

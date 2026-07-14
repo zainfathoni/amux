@@ -13,12 +13,21 @@ import (
 const OperationSchemaVersion = 1
 
 type OperationState string
+type OperationPhase string
 
 const (
 	OperationStarted       OperationState = "started"
 	OperationSucceeded     OperationState = "succeeded"
 	OperationFailed        OperationState = "failed"
 	OperationIndeterminate OperationState = "indeterminate"
+)
+
+const (
+	OperationPhaseCreatingThread  OperationPhase = "creating_thread"
+	OperationPhaseThreadBound     OperationPhase = "thread_bound"
+	OperationPhaseDeliveryStarted OperationPhase = "delivery_started"
+	OperationPhaseMessageVerified OperationPhase = "message_verified"
+	OperationPhaseConfigured      OperationPhase = "configured"
 )
 
 type OperationResource struct {
@@ -33,6 +42,7 @@ type OperationRecord struct {
 	Kind          string            `json:"kind"`
 	RequestHash   string            `json:"request_hash"`
 	State         OperationState    `json:"state"`
+	Phase         OperationPhase    `json:"phase,omitempty"`
 	Resource      OperationResource `json:"resource"`
 	Error         string            `json:"error,omitempty"`
 	CreatedAt     time.Time         `json:"created_at"`
@@ -118,6 +128,14 @@ func canonicalOperation(operation OperationRecord) (OperationRecord, error) {
 	case OperationStarted, OperationSucceeded, OperationFailed, OperationIndeterminate:
 	default:
 		return operation, fmt.Errorf("invalid operation state %q", operation.State)
+	}
+	switch operation.Phase {
+	case "", OperationPhaseCreatingThread, OperationPhaseThreadBound, OperationPhaseDeliveryStarted, OperationPhaseMessageVerified, OperationPhaseConfigured:
+	default:
+		return operation, fmt.Errorf("invalid operation phase %q", operation.Phase)
+	}
+	if operation.Phase != "" && operation.Kind != "worker-spawn" {
+		return operation, fmt.Errorf("operation phase %q is only valid for worker-spawn", operation.Phase)
 	}
 	switch operation.Resource.Kind {
 	case "worker":

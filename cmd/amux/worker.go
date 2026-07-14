@@ -54,7 +54,10 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 		in.Selectors.Workspace = identity.Workspace
 		in.Selectors.Window = identity.Window
 		in.Selectors.Thread = identity.Thread
-		in.Selectors.Workdir = filepath.Clean(config.ExpandHome(os.Getenv("AMUX_WORKDIR")))
+		in.Selectors.Workdir, err = config.CanonicalWorkdir(os.Getenv("AMUX_WORKDIR"))
+		if err != nil {
+			return &env, result.Preflight(fmt.Errorf("--current requires valid AMUX_WORKDIR: %w", err))
+		}
 	}
 	rows = selectWorkerRows(rows, in.Selectors)
 	if in.Command.Name == "list" {
@@ -75,19 +78,44 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 	}
 	if len(rows) == 0 {
 		if (in.Command.Name == "unpin" || in.Command.Name == "remove") && in.Selectors.Thread != "" {
-			if in.Command.Name == "remove" && !in.Options.DryRun {
-				if _, err := config.RemoveShelf(dir.ShelvesPath(), in.Selectors.Thread); err != nil {
+			resource, _ := result.WorkerResource(in.Selectors.Thread)
+			out := result.Outcome{Resource: resource, Action: in.Command.Name}
+			if in.Command.Name == "remove" && shelved[in.Selectors.Thread] {
+				if in.Options.DryRun {
+					env.Planned = append(env.Planned, out)
+					return &env, nil
+				}
+				changed, err := config.RemoveShelf(dir.ShelvesPath(), in.Selectors.Thread)
+				if err != nil {
 					return &env, result.Runtime(err)
 				}
+				if changed {
+					env.Successful = append(env.Successful, out)
+					return &env, nil
+				}
 			}
-			resource, _ := result.WorkerResource(in.Selectors.Thread)
-			out := result.Outcome{Resource: resource, Action: in.Command.Name, Message: "already in desired state"}
+			out.Message = "already in desired state"
 			env.Skipped = append(env.Skipped, out)
 			return &env, nil
 		}
 		return &env, result.Preflight(errors.New("no configured worker matches the selector"))
 	}
 	inspections := make(map[string]workerInspection, len(rows))
+	if in.Command.Name == "launch" || in.Command.Name == "restart" {
+		for _, row := range rows {
+			if in.Command.Name == "launch" && shelved[row.Thread] {
+				continue
+			}
+			workdir, canonicalErr := config.CanonicalWorkdir(row.Workdir)
+			if canonicalErr != nil {
+				return &env, result.Preflight(canonicalErr)
+			}
+			stat, statErr := os.Stat(workdir)
+			if statErr != nil || !stat.IsDir() {
+				return &env, result.Preflight(fmt.Errorf("missing workdir: %s", workdir))
+			}
+		}
+	}
 	if workerCommandNeedsTmux(in.Command.Name) {
 		for _, row := range rows {
 			if in.Command.Name == "launch" && shelved[row.Thread] {
@@ -108,6 +136,21 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 	}
 	for _, row := range rows {
 		out := workerOutcome(row, in.Command.Name, "")
+		if in.Command.Name == "launch" && shelved[row.Thread] {
+			out.Message = "worker is locally shelved"
+			env.Skipped = append(env.Skipped, out)
+			continue
+		}
+		if in.Command.Name == "launch" && inspections[row.Thread].state == workerPaneExact {
+			out.Message = "already running"
+			env.Skipped = append(env.Skipped, out)
+			continue
+		}
+		if (in.Command.Name == "park" && inspections[row.Thread].state == workerPaneAbsent) || (in.Command.Name == "unshelve" && !shelved[row.Thread]) {
+			out.Message = "already in desired state"
+			env.Skipped = append(env.Skipped, out)
+			continue
+		}
 		if in.Options.DryRun {
 			env.Planned = append(env.Planned, out)
 			continue
@@ -126,7 +169,10 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 				err = archiveAmpThread(row.Thread)
 			}
 			if err == nil && inspections[row.Thread].state == workerPaneExact {
-				err = tmux.Runner{}.KillWindow(inspections[row.Thread].pane.WindowID)
+				err = revalidateWorkerBeforeMutation(row, inspections[row.Thread])
+				if err == nil {
+					err = tmux.Runner{}.KillWindow(inspections[row.Thread].pane.WindowID)
+				}
 				changed = true
 			}
 		case "unshelve":
@@ -141,7 +187,10 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			}
 		case "remove":
 			if inspections[row.Thread].state == workerPaneExact {
-				err = tmux.Runner{}.KillWindow(inspections[row.Thread].pane.WindowID)
+				err = revalidateWorkerBeforeMutation(row, inspections[row.Thread])
+				if err == nil {
+					err = tmux.Runner{}.KillWindow(inspections[row.Thread].pane.WindowID)
+				}
 			}
 			if err == nil {
 				_, err = config.RemoveShelf(dir.ShelvesPath(), row.Thread)
@@ -151,29 +200,39 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			}
 		case "park":
 			if inspections[row.Thread].state == workerPaneExact {
-				err = tmux.Runner{}.KillWindow(inspections[row.Thread].pane.WindowID)
+				err = revalidateWorkerBeforeMutation(row, inspections[row.Thread])
+				if err == nil {
+					err = tmux.Runner{}.KillWindow(inspections[row.Thread].pane.WindowID)
+				}
 				changed = err == nil
 			}
 		case "restart":
 			if inspections[row.Thread].state == workerPaneExact {
-				err = tmux.Runner{}.KillWindow(inspections[row.Thread].pane.WindowID)
+				err = revalidateWorkerBeforeMutation(row, inspections[row.Thread])
+				if err == nil {
+					err = tmux.Runner{}.KillWindow(inspections[row.Thread].pane.WindowID)
+				}
 			}
 			if err == nil {
 				err = createWorkerPane(row)
 			}
+			if err == nil {
+				var after workerInspection
+				after, err = inspectWorker(row)
+				if err == nil && after.state != workerPaneExact {
+					err = fmt.Errorf("restarted worker tmux identity is %s", after.state)
+				}
+			}
 			changed = err == nil
 		case "launch":
-			if shelved[row.Thread] {
-				out.Message = "worker is locally shelved"
-				env.Skipped = append(env.Skipped, out)
-				continue
-			}
-			if inspections[row.Thread].state == workerPaneExact {
-				out.Message = "already running"
-				env.Skipped = append(env.Skipped, out)
-				continue
-			}
 			err = createWorkerPane(row)
+			if err == nil {
+				var after workerInspection
+				after, err = inspectWorker(row)
+				if err == nil && after.state != workerPaneExact {
+					err = fmt.Errorf("launched worker tmux identity is %s", after.state)
+				}
+			}
 			changed = err == nil
 		case "teardown":
 			err = archiveAmpThread(row.Thread)
@@ -181,7 +240,10 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 				_, err = config.RemoveShelf(dir.ShelvesPath(), row.Thread)
 			}
 			if err == nil {
-				err = tmux.Runner{}.KillWindow(inspections[row.Thread].pane.WindowID)
+				err = revalidateWorkerBeforeMutation(row, inspections[row.Thread])
+				if err == nil {
+					err = tmux.Runner{}.KillWindow(inspections[row.Thread].pane.WindowID)
+				}
 			}
 			if err == nil {
 				_, err = config.Remove(dir.WorkersPath(), row.Workspace, row.Window)
@@ -293,6 +355,18 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	if found && existing.State != config.OperationStarted {
 		return env, result.Preflight(fmt.Errorf("spawn operation is terminal in state %s; refusing new work", existing.State))
 	}
+	if in.Options.DryRun {
+		message := "would create worker"
+		resource := result.CommandResource()
+		if found {
+			message = fmt.Sprintf("would resume worker spawn from %s", existing.Phase)
+			if existing.Resource.Thread != "" {
+				resource, _ = result.WorkerResource(existing.Resource.Thread)
+			}
+		}
+		env.Planned = append(env.Planned, result.Outcome{Resource: resource, Action: "spawn", Message: message})
+		return env, nil
+	}
 	if found {
 		if existing.Resource.Thread == "" {
 			existing.State = config.OperationIndeterminate
@@ -300,9 +374,9 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 			existing.UpdatedAt = time.Now().UTC()
 			_, storeErr := config.StoreOperation(dir.OperationsPath(), existing)
 			if storeErr != nil {
-				return env, result.Preflight(storeErr)
+				return env, result.Runtime(storeErr)
 			}
-			return env, result.Preflight(errors.New(existing.Error))
+			return env, result.Runtime(errors.New(existing.Error))
 		}
 		rows, loadErr := config.LoadReadOnly(dir.WorkersPath())
 		if loadErr != nil {
@@ -310,14 +384,19 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		}
 		for _, row := range rows {
 			if row.Thread == existing.Resource.Thread && row.Workspace == workspace && row.Window == s.Window && row.Workdir == s.Workdir {
-				existing.State = config.OperationSucceeded
-				existing.UpdatedAt = time.Now().UTC()
-				_, storeErr := config.StoreOperation(dir.OperationsPath(), existing)
-				if storeErr != nil {
-					return env, result.Preflight(storeErr)
+				switch existing.Phase {
+				case "", config.OperationPhaseMessageVerified, config.OperationPhaseConfigured:
+					existing.Phase = config.OperationPhaseConfigured
+					existing.State = config.OperationSucceeded
+					existing.UpdatedAt = time.Now().UTC()
+					_, storeErr := config.StoreOperation(dir.OperationsPath(), existing)
+					if storeErr != nil {
+						return env, result.Runtime(storeErr)
+					}
+					env.Skipped = append(env.Skipped, workerOutcome(row, "spawn", "recovered completed spawn"))
+					return env, nil
 				}
-				env.Skipped = append(env.Skipped, workerOutcome(row, "spawn", "recovered completed spawn"))
-				return env, nil
+				continue
 			}
 			if row.Workspace == workspace && row.Window == s.Window {
 				return env, result.Preflight(fmt.Errorf("bound spawn cannot resume because worker window %s/%s is configured for thread %s", workspace, s.Window, row.Thread))
@@ -326,7 +405,12 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 				return env, result.Preflight(fmt.Errorf("bound spawn cannot resume because thread %s is configured as %s/%s", row.Thread, row.Workspace, row.Window))
 			}
 		}
-		return a.resumeBoundSpawn(in, dir, env, existing, workspace, s.Workdir, message, false)
+		if existing.Phase == "" {
+			// Old bound records without an exact configured row may have crossed
+			// the delivery boundary. Never resubmit when upgrading them.
+			existing.Phase = config.OperationPhaseDeliveryStarted
+		}
+		return a.resumeBoundSpawn(in, dir, env, existing, workspace, s.Workdir, message)
 	}
 	rows, err := config.LoadReadOnly(dir.WorkersPath())
 	if err != nil {
@@ -345,11 +429,7 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		return env, result.Preflight(fmt.Errorf("window %q already exists in tmux session %q", s.Window, workspace))
 	}
 	now := time.Now().UTC()
-	record := config.OperationRecord{Key: s.IdempotencyKey, Kind: "worker-spawn", RequestHash: hash, State: config.OperationStarted, Resource: config.OperationResource{Kind: "worker"}, CreatedAt: now, UpdatedAt: now}
-	if in.Options.DryRun {
-		env.Planned = append(env.Planned, result.Outcome{Resource: result.CommandResource(), Action: "spawn", Message: "would create worker"})
-		return env, nil
-	}
+	record := config.OperationRecord{Key: s.IdempotencyKey, Kind: "worker-spawn", RequestHash: hash, State: config.OperationStarted, Phase: config.OperationPhaseCreatingThread, Resource: config.OperationResource{Kind: "worker"}, CreatedAt: now, UpdatedAt: now}
 	if _, err := config.StoreOperation(dir.OperationsPath(), record); err != nil {
 		return env, result.Preflight(err)
 	}
@@ -361,7 +441,7 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	cmd.Dir = s.Workdir
 	output, err := cmd.Output()
 	if err != nil {
-		record.State = config.OperationFailed
+		record.State = config.OperationIndeterminate
 		record.Error = err.Error()
 		record.UpdatedAt = time.Now().UTC()
 		_, _ = config.StoreOperation(dir.OperationsPath(), record)
@@ -377,46 +457,68 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		return env, result.Runtime(errors.New(record.Error))
 	}
 	record.Resource.Thread = canonical
+	record.Phase = config.OperationPhaseThreadBound
 	record.UpdatedAt = time.Now().UTC()
 	if _, err := config.StoreOperation(dir.OperationsPath(), record); err != nil {
 		return env, result.Runtime(err)
 	}
-	return a.resumeBoundSpawn(in, dir, env, record, workspace, s.Workdir, message, true)
+	return a.resumeBoundSpawn(in, dir, env, record, workspace, s.Workdir, message)
 }
 
-func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.Envelope, record config.OperationRecord, workspace, workdir, message string, fresh bool) (*result.Envelope, error) {
+func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.Envelope, record config.OperationRecord, workspace, workdir, message string) (*result.Envelope, error) {
 	row := config.Row{Workspace: workspace, Window: in.Selectors.Window, Workdir: workdir, Thread: record.Resource.Thread}
-	inspection, err := inspectWorker(row)
-	if err == nil && inspection.state == workerPaneAbsent {
-		err = createWorkerPane(row)
-		if err == nil {
-			inspection, err = inspectWorker(row)
-		}
-	}
-	if err == nil && inspection.state != workerPaneExact {
-		err = fmt.Errorf("spawned worker tmux identity is %s", inspection.state)
-	}
-	if err == nil {
-		target := submissionTarget(tmux.Runner{}, inspection.pane.WindowID)
-		delivered := false
-		if !fresh {
-			delivered, err = verifyBoundThreadMessage(row.Thread, message)
-		}
-		if err == nil && !delivered {
-			_, err = submitInitialMessage(tmux.Runner{}, target, message)
+	var err error
+	if record.Phase == config.OperationPhaseThreadBound {
+		inspection, inspectErr := inspectWorker(row)
+		err = inspectErr
+		if err == nil && inspection.state == workerPaneAbsent {
+			err = createWorkerPane(row)
 			if err == nil {
-				delivered, err = verifyBoundThreadMessage(row.Thread, message)
+				inspection, err = inspectWorker(row)
 			}
 		}
+		if err == nil && inspection.state != workerPaneExact {
+			err = fmt.Errorf("spawned worker tmux identity is %s", inspection.state)
+		}
+		if err != nil {
+			record.Error = err.Error()
+			record.UpdatedAt = time.Now().UTC()
+			_, _ = config.StoreOperation(dir.OperationsPath(), record)
+			return env, result.Runtime(err)
+		}
+		deliveryRecord := record
+		deliveryRecord.Phase = config.OperationPhaseDeliveryStarted
+		deliveryRecord.Error = ""
+		deliveryRecord.UpdatedAt = time.Now().UTC()
+		if _, err = config.StoreOperation(dir.OperationsPath(), deliveryRecord); err == nil {
+			record = deliveryRecord
+			_, err = submitInitialMessage(tmux.Runner{}, submissionTarget(tmux.Runner{}, inspection.pane.WindowID), message)
+		}
+	}
+	if err == nil && record.Phase == config.OperationPhaseDeliveryStarted {
+		var delivered bool
+		delivered, err = verifyBoundThreadMessage(row.Thread, message)
 		if err == nil && !delivered {
 			err = errors.New("initial message delivery was not verified in the bound thread")
 		}
+		if err == nil {
+			record.Phase = config.OperationPhaseMessageVerified
+			record.UpdatedAt = time.Now().UTC()
+			_, err = config.StoreOperation(dir.OperationsPath(), record)
+		}
 	}
-	if err == nil {
+	if err == nil && record.Phase == config.OperationPhaseMessageVerified {
 		_, err = config.Store(dir.WorkersPath(), row)
+		if err == nil {
+			record.Phase = config.OperationPhaseConfigured
+			record.UpdatedAt = time.Now().UTC()
+			_, err = config.StoreOperation(dir.OperationsPath(), record)
+		}
 	}
 	if err != nil {
-		record.State = config.OperationIndeterminate
+		if record.Phase == config.OperationPhaseDeliveryStarted {
+			record.State = config.OperationIndeterminate
+		}
 		record.Error = err.Error()
 		record.UpdatedAt = time.Now().UTC()
 		_, _ = config.StoreOperation(dir.OperationsPath(), record)
@@ -454,7 +556,13 @@ func verifyBoundThreadMessage(thread, message string) (bool, error) {
 func selectWorkerRows(rows []config.Row, s selectors) []config.Row {
 	selected := make([]config.Row, 0, len(rows))
 	for _, r := range rows {
-		if s.Thread != "" && r.Thread != s.Thread || s.Workspace != "" && r.Workspace != s.Workspace || s.Window != "" && r.Window != s.Window || s.Workdir != "" && r.Workdir != s.Workdir {
+		workdirMatches := true
+		if s.Workdir != "" {
+			selectedWorkdir, selectedErr := config.CanonicalWorkdir(s.Workdir)
+			rowWorkdir, rowErr := config.CanonicalWorkdir(r.Workdir)
+			workdirMatches = selectedErr == nil && rowErr == nil && selectedWorkdir == rowWorkdir
+		}
+		if s.Thread != "" && r.Thread != s.Thread || s.Workspace != "" && r.Workspace != s.Workspace || s.Window != "" && r.Window != s.Window || !workdirMatches {
 			continue
 		}
 		selected = append(selected, r)
@@ -520,7 +628,11 @@ func workerCommandNeedsTmux(name string) bool {
 
 func inspectWorker(row config.Row) (workerInspection, error) {
 	runner := tmux.Runner{}
-	if !runner.HasSession(row.Workspace) {
+	exists, err := runner.SessionExists(row.Workspace)
+	if err != nil {
+		return workerInspection{}, fmt.Errorf("inspect tmux worker %s/%s: %w", row.Workspace, row.Window, err)
+	}
+	if !exists {
 		return workerInspection{state: workerPaneAbsent}, nil
 	}
 	panes, err := runner.WindowPanes(row.Workspace, row.Window)
@@ -541,10 +653,25 @@ func inspectWorker(row config.Row) (workerInspection, error) {
 	return workerInspection{state: workerPaneExact, pane: panes[0]}, nil
 }
 
+func revalidateWorkerBeforeMutation(row config.Row, before workerInspection) error {
+	after, err := inspectWorker(row)
+	if err != nil {
+		return err
+	}
+	if after.state != workerPaneExact || after.pane.WindowID != before.pane.WindowID {
+		return fmt.Errorf("worker %s/%s changed after preflight", row.Workspace, row.Window)
+	}
+	return nil
+}
+
 func createWorkerPane(row config.Row) error {
 	runner := tmux.Runner{}
 	command := teardownExpectedStartCommand(teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}, row)
-	if runner.HasSession(row.Workspace) {
+	exists, err := runner.SessionExists(row.Workspace)
+	if err != nil {
+		return err
+	}
+	if exists {
 		return runner.NewWindow(row.Workspace, row.Window, command)
 	}
 	return runner.NewSession(row.Workspace, row.Window, command)
@@ -559,12 +686,9 @@ func workerIdentityFromEnv() (teardownIdentity, error) {
 	if workdir == "" {
 		return identity, errors.New("AMUX_WORKDIR is required")
 	}
-	canonical, err := filepath.Abs(config.ExpandHome(workdir))
+	_, err = config.CanonicalWorkdir(workdir)
 	if err != nil {
 		return identity, err
-	}
-	if filepath.Clean(canonical) != filepath.Clean(config.ExpandHome(workdir)) {
-		return identity, errors.New("AMUX_WORKDIR must be canonical")
 	}
 	if identity.Workspace != identity.Session {
 		return identity, errors.New("AMUX_WORKSPACE must equal AMUX_SESSION")
