@@ -18,8 +18,10 @@ Use this when a thread is stuck loading, was created under the wrong Amp project
 2. Prepare and preflight the replacement before stopping or unpinning anything. Prefer `--message-file` for a structured replacement prompt; use `--message-stdin` when another command generates the prompt. Keep positional `<initial-message>` as a short single-line fallback only. Validate the exact command with `--dry-run` first:
 
    ```sh
-   amux --dry-run spawn [--title-prefix '<prefix>'] --message-file <replacement-prompt.md> <candidate-window> <workdir> <workspace> [session]
+   amux --dry-run spawn --mode medium [--title-prefix '<prefix>'] --message-file <replacement-prompt.md> <candidate-window> <workdir> <workspace> [session]
    ```
+
+   These replacement examples use the mandatory skill default, `--mode medium`. Substitute another mode only when the user explicitly requested it; never infer a higher mode because replacement work looks complex, urgent, large, or long-running.
 
    Keep the replacement prompt's first sentence title-neutral and task-specific. Avoid starting with "This is a replacement worker..." because Amp may auto-title the new thread from that phrase. Put replacement context after the task sentence. Example prompt file:
 
@@ -34,13 +36,13 @@ Use this when a thread is stuck loading, was created under the wrong Amp project
    If a prompt file is not practical, use the positional fallback with one single-line prompt:
 
    ```sh
-   amux --dry-run spawn [--title-prefix '<prefix>'] <candidate-window> <workdir> "<single-line replacement prompt>" <workspace> [session]
+   amux --dry-run spawn --mode medium [--title-prefix '<prefix>'] <candidate-window> <workdir> "<single-line replacement prompt>" <workspace> [session]
    ```
 
 3. Prefer a temporary-name replacement so the old live window stays available until the replacement is verified:
 
    ```sh
-   amux spawn [--title-prefix '<prefix>'] --message-file <replacement-prompt.md> <window>-replacement <workdir> <workspace> [session]
+   amux spawn --mode medium [--title-prefix '<prefix>'] --message-file <replacement-prompt.md> <window>-replacement <workdir> <workspace> [session]
    amux list <workspace>
    tmux list-panes -a -F '#{session_name}\t#{window_id}\t#{window_name}\t#{pane_current_path}\t#{pane_pid}\t#{pane_start_command}' | rg '<new-thread-id>|<window>-replacement|<workdir>'
    amp threads export <new-thread-id> | head -80
@@ -61,7 +63,7 @@ Use this when a thread is stuck loading, was created under the wrong Amp project
    amux list <workspace>
    ```
 
-4. Use the same-name path only when a temporary window cannot work. Never combine kill and spawn in one shell command; do not run `tmux kill-window ... && amux spawn ...`. Checkpoint after each mutation so an interruption leaves a reportable state:
+4. Use the same-name path only when a temporary window cannot work. Never combine kill and spawn in one shell command; do not run `tmux kill-window ... && amux spawn --mode medium ...`. Checkpoint after each mutation so an interruption leaves a reportable state:
 
    a. Preflight the exact same-name spawn command before killing anything. If the old tmux window still exists, `--dry-run` may stop at the expected existing-window conflict; treat that only as confirmation that prompt/workdir/argument validation reached the tmux-conflict check. Do not continue on `initial-message`, workdir, workspace/session, or option validation errors.
 
@@ -77,14 +79,14 @@ Use this when a thread is stuck loading, was created under the wrong Amp project
       tmux kill-window -t '<session>:<window>'
       ```
 
-   d. Re-check that the old row is gone and the old live window is gone. Then run the exact same-name `amux --dry-run spawn ...` again and require it to pass before spawning the replacement into the same workspace/session/workdir. If workspace and tmux session have the same name, omit the final session argument. Run `amux spawn` from any directory only if the installed `amux` is new enough to create the Amp thread in the target workdir; otherwise run it from `<workdir>` so Amp groups the thread under the correct project:
+   d. Re-check that the old row is gone and the old live window is gone. Then run the exact same-name `amux --dry-run spawn --mode medium ...` again and require it to pass before spawning the replacement into the same workspace/session/workdir. If workspace and tmux session have the same name, omit the final session argument. Run `amux spawn` from any directory only if the installed `amux` is new enough to create the Amp thread in the target workdir; otherwise run it from `<workdir>` so Amp groups the thread under the correct project:
 
       ```sh
       amux version
       amux list <workspace>
       tmux list-windows -t <session>
-      amux --dry-run spawn [--title-prefix '<prefix>'] --message-file <replacement-prompt.md> <window> <workdir> <workspace> [session]
-      amux spawn [--title-prefix '<prefix>'] --message-file <replacement-prompt.md> <window> <workdir> <workspace> [session]
+      amux --dry-run spawn --mode medium [--title-prefix '<prefix>'] --message-file <replacement-prompt.md> <window> <workdir> <workspace> [session]
+      amux spawn --mode medium [--title-prefix '<prefix>'] --message-file <replacement-prompt.md> <window> <workdir> <workspace> [session]
       ```
 
    e. Verify the replacement row and live pane:
