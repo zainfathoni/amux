@@ -22,6 +22,7 @@ var (
 	runnerStartupTimeout = 750 * time.Millisecond
 	runnerPollInterval   = 50 * time.Millisecond
 	runnerProcessAlive   = processAlive
+	runnerCacheDir       = os.UserCacheDir
 )
 
 type runnerPaneState string
@@ -326,8 +327,8 @@ func requireLockedWorktree(workdir string) error {
 	if err != nil {
 		return fmt.Errorf("runner workdir %s is not a Git worktree", workdir)
 	}
-	topdir, err := config.CanonicalWorkdir(strings.TrimSpace(string(top)))
-	if err != nil || topdir != workdir {
+	topInfo, topErr := os.Stat(strings.TrimSpace(string(top)))
+	if topErr != nil || !os.SameFile(stat, topInfo) {
 		return fmt.Errorf("runner workdir %s must be the Git worktree root", workdir)
 	}
 	out, err := exec.Command("git", "-C", workdir, "worktree", "list", "--porcelain").Output()
@@ -339,8 +340,8 @@ func requireLockedWorktree(workdir string) error {
 		if len(lines) == 0 || !strings.HasPrefix(lines[0], "worktree ") {
 			continue
 		}
-		candidate, canonicalErr := config.CanonicalWorkdir(strings.TrimPrefix(lines[0], "worktree "))
-		if canonicalErr != nil || candidate != workdir {
+		candidateInfo, candidateErr := os.Stat(strings.TrimPrefix(lines[0], "worktree "))
+		if candidateErr != nil || !os.SameFile(stat, candidateInfo) {
 			continue
 		}
 		for _, line := range lines[1:] {
@@ -470,7 +471,7 @@ func boundedDiagnostic(value string, limit int) string {
 }
 
 func staleAmpPIDDiagnostic(workdir string) string {
-	cache, err := os.UserCacheDir()
+	cache, err := runnerCacheDir()
 	if err != nil {
 		return ""
 	}

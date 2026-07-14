@@ -170,6 +170,9 @@ func TestRunnerLaunchEarlyExitReportsBoundedPaneAndStalePIDDiagnostics(t *testin
 	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
 	cache := t.TempDir()
 	pids := filepath.Join(cache, "amp", "pids")
+	oldCacheDir := runnerCacheDir
+	runnerCacheDir = func() (string, error) { return cache, nil }
+	t.Cleanup(func() { runnerCacheDir = oldCacheDir })
 	if err := os.MkdirAll(pids, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +224,9 @@ esac
 func TestStaleAmpPIDDiagnosticReportsLiveAmbiguousOwnershipWithoutDeletion(t *testing.T) {
 	workdir := filepath.Join(t.TempDir(), "project")
 	cache := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", cache)
+	oldCacheDir := runnerCacheDir
+	runnerCacheDir = func() (string, error) { return cache, nil }
+	t.Cleanup(func() { runnerCacheDir = oldCacheDir })
 	sum := sha256.Sum256([]byte(workdir))
 	marker := filepath.Join(cache, "amp", "pids", fmt.Sprintf("runner-%x.pid", sum[:8]))
 	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
@@ -400,7 +405,9 @@ func TestRunnerParkRemoveReconcileAndDryRunConverge(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "gone")
 	writeRunnerRegistry(t, dir, "alpha\t"+missing+"\n")
 	cache := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", cache)
+	oldCacheDir := runnerCacheDir
+	runnerCacheDir = func() (string, error) { return cache, nil }
+	t.Cleanup(func() { runnerCacheDir = oldCacheDir })
 	sum := sha256.Sum256([]byte(missing))
 	marker := filepath.Join(cache, "amp", "pids", fmt.Sprintf("runner-%x.pid", sum[:8]))
 	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
