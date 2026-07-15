@@ -53,6 +53,23 @@ func (a app) executeGroup(in invocation, dir config.Directory) (*result.Envelope
 				fmt.Fprintf(a.stdout, "%s\t%s\t%s\n", membership.Group, membership.Thread, membership.Role)
 			}
 		}
+		if in.Command.Name == "show" {
+			pending, err := config.LoadPendingReports(dir.ReportsPath())
+			if err != nil {
+				return &env, result.Preflight(err)
+			}
+			for _, report := range pending {
+				if report.GroupID != in.Selectors.Group {
+					continue
+				}
+				out := reportOutcome(report, "pending")
+				out.Report.Pending = true
+				env.Successful = append(env.Successful, out)
+				if !in.Options.JSON {
+					fmt.Fprintf(a.stdout, "REPORT\t%s\t%s\t%s\t%s\n", report.ReportID, report.MemberThread, report.Status, report.Summary)
+				}
+			}
+		}
 		return &env, nil
 	case "remove":
 		return a.removeGroupMembership(in, dir, memberships, &env)

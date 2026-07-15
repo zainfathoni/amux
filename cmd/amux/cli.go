@@ -40,6 +40,12 @@ type selectors struct {
 	All            bool
 	Shelf          string
 	IdempotencyKey string
+	ReportID       string
+	Status         string
+	Issue          string
+	Reference      string
+	PRURL          string
+	Summary        string
 	Message        string
 	MessageFile    string
 	MessageStdin   bool
@@ -82,6 +88,7 @@ var rootCommand = &commandSpec{
 		runnerCommand(),
 		workspaceCommand(),
 		groupCommand(),
+		reportCommand(),
 		installCommand(),
 		lifecycleCommand("workspaces", "Exact alias for workspace list", false, "--mode, -m <worker|runner>"),
 		lifecycleCommand("spawn", "Spawn an interactive worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>"),
@@ -202,6 +209,22 @@ func groupCommand() *commandSpec {
 
 func groupLeaf(name, summary string, mutating bool, flags ...string) *commandSpec {
 	return &commandSpec{Name: name, Summary: summary, Usage: "amux group " + name + " [selectors]", Flags: flags, NeedsConfig: true, Mutating: mutating}
+}
+
+func reportCommand() *commandSpec {
+	report := &commandSpec{Name: "report", Summary: "Manage durable worker reports and finish authorization", Usage: "amux report <command>"}
+	report.Children = []*commandSpec{
+		reportLeaf("submit", "Submit or progress a durable worker report", true, "--report-id <id>", "--group <id>", "--thread, -t <id>", "--status <ready|blocked|merged>", "--issue <value>", "--reference <value>", "--pr <url>", "--summary <text>"),
+		reportLeaf("pending", "List unacknowledged reports locally", false, "--group <id>", "--thread, -t <id>", "--all"),
+		reportLeaf("history", "Show durable history for one report", false, "--report-id <id>"),
+		reportLeaf("acknowledge", "Acknowledge a report without authorizing finish", true, "--report-id <id>"),
+		reportLeaf("authorize-finish", "Explicitly authorize finish for a ready report", true, "--report-id <id>", "--thread, -t <coordinator-id>", "--reference <value>"),
+	}
+	return report
+}
+
+func reportLeaf(name, summary string, mutating bool, flags ...string) *commandSpec {
+	return &commandSpec{Name: name, Summary: summary, Usage: "amux report " + name + " [selectors]", Flags: flags, NeedsConfig: true, Mutating: mutating}
 }
 
 func installCommand() *commandSpec {
@@ -628,6 +651,23 @@ func parseSelectors(args []string) (selectors, []string, error) {
 			if err := setSelector(&parsed.IdempotencyKey, value, "--idempotency-key"); err != nil {
 				return parsed, nil, err
 			}
+		case "--report-id", "--status", "--issue", "--reference", "--pr", "--summary":
+			value, next, err := selectorValue(args, i, name, inline, hasInline)
+			if err != nil {
+				return parsed, nil, err
+			}
+			i = next
+			target := map[string]*string{
+				"--report-id": &parsed.ReportID,
+				"--status":    &parsed.Status,
+				"--issue":     &parsed.Issue,
+				"--reference": &parsed.Reference,
+				"--pr":        &parsed.PRURL,
+				"--summary":   &parsed.Summary,
+			}[name]
+			if err := setSelector(target, value, name); err != nil {
+				return parsed, nil, err
+			}
 		case "--message", "--message-file":
 			value, next, err := selectorValue(args, i, name, inline, hasInline)
 			if err != nil {
@@ -708,6 +748,12 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 		{"--title-prefix", parsed.TitlePrefix},
 		{"--shelf", parsed.Shelf},
 		{"--idempotency-key", parsed.IdempotencyKey},
+		{"--report-id", parsed.ReportID},
+		{"--status", parsed.Status},
+		{"--issue", parsed.Issue},
+		{"--reference", parsed.Reference},
+		{"--pr", parsed.PRURL},
+		{"--summary", parsed.Summary},
 		{"--message", parsed.Message},
 		{"--message-file", parsed.MessageFile},
 	}
@@ -805,11 +851,15 @@ func (c *commandSpec) UsageName() string {
 }
 
 func hasResourceScope(parsed selectors) bool {
-	return parsed.All || parsed.Current || parsed.Workspace != "" || parsed.Window != "" || parsed.Workdir != "" || parsed.Thread != "" || parsed.Group != ""
+	return parsed.All || parsed.Current || parsed.Workspace != "" || parsed.Window != "" || parsed.Workdir != "" || parsed.Thread != "" || parsed.Group != "" || parsed.ReportID != ""
 }
 
 func isGroupPath(path []string) bool {
 	return len(path) == 2 && path[0] == "group"
+}
+
+func isReportPath(path []string) bool {
+	return len(path) == 2 && path[0] == "report"
 }
 
 func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
@@ -857,7 +907,7 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 		return a.executeMaintenance(parsed, dir)
 	}
 
-	if !parsed.Command.FoundationOnly && !isAggregateLifecycle(parsed.Path) && !isWorkspaceList(parsed.Path) && !isGroupPath(parsed.Path) && (len(parsed.Path) != 2 || parsed.Path[0] != "worker" && parsed.Path[0] != "runner") && !isWorkerConvenience(parsed.Path) {
+	if !parsed.Command.FoundationOnly && !isAggregateLifecycle(parsed.Path) && !isWorkspaceList(parsed.Path) && !isGroupPath(parsed.Path) && !isReportPath(parsed.Path) && (len(parsed.Path) != 2 || parsed.Path[0] != "worker" && parsed.Path[0] != "runner") && !isWorkerConvenience(parsed.Path) {
 		return nil, result.Preflight(fmt.Errorf("%s is reserved for its lifecycle implementation phase and is not available in the CLI foundations", strings.Join(parsed.Path, " ")))
 	}
 
@@ -871,6 +921,9 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 	}
 	if isGroupPath(parsed.Path) {
 		return a.executeGroup(parsed, dir)
+	}
+	if isReportPath(parsed.Path) {
+		return a.executeReport(parsed, dir)
 	}
 
 	switch parsed.Command.Name {

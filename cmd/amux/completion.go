@@ -48,6 +48,13 @@ var completionCommands = []completionCommand{
 		{Name: "show", Description: "Show one durable group", Flags: []string{"--group"}},
 		{Name: "reconcile", Description: "Add-only ensure group labels", Flags: []string{"--group", "--thread", "--all", "-t"}},
 	}},
+	{Name: "report", Description: "Manage durable worker reports and finish authorization", Subcommands: []completionCommand{
+		{Name: "submit", Description: "Submit or progress a durable report", Flags: []string{"--report-id", "--group", "--thread", "--status", "--issue", "--reference", "--pr", "--summary", "-t"}},
+		{Name: "pending", Description: "List unacknowledged reports", Flags: []string{"--group", "--thread", "--all", "-t"}},
+		{Name: "history", Description: "Show report history", Flags: []string{"--report-id"}},
+		{Name: "acknowledge", Description: "Acknowledge a report", Flags: []string{"--report-id"}},
+		{Name: "authorize-finish", Description: "Authorize finish for a ready report", Flags: []string{"--report-id", "--thread", "--reference", "-t"}},
+	}},
 	{Name: "install", Description: "Inspect the amux client installation", Subcommands: []completionCommand{
 		{Name: "doctor", Description: "Diagnose executable targets, versions, and PATH drift"},
 	}},
@@ -89,7 +96,7 @@ _amux_complete() {
     word="${COMP_WORDS[i]}"
     if [[ "$word" == --config-dir || "$word" == -c ]]; then ((i++)); continue; fi
     if [[ "$word" == --config-dir=* || "$word" == -c=* || "$word" == --json || "$word" == -j || "$word" == --dry-run || "$word" == -n ]]; then continue; fi
-    if [[ -z "$command" ]]; then command="$word"; elif [[ ( "$command" == worker || "$command" == group || "$command" == install ) && -z "$leaf" ]]; then leaf="$word"; fi
+    if [[ -z "$command" ]]; then command="$word"; elif [[ ( "$command" == worker || "$command" == group || "$command" == report || "$command" == install ) && -z "$leaf" ]]; then leaf="$word"; fi
   done
   if [[ -z "$command" ]]; then
     COMPREPLY=( $(compgen -W "%s %s" -- "$cur") )
@@ -120,6 +127,18 @@ _amux_complete() {
           show) COMPREPLY=( $(compgen -W "--group" -- "$cur") ) ;;
           list|reconcile) COMPREPLY=( $(compgen -W "--group --thread --all -t" -- "$cur") ) ;;
           *) COMPREPLY=( $(compgen -W "--group --thread -t" -- "$cur") ) ;;
+        esac
+      fi
+      ;;
+    report)
+      if [[ -z "$leaf" ]]; then
+        COMPREPLY=( $(compgen -W "submit pending history acknowledge authorize-finish" -- "$cur") )
+      else
+        case "$leaf" in
+          submit) COMPREPLY=( $(compgen -W "--report-id --group --thread --status --issue --reference --pr --summary -t" -- "$cur") ) ;;
+          pending) COMPREPLY=( $(compgen -W "--group --thread --all -t" -- "$cur") ) ;;
+          authorize-finish) COMPREPLY=( $(compgen -W "--report-id --thread --reference -t" -- "$cur") ) ;;
+          *) COMPREPLY=( $(compgen -W "--report-id" -- "$cur") ) ;;
         esac
       fi
       ;;
@@ -160,6 +179,13 @@ func writeZshCompletion(w io.Writer) {
 	}
 	fmt.Fprintln(w, ")")
 	fmt.Fprintln(w)
+	fmt.Fprintln(w, "local -a report_commands")
+	fmt.Fprintln(w, "report_commands=(")
+	for _, command := range reportCompletionCommands() {
+		fmt.Fprintf(w, "  %q\n", command.Name+":"+command.Description)
+	}
+	fmt.Fprintln(w, ")")
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, `local command leaf i word
 i=2
 while (( i <= CURRENT )); do
@@ -167,7 +193,7 @@ while (( i <= CURRENT )); do
   case $word in
     --config-dir|-c) (( i += 2 )); continue ;;
     --config-dir=*|-c=*|--json|-j|--dry-run|-n) (( i++ )); continue ;;
-    *) command=$word; (( i++ )); if [[ $command == worker || $command == group || $command == install ]]; then leaf=$words[$i]; fi; break ;;
+    *) command=$word; (( i++ )); if [[ $command == worker || $command == group || $command == report || $command == install ]]; then leaf=$words[$i]; fi; break ;;
   esac
 done`)
 	fmt.Fprintln(w)
@@ -216,6 +242,18 @@ case $state in
             show) _arguments '--group[group id]:group:' ;;
             list|reconcile) _arguments '--group[group id]:group:' '--thread[thread id or URL]:thread:' '--all[all memberships]' '-t[thread id or URL]:thread:' ;;
             *) _arguments '--group[group id]:group:' '--thread[thread id or URL]:thread:' '-t[thread id or URL]:thread:' ;;
+          esac
+        fi
+        ;;
+      report)
+        if [[ -z $leaf ]]; then
+          _describe -t report-commands 'report command' report_commands
+        else
+          case $leaf in
+            submit) _arguments '--report-id[stable report id]:id:' '--group[group id]:group:' '--thread[member thread]:thread:' '--status[report status]:status:(ready blocked merged)' '--issue[issue]:issue:' '--reference[reference]:reference:' '--pr[pull request URL]:url:' '--summary[summary]:summary:' '-t[member thread]:thread:' ;;
+            pending) _arguments '--group[group id]:group:' '--thread[member thread]:thread:' '--all[all reports]' '-t[member thread]:thread:' ;;
+            authorize-finish) _arguments '--report-id[stable report id]:id:' '--thread[coordinator thread]:thread:' '--reference[authorization reference]:reference:' '-t[coordinator thread]:thread:' ;;
+            *) _arguments '--report-id[stable report id]:id:' ;;
           esac
         fi
         ;;
@@ -299,6 +337,14 @@ function __fish_amux_group_leaf
         echo $words[(math $index + 1)]
     end
 end`)
+	fmt.Fprintln(w, `
+function __fish_amux_report_leaf
+    set -l words (commandline -opc)
+    set -l index (contains -i -- report $words)
+    if test -n "$index"; and test (math $index + 1) -le (count $words)
+        echo $words[(math $index + 1)]
+    end
+end`)
 	for _, flag := range globalCompletionFlags {
 		writeFishFlag(w, "__fish_use_subcommand", flag, flagDescription(flag), flagTakesValue(flag))
 	}
@@ -326,6 +372,15 @@ end`)
 			for _, subcommand := range command.Subcommands {
 				fmt.Fprintf(w, "complete -c amux -f -n 'test (__fish_amux_root_command) = group; and test -z (__fish_amux_group_leaf)' -a %s -d %s\n", fishQuote(subcommand.Name), fishQuote(subcommand.Description))
 				condition := fmt.Sprintf("test (__fish_amux_root_command) = group; and test (__fish_amux_group_leaf) = %s", subcommand.Name)
+				for _, flag := range subcommand.Flags {
+					writeFishFlag(w, condition, flag, flagDescription(flag), flagTakesValue(flag))
+				}
+			}
+		}
+		if command.Name == "report" {
+			for _, subcommand := range command.Subcommands {
+				fmt.Fprintf(w, "complete -c amux -f -n 'test (__fish_amux_root_command) = report; and test -z (__fish_amux_report_leaf)' -a %s -d %s\n", fishQuote(subcommand.Name), fishQuote(subcommand.Description))
+				condition := fmt.Sprintf("test (__fish_amux_root_command) = report; and test (__fish_amux_report_leaf) = %s", subcommand.Name)
 				for _, flag := range subcommand.Flags {
 					writeFishFlag(w, condition, flag, flagDescription(flag), flagTakesValue(flag))
 				}
@@ -398,6 +453,15 @@ func groupCompletionCommands() []completionCommand {
 	return nil
 }
 
+func reportCompletionCommands() []completionCommand {
+	for _, command := range completionCommands {
+		if command.Name == "report" {
+			return command.Subcommands
+		}
+	}
+	return nil
+}
+
 func flagDescription(flag string) string {
 	switch flag {
 	case "--config-dir":
@@ -419,7 +483,17 @@ func flagDescription(flag string) string {
 	case "--terminal-launcher":
 		return "Terminal launcher command"
 	case "--status":
-		return "Append thread status"
+		return "Report status"
+	case "--report-id":
+		return "Stable report ID"
+	case "--issue":
+		return "Issue identifier"
+	case "--reference":
+		return "Durable reference"
+	case "--pr":
+		return "Pull request URL"
+	case "--summary":
+		return "Bounded report summary"
 	case "--active":
 		return "Only confirmed active rows"
 	case "--shelved":
@@ -463,7 +537,7 @@ func flagDescription(flag string) string {
 
 func flagTakesValue(flag string) bool {
 	switch flag {
-	case "--config-dir", "-c", "--thread", "-t", "--group", "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--shelf", "--mode", "-m", "--title-prefix", "--message", "--message-file", "--idempotency-key":
+	case "--config-dir", "-c", "--thread", "-t", "--group", "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--shelf", "--mode", "-m", "--title-prefix", "--message", "--message-file", "--idempotency-key", "--report-id", "--status", "--issue", "--reference", "--pr", "--summary":
 		return true
 	default:
 		return false
