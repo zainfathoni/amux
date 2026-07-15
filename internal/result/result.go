@@ -28,6 +28,7 @@ const (
 type ResourceID struct {
 	Kind      string `json:"kind"`
 	Thread    string `json:"thread,omitempty"`
+	Group     string `json:"group,omitempty"`
 	Workdir   string `json:"workdir,omitempty"`
 	Workspace string `json:"workspace,omitempty"`
 	Path      string `json:"path,omitempty"`
@@ -51,6 +52,17 @@ func RunnerResource(value string) (ResourceID, error) {
 
 func WorkspaceResource(name string) ResourceID {
 	return ResourceID{Kind: "workspace", Workspace: name}
+}
+
+func GroupMembershipResource(group, thread string) (ResourceID, error) {
+	if err := config.ValidateGroupID(group); err != nil {
+		return ResourceID{}, err
+	}
+	canonical, err := config.CanonicalThreadID(thread)
+	if err != nil {
+		return ResourceID{}, err
+	}
+	return ResourceID{Kind: "group_membership", Group: group, Thread: canonical}, nil
 }
 
 func ConfigResource(path string) ResourceID {
@@ -113,6 +125,12 @@ type RunnerDetails struct {
 	ProcessAgeSeconds int64  `json:"process_age_seconds,omitempty"`
 }
 
+type GroupDetails struct {
+	Role         string `json:"role,omitempty"`
+	ExternalSync string `json:"external_sync,omitempty"`
+	Drift        string `json:"drift,omitempty"`
+}
+
 type Outcome struct {
 	Resource    ResourceID          `json:"resource"`
 	Action      string              `json:"action"`
@@ -120,6 +138,7 @@ type Outcome struct {
 	Executable  *ExecutableDetails  `json:"executable,omitempty"`
 	Maintenance *MaintenanceDetails `json:"maintenance,omitempty"`
 	Runner      *RunnerDetails      `json:"runner,omitempty"`
+	Group       *GroupDetails       `json:"group,omitempty"`
 	Error       *Failure            `json:"error,omitempty"`
 }
 
