@@ -126,6 +126,7 @@ type RunnerDetails struct {
 }
 
 type GroupDetails struct {
+	ID           string `json:"id,omitempty"`
 	Role         string `json:"role,omitempty"`
 	ExternalSync string `json:"external_sync,omitempty"`
 	Drift        string `json:"drift,omitempty"`

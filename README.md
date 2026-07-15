@@ -136,7 +136,7 @@ Removed aliases and positional forms fail with remediation. In particular, do no
 `spawn`, `shelve`, `unshelve`, and `teardown` are worker-only and have concise top-level routes.
 
 ```sh
-amux --dry-run spawn --workspace amux --window install-diagnostics --workdir ~/Code/amux-issue-110 --mode medium --title-prefix '#110' --message-file /tmp/issue-110.md --idempotency-key issue-110
+amux --dry-run spawn --workspace amux --window install-diagnostics --workdir ~/Code/amux-issue-110 --mode medium --title-prefix '#110' --group issue-110 --message-file /tmp/issue-110.md --idempotency-key issue-110
 ```
 
 An exact `#<issue>` title prefix owns issue identity. The window must be an issue-unprefixed semantic slug; obvious duplicates such as `issue-110-install-diagnostics` are rejected before side effects. `--message`, `--message-file`, and `--message-stdin` are mutually exclusive. Spawn requires a stable idempotency key; if interrupted external creation cannot be recovered, the operation becomes indeterminate and is never blindly retried.
@@ -172,6 +172,8 @@ amux group remove --group issue-131 --thread T-worker
 ```
 
 Group IDs map byte-for-byte to Amp labels and must match `^[a-z0-9]+(?:-[a-z0-9]+)*$`; amux never normalizes or infers them from titles, branches, issue numbers, or existing labels. Local `groups.tsv` intent is authoritative and survives worker/tmux/worktree lifecycle changes. `group list` and `group show` are deterministic local-only reads.
+
+Worker spawn accepts repeatable `--group <id>`. amux validates and deterministically sorts/deduplicates the complete set before creation, binds memberships only to the final authoritative receiving thread, persists all local intent before add-only label synchronization, and resumes a partial grouping failure with the same idempotency key without recreating or resubmitting the worker.
 
 External synchronization is deliberately add-only. Declare, add, coordinator changes, and reconcile use Amp's additive label command only after a version and exact semantic-help capability check. Additive failures retain local intent as visible drift. Local removal cannot remove the Amp label, succeeds with a warning that the external label may remain indefinitely, and never claims exact synchronization. Use `--dry-run` to preflight and inspect any group mutation.
 

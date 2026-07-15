@@ -139,7 +139,7 @@ func digest(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(
 
 func (a app) executeMaintenance(in invocation, dir config.Directory) (*result.Envelope, error) {
 	env := result.NewEnvelope(strings.Join(in.Path, " "), in.Options.DryRun)
-	if len(in.Args) != 0 || in.Selectors != (selectors{}) {
+	if len(in.Args) != 0 || !selectorsEmpty(in.Selectors) {
 		return &env, result.Request(errors.New("maintenance command does not accept selectors or arguments"))
 	}
 	if maintenanceGOOS != "linux" && maintenanceGOOS != "darwin" {
