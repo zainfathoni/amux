@@ -161,6 +161,18 @@ type ReportDetails struct {
 	Pending           bool   `json:"pending,omitempty"`
 }
 
+type CallbackDetails struct {
+	Generation   int    `json:"generation,omitempty"`
+	ConfigDir    string `json:"config_dir,omitempty"`
+	PaneID       string `json:"pane_id,omitempty"`
+	Session      string `json:"session,omitempty"`
+	Window       string `json:"window,omitempty"`
+	WindowID     string `json:"window_id,omitempty"`
+	PID          int    `json:"pid,omitempty"`
+	RegisteredAt string `json:"registered_at,omitempty"`
+	Notified     bool   `json:"notified,omitempty"`
+}
+
 type Outcome struct {
 	Resource    ResourceID          `json:"resource"`
 	Action      string              `json:"action"`
@@ -170,6 +182,7 @@ type Outcome struct {
 	Runner      *RunnerDetails      `json:"runner,omitempty"`
 	Group       *GroupDetails       `json:"group,omitempty"`
 	Report      *ReportDetails      `json:"report,omitempty"`
+	Callback    *CallbackDetails    `json:"callback,omitempty"`
 	Error       *Failure            `json:"error,omitempty"`
 }
 

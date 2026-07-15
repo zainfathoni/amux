@@ -10,7 +10,10 @@ import (
 	"github.com/zainfathoni/amux/internal/result"
 )
 
-var reportNow = func() time.Time { return time.Now().UTC() }
+var (
+	reportNow            = func() time.Time { return time.Now().UTC() }
+	reportNotifyCallback = notifyReportCallback
+)
 
 func (a app) executeReport(in invocation, dir config.Directory) (*result.Envelope, error) {
 	env := result.NewEnvelope(strings.Join(in.Path, " "), in.Options.DryRun)
@@ -114,6 +117,29 @@ func (a app) submitReport(in invocation, dir config.Directory, env *result.Envel
 	}
 	if !in.Options.JSON {
 		fmt.Fprintf(a.stdout, "%s\t%s\t%s\t%s\n", record.ReportID, record.Status, outcomeLabel(outcome, in.Options.DryRun), record.MemberThread)
+	}
+	if in.Options.DryRun {
+		callback := result.Outcome{Resource: result.ResourceID{Kind: "callback", Group: record.GroupID, Path: record.ReportID}, Action: "notify", Message: "wake-up notification would be attempted only after durable report persistence", Callback: &result.CallbackDetails{ConfigDir: dir.Path}}
+		env.Planned = append(env.Planned, callback)
+		if !in.Options.JSON {
+			fmt.Fprintf(a.stdout, "CALLBACK\t%s\t%s\tplanned\n", record.GroupID, record.ReportID)
+		}
+		return env, nil
+	}
+	callback, notifyErr := reportNotifyCallback(dir, record.GroupID, record.ReportID)
+	if notifyErr != nil {
+		callback.Action = "notify"
+		callback.Message = "durable report persisted; callback failed separately and report remains pending"
+		callback.Error = &result.Failure{Kind: result.ErrorRuntime, Message: notifyErr.Error()}
+		env.Failed = append(env.Failed, callback)
+		if !in.Options.JSON {
+			fmt.Fprintf(a.stdout, "CALLBACK\t%s\t%s\tfailed\n", record.GroupID, record.ReportID)
+		}
+		return env, result.Runtime(notifyErr)
+	}
+	env.Successful = append(env.Successful, callback)
+	if !in.Options.JSON {
+		fmt.Fprintf(a.stdout, "CALLBACK\t%s\t%s\tnotified\n", record.GroupID, record.ReportID)
 	}
 	return env, nil
 }

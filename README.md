@@ -179,7 +179,7 @@ External synchronization is deliberately add-only. Declare, add, coordinator cha
 
 ### Durable worker reports and finish authorization
 
-Reports are persisted locally before any future callback notification. A stable report ID can progress between `ready` and `blocked`; `merged` is terminal and is accepted only after the group coordinator records a separate durable finish authorization. Acknowledgement never implies authorization, and neither `ready`, `blocked`, nor deadline expiry authorizes cleanup.
+Reports are persisted locally before callback notification. A stable report ID can progress between `ready` and `blocked`; `merged` is terminal and is accepted only after the group coordinator records a separate durable finish authorization. Acknowledgement never implies authorization, and neither `ready`, `blocked`, callback success, nor deadline expiry authorizes cleanup.
 
 ```sh
 amux report submit --report-id issue-133-worker --group issue-133 --thread T-worker \
@@ -192,7 +192,16 @@ amux report authorize-finish --report-id issue-133-worker \
   --thread T-coordinator --reference coordinator-verification
 ```
 
-Identical replay is a benign skip; conflicting reuse and illegal transitions reject before mutation. `reports.json` also carries coordinator-owned soft-deadline generations, demonstrated external-wait evidence, and durable stale/overdue/blocker diagnostics. These records provide a nearest-deadline scheduling seam only: amux creates no supervisor, sleeping worker timer, tmux callback, notification, or destructive expiry action.
+Register an exact live interactive coordinator pane explicitly, and clear it when it should no longer receive wake-ups:
+
+```sh
+amux callback register --group issue-133 --thread T-coordinator --pane %16
+amux callback clear --group issue-133
+```
+
+The single lease for each config-directory/group is machine runtime state, not portable group/report history. Registration captures the exact pane, session/window IDs and names, start/current command, canonical workdir, PID, process start identity, generation, and registration time. Every report submission—including an identical retry—freshly verifies all metadata before sending `AMUX_REPORT group=<group> report=<id>` plus Enter. Missing or changed leases fail separately after the durable report is confirmed; amux never guesses another pane. A sent token is only a best-effort wake-up and never acknowledgement or finish authorization.
+
+Identical replay is a benign durable-state skip that may retry notification; conflicting reuse and illegal transitions reject before mutation. `reports.json` also carries coordinator-owned soft-deadline generations, demonstrated external-wait evidence, and durable stale/overdue/blocker diagnostics. These records provide a nearest-deadline scheduling seam only: amux creates no supervisor, sleeping worker timer, polling loop, or destructive expiry action.
 
 ## Side effects
 
@@ -208,6 +217,8 @@ Identical replay is a benign skip; conflicting reuse and illegal transitions rej
 | `spawn` | add worker after verification | none | create worker | create/rename |
 | `teardown` | remove worker/shelf | none | stop verified worker | archive |
 | `reconcile` | synchronize drift | repair stale ownership | verified repairs only | worker sync only |
+| `callback register` / `clear` | none; mutate machine runtime lease only | none | inspect exact pane/process | none |
+| `report submit` | persist report, then best-effort verified wake-up | none | optionally send short token | none |
 | `group list` / `group show` | inspect durable group intent | none | none | none |
 | `group declare` / `add` / `coordinator` / `reconcile` | persist/inspect durable group intent | none | none | add-only label command |
 | `group remove` | remove durable group intent | none | none | unsupported; label may remain |
@@ -251,6 +262,8 @@ Current config is directory-based:
 ~/.config/amux/groups.tsv
 ~/.config/amux/reports.json
 ```
+
+Ephemeral callback leases are stored separately under `$XDG_RUNTIME_DIR/amux/callback-leases.json` (or the user cache directory fallback) and are intentionally not portable configuration.
 
 Ordinary commands never migrate legacy config implicitly. They reject with guidance. Preview and run explicit migration:
 

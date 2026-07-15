@@ -28,7 +28,14 @@ func installReportFixture(t *testing.T) (string, *time.Time) {
 	now := time.Date(2026, 7, 15, 6, 0, 0, 0, time.UTC)
 	oldNow := reportNow
 	reportNow = func() time.Time { return now }
-	t.Cleanup(func() { reportNow = oldNow })
+	oldNotify := reportNotifyCallback
+	reportNotifyCallback = func(dir config.Directory, group, reportID string) (result.Outcome, error) {
+		return result.Outcome{Resource: result.ResourceID{Kind: "callback", Group: group, Path: reportID}, Action: "notified", Callback: &result.CallbackDetails{Notified: true}}, nil
+	}
+	t.Cleanup(func() {
+		reportNow = oldNow
+		reportNotifyCallback = oldNotify
+	})
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	return dir, &now
 }
