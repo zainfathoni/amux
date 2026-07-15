@@ -38,7 +38,7 @@
     <div class="wrap">
       <header><a href="/">← amux</a><a href="https://github.com/zainfathoni/amux/tree/main/skills/amux">Skill source</a></header>
       <div class="layout">
-        <aside aria-label="On this page"><strong>On this page</strong><a href="#install">Install</a><a href="#model">Terminology</a><a href="#routing">Trigger routing</a><a href="#health">Health</a><a href="#sprawl">Sprawl</a><a href="#finish">Finish</a><a href="#contracts">Agent contracts</a></aside>
+        <aside aria-label="On this page"><strong>On this page</strong><a href="#install">Install</a><a href="#model">Terminology</a><a href="#routing">Trigger routing</a><a href="#health">Health</a><a href="#sprawl">Sprawl</a><a href="#coordination">Coordination</a><a href="#finish">Finish</a><a href="#contracts">Agent contracts</a></aside>
         <main>
           <h1>The <span style="color:var(--red)">/amux</span> skill</h1>
           <p class="lede">The bundled skill gives agents a precise vocabulary for local Amp lifecycle. It separates configuration, local execution, and remote thread state—and reserves higher-level health, sprawl, and finish behavior for safe skill orchestration.</p>
@@ -78,12 +78,25 @@
   --idempotency-key issue-110</code></pre>
           <p>Every accepted issue gets the <code>amux-agent-first</code> label, one narrow assignment, dedicated branch/worktree, semantic issue-unprefixed window, focused Oracle diff review, and explicit callback/finish protocol. Medium is mandatory unless the user explicitly requests another mode; complexity never raises it automatically.</p>
 
+          <h2 id="coordination">Durable issue-worker coordination</h2>
+          <p>The coordinator first inspects native issue dependencies and active overlap, then creates worktrees from fresh <code>origin/main</code>. It declares a durable group, registers the exact verified coordinator pane, and spawns with <code>--group</code> so only the authoritative receiving thread is attached.</p>
+          <pre><code>amux callback register --group &lt;group&gt; --thread &lt;coordinator&gt; --pane &lt;pane&gt;
+amux spawn --mode medium --workspace &lt;workspace&gt; --window &lt;semantic-window&gt; \
+  --workdir &lt;fresh-worktree&gt; --title-prefix '#135' \
+  --group &lt;group&gt; --message-file &lt;assignment&gt; --idempotency-key issue-135
+amux report submit --report-id &lt;stable-id&gt; --group &lt;group&gt; \
+  --thread &lt;worker&gt; --status ready --issue '#135' --pr &lt;url&gt; \
+  --summary implementation-tests-review-pr-ci-complete</code></pre>
+          <p>A report is persisted before the short wake-up token. Notification and acknowledgement are not finish authorization. The coordinator independently verifies PR head/scope/mergeability/closing issue, worktree and CI, then verifies post-merge CI before recording explicit durable authorization. The child progresses the same report to terminal <code>merged</code>; <code>/amux finish</code> performs safe Git/worktree cleanup and teardown last. Group/report history survives.</p>
+          <p class="note">Exit 2 lock contention writes nothing: wait, then retry the identical operation and report ID. Missing, stale, recycled, duplicate, reordered, and restarted callbacks fail closed or recover from durable state. Never retry into a suspected busy composer; inspect pending/history directly. Never guess a pane, force-delete, auto-release, or infer finish from a wake-up.</p>
+          <p>Soft budgets to ready are Small 30m, Medium 1h, and Large 2h; split XL. Stale is 15m, review warns after 10m, demonstrated external CI alerts after 20m, and authorized finish alerts after 10m. Only demonstrated external waits pause active time. One extension may add at most half the original budget under a new generation; expiry is diagnostic only. The coordinator owns one nearest-deadline queue, not a timer process per child. This is policy, not a CLI deadline option; never edit <code>reports.json</code> directly.</p>
+
           <h2 id="finish">Skill-only finish</h2>
           <p><code>/amux finish</code> verifies merge and a clean worker worktree, then fails closed if runner configuration or diagnostics show that the worktree has acquired runner ownership. It never removes or unpins that runner implicitly.</p>
           <p>After updating main, finish removes the clean worktree without force and preserves squash-merge branch safety: <code>git branch -d</code> first; no automatic <code>-D</code>. Worker teardown runs last. A ready callback never authorizes cleanup; finish requires independently verified merge and explicit authorization.</p>
 
           <h2 id="contracts">Agent contracts</h2>
-          <ul><li>Use long canonical selectors and current contextual help.</li><li>Use <code>--dry-run</code> before mutation and <code>--json</code> for parsing.</li><li>JSON v1 separates <code>planned</code>, <code>successful</code>, <code>skipped</code>, and <code>failed</code>.</li><li>Exit 2 rejects before mutation; exit 1 may represent partial runtime success.</li><li>Mutations are idempotent desired state under one machine lock.</li><li>Spawn requires a stable idempotency key; indeterminate creation is never blindly retried.</li><li>Health, sprawl, and finish are not <code>amux</code> subcommands.</li></ul>
+          <ul><li>Use long canonical selectors and current contextual help.</li><li>Use <code>--dry-run</code> before mutation and <code>--json</code> for parsing.</li><li>JSON v1 separates <code>planned</code>, <code>successful</code>, <code>skipped</code>, and <code>failed</code>.</li><li>Exit 2 rejects before mutation; exit 1 may represent partial runtime success.</li><li>Mutations are idempotent desired state under one machine lock.</li><li>Spawn requires a stable idempotency key; reports require a stable report ID.</li><li>Group labels are add-only; local removal may leave permanent external drift.</li><li>Health, coordinator orchestration, sprawl, and finish are not <code>amux</code> subcommands.</li></ul>
         </main>
       </div>
     </div>

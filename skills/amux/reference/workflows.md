@@ -22,7 +22,7 @@ Sprawl is worker-only orchestration around GitHub, dedicated Git worktrees, and 
 
 Fetch `origin/main`, read every requested issue and comment, and inspect native `blockedBy`, `blocking`, parent, and sub-issue relationships. Compare likely file/API overlap too. Create nothing until the independent set is known. Sequence blocked, prerequisite, overlapping, or user-ordered work and report the chain.
 
-Apply the `amux-agent-first` label to accepted issue work. Give each worker one narrow issue, one dedicated worktree, and one branch. Do not group issues (#118 is outside this workflow).
+Apply the `amux-agent-first` label to accepted issue work. This label operation is add-only: confirm the desired label is present, but do not remove unrelated labels to force exact equality. Give each worker one narrow issue, one dedicated worktree, and one branch. When a coordinator supervises the batch, use the durable work-group workflow below; a group associates threads, not multiple issues in one worker assignment.
 
 ### 2. Use stable issue identity
 
@@ -31,9 +31,10 @@ Apply the `amux-agent-first` label to accepted issue work. Give each worker one 
 - Exact `--title-prefix '#<issue>'` owns issue identity. Never use `issue-123`, `issue-123-...`, `#123`, or `#123 ...` as the window.
 
 ```sh
+git fetch origin main
 git worktree add -b <type>/issue-<issue>-<slug> <dedicated-worktree> origin/main
-amux --dry-run spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode medium --title-prefix '#<issue>' --message-file <prompt> --idempotency-key issue-<issue>
-amux spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode medium --title-prefix '#<issue>' --message-file <prompt> --idempotency-key issue-<issue>
+amux --dry-run spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode medium --title-prefix '#<issue>' --group <group> --message-file <prompt> --idempotency-key issue-<issue>
+amux spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode medium --title-prefix '#<issue>' --group <group> --message-file <prompt> --idempotency-key issue-<issue>
 ```
 
 Use explicit `--mode medium` unless the user requested another mode. The worker prompt must include:
@@ -48,6 +49,110 @@ Use explicit `--mode medium` unless the user requested another mode. The worker 
 ### 3. Verify and report
 
 Verify branch/worktree, JSON worker identity, tmux pane, and initial assignment. Report accepted/deferred issues, dependency policy, issue/title, thread URL, worktree, branch, workspace/window, mode, callback route, and `/amux finish` cleanup path. On partial success, stop and inspect before retrying.
+
+## Coordinate a durable issue work group
+
+This is the proven coordinator protocol layered on the implemented group, spawn, report, and callback commands. The durable stores—not tmux text—are authoritative.
+
+### 1. Preflight authoritative state and bootstrap the CLI
+
+1. Fetch `origin/main`. Read issue bodies/comments and native parent/sub-issue/blocked-by/blocking relationships, then compare active branches, PRs, worktrees, and likely files/APIs for overlap. Sequence dependencies and overlapping work; do not spawn first and reconcile later.
+2. Verify current help contains `group`, `callback`, `report`, and spawn `--group`. If an installed binary predates those commands, use a separate fresh `origin/main` worktree and one absolute binary path:
+
+   ```sh
+   git fetch origin main
+   git worktree add --detach <bootstrap-worktree> origin/main
+   make -C <bootstrap-worktree> build BUILD_OUTPUT=<absolute-amux-path>
+   <absolute-amux-path> help group
+   <absolute-amux-path> help callback
+   <absolute-amux-path> help report
+   <absolute-amux-path> help spawn
+   ```
+
+   Invoke `<absolute-amux-path>` instead of bare `amux` for every subsequent example. Do not hand-edit registries or pretend unavailable commands succeeded. If a worker already exists, use `group add` only after verifying its authoritative thread; do not respawn it.
+3. Create every branch/worktree from the freshly fetched `origin/main`. Use an issue-bearing branch/worktree but an issue-unprefixed semantic window. Pass explicit `--mode medium` unless the user chose another mode.
+4. Serialize mutations. Wait for each group/callback/spawn/pane/row/worktree mutation to finish and verify its outcome before starting the next operation that needs the machine lock.
+
+Repository policy may additionally require an add-only issue label, exactly one focused Oracle diff review, squash merge, named CI jobs, or Pages. Keep those in the assignment/project workflow; they are not generic amux CLI promises. Do not read Amp thread history by default. Only after naming a concrete unresolved discrepancy may coordinator or reviewer ask one narrow question of the exact related thread; if it does not resolve the discrepancy, report blocked rather than widening the search.
+
+### 2. Declare the group and register the verified coordinator lease
+
+```sh
+amux --json group declare --group <group> --thread <coordinator-thread>
+amux --json callback register --group <group> --thread <coordinator-thread> --pane <coordinator-pane>
+```
+
+Before registration, independently verify the pane belongs to the configured coordinator worker. Parse the successful callback outcome and confirm its config directory, group/thread, pane, session/window IDs, PID, generation, and registration time against fresh tmux/process metadata. Registration human output is tab-separated: `<group><TAB>registered<TAB><generation><TAB><pane>`. A restart or any identity change invalidates the lease; explicitly register a new generation. Never guess a pane.
+
+### 3. Spawn and attach the authoritative receiving thread
+
+```sh
+git fetch origin main
+git worktree add -b <type>/issue-<issue>-<slug> <dedicated-worktree> origin/main
+amux --dry-run spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode medium --title-prefix '#<issue>' --group <group> --message-file <assignment> --idempotency-key issue-<issue>
+amux --json spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode medium --title-prefix '#<issue>' --group <group> --message-file <assignment> --idempotency-key issue-<issue>
+```
+
+Spawn resolves #104 alternate-thread delivery before persisting group intent. Verify the worker and membership outcomes name only the final receiving thread; never add the abandoned provisioned identity. If label ensure fails after creation, the worker and local membership remain, exit is `1`, and retry with the identical idempotency key resumes grouping without recreating or resubmitting.
+
+Give the child one stable report ID (for example `issue-135-worker-1`) and the exact group/thread/issue/reference binding. Require the child to remain alive after every status. `ready` means implementation, focused tests/checks, one review, addressed findings, PR, and normal CI are complete. A blocker uses the same report identity and `--pr none` when no PR exists:
+
+```sh
+amux report submit --report-id <stable-report-id> --group <group> --thread <member-thread> --status blocked --issue '#<issue>' --pr none --summary <concise-hyphenated-blocker>
+```
+
+### 4. Persist ready, wake, acknowledge, and independently verify
+
+```sh
+amux report submit --report-id <stable-report-id> --group <group> --thread <member-thread> --status ready --issue '#<issue>' --pr <pr-url> --summary implementation-tests-review-pr-ci-complete
+amux report pending --group <group>
+amux report history --report-id <stable-report-id>
+amux report acknowledge --report-id <stable-report-id>
+```
+
+Successful human submission is exactly:
+
+```text
+<stable-report-id><TAB>ready<TAB>recorded<TAB><member-thread>
+CALLBACK<TAB><group><TAB><stable-report-id><TAB>notified
+```
+
+The wake-up text is only `AMUX_REPORT group=<group> report=<stable-report-id>` plus Enter. If callback verification/send fails, submission exits `1` after recording the report and prints `CALLBACK<TAB><group><TAB><stable-report-id><TAB>failed`; keep the child alive. An identical retry prints the report line with `duplicate`, leaves one durable status event, and may retry notification only after the exact pane is independently known safe for input. If the composer is suspected or observed busy, do not send again: recover from `report pending`/`history` and acknowledge the durable report. Duplicate/late/reordered tokens cannot alter durable state.
+
+Acknowledgement is receipt only. Before merge, the coordinator independently verifies the exact PR URL, head branch/SHA, issue scope and diff, mergeability, closing-issue metadata, worker/worktree identity and cleanliness, review evidence, and every required CI check. Do not substitute the child's summary, callback success, or acknowledgement for this evidence.
+
+### 5. Merge, verify post-merge CI, then authorize finish
+
+After a separately authorized merge, verify the resulting `main` commit and all required post-merge CI (including Pages when project paths trigger it). Do not auto-release, tag, or start dependent work while required post-merge evidence is pending. Only then record authorization:
+
+```sh
+amux report authorize-finish --report-id <stable-report-id> --thread <coordinator-thread> --reference <verified-main-commit-or-run>
+amux report history --report-id <stable-report-id>
+```
+
+Human output is `<stable-report-id><TAB>authorized`. Authorization is durable, separate from acknowledgement, and accepted only from the current group coordinator while status is `ready`. Ready, blocked, notification, acknowledgement, deadline expiry, and a late callback never authorize finish.
+
+### 6. Submit merged and run `/amux finish`
+
+The child confirms the durable authorization and independently verifies merge, then progresses the same report ID without changing its immutable binding or authorized payload:
+
+```sh
+amux report submit --report-id <stable-report-id> --group <group> --thread <member-thread> --status merged --issue '#<issue>' --pr <pr-url> --summary implementation-tests-review-pr-ci-complete
+```
+
+`merged` is terminal. The callback remains a wake-up; the coordinator inspects and acknowledges the merged event. Then the coordinator explicitly directs `/amux finish`. Finish verifies GitHub/Git/worktree/runner ownership, cleans the worktree and safe branch state, and invokes `amux teardown --thread <member-thread>` last. Group membership and report history survive teardown unless a separate explicit group removal is requested. Never force-delete a branch, infer finish from a callback, or release automatically.
+
+### 7. Coordinator-owned deadline queue
+
+Assign size and generation at spawn: Small 30m, Medium 1h (default), Large 2h, and split XL before spawning. The soft deadline covers through `ready`: implementation, focused checks, one focused review and fixes, PR, and normal CI. Merge, post-merge checks, and finish are later coordinator-owned stages.
+
+This is coordinator policy, not a spawn/report CLI option. The current CLI exposes no command to create or update deadline records. Do not edit `reports.json` directly. The coordinator's external durable scheduler records generations, waits, and diagnostics and owns the single queue; where expiry reveals an actual work blocker, the worker also submits the same stable report ID as `blocked`. Expiry alone does not manufacture a report status transition.
+
+- No meaningful progress for 15m is `stale`; one Oracle/review over 10m warns and must not become a review loop; demonstrated external CI/service wait over 20m alerts; authorized finish over 10m alerts.
+- Thinking, research, review loops, and thread reads do not pause active time. Only a demonstrated external CI queue/service outage pauses active time; retain its visible wall-clock evidence.
+- The coordinator may grant at most one explicit extension, no more than half the original budget (Small +15m, Medium +30m, Large +1h), with a reason and new timer generation. The child never self-extends. Superseded generations are harmless.
+- Expiry is diagnostic and non-destructive. Record/retain overdue or blocker evidence, report it, and leave the worker alive. It never authorizes archive, park, replacement, merge, teardown, unpin, or finish.
+- Maintain one coordinator-owned nearest-deadline queue and arm only its next wake-up—not one timer process per child. Never create a sleeping process or persistent supervisor per child.
 
 ## Health workers and runners
 
@@ -105,11 +210,11 @@ Finish is worker-only post-merge orchestration. It never removes a runner implic
 3. Update the designated main worktree with `git pull --ff-only`. Remove the clean worker worktree without force.
 4. Preserve squash-merge safety. Try `git branch -d <branch>` only after merge verification. If it refuses because the PR was squash-merged, do not use `-D` automatically; verify the PR head, remote state, and absence of unique/unpushed work, then require explicit authorization for force deletion. Delete a remote branch only when its merged PR proves it safe and the user authorized shared mutation.
 5. Do not tag or release unless separately and explicitly requested. Finish does not imply either.
-6. Follow the originating callback protocol exactly. Re-verify pane/session/window/process metadata; send one literal merged/finish-authorized report plus Enter to the immutable pane. If verification or delivery fails, do not guess another pane and do not teardown. Remain alive and report the concrete blocker through the available channel.
-7. After successful callback delivery, run worker teardown as the final action:
+6. Follow the originating report protocol exactly. For a work-group worker, confirm the durable authorization, submit `merged` with the same report ID/binding/payload, and let amux verify the callback lease and send only its wake-up token. If durable reporting or notification fails, do not guess another pane and do not teardown; the report remains inspectable and the worker remains alive. For a legacy non-group assignment, follow its explicit callback format after re-verifying the immutable pane/session/window/process identity.
+7. After durable merged reporting and the coordinator's explicit finish direction, run worker teardown as the final action:
 
    ```sh
    amux teardown --thread <thread-id>
    ```
 
-The pre-teardown callback reports merge, worktree, local/remote branch, runner-ownership check, and the pending final teardown. Teardown stops the worker, so no post-teardown callback is required. Only then may the worker stop.
+The pre-teardown report/legacy callback covers merge, worktree, local/remote branch, runner-ownership check, and the pending final teardown. Teardown stops the worker, so no post-teardown callback is required. Durable group/report history remains. Only then may the worker stop.
