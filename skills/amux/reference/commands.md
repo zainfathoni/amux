@@ -26,6 +26,19 @@ amux runner unpin --current
 amux spawn --workspace <name> --window <slug> --workdir <path> --mode medium --message <text> --idempotency-key <key>
 amux shelve|unshelve|teardown [--workspace <name>|--thread <id>|--current|--all]
 
+# Durable group intent, reports, and ephemeral callbacks
+amux group declare|add|remove|coordinator --group <id> --thread <id>
+amux group list [--group <id>|--thread <id>|--all]
+amux group show --group <id>
+amux group reconcile (--group <id>|--thread <id>|--all)
+amux callback register --group <id> --thread <coordinator-id> --pane <pane-id>
+amux callback clear --group <id>
+amux report submit --report-id <id> --group <id> --thread <member-id> --status <ready|blocked|merged> --issue <value> --pr <url> --summary <text>
+amux report pending [--group <id>|--thread <id>|--all]
+amux report history --report-id <id>
+amux report acknowledge --report-id <id>
+amux report authorize-finish --report-id <id> --thread <coordinator-id> --reference <value>
+
 # Workspace and maintenance routes
 amux workspace list [--mode worker|runner]
 amux workspaces [--mode worker|runner]
@@ -69,6 +82,16 @@ Removed commands and positional forms fail with remediation. Do not use `store`,
 
 Runner pin requires an already locked Git worktree. amux verifies the lock but never locks or unlocks it. Runner reconcile may remove stale config for a missing worktree, but never adopts or deletes ambiguous Amp-owned processes.
 
+## Work-group, report, and callback contract
+
+- Group IDs match `^[a-z0-9]+(?:-[a-z0-9]+)*$` byte-for-byte. Local `groups.tsv` intent is authoritative and survives worker teardown and finish. External labels are add-only: removal is local-only and reports `external_sync: unsupported` plus `drift: may_remain_indefinitely`.
+- Spawn validates/sorts groups before creation, then attaches only the final authoritative receiving thread. Retry the same key after partial grouping; never attach the abandoned provisioned thread.
+- Report identity is the stable `--report-id` plus immutable group/thread/issue/reference binding. Exact duplicate submission is a skipped replay and retries callback notification. Conflicting reuse and illegal transitions are exit `2`. `ready` requires a PR and means implementation, tests, one review, PR, and normal CI are complete. `blocked` may use `--pr none`; `merged` requires prior durable finish authorization.
+- Submission persists or confirms the report before callback verification. Human fields are tab-separated: recorded submission is `<report><TAB><status><TAB>recorded<TAB><thread>`, exact replay substitutes `duplicate`, and dry-run substitutes `planned`. Its next line is `CALLBACK<TAB><group><TAB><report><TAB>notified`; callback failure substitutes `failed`. Callback failure is exit `1`, with a successful/skipped report outcome and separate failed callback outcome; the report remains pending.
+- `acknowledge` prints `<report><TAB>acknowledged` (or `<report><TAB>duplicate`), but does not authorize finish. `authorize-finish` prints `<report><TAB>authorized` (or `<report><TAB>duplicate`) and is accepted only from the current durable group coordinator for a `ready` report.
+- Callback registration prints `<group><TAB>registered<TAB><generation><TAB><pane>`; each registration creates a new lease generation. The lease is config-directory/group-scoped runtime state. Every notification freshly verifies the exact coordinator, pane/session/window IDs, start/current command, canonical workdir, PID/process/start identity. Missing, stale, recycled, or restarted targets fail closed; explicit registration is the only recovery.
+- A wake-up is exactly `AMUX_REPORT group=<group> report=<id>` plus Enter in one tmux operation. It is notification only—not report delivery, acknowledgement, verification, authorization, or lifecycle authority.
+
 ## Output, failure, and concurrency
 
 - Human output is default. `--json` emits exactly one v1 envelope with `schema_version`, `command`, `dry_run`, and `planned`, `successful`, `skipped`, and `failed` arrays.
@@ -77,6 +100,7 @@ Runner pin requires an already locked Git worktree. amux verifies the lock but n
 - Exit `0`: no failures. Exit `1`: at least one runtime failure after mutation may have begun. Exit `2`: request/preflight rejection before mutation.
 - Bulk operations preflight the whole plan, then continue independent actions after runtime failures.
 - Mutations share one bounded machine-level lock. A busy result includes structured lock ownership and performs no mutation.
+- Lock contention is exit `2`, authorizes no side effect, and must be retried as the identical desired-state operation after the current lock owner finishes. Preserve the same report ID or spawn key.
 - Desired-state operations are idempotent. Spawn additionally requires a stable `--idempotency-key`; an unrecoverable interrupted external creation becomes indeterminate and must not be blindly retried.
 
 ## Installation and maintenance

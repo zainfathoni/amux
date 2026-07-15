@@ -1,6 +1,6 @@
 ---
 name: amux
-description: "Manage local Amp worker, runner, and workspace lifecycle with amux. Use for 'Pin it', 'Unpin it', 'forget this on restore', 'Park it', 'Restart unresponsive clients', 'Shelve this', 'defer this workspace', 'hide it for now', 'Show shelved work', 'Unshelve this', 'Restore my workspace', 'Spawn a worker for', 'Teardown this worker', 'Doctor amux', '/amux health', '/amux sprawl', and '/amux finish'. Health, sprawl, and finish are skill-only workflows, not CLI commands."
+description: "Manage local Amp worker, runner, workspace, and durable work-group orchestration with amux. Use for 'Pin it', 'Unpin it', 'forget this on restore', 'Park it', 'Restart unresponsive clients', 'Shelve this', 'defer this workspace', 'hide it for now', 'Show shelved work', 'Unshelve this', 'Restore my workspace', 'Spawn a worker for', 'Coordinate issue workers', 'Teardown this worker', 'Doctor amux', '/amux health', '/amux sprawl', and '/amux finish'. Health, sprawl, coordinator orchestration, and finish are skill-only workflows, not CLI commands."
 ---
 
 # amux
@@ -18,6 +18,8 @@ Do not edit `workers.tsv`, `runners.tsv`, or `shelves.tsv` directly when the CLI
 - Every skill-driven worker spawn MUST pass `--mode medium` unless the user explicitly requests another mode. An explicitly requested mode always wins. Do not infer `high` or `ultra` from task complexity, size, urgency, or expected duration.
 - `/amux health`, `/amux sprawl`, and `/amux finish` are skill-only workflows. Never invoke or document `amux health`, `amux sprawl`, or `amux finish` as CLI commands.
 - Prefer `--dry-run`; prefer `--json` for parsing. Treat exit `2` as request/preflight rejection and exit `1` as runtime failure. Never retry an indeterminate spawn blindly.
+- Work-group membership and reports are durable local intent; callback leases and wake-ups are ephemeral. A `ready` report, notification, acknowledgement, stale/overdue diagnostic, or late callback never authorizes finish.
+- Machine mutations are serialized. Exit `2` lock contention means no mutation occurred: wait for the prior lifecycle operation, then retry the identical operation with the same spawn key or report ID.
 
 ## Route triggers to the smallest side effect
 
@@ -31,6 +33,7 @@ Do not edit `workers.tsv`, `runners.tsv`, or `shelves.tsv` directly when the CLI
 - **Restore my workspace**: `amux launch --workspace <name>` for both modes, `amux worker launch --workspace <name>` for workers only, or bare `amux` for all configured workers.
 - **Doctor amux**: `amux doctor --all`, `amux doctor --workspace <name>`, or a mode-specific doctor route. Doctor inspects only.
 - **Spawn a worker for ...**: load [`reference/workflows.md`](reference/workflows.md), then use `amux spawn --mode medium ...` unless the user explicitly requested another mode.
+- **Coordinate issue workers**: load [`reference/workflows.md`](reference/workflows.md#coordinate-a-durable-issue-work-group); inspect dependencies/overlap, use fresh `origin/main` worktrees, attach only authoritative threads to a durable group, register and verify the coordinator lease, and drive reports through acknowledgement, independent verification, explicit finish authorization, post-merge CI, merged reporting, and teardown-last finish.
 - **Teardown this worker**: `amux teardown --current` or `amux teardown --thread <id>`. Teardown archives the verified thread, removes worker and shelf configuration, and stops its verified local client.
 - **/amux health**: load [`reference/workflows.md`](reference/workflows.md); aggregate worker responsiveness and runner process probes, with optional workspace/mode filters.
 - **/amux sprawl #12 #34 ...**: load [`reference/workflows.md`](reference/workflows.md); worker-only issue orchestration with dependency inspection before side effects.
@@ -49,4 +52,5 @@ Do not edit `workers.tsv`, `runners.tsv`, or `shelves.tsv` directly when the CLI
 - Do not mutate the default config merely to test a command; use a temporary `--config-dir` and `--dry-run`.
 - Mutations are idempotent desired-state operations under one bounded machine lock. Lock contention and preflight errors authorize no mutation.
 - On partial failure, inspect JSON outcomes and external state before retrying. Do not duplicate threads, windows, worktrees, or operation keys.
+- Never guess a missing/recycled callback pane, infer authorization from a wake-up, auto-release, force-delete a branch, or erase group history during finish. Callback failure leaves the report pending and the worker alive.
 - Runner commands never own remote agent threads. Teardown never applies to runners.

@@ -43,4 +43,17 @@ Runner pin requires a locked Git worktree. Missing-worktree repair belongs to `a
 
 ## Mutation lock
 
-All mutations and scheduled maintenance share one bounded machine-level lock. If JSON reports a busy lock, retain its owner metadata, wait or investigate the owning operation, and retry only after confirming the first operation's result. Never bypass the lock or edit registries concurrently.
+All mutations and scheduled maintenance share one bounded machine-level lock. Exit `2` with a JSON busy-lock failure guarantees that the contending operation performed no mutation. Retain its owner metadata, wait for the prior pane/row/worktree lifecycle operation to finish, confirm its result, then retry the identical desired-state operation with the same report ID or spawn key. Never bypass the lock, change retry identity, edit registries concurrently, or start the next lifecycle mutation while the prior one is unresolved.
+
+## Group/report/callback recovery
+
+- **Missing, stale, or recycled callback:** the durable report is already pending. Keep the worker alive, inspect `amux report pending --group <id>`, and explicitly re-register the exact current coordinator with `amux callback register ...`. Never search for or guess another pane. A coordinator restart always requires registration of a new lease generation.
+- **Busy composer:** production notification does not detect composer occupancy. Do not retry notification into a pane suspected or observed to contain draft text. The coordinator recovers directly from `report pending`/`report history` and acknowledges durable state. Retry the identical submission only after independently verifying that the exact registered pane is safe for input and a wake-up is still needed.
+- **Failed send with a verified safe pane:** do not paste the report payload manually or infer delivery. Retry the identical `report submit` with the same report ID and unchanged binding/payload. Duplicate durable state is skipped while notification is retried.
+- **Duplicate or reordered wake-up:** treat the token only as a hint to query `report pending`, `report history`, and `group show`. Durable state controls ordering and terminal non-regression; a late token cannot acknowledge, authorize, merge, or finish anything.
+- **Conflicting report ID:** exit `2` means the ID is bound to another immutable request or payload. Do not choose a new ID to evade the conflict. Inspect history and resolve the discrepancy.
+- **Coordinator restart:** group membership, reports, acknowledgement, authorization, and history survive. The old runtime lease fails closed. Re-register the verified new process/pane; do not reconstruct durable state from tmux.
+- **Add-only label drift:** a failed add/reconcile retains local membership and exits `1`; retry add-only ensure later. Removal exits `0` locally but the Amp label may remain indefinitely. Never use all-label replacement or claim exact external equality.
+- **Bootstrap mismatch:** if installed help lacks `group`, `report`, `callback`, or spawn `--group`, use the exact bootstrap sequence in the coordinator workflow. Keep invoking the verified absolute binary path for every subsequent operation; do not fall back to stale bare `amux`. For an already-created worker, explicitly add the verified authoritative thread; do not respawn, infer membership, edit registries, or attach a provisioned/abandoned identity.
+
+No recovery path may force-delete a branch, auto-release, infer finish from a late callback, or erase durable group history. If local/GitHub evidence conflicts, name the exact discrepancy before one narrow read of the exact related thread; do not survey or chain thread history. If that read fails to resolve it, report blocked and remain alive.

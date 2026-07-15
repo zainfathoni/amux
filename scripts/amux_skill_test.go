@@ -30,8 +30,8 @@ func TestTriggerChecklistMatchesSkillActivationAndRouting(t *testing.T) {
 
 	triggerPattern := regexp.MustCompile(`(?m)^\| \x60([^\x60]+)\x60 \|`)
 	matches := triggerPattern.FindAllStringSubmatch(checklist, -1)
-	if len(matches) != 17 {
-		t.Fatalf("trigger checklist has %d routes, want 17", len(matches))
+	if len(matches) != 18 {
+		t.Fatalf("trigger checklist has %d routes, want 18", len(matches))
 	}
 	for _, match := range matches {
 		trigger := match[1]
@@ -62,11 +62,14 @@ func TestDocumentedCommandTreeMatchesCLIHelp(t *testing.T) {
 		args []string
 		want []string
 	}{
-		{args: []string{"help"}, want: []string{"launch", "list", "park", "restart", "remove", "doctor", "reconcile", "worker", "runner", "workspace", "workspaces", "group", "spawn", "shelve", "unshelve", "teardown"}},
+		{args: []string{"help"}, want: []string{"launch", "list", "park", "restart", "remove", "doctor", "reconcile", "worker", "runner", "workspace", "workspaces", "group", "callback", "report", "spawn", "shelve", "unshelve", "teardown"}},
 		{args: []string{"help", "worker", "pin"}, want: []string{"--workspace, -w", "--window, -W", "--workdir, -d", "--thread, -t", "--current"}},
 		{args: []string{"help", "runner", "pin"}, want: []string{"--workspace, -w", "--workdir, -d", "--current"}},
 		{args: []string{"help", "workspace", "list"}, want: []string{"--mode, -m <worker|runner>"}},
 		{args: []string{"help", "group", "reconcile"}, want: []string{"--group <id>", "--thread, -t <id>", "--all"}},
+		{args: []string{"help", "callback", "register"}, want: []string{"--group <id>", "--thread, -t <id>", "--pane <id>"}},
+		{args: []string{"help", "report", "submit"}, want: []string{"--report-id <id>", "--group <id>", "--thread, -t <id>", "--status <ready|blocked|merged>", "--issue <value>", "--reference <value>", "--pr <url>", "--summary <text>"}},
+		{args: []string{"help", "report", "authorize-finish"}, want: []string{"--report-id <id>", "--thread, -t <coordinator-id>", "--reference <value>"}},
 	}
 	for _, check := range checks {
 		command := exec.Command("go", append([]string{"run", "./cmd/amux"}, check.args...)...)
@@ -83,6 +86,146 @@ func TestDocumentedCommandTreeMatchesCLIHelp(t *testing.T) {
 		for _, fake := range []string{"  health ", "  sprawl ", "  finish "} {
 			if strings.Contains(string(output), fake) {
 				t.Errorf("amux %s help exposes fake skill-only command %q", strings.Join(check.args, " "), strings.TrimSpace(fake))
+			}
+		}
+	}
+}
+
+func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	commands := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "commands.md"))
+	troubleshooting := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "troubleshooting.md"))
+
+	stages := []string{
+		"### 1. Preflight authoritative state and bootstrap the CLI",
+		"### 2. Declare the group and register the verified coordinator lease",
+		"### 3. Spawn and attach the authoritative receiving thread",
+		"### 4. Persist ready, wake, acknowledge, and independently verify",
+		"### 5. Merge, verify post-merge CI, then authorize finish",
+		"### 6. Submit merged and run `/amux finish`",
+		"### 7. Coordinator-owned deadline queue",
+	}
+	last := -1
+	for _, stage := range stages {
+		at := strings.Index(workflow, stage)
+		if at <= last {
+			t.Errorf("coordinator stage missing or out of order: %q", stage)
+		}
+		last = at
+	}
+
+	for _, required := range []string{
+		"native parent/sub-issue/blocked-by/blocking relationships",
+		"fresh `origin/main`",
+		"issue-unprefixed semantic window",
+		"--mode medium",
+		"--group <group>",
+		"authoritative receiving thread",
+		"amux --json callback register --group <group> --thread <coordinator-thread> --pane <coordinator-pane>",
+		"amux report submit --report-id <stable-report-id>",
+		"amux report acknowledge --report-id <stable-report-id>",
+		"PR URL, head branch/SHA, issue scope and diff, mergeability, closing-issue metadata",
+		"amux report authorize-finish --report-id <stable-report-id>",
+		"verify post-merge CI",
+		"--status merged",
+		"invokes `amux teardown --thread <member-thread>` last",
+		"Group membership and report history survive teardown",
+		"<stable-report-id><TAB>ready<TAB>recorded<TAB><member-thread>",
+		"CALLBACK<TAB><group><TAB><stable-report-id><TAB>notified",
+		"Do not edit `reports.json` directly",
+		"current CLI exposes no command to create or update deadline records",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("coordinator workflow is missing %q", required)
+		}
+	}
+
+	for _, required := range []string{
+		"<report><TAB><status><TAB>recorded<TAB><thread>",
+		"CALLBACK<TAB><group><TAB><report><TAB>notified",
+		"AMUX_REPORT group=<group> report=<id>",
+		"external_sync: unsupported",
+		"drift: may_remain_indefinitely",
+		"Lock contention is exit `2`",
+	} {
+		if !strings.Contains(commands, required) {
+			t.Errorf("command contract is missing %q", required)
+		}
+	}
+
+	for _, required := range []string{
+		"Missing, stale, or recycled callback",
+		"Busy composer",
+		"Failed send with a verified safe pane",
+		"Duplicate or reordered wake-up",
+		"Coordinator restart",
+		"Add-only label drift",
+		"Bootstrap mismatch",
+		"retry the identical desired-state operation with the same report ID or spawn key",
+		"do not fall back to stale bare `amux`",
+	} {
+		if !strings.Contains(troubleshooting, required) {
+			t.Errorf("coordinator recovery is missing %q", required)
+		}
+	}
+}
+
+func TestWorkGroupCompletionsExposeImplementedCommands(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	checks := map[string][]string{
+		"bash": {"declare add remove coordinator list show reconcile", "register clear", "submit pending history acknowledge authorize-finish"},
+		"zsh":  {"group_commands=(", "callback_commands=(", "report_commands=(", "--report-id", "--pane"},
+		"fish": {"__fish_amux_group_leaf", "__fish_amux_callback_leaf", "__fish_amux_report_leaf", "authorize-finish", "-l 'report-id'", "-l 'pane'"},
+	}
+	for shell, wants := range checks {
+		command := exec.Command("go", "run", "./cmd/amux", "completion", shell)
+		command.Dir = root
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("completion %s failed: %v\n%s", shell, err, output)
+		}
+		for _, want := range wants {
+			if !strings.Contains(string(output), want) {
+				t.Errorf("completion %s is missing %q", shell, want)
+			}
+		}
+	}
+}
+
+func TestCoordinatorDeadlinePolicyIsConsistent(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	for _, relativePath := range []string{
+		"README.md",
+		filepath.Join("skills", "amux", "reference", "workflows.md"),
+		filepath.Join("docs", "skill", "index.html"),
+	} {
+		contents := readSkillFile(t, root, relativePath)
+		for _, required := range []string{"Small 30m", "Medium 1h", "Large 2h", "XL", "15m", "review", "10m", "external CI", "20m", "finish", "half the original budget", "new generation", "diagnostic", "nearest-deadline queue", "timer process per child"} {
+			if !strings.Contains(contents, required) {
+				t.Errorf("%s is missing deadline policy %q", relativePath, required)
+			}
+		}
+	}
+}
+
+func TestCoordinatorSafetyAppearsInPublicReferences(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	for _, relativePath := range []string{
+		"README.md",
+		filepath.Join("skills", "amux", "SKILL.md"),
+		filepath.Join("skills", "amux", "reference", "workflows.md"),
+		filepath.Join("skills", "amux", "reference", "troubleshooting.md"),
+		filepath.Join("docs", "skill", "index.html"),
+	} {
+		contents := readSkillFile(t, root, relativePath)
+		for _, required := range []string{"force-delete", "auto-release", "history"} {
+			if !strings.Contains(contents, required) {
+				t.Errorf("%s is missing coordinator safety term %q", relativePath, required)
 			}
 		}
 	}
