@@ -155,6 +155,26 @@ amux teardown --thread T-example
 - Remove stops a worker and deletes local configuration without archiving. Unpin only deletes configuration and does not stop it.
 - Reconcile explicitly synchronizes worker shelf/remote drift or repairs stale runner ownership. Launch never performs hidden reconciliation.
 
+## Durable work groups
+
+Work groups are explicit, durable many-to-many associations between Amp thread IDs and byte-preserving group IDs. Declare a group with one coordinator, then add any worker, archived, recovered, evidence, duplicate, or runner-managed thread by its canonical ID:
+
+```sh
+amux group declare --group issue-131 --thread T-coordinator
+amux group add --group issue-131 --thread T-worker
+amux group coordinator --group issue-131 --thread T-worker
+amux group list
+amux group show --group issue-131
+amux group reconcile --group issue-131
+amux group reconcile --thread T-worker
+amux group reconcile --all
+amux group remove --group issue-131 --thread T-worker
+```
+
+Group IDs map byte-for-byte to Amp labels and must match `^[a-z0-9]+(?:-[a-z0-9]+)*$`; amux never normalizes or infers them from titles, branches, issue numbers, or existing labels. Local `groups.tsv` intent is authoritative and survives worker/tmux/worktree lifecycle changes. `group list` and `group show` are deterministic local-only reads.
+
+External synchronization is deliberately add-only. Declare, add, coordinator changes, and reconcile use Amp's additive label command only after a version and exact semantic-help capability check. Additive failures retain local intent as visible drift. Local removal cannot remove the Amp label, succeeds with a warning that the external label may remain indefinitely, and never claims exact synchronization. Use `--dry-run` to preflight and inspect any group mutation.
+
 ## Side effects
 
 | Operation | Worker config / shelf | Runner config | Local clients | Remote worker thread |
@@ -169,6 +189,9 @@ amux teardown --thread T-example
 | `spawn` | add worker after verification | none | create worker | create/rename |
 | `teardown` | remove worker/shelf | none | stop verified worker | archive |
 | `reconcile` | synchronize drift | repair stale ownership | verified repairs only | worker sync only |
+| `group list` / `group show` | inspect durable group intent | none | none | none |
+| `group declare` / `add` / `coordinator` / `reconcile` | persist/inspect durable group intent | none | none | add-only label command |
+| `group remove` | remove durable group intent | none | none | unsupported; label may remain |
 
 Runner lifecycle never creates, continues, archives, or manages remote agent threads.
 
@@ -188,7 +211,7 @@ Runner lifecycle never creates, continues, archives, or manages remote agent thr
 }
 ```
 
-Workers are identified by `{ "kind": "worker", "thread": "T-..." }`; runners by `{ "kind": "runner", "workdir": "/canonical/path" }`. Agents must ignore unknown optional fields within schema v1.
+Workers are identified by `{ "kind": "worker", "thread": "T-..." }`; runners by `{ "kind": "runner", "workdir": "/canonical/path" }`; group memberships by `{ "kind": "group_membership", "group": "issue-131", "thread": "T-..." }`. Agents must ignore unknown optional fields within schema v1.
 
 - `--dry-run` (`-n`) validates and plans without mutation. Prospective changes appear under `planned`, never `successful`.
 - Exit `0`: no failures. Exit `1`: runtime failure; some independent actions may have completed. Exit `2`: request/preflight rejection before mutation.
@@ -204,6 +227,7 @@ Current config is directory-based:
 ~/.config/amux/workers.tsv
 ~/.config/amux/runners.tsv
 ~/.config/amux/shelves.tsv
+~/.config/amux/groups.tsv
 ```
 
 Ordinary commands never migrate legacy config implicitly. They reject with guidance. Preview and run explicit migration:

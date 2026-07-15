@@ -33,6 +33,7 @@ type selectors struct {
 	Window         string
 	Workdir        string
 	Thread         string
+	Group          string
 	Mode           string
 	TitlePrefix    string
 	Current        bool
@@ -80,6 +81,7 @@ var rootCommand = &commandSpec{
 		workerCommand(),
 		runnerCommand(),
 		workspaceCommand(),
+		groupCommand(),
 		installCommand(),
 		lifecycleCommand("workspaces", "Exact alias for workspace list", false, "--mode, -m <worker|runner>"),
 		lifecycleCommand("spawn", "Spawn an interactive worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>"),
@@ -182,6 +184,24 @@ func workspaceCommand() *commandSpec {
 			{Name: "list", Summary: "List worker and runner workspaces", Usage: "amux workspace list", Flags: []string{"--mode, -m <worker|runner>"}, NeedsConfig: true},
 		},
 	}
+}
+
+func groupCommand() *commandSpec {
+	group := &commandSpec{Name: "group", Summary: "Manage durable Amp thread groups", Usage: "amux group <command>"}
+	group.Children = []*commandSpec{
+		groupLeaf("declare", "Declare a group with its coordinator", true, "--group <id>", "--thread, -t <id>"),
+		groupLeaf("add", "Add explicit local membership and ensure its Amp label", true, "--group <id>", "--thread, -t <id>"),
+		groupLeaf("remove", "Remove local membership without removing its Amp label", true, "--group <id>", "--thread, -t <id>"),
+		groupLeaf("coordinator", "Designate a group's coordinator", true, "--group <id>", "--thread, -t <id>"),
+		groupLeaf("list", "List durable group memberships locally", false, "--group <id>", "--thread, -t <id>", "--all"),
+		groupLeaf("show", "Show one durable group locally", false, "--group <id>"),
+		groupLeaf("reconcile", "Add-only ensure current membership labels", true, "--group <id>", "--thread, -t <id>", "--all"),
+	}
+	return group
+}
+
+func groupLeaf(name, summary string, mutating bool, flags ...string) *commandSpec {
+	return &commandSpec{Name: name, Summary: summary, Usage: "amux group " + name + " [selectors]", Flags: flags, NeedsConfig: true, Mutating: mutating}
 }
 
 func installCommand() *commandSpec {
@@ -563,6 +583,15 @@ func parseSelectors(args []string) (selectors, []string, error) {
 			if err := setSelector(&parsed.Thread, value, "--thread"); err != nil {
 				return parsed, nil, err
 			}
+		case "--group":
+			value, next, err := selectorValue(args, i, name, inline, hasInline)
+			if err != nil {
+				return parsed, nil, err
+			}
+			i = next
+			if err := setSelector(&parsed.Group, value, "--group"); err != nil {
+				return parsed, nil, err
+			}
 		case "--mode", "-m":
 			value, next, err := selectorValue(args, i, name, inline, hasInline)
 			if err != nil {
@@ -627,10 +656,10 @@ func parseSelectors(args []string) (selectors, []string, error) {
 			remaining = append(remaining, arg)
 		}
 	}
-	if parsed.All && (parsed.Current || parsed.Workspace != "" || parsed.Window != "" || parsed.Workdir != "" || parsed.Thread != "") {
+	if parsed.All && (parsed.Current || parsed.Workspace != "" || parsed.Window != "" || parsed.Workdir != "" || parsed.Thread != "" || parsed.Group != "") {
 		return parsed, nil, errors.New("--all cannot be combined with --current or resource selectors")
 	}
-	if parsed.Current && (parsed.Workspace != "" || parsed.Window != "" || parsed.Workdir != "" || parsed.Thread != "") {
+	if parsed.Current && (parsed.Workspace != "" || parsed.Window != "" || parsed.Workdir != "" || parsed.Thread != "" || parsed.Group != "") {
 		return parsed, nil, errors.New("--current cannot be combined with resource selectors")
 	}
 	return parsed, remaining, nil
@@ -674,6 +703,7 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 		{"--window", parsed.Window},
 		{"--workdir", parsed.Workdir},
 		{"--thread", parsed.Thread},
+		{"--group", parsed.Group},
 		{"--mode", parsed.Mode},
 		{"--title-prefix", parsed.TitlePrefix},
 		{"--shelf", parsed.Shelf},
@@ -715,6 +745,11 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 			return err
 		}
 		parsed.Thread = thread
+	}
+	if parsed.Group != "" {
+		if err := config.ValidateGroupID(parsed.Group); err != nil {
+			return err
+		}
 	}
 	if parsed.Mode != "" {
 		if err := config.ValidateField("mode", parsed.Mode); err != nil {
@@ -770,7 +805,11 @@ func (c *commandSpec) UsageName() string {
 }
 
 func hasResourceScope(parsed selectors) bool {
-	return parsed.All || parsed.Current || parsed.Workspace != "" || parsed.Window != "" || parsed.Workdir != "" || parsed.Thread != ""
+	return parsed.All || parsed.Current || parsed.Workspace != "" || parsed.Window != "" || parsed.Workdir != "" || parsed.Thread != "" || parsed.Group != ""
+}
+
+func isGroupPath(path []string) bool {
+	return len(path) == 2 && path[0] == "group"
 }
 
 func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
@@ -818,7 +857,7 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 		return a.executeMaintenance(parsed, dir)
 	}
 
-	if !parsed.Command.FoundationOnly && !isAggregateLifecycle(parsed.Path) && !isWorkspaceList(parsed.Path) && (len(parsed.Path) != 2 || parsed.Path[0] != "worker" && parsed.Path[0] != "runner") && !isWorkerConvenience(parsed.Path) {
+	if !parsed.Command.FoundationOnly && !isAggregateLifecycle(parsed.Path) && !isWorkspaceList(parsed.Path) && !isGroupPath(parsed.Path) && (len(parsed.Path) != 2 || parsed.Path[0] != "worker" && parsed.Path[0] != "runner") && !isWorkerConvenience(parsed.Path) {
 		return nil, result.Preflight(fmt.Errorf("%s is reserved for its lifecycle implementation phase and is not available in the CLI foundations", strings.Join(parsed.Path, " ")))
 	}
 
@@ -829,6 +868,9 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 			return nil, result.Preflight(err)
 		}
 		defer held.Release()
+	}
+	if isGroupPath(parsed.Path) {
+		return a.executeGroup(parsed, dir)
 	}
 
 	switch parsed.Command.Name {

@@ -62,10 +62,11 @@ func TestDocumentedCommandTreeMatchesCLIHelp(t *testing.T) {
 		args []string
 		want []string
 	}{
-		{args: []string{"help"}, want: []string{"launch", "list", "park", "restart", "remove", "doctor", "reconcile", "worker", "runner", "workspace", "workspaces", "spawn", "shelve", "unshelve", "teardown"}},
+		{args: []string{"help"}, want: []string{"launch", "list", "park", "restart", "remove", "doctor", "reconcile", "worker", "runner", "workspace", "workspaces", "group", "spawn", "shelve", "unshelve", "teardown"}},
 		{args: []string{"help", "worker", "pin"}, want: []string{"--workspace, -w", "--window, -W", "--workdir, -d", "--thread, -t", "--current"}},
 		{args: []string{"help", "runner", "pin"}, want: []string{"--workspace, -w", "--workdir, -d", "--current"}},
 		{args: []string{"help", "workspace", "list"}, want: []string{"--mode, -m <worker|runner>"}},
+		{args: []string{"help", "group", "reconcile"}, want: []string{"--group <id>", "--thread, -t <id>", "--all"}},
 	}
 	for _, check := range checks {
 		command := exec.Command("go", append([]string{"run", "./cmd/amux"}, check.args...)...)

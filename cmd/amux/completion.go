@@ -39,6 +39,15 @@ var completionCommands = []completionCommand{
 	{Name: "shelve", Description: "Shelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 	{Name: "unshelve", Description: "Unshelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 	{Name: "teardown", Description: "Teardown workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
+	{Name: "group", Description: "Manage durable Amp thread groups", Subcommands: []completionCommand{
+		{Name: "declare", Description: "Declare a group with its coordinator", Flags: []string{"--group", "--thread", "-t"}},
+		{Name: "add", Description: "Add explicit group membership", Flags: []string{"--group", "--thread", "-t"}},
+		{Name: "remove", Description: "Remove local group membership", Flags: []string{"--group", "--thread", "-t"}},
+		{Name: "coordinator", Description: "Designate a group coordinator", Flags: []string{"--group", "--thread", "-t"}},
+		{Name: "list", Description: "List durable group memberships", Flags: []string{"--group", "--thread", "--all", "-t"}},
+		{Name: "show", Description: "Show one durable group", Flags: []string{"--group"}},
+		{Name: "reconcile", Description: "Add-only ensure group labels", Flags: []string{"--group", "--thread", "--all", "-t"}},
+	}},
 	{Name: "install", Description: "Inspect the amux client installation", Subcommands: []completionCommand{
 		{Name: "doctor", Description: "Diagnose executable targets, versions, and PATH drift"},
 	}},
@@ -80,7 +89,7 @@ _amux_complete() {
     word="${COMP_WORDS[i]}"
     if [[ "$word" == --config-dir || "$word" == -c ]]; then ((i++)); continue; fi
     if [[ "$word" == --config-dir=* || "$word" == -c=* || "$word" == --json || "$word" == -j || "$word" == --dry-run || "$word" == -n ]]; then continue; fi
-    if [[ -z "$command" ]]; then command="$word"; elif [[ ( "$command" == worker || "$command" == install ) && -z "$leaf" ]]; then leaf="$word"; fi
+    if [[ -z "$command" ]]; then command="$word"; elif [[ ( "$command" == worker || "$command" == group || "$command" == install ) && -z "$leaf" ]]; then leaf="$word"; fi
   done
   if [[ -z "$command" ]]; then
     COMPREPLY=( $(compgen -W "%s %s" -- "$cur") )
@@ -102,6 +111,17 @@ _amux_complete() {
       ;;
     install)
       if [[ -z "$leaf" ]]; then COMPREPLY=( $(compgen -W "doctor" -- "$cur") ); fi
+      ;;
+    group)
+      if [[ -z "$leaf" ]]; then
+        COMPREPLY=( $(compgen -W "declare add remove coordinator list show reconcile" -- "$cur") )
+      else
+        case "$leaf" in
+          show) COMPREPLY=( $(compgen -W "--group" -- "$cur") ) ;;
+          list|reconcile) COMPREPLY=( $(compgen -W "--group --thread --all -t" -- "$cur") ) ;;
+          *) COMPREPLY=( $(compgen -W "--group --thread -t" -- "$cur") ) ;;
+        esac
+      fi
       ;;
     spawn) COMPREPLY=( $(compgen -W "--workspace --window --workdir --mode -m --title-prefix --message --message-file --message-stdin --idempotency-key -w -W -d" -- "$cur") ) ;;
     shelve|unshelve|teardown) COMPREPLY=( $(compgen -W "--workspace --thread --current --all -w -t" -- "$cur") ) ;;
@@ -133,6 +153,13 @@ func writeZshCompletion(w io.Writer) {
 	fmt.Fprintln(w, "local -a install_commands")
 	fmt.Fprintln(w, "install_commands=(\n  \"doctor:Diagnose executable targets, versions, and PATH drift\"\n)")
 	fmt.Fprintln(w)
+	fmt.Fprintln(w, "local -a group_commands")
+	fmt.Fprintln(w, "group_commands=(")
+	for _, command := range groupCompletionCommands() {
+		fmt.Fprintf(w, "  %q\n", command.Name+":"+command.Description)
+	}
+	fmt.Fprintln(w, ")")
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, `local command leaf i word
 i=2
 while (( i <= CURRENT )); do
@@ -140,7 +167,7 @@ while (( i <= CURRENT )); do
   case $word in
     --config-dir|-c) (( i += 2 )); continue ;;
     --config-dir=*|-c=*|--json|-j|--dry-run|-n) (( i++ )); continue ;;
-    *) command=$word; (( i++ )); if [[ $command == worker || $command == install ]]; then leaf=$words[$i]; fi; break ;;
+    *) command=$word; (( i++ )); if [[ $command == worker || $command == group || $command == install ]]; then leaf=$words[$i]; fi; break ;;
   esac
 done`)
 	fmt.Fprintln(w)
@@ -179,6 +206,17 @@ case $state in
       install)
         if [[ -z $leaf ]]; then
           _describe -t install-commands 'install command' install_commands
+        fi
+        ;;
+      group)
+        if [[ -z $leaf ]]; then
+          _describe -t group-commands 'group command' group_commands
+        else
+          case $leaf in
+            show) _arguments '--group[group id]:group:' ;;
+            list|reconcile) _arguments '--group[group id]:group:' '--thread[thread id or URL]:thread:' '--all[all memberships]' '-t[thread id or URL]:thread:' ;;
+            *) _arguments '--group[group id]:group:' '--thread[thread id or URL]:thread:' '-t[thread id or URL]:thread:' ;;
+          esac
         fi
         ;;
       shelve)
@@ -253,6 +291,14 @@ function __fish_amux_install_leaf
         echo $words[(math $index + 1)]
     end
 end`)
+	fmt.Fprintln(w, `
+function __fish_amux_group_leaf
+    set -l words (commandline -opc)
+    set -l index (contains -i -- group $words)
+    if test -n "$index"; and test (math $index + 1) -le (count $words)
+        echo $words[(math $index + 1)]
+    end
+end`)
 	for _, flag := range globalCompletionFlags {
 		writeFishFlag(w, "__fish_use_subcommand", flag, flagDescription(flag), flagTakesValue(flag))
 	}
@@ -275,6 +321,15 @@ end`)
 		}
 		if command.Name == "install" {
 			fmt.Fprintln(w, "complete -c amux -f -n 'test (__fish_amux_root_command) = install; and test -z (__fish_amux_install_leaf)' -a doctor -d 'Diagnose executable targets, versions, and PATH drift'")
+		}
+		if command.Name == "group" {
+			for _, subcommand := range command.Subcommands {
+				fmt.Fprintf(w, "complete -c amux -f -n 'test (__fish_amux_root_command) = group; and test -z (__fish_amux_group_leaf)' -a %s -d %s\n", fishQuote(subcommand.Name), fishQuote(subcommand.Description))
+				condition := fmt.Sprintf("test (__fish_amux_root_command) = group; and test (__fish_amux_group_leaf) = %s", subcommand.Name)
+				for _, flag := range subcommand.Flags {
+					writeFishFlag(w, condition, flag, flagDescription(flag), flagTakesValue(flag))
+				}
+			}
 		}
 		if command.Name == "completion" {
 			fmt.Fprintln(w, "complete -c amux -f -n 'test (__fish_amux_root_command) = completion' -a 'bash zsh fish'")
@@ -334,6 +389,15 @@ func runnerCompletionCommands() []completionCommand {
 	return nil
 }
 
+func groupCompletionCommands() []completionCommand {
+	for _, command := range completionCommands {
+		if command.Name == "group" {
+			return command.Subcommands
+		}
+	}
+	return nil
+}
+
 func flagDescription(flag string) string {
 	switch flag {
 	case "--config-dir":
@@ -362,6 +426,8 @@ func flagDescription(flag string) string {
 		return "Only confirmed shelved rows"
 	case "--thread", "-t":
 		return "Select by thread id or URL"
+	case "--group":
+		return "Select group ID"
 	case "--workspace", "-w":
 		return "Select workspace rows"
 	case "--window", "-W":
@@ -397,7 +463,7 @@ func flagDescription(flag string) string {
 
 func flagTakesValue(flag string) bool {
 	switch flag {
-	case "--config-dir", "-c", "--thread", "-t", "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--shelf", "--mode", "-m", "--title-prefix", "--message", "--message-file", "--idempotency-key":
+	case "--config-dir", "-c", "--thread", "-t", "--group", "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--shelf", "--mode", "-m", "--title-prefix", "--message", "--message-file", "--idempotency-key":
 		return true
 	default:
 		return false
