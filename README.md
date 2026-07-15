@@ -177,6 +177,23 @@ Worker spawn accepts repeatable `--group <id>`. amux validates and deterministic
 
 External synchronization is deliberately add-only. Declare, add, coordinator changes, and reconcile use Amp's additive label command only after a version and exact semantic-help capability check. Additive failures retain local intent as visible drift. Local removal cannot remove the Amp label, succeeds with a warning that the external label may remain indefinitely, and never claims exact synchronization. Use `--dry-run` to preflight and inspect any group mutation.
 
+### Durable worker reports and finish authorization
+
+Reports are persisted locally before any future callback notification. A stable report ID can progress between `ready` and `blocked`; `merged` is terminal and is accepted only after the group coordinator records a separate durable finish authorization. Acknowledgement never implies authorization, and neither `ready`, `blocked`, nor deadline expiry authorizes cleanup.
+
+```sh
+amux report submit --report-id issue-133-worker --group issue-133 --thread T-worker \
+  --status ready --issue '#133' --pr https://github.com/owner/repo/pull/123 \
+  --summary implementation-tests-review-pr-ci-complete
+amux report pending --group issue-133
+amux report history --report-id issue-133-worker
+amux report acknowledge --report-id issue-133-worker
+amux report authorize-finish --report-id issue-133-worker \
+  --thread T-coordinator --reference coordinator-verification
+```
+
+Identical replay is a benign skip; conflicting reuse and illegal transitions reject before mutation. `reports.json` also carries coordinator-owned soft-deadline generations, demonstrated external-wait evidence, and durable stale/overdue/blocker diagnostics. These records provide a nearest-deadline scheduling seam only: amux creates no supervisor, sleeping worker timer, tmux callback, notification, or destructive expiry action.
+
 ## Side effects
 
 | Operation | Worker config / shelf | Runner config | Local clients | Remote worker thread |
@@ -194,6 +211,8 @@ External synchronization is deliberately add-only. Declare, add, coordinator cha
 | `group list` / `group show` | inspect durable group intent | none | none | none |
 | `group declare` / `add` / `coordinator` / `reconcile` | persist/inspect durable group intent | none | none | add-only label command |
 | `group remove` | remove durable group intent | none | none | unsupported; label may remain |
+| `report pending` / `history` | inspect durable reports | none | none | none |
+| `report submit` / `acknowledge` / `authorize-finish` | mutate durable report state | none | none | none |
 
 Runner lifecycle never creates, continues, archives, or manages remote agent threads.
 
@@ -213,7 +232,7 @@ Runner lifecycle never creates, continues, archives, or manages remote agent thr
 }
 ```
 
-Workers are identified by `{ "kind": "worker", "thread": "T-..." }`; runners by `{ "kind": "runner", "workdir": "/canonical/path" }`; group memberships by `{ "kind": "group_membership", "group": "issue-131", "thread": "T-..." }`. Agents must ignore unknown optional fields within schema v1.
+Workers are identified by `{ "kind": "worker", "thread": "T-..." }`; runners by `{ "kind": "runner", "workdir": "/canonical/path" }`; group memberships by `{ "kind": "group_membership", "group": "issue-131", "thread": "T-..." }`; reports by `{ "kind": "report", "path": "stable-report-id", "group": "issue-133", "thread": "T-..." }`. Agents must ignore unknown optional fields within schema v1.
 
 - `--dry-run` (`-n`) validates and plans without mutation. Prospective changes appear under `planned`, never `successful`.
 - Exit `0`: no failures. Exit `1`: runtime failure; some independent actions may have completed. Exit `2`: request/preflight rejection before mutation.
@@ -230,6 +249,7 @@ Current config is directory-based:
 ~/.config/amux/runners.tsv
 ~/.config/amux/shelves.tsv
 ~/.config/amux/groups.tsv
+~/.config/amux/reports.json
 ```
 
 Ordinary commands never migrate legacy config implicitly. They reject with guidance. Preview and run explicit migration:

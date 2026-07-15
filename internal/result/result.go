@@ -65,6 +65,19 @@ func GroupMembershipResource(group, thread string) (ResourceID, error) {
 	return ResourceID{Kind: "group_membership", Group: group, Thread: canonical}, nil
 }
 
+func ReportResource(reportID, group, thread string) (ResourceID, error) {
+	if reportID == "" {
+		return ResourceID{}, errors.New("report ID is required")
+	}
+	resource, err := GroupMembershipResource(group, thread)
+	if err != nil {
+		return ResourceID{}, err
+	}
+	resource.Kind = "report"
+	resource.Path = reportID
+	return resource, nil
+}
+
 func ConfigResource(path string) ResourceID {
 	return ResourceID{Kind: "config", Path: path}
 }
@@ -132,6 +145,22 @@ type GroupDetails struct {
 	Drift        string `json:"drift,omitempty"`
 }
 
+type ReportDetails struct {
+	ReportID          string `json:"report_id"`
+	RequestHash       string `json:"request_hash,omitempty"`
+	Status            string `json:"status,omitempty"`
+	Issue             string `json:"issue,omitempty"`
+	Reference         string `json:"reference,omitempty"`
+	PRURL             string `json:"pr_url,omitempty"`
+	Summary           string `json:"summary,omitempty"`
+	CreatedAt         string `json:"created_at,omitempty"`
+	UpdatedAt         string `json:"updated_at,omitempty"`
+	AcknowledgedAt    string `json:"acknowledged_at,omitempty"`
+	AuthorizedAt      string `json:"authorized_at,omitempty"`
+	AuthorizingThread string `json:"authorizing_thread,omitempty"`
+	Pending           bool   `json:"pending,omitempty"`
+}
+
 type Outcome struct {
 	Resource    ResourceID          `json:"resource"`
 	Action      string              `json:"action"`
@@ -140,6 +169,7 @@ type Outcome struct {
 	Maintenance *MaintenanceDetails `json:"maintenance,omitempty"`
 	Runner      *RunnerDetails      `json:"runner,omitempty"`
 	Group       *GroupDetails       `json:"group,omitempty"`
+	Report      *ReportDetails      `json:"report,omitempty"`
 	Error       *Failure            `json:"error,omitempty"`
 }
 
