@@ -45,9 +45,9 @@ jobs:
           cp README.md "$stable/README.md"
 
           tar -czf "$versioned.tar.gz" "$versioned"
-          sha256sum "$versioned.tar.gz" > "$versioned.tar.gz.sha256"
+          sha256sum "$versioned.tar.gz" | tee "$versioned.tar.gz.sha256"
           tar -czf "$stable.tar.gz" "$stable"
-          sha256sum "$stable.tar.gz" > "$stable.tar.gz.sha256"
+          sha256sum "$stable.tar.gz" | tee "$stable.tar.gz.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
