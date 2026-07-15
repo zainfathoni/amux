@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -115,6 +116,51 @@ func TestWorkerSpawnGenericTitlePrefixDoesNotApplyIssueRules(t *testing.T) {
 	got := executeWorkerJSON(t, "--json", "--dry-run", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "issue-119-install", "--workdir", workdir, "--title-prefix", "release", "--message", "hello", "--idempotency-key", "generic-title")
 	if len(got.Planned) != 1 || !strings.Contains(got.Planned[0].Message, "alpha/release issue-119-install") {
 		t.Fatalf("generic title dry-run = %+v", got)
+	}
+}
+
+func TestWorkerSpawnGroupsDryRunSortsDeduplicatesWithoutSideEffects(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	bin := t.TempDir()
+	called := filepath.Join(bin, "called")
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	got := executeWorkerJSON(t, "--json", "--dry-run", "--config-dir", dir, "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--group", "zeta", "--group", "alpha", "--group", "zeta", "--message", "hello", "--idempotency-key", "group-dry-run")
+	if len(got.Planned) != 3 || got.Planned[1].Resource.Kind != "command" || got.Planned[1].Group.ID != "alpha" || got.Planned[2].Resource.Kind != "command" || got.Planned[2].Group.ID != "zeta" {
+		t.Fatalf("grouped dry-run result = %+v", got)
+	}
+	if _, err := os.Stat(called); !os.IsNotExist(err) {
+		t.Fatalf("grouped dry-run called amp or tmux: %v", err)
+	}
+	for _, name := range []string{config.WorkersFile, config.OperationsFile, config.GroupsFile} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("grouped dry-run created %s: %v", name, err)
+		}
+	}
+}
+
+func TestWorkerSpawnRejectsAnyInvalidGroupBeforeSideEffects(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	bin := t.TempDir()
+	called := filepath.Join(bin, "called")
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--group", "valid", "--group", "Invalid", "--message", "hello", "--idempotency-key", "invalid-group")
+	if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), "invalid group ID") {
+		t.Fatalf("invalid group error = %v, exit = %d", err, result.ExitCode(err))
+	}
+	if _, err := os.Stat(called); !os.IsNotExist(err) {
+		t.Fatalf("invalid group called amp or tmux: %v", err)
+	}
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil || len(entries) != 0 {
+		t.Fatalf("invalid group mutated config: entries=%v err=%v", entries, readErr)
 	}
 }
 
@@ -459,6 +505,178 @@ exit 2
 	}
 }
 
+func TestWorkerSpawnLabelFailureRetainsIntentAndRetryResumesGroupingOnly(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	running := filepath.Join(bin, "running")
+	delivered := filepath.Join(bin, "delivered")
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-spawned"}
+	start := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "worker", Thread: row.Thread}, row)
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+echo "amp $*" >> "`+logPath+`"
+if [ "$1 $2" = "threads new" ]; then echo T-spawned; exit 0; fi
+if [ "$1 $2 $3" = "threads export T-spawned" ]; then
+  if [ -e "`+delivered+`" ]; then printf '%s\n' '{"id":"T-spawned","messages":[{"role":"user","content":"hello"}]}'; else printf '%s\n' '{"id":"T-spawned","messages":[]}'; fi
+  exit 0
+fi
+if [ "$1 $2" = "threads list" ]; then printf '%s\n' '[{"id":"T-spawned"}]'; exit 0; fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "tmux $*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then test -e "`+running+`"; exit $?; fi
+if [ "$1" = new-session ]; then touch "`+running+`"; exit 0; fi
+if [ "$1" = list-panes ]; then printf 'worker\t@1\t%s\n' `+shellSingleQuote(start)+`; exit 0; fi
+if [ "$1" = display-message ]; then echo %1; exit 0; fi
+if [ "$1" = capture-pane ]; then printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; exit 0; fi
+if [ "$1" = send-keys ]; then if [ "$4" = Enter ]; then touch "`+delivered+`"; fi; exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+	failedOnce := false
+	calls := installSupportedGroupAmp(t, func(args []string) ([]byte, error) {
+		if args[3] == "zeta" && !failedOnce {
+			failedOnce = true
+			return []byte("label unavailable"), errors.New("exit status 1")
+		}
+		return nil, nil
+	})
+	args := []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--group", "zeta", "--group", "alpha", "--group", "zeta", "--message", "hello", "--idempotency-key", "group-retry"}
+
+	first, firstErr := executeWorkerJSONResult(t, args...)
+	if firstErr == nil || result.ExitCode(firstErr) != result.ExitRuntimeFailure {
+		t.Fatalf("first grouped spawn error = %v", firstErr)
+	}
+	if len(first.Successful) != 2 || first.Successful[0].Resource.Kind != "worker" || first.Successful[1].Resource.Group != "alpha" || len(first.Failed) != 1 || first.Failed[0].Resource.Group != "zeta" {
+		t.Fatalf("first grouped spawn outcomes = %+v", first)
+	}
+	memberships, err := config.LoadGroupsReadOnly(filepath.Join(dir, config.GroupsFile))
+	if err != nil || len(memberships) != 2 || memberships[0].Group != "alpha" || memberships[0].Thread != "T-spawned" || memberships[1].Group != "zeta" || memberships[1].Thread != "T-spawned" {
+		t.Fatalf("retained spawn group intent = %+v err=%v", memberships, err)
+	}
+	record, found, err := config.LoadOperation(filepath.Join(dir, config.OperationsFile), "group-retry")
+	if err != nil || !found || record.State != config.OperationStarted || record.Phase != config.OperationPhaseGroupIntent {
+		t.Fatalf("partial grouped operation = %+v found=%t err=%v", record, found, err)
+	}
+	beforeRetry, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	retryArgs := []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--group", "alpha", "--group", "zeta", "--message", "hello", "--idempotency-key", "group-retry"}
+	retry := executeWorkerJSON(t, retryArgs...)
+	if len(retry.Skipped) != 1 || !strings.Contains(retry.Skipped[0].Message, "grouping only") || len(retry.Successful) != 2 || len(retry.Failed) != 0 {
+		t.Fatalf("grouping retry outcomes = %+v", retry)
+	}
+	record, found, err = config.LoadOperation(filepath.Join(dir, config.OperationsFile), "group-retry")
+	if err != nil || !found || record.State != config.OperationSucceeded || record.Phase != config.OperationPhaseGrouped {
+		t.Fatalf("completed grouped operation = %+v found=%t err=%v", record, found, err)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil || !bytes.Equal(log, beforeRetry) || strings.Count(string(log), "amp threads new") != 1 {
+		t.Fatalf("grouping retry recreated or resubmitted: err=%v\n%s", err, log)
+	}
+	var labels []string
+	for _, call := range *calls {
+		if len(call.args) == 4 && call.args[0] == "threads" && call.args[1] == "label" {
+			labels = append(labels, call.args[2]+"/"+call.args[3])
+		}
+	}
+	if got, want := strings.Join(labels, ","), "T-spawned/alpha,T-spawned/zeta,T-spawned/alpha,T-spawned/zeta"; got != want {
+		t.Fatalf("label attempts = %q, want %q", got, want)
+	}
+	conflict := append([]string(nil), retryArgs...)
+	for i, arg := range conflict {
+		if arg == "zeta" {
+			conflict[i] = "beta"
+		}
+	}
+	if err := executeWorkerJSONError(t, conflict...); err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), "different request") {
+		t.Fatalf("changed group set idempotency conflict = %v", err)
+	}
+}
+
+func TestWorkerSpawnGroupingReplayHumanFailureShowsWorkerIntentAndDrift(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-spawned"}
+	writeWorkerRegistry(t, dir, row.String()+"\n")
+	if err := config.WriteGroups(filepath.Join(dir, config.GroupsFile), []config.GroupMembership{{Group: "issue-132", Thread: row.Thread, Role: config.GroupMember}}); err != nil {
+		t.Fatal(err)
+	}
+	request := strings.Join([]string{"alpha", "worker", workdir, "", "hello", "groups", "issue-132"}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Now().UTC()
+	record := config.OperationRecord{Key: "human-group-replay", Kind: "worker-spawn", RequestHash: hex.EncodeToString(sum[:]), State: config.OperationStarted, Phase: config.OperationPhaseConfigured, Resource: config.OperationResource{Kind: "worker", Thread: row.Thread}, CreatedAt: now, UpdatedAt: now}
+	if _, err := config.StoreOperation(filepath.Join(dir, config.OperationsFile), record); err != nil {
+		t.Fatal(err)
+	}
+	installSupportedGroupAmp(t, func([]string) ([]byte, error) { return []byte("label unavailable"), errors.New("exit status 1") })
+	bin := t.TempDir()
+	called := filepath.Join(bin, "called")
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout, stderr bytes.Buffer
+	err := (app{stdout: &stdout, stderr: &stderr}).execute([]string{"--config-dir", dir, "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--group", "issue-132", "--message", "hello", "--idempotency-key", "human-group-replay"})
+	if err == nil || result.ExitCode(err) != result.ExitRuntimeFailure {
+		t.Fatalf("human grouping replay error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Worker T-spawned already exists; resuming durable grouping only") || !strings.Contains(stderr.String(), "retained local membership issue-132/T-spawned") || !strings.Contains(stderr.String(), "drift remains") {
+		t.Fatalf("human grouping output:\nstdout=%s\nstderr=%s", stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(called); !os.IsNotExist(err) {
+		t.Fatalf("human grouping replay called creation tools: %v", err)
+	}
+	if strings.Contains(stdout.String(), "Spawned worker") {
+		t.Fatalf("human grouping replay falsely claimed worker creation: %s", stdout.String())
+	}
+}
+
+func TestWorkerSpawnExactRowPartialPhasesResumeGroupingWithoutWorkerSuccess(t *testing.T) {
+	for _, phase := range []config.OperationPhase{config.OperationPhaseMessageVerified, config.OperationPhaseConfigured} {
+		t.Run(string(phase), func(t *testing.T) {
+			dir := t.TempDir()
+			workdir := t.TempDir()
+			row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-spawned"}
+			writeWorkerRegistry(t, dir, row.String()+"\n")
+			if err := config.WriteGroups(filepath.Join(dir, config.GroupsFile), []config.GroupMembership{{Group: "issue-132", Thread: row.Thread, Role: config.GroupMember}}); err != nil {
+				t.Fatal(err)
+			}
+			request := strings.Join([]string{"alpha", "worker", workdir, "", "hello", "groups", "issue-132"}, "\x00")
+			sum := sha256.Sum256([]byte(request))
+			now := time.Now().UTC()
+			record := config.OperationRecord{Key: "phase-replay", Kind: "worker-spawn", RequestHash: hex.EncodeToString(sum[:]), State: config.OperationStarted, Phase: phase, Resource: config.OperationResource{Kind: "worker", Thread: row.Thread}, CreatedAt: now, UpdatedAt: now}
+			if _, err := config.StoreOperation(filepath.Join(dir, config.OperationsFile), record); err != nil {
+				t.Fatal(err)
+			}
+			installSupportedGroupAmp(t, func([]string) ([]byte, error) { return nil, nil })
+			bin := t.TempDir()
+			called := filepath.Join(bin, "called")
+			writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			got := executeWorkerJSON(t, "--json", "--config-dir", dir, "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--group", "issue-132", "--message", "hello", "--idempotency-key", "phase-replay")
+			if len(got.Skipped) != 1 || got.Skipped[0].Resource.Kind != "worker" || len(got.Successful) != 1 || got.Successful[0].Resource.Kind != "group_membership" {
+				t.Fatalf("%s replay outcomes = %+v", phase, got)
+			}
+			completed, found, err := config.LoadOperation(filepath.Join(dir, config.OperationsFile), "phase-replay")
+			if err != nil || !found || completed.State != config.OperationSucceeded || completed.Phase != config.OperationPhaseGrouped {
+				t.Fatalf("%s completed operation = %+v found=%t err=%v", phase, completed, found, err)
+			}
+			if _, err := os.Stat(called); !os.IsNotExist(err) {
+				t.Fatalf("%s replay called creation tools: %v", phase, err)
+			}
+		})
+	}
+}
+
 func TestWorkerSpawnAdoptsSoleFreshActiveReceivingThread(t *testing.T) {
 	dir := t.TempDir()
 	workdir := t.TempDir()
@@ -502,10 +720,11 @@ exit 2
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
-	args := []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", "adopt-1"}
+	groupCalls := installSupportedGroupAmp(t, func([]string) ([]byte, error) { return nil, nil })
+	args := []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--group", "issue-132", "--message", "hello", "--idempotency-key", "adopt-1"}
 
 	first := executeWorkerJSON(t, args...)
-	if len(first.Successful) != 1 || first.Successful[0].Resource.Thread != "T-receiver" {
+	if len(first.Successful) != 2 || first.Successful[0].Resource.Thread != "T-receiver" || first.Successful[1].Resource.Group != "issue-132" {
 		t.Fatalf("adopted spawn result = %+v", first)
 	}
 	rows, err := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
@@ -515,6 +734,15 @@ exit 2
 	record, found, err := config.LoadOperation(filepath.Join(dir, config.OperationsFile), "adopt-1")
 	if err != nil || !found || record.State != config.OperationSucceeded || record.Resource.Thread != "T-receiver" {
 		t.Fatalf("adopted operation = %+v found=%t err=%v", record, found, err)
+	}
+	memberships, err := config.LoadGroupsReadOnly(filepath.Join(dir, config.GroupsFile))
+	if err != nil || len(memberships) != 1 || memberships[0].Group != "issue-132" || memberships[0].Thread != "T-receiver" {
+		t.Fatalf("adopted group membership = %+v err=%v", memberships, err)
+	}
+	for _, call := range *groupCalls {
+		if len(call.args) == 4 && call.args[0] == "threads" && call.args[1] == "label" && (call.args[2] != "T-receiver" || call.args[3] != "issue-132") {
+			t.Fatalf("group label targeted abandoned identity: %+v", call.args)
+		}
 	}
 	log, err := os.ReadFile(logPath)
 	if err != nil {
@@ -1124,6 +1352,17 @@ func executeWorkerJSON(t *testing.T, args ...string) result.Envelope {
 		t.Fatalf("decode execute(%q): %v\nstdout: %s", args, err, stdout.String())
 	}
 	return envelope
+}
+
+func executeWorkerJSONResult(t *testing.T, args ...string) (result.Envelope, error) {
+	t.Helper()
+	var stdout bytes.Buffer
+	err := (app{stdout: &stdout}).execute(args)
+	var envelope result.Envelope
+	if decodeErr := json.NewDecoder(&stdout).Decode(&envelope); decodeErr != nil {
+		t.Fatalf("decode execute(%q): %v\nstdout: %s", args, decodeErr, stdout.String())
+	}
+	return envelope, err
 }
 
 func executeWorkerJSONError(t *testing.T, args ...string) error {

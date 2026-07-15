@@ -396,6 +396,10 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	if s.TitlePrefix != "" {
 		requestFields = append(requestFields, s.TitlePrefix)
 	}
+	if len(s.Groups) != 0 {
+		requestFields = append(requestFields, "groups")
+		requestFields = append(requestFields, s.Groups...)
+	}
 	request := strings.Join(requestFields, "\x00")
 	sum := sha256.Sum256([]byte(request))
 	hash := hex.EncodeToString(sum[:])
@@ -425,10 +429,32 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 			}
 		}
 		env.Planned = append(env.Planned, result.Outcome{Resource: resource, Action: "spawn", Message: message})
+		for _, group := range s.Groups {
+			groupResource := result.CommandResource()
+			if existing.Resource.Thread != "" && (existing.Phase == config.OperationPhaseMessageVerified || existing.Phase == config.OperationPhaseConfigured || existing.Phase == config.OperationPhaseGroupIntent || existing.Phase == config.OperationPhaseGrouped) {
+				groupResource, _ = result.GroupMembershipResource(group, existing.Resource.Thread)
+			}
+			env.Planned = append(env.Planned, result.Outcome{
+				Resource: groupResource,
+				Action:   "attach-group",
+				Message:  "would persist membership for the authoritative receiving thread, then add-only ensure its Amp label",
+				Group:    &result.GroupDetails{ID: group, Role: string(config.GroupMember), ExternalSync: "additive_ensure_planned"},
+			})
+		}
 		if !in.Options.JSON {
 			fmt.Fprintln(a.stdout, message)
 		}
 		return env, nil
+	}
+	var groupAmpPath string
+	if len(s.Groups) != 0 {
+		if _, loadErr := config.LoadGroupsReadOnly(dir.GroupsPath()); loadErr != nil {
+			return env, result.Preflight(loadErr)
+		}
+		groupAmpPath, err = preflightGroupAmp()
+		if err != nil {
+			return env, result.Preflight(err)
+		}
 	}
 	if found {
 		if existing.Resource.Thread == "" {
@@ -445,11 +471,27 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		if loadErr != nil {
 			return env, result.Preflight(loadErr)
 		}
+		workerAlreadyConfigured := false
+	rowsLoop:
 		for _, row := range rows {
 			requested := config.Row{Workspace: workspace, Window: s.Window, Workdir: s.Workdir, Thread: existing.Resource.Thread}
 			if workerRowsEquivalent(row, requested) {
 				switch existing.Phase {
-				case "", config.OperationPhaseMessageVerified, config.OperationPhaseConfigured:
+				case "", config.OperationPhaseMessageVerified:
+					if existing.Phase == config.OperationPhaseMessageVerified && len(s.Groups) != 0 {
+						existing.Phase = config.OperationPhaseConfigured
+						existing.Error = ""
+						existing.UpdatedAt = time.Now().UTC()
+						if _, storeErr := config.StoreOperation(dir.OperationsPath(), existing); storeErr != nil {
+							return env, result.Runtime(storeErr)
+						}
+						env.Skipped = append(env.Skipped, workerOutcome(row, "spawn", "worker already created; resuming grouping only"))
+						if !in.Options.JSON {
+							fmt.Fprintf(a.stdout, "Worker %s already exists; resuming durable grouping only.\n", row.Thread)
+						}
+						workerAlreadyConfigured = true
+						break rowsLoop
+					}
 					existing.Phase = config.OperationPhaseConfigured
 					existing.State = config.OperationSucceeded
 					existing.UpdatedAt = time.Now().UTC()
@@ -458,6 +500,30 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 						return env, result.Runtime(storeErr)
 					}
 					env.Skipped = append(env.Skipped, workerOutcome(row, "spawn", "recovered completed spawn"))
+					return env, nil
+				case config.OperationPhaseConfigured, config.OperationPhaseGroupIntent:
+					if len(s.Groups) == 0 {
+						existing.State = config.OperationSucceeded
+						existing.UpdatedAt = time.Now().UTC()
+						if _, storeErr := config.StoreOperation(dir.OperationsPath(), existing); storeErr != nil {
+							return env, result.Runtime(storeErr)
+						}
+						env.Skipped = append(env.Skipped, workerOutcome(row, "spawn", "recovered completed spawn"))
+						return env, nil
+					}
+					env.Skipped = append(env.Skipped, workerOutcome(row, "spawn", "worker already created; resuming grouping only"))
+					if !in.Options.JSON {
+						fmt.Fprintf(a.stdout, "Worker %s already exists; resuming durable grouping only.\n", row.Thread)
+					}
+					workerAlreadyConfigured = true
+					break rowsLoop
+				case config.OperationPhaseGrouped:
+					existing.State = config.OperationSucceeded
+					existing.UpdatedAt = time.Now().UTC()
+					if _, storeErr := config.StoreOperation(dir.OperationsPath(), existing); storeErr != nil {
+						return env, result.Runtime(storeErr)
+					}
+					env.Skipped = append(env.Skipped, workerOutcome(row, "spawn", "recovered completed grouped spawn"))
 					return env, nil
 				}
 				continue
@@ -474,7 +540,10 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 			// the delivery boundary. Never resubmit when upgrading them.
 			existing.Phase = config.OperationPhaseDeliveryStarted
 		}
-		return a.resumeBoundSpawn(in, dir, env, existing, workspace, s.Workdir, message)
+		if len(s.Groups) != 0 && (existing.Phase == config.OperationPhaseConfigured || existing.Phase == config.OperationPhaseGroupIntent) && !workerAlreadyConfigured {
+			return env, result.Preflight(fmt.Errorf("bound spawn cannot resume grouping because its configured worker row is missing"))
+		}
+		return a.resumeBoundSpawn(in, dir, env, existing, workspace, s.Workdir, message, groupAmpPath, workerAlreadyConfigured)
 	}
 	rows, err := config.LoadReadOnly(dir.WorkersPath())
 	if err != nil {
@@ -526,12 +595,13 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	if _, err := config.StoreOperation(dir.OperationsPath(), record); err != nil {
 		return env, result.Runtime(err)
 	}
-	return a.resumeBoundSpawn(in, dir, env, record, workspace, s.Workdir, message)
+	return a.resumeBoundSpawn(in, dir, env, record, workspace, s.Workdir, message, groupAmpPath, false)
 }
 
-func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.Envelope, record config.OperationRecord, workspace, workdir, message string) (*result.Envelope, error) {
+func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.Envelope, record config.OperationRecord, workspace, workdir, message, groupAmpPath string, workerAlreadyConfigured bool) (*result.Envelope, error) {
 	row := config.Row{Workspace: workspace, Window: in.Selectors.Window, Workdir: workdir, Thread: record.Resource.Thread}
 	var err error
+	configuredThisCall := false
 	var preDeliveryThreads map[string]bool
 	var inspection workerInspection
 	if record.Phase == config.OperationPhaseThreadBound {
@@ -642,6 +712,7 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 			record.Phase = config.OperationPhaseConfigured
 			record.UpdatedAt = time.Now().UTC()
 			_, err = config.StoreOperation(dir.OperationsPath(), record)
+			configuredThisCall = err == nil
 		}
 	}
 	if err != nil {
@@ -653,6 +724,15 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 		_, _ = config.StoreOperation(dir.OperationsPath(), record)
 		return env, result.Runtime(err)
 	}
+	if len(in.Selectors.Groups) != 0 && record.Phase == config.OperationPhaseConfigured && configuredThisCall && !workerAlreadyConfigured {
+		env.Successful = append(env.Successful, workerOutcome(row, "spawn", "spawned worker; durable group intent follows"))
+		if !in.Options.JSON {
+			fmt.Fprintf(a.stdout, "Spawned worker %s; persisting durable group intent before label synchronization.\n", row.Thread)
+		}
+	}
+	if len(in.Selectors.Groups) != 0 && (record.Phase == config.OperationPhaseConfigured || record.Phase == config.OperationPhaseGroupIntent) {
+		return a.resumeSpawnGrouping(dir, env, record, row, in.Selectors.Groups, groupAmpPath, in.Options.JSON)
+	}
 	record.State = config.OperationSucceeded
 	record.UpdatedAt = time.Now().UTC()
 	_, err = config.StoreOperation(dir.OperationsPath(), record)
@@ -660,6 +740,63 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 		return env, result.Runtime(err)
 	}
 	env.Successful = append(env.Successful, workerOutcome(row, "spawn", "spawned worker"))
+	return env, nil
+}
+
+func (a app) resumeSpawnGrouping(dir config.Directory, env *result.Envelope, record config.OperationRecord, row config.Row, groups []string, ampPath string, jsonOutput bool) (*result.Envelope, error) {
+	if record.Phase == config.OperationPhaseConfigured {
+		memberships, err := config.LoadGroupsReadOnly(dir.GroupsPath())
+		if err != nil {
+			return env, result.Runtime(err)
+		}
+		updated := append([]config.GroupMembership(nil), memberships...)
+		for _, group := range groups {
+			if membershipIndex(updated, group, row.Thread) < 0 {
+				updated = append(updated, config.GroupMembership{Group: group, Thread: row.Thread, Role: config.GroupMember})
+			}
+		}
+		if err := config.WriteGroups(dir.GroupsPath(), updated); err != nil {
+			return env, result.Runtime(err)
+		}
+		record.Phase = config.OperationPhaseGroupIntent
+		record.Error = ""
+		record.UpdatedAt = time.Now().UTC()
+		if _, err := config.StoreOperation(dir.OperationsPath(), record); err != nil {
+			return env, result.Runtime(err)
+		}
+	}
+
+	memberships, err := config.LoadGroupsReadOnly(dir.GroupsPath())
+	if err != nil {
+		return env, result.Runtime(err)
+	}
+	failed := false
+	for _, group := range groups {
+		index := membershipIndex(memberships, group, row.Thread)
+		if index < 0 {
+			return env, result.Runtime(fmt.Errorf("durable spawn group intent %s/%s is missing; refusing label synchronization", group, row.Thread))
+		}
+		membership := memberships[index]
+		out := groupOutcome(membership, "attach-group")
+		if _, err := a.ensureGroupLabel(env, out, ampPath, membership, jsonOutput); err != nil {
+			failed = true
+		}
+	}
+	if failed {
+		record.Error = "one or more additive Amp label commands failed; worker and durable group intent were retained"
+		record.UpdatedAt = time.Now().UTC()
+		if _, err := config.StoreOperation(dir.OperationsPath(), record); err != nil {
+			return env, result.Runtime(fmt.Errorf("%s; persist resumable grouping failure: %w", record.Error, err))
+		}
+		return env, result.Runtime(errors.New(record.Error))
+	}
+	record.Phase = config.OperationPhaseGrouped
+	record.State = config.OperationSucceeded
+	record.Error = ""
+	record.UpdatedAt = time.Now().UTC()
+	if _, err := config.StoreOperation(dir.OperationsPath(), record); err != nil {
+		return env, result.Runtime(err)
+	}
 	return env, nil
 }
 
