@@ -34,6 +34,7 @@ type selectors struct {
 	Workdir        string
 	Thread         string
 	Group          string
+	Groups         []string
 	Mode           string
 	TitlePrefix    string
 	Current        bool
@@ -91,7 +92,7 @@ var rootCommand = &commandSpec{
 		reportCommand(),
 		installCommand(),
 		lifecycleCommand("workspaces", "Exact alias for workspace list", false, "--mode, -m <worker|runner>"),
-		lifecycleCommand("spawn", "Spawn an interactive worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>"),
+		lifecycleCommand("spawn", "Spawn an interactive worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--group <id>  Repeat to attach the authoritative worker thread to multiple groups", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>"),
 		lifecycleCommand("shelve", "Shelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		lifecycleCommand("unshelve", "Unshelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		lifecycleCommand("teardown", "Teardown workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
@@ -139,7 +140,7 @@ func workerCommand() *commandSpec {
 		workerLeaf("park", "Park workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("restart", "Restart workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("remove", "Remove workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
-		workerLeaf("spawn", "Spawn a worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>"),
+		workerLeaf("spawn", "Spawn a worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--group <id>  Repeat to attach the authoritative worker thread to multiple groups", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>"),
 		workerLeaf("shelve", "Shelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("unshelve", "Unshelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("teardown", "Teardown workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
@@ -612,9 +613,10 @@ func parseSelectors(args []string) (selectors, []string, error) {
 				return parsed, nil, err
 			}
 			i = next
-			if err := setSelector(&parsed.Group, value, "--group"); err != nil {
-				return parsed, nil, err
+			if parsed.Group == "" {
+				parsed.Group = value
 			}
+			parsed.Groups = append(parsed.Groups, value)
 		case "--mode", "-m":
 			value, next, err := selectorValue(args, i, name, inline, hasInline)
 			if err != nil {
@@ -696,10 +698,10 @@ func parseSelectors(args []string) (selectors, []string, error) {
 			remaining = append(remaining, arg)
 		}
 	}
-	if parsed.All && (parsed.Current || parsed.Workspace != "" || parsed.Window != "" || parsed.Workdir != "" || parsed.Thread != "" || parsed.Group != "") {
+	if parsed.All && (parsed.Current || parsed.Workspace != "" || parsed.Window != "" || parsed.Workdir != "" || parsed.Thread != "" || len(parsed.Groups) != 0) {
 		return parsed, nil, errors.New("--all cannot be combined with --current or resource selectors")
 	}
-	if parsed.Current && (parsed.Workspace != "" || parsed.Window != "" || parsed.Workdir != "" || parsed.Thread != "" || parsed.Group != "") {
+	if parsed.Current && (parsed.Workspace != "" || parsed.Window != "" || parsed.Workdir != "" || parsed.Thread != "" || len(parsed.Groups) != 0) {
 		return parsed, nil, errors.New("--current cannot be combined with resource selectors")
 	}
 	return parsed, remaining, nil
@@ -793,8 +795,17 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 		parsed.Thread = thread
 	}
 	if parsed.Group != "" {
-		if err := config.ValidateGroupID(parsed.Group); err != nil {
-			return err
+		for _, group := range parsed.Groups {
+			if err := config.ValidateGroupID(group); err != nil {
+				return err
+			}
+		}
+		if command.Name == "spawn" {
+			sort.Strings(parsed.Groups)
+			parsed.Groups = compactStrings(parsed.Groups)
+			parsed.Group = ""
+		} else if len(parsed.Groups) != 1 {
+			return errors.New("--group may be repeated only for worker spawn")
 		}
 	}
 	if parsed.Mode != "" {
@@ -851,7 +862,24 @@ func (c *commandSpec) UsageName() string {
 }
 
 func hasResourceScope(parsed selectors) bool {
-	return parsed.All || parsed.Current || parsed.Workspace != "" || parsed.Window != "" || parsed.Workdir != "" || parsed.Thread != "" || parsed.Group != "" || parsed.ReportID != ""
+	return parsed.All || parsed.Current || parsed.Workspace != "" || parsed.Window != "" || parsed.Workdir != "" || parsed.Thread != "" || len(parsed.Groups) != 0 || parsed.ReportID != ""
+}
+
+func compactStrings(values []string) []string {
+	if len(values) < 2 {
+		return values
+	}
+	compacted := values[:1]
+	for _, value := range values[1:] {
+		if value != compacted[len(compacted)-1] {
+			compacted = append(compacted, value)
+		}
+	}
+	return compacted
+}
+
+func selectorsEmpty(parsed selectors) bool {
+	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin
 }
 
 func isGroupPath(path []string) bool {
@@ -929,7 +957,7 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 	switch parsed.Command.Name {
 	case "list", "pin", "unpin", "launch", "park", "restart", "remove", "spawn", "shelve", "unshelve", "teardown", "doctor", "reconcile":
 		if strings.Join(parsed.Path, " ") == "install doctor" {
-			if len(parsed.Args) != 0 || parsed.Selectors != (selectors{}) {
+			if len(parsed.Args) != 0 || !selectorsEmpty(parsed.Selectors) {
 				return nil, result.Request(errors.New("usage: amux install doctor"))
 			}
 			return a.installDoctor(parsed)
@@ -950,18 +978,18 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 	case "workspaces":
 		return a.executeWorkspaceList(parsed, dir)
 	case "migrate-config":
-		if len(parsed.Args) != 0 || parsed.Selectors != (selectors{}) {
+		if len(parsed.Args) != 0 || !selectorsEmpty(parsed.Selectors) {
 			return nil, result.Request(errors.New("usage: amux migrate-config"))
 		}
 		return a.executeMigration(parsed, dir)
 	case "path":
-		if len(parsed.Args) != 0 || parsed.Selectors != (selectors{}) {
+		if len(parsed.Args) != 0 || !selectorsEmpty(parsed.Selectors) {
 			return nil, result.Request(errors.New("usage: amux path"))
 		}
 		fmt.Fprintln(a.stdout, dir.Path)
 		return nil, nil
 	case "version":
-		if len(parsed.Args) != 0 || parsed.Selectors != (selectors{}) {
+		if len(parsed.Args) != 0 || !selectorsEmpty(parsed.Selectors) {
 			return nil, result.Request(errors.New("usage: amux version"))
 		}
 		fmt.Fprintln(a.stdout, versionString())
@@ -969,7 +997,7 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 	case "completion":
 		return nil, result.Request(a.completion(parsed.Args))
 	case "update":
-		if len(parsed.Args) != 0 || parsed.Selectors != (selectors{}) {
+		if len(parsed.Args) != 0 || !selectorsEmpty(parsed.Selectors) {
 			return nil, result.Request(errors.New("usage: amux update"))
 		}
 		if err := a.selfUpdate(options{dryRun: parsed.Options.DryRun}, nil); err != nil {

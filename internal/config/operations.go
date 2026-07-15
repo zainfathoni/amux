@@ -28,6 +28,8 @@ const (
 	OperationPhaseDeliveryStarted OperationPhase = "delivery_started"
 	OperationPhaseMessageVerified OperationPhase = "message_verified"
 	OperationPhaseConfigured      OperationPhase = "configured"
+	OperationPhaseGroupIntent     OperationPhase = "group_intent_persisted"
+	OperationPhaseGrouped         OperationPhase = "grouped"
 )
 
 type OperationResource struct {
@@ -203,7 +205,7 @@ func canonicalOperation(operation OperationRecord) (OperationRecord, error) {
 		return operation, fmt.Errorf("invalid operation state %q", operation.State)
 	}
 	switch operation.Phase {
-	case "", OperationPhaseCreatingThread, OperationPhaseThreadBound, OperationPhaseDeliveryStarted, OperationPhaseMessageVerified, OperationPhaseConfigured:
+	case "", OperationPhaseCreatingThread, OperationPhaseThreadBound, OperationPhaseDeliveryStarted, OperationPhaseMessageVerified, OperationPhaseConfigured, OperationPhaseGroupIntent, OperationPhaseGrouped:
 	default:
 		return operation, fmt.Errorf("invalid operation phase %q", operation.Phase)
 	}
@@ -211,7 +213,7 @@ func canonicalOperation(operation OperationRecord) (OperationRecord, error) {
 		return operation, fmt.Errorf("operation phase %q is only valid for worker-spawn", operation.Phase)
 	}
 	if operation.ThreadAdoption != nil {
-		if operation.Kind != "worker-spawn" || operation.Phase != OperationPhaseDeliveryStarted && operation.Phase != OperationPhaseMessageVerified && operation.Phase != OperationPhaseConfigured {
+		if operation.Kind != "worker-spawn" || operation.Phase != OperationPhaseDeliveryStarted && operation.Phase != OperationPhaseMessageVerified && operation.Phase != OperationPhaseConfigured && operation.Phase != OperationPhaseGroupIntent && operation.Phase != OperationPhaseGrouped {
 			return operation, errors.New("thread adoption is only valid after worker-spawn delivery starts")
 		}
 		provisioned, err := CanonicalThreadID(operation.ThreadAdoption.ProvisionedThread)
