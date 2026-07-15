@@ -42,6 +42,7 @@ type selectors struct {
 	Shelf          string
 	IdempotencyKey string
 	ReportID       string
+	Pane           string
 	Status         string
 	Issue          string
 	Reference      string
@@ -89,6 +90,7 @@ var rootCommand = &commandSpec{
 		runnerCommand(),
 		workspaceCommand(),
 		groupCommand(),
+		callbackCommand(),
 		reportCommand(),
 		installCommand(),
 		lifecycleCommand("workspaces", "Exact alias for workspace list", false, "--mode, -m <worker|runner>"),
@@ -222,6 +224,19 @@ func reportCommand() *commandSpec {
 		reportLeaf("authorize-finish", "Explicitly authorize finish for a ready report", true, "--report-id <id>", "--thread, -t <coordinator-id>", "--reference <value>"),
 	}
 	return report
+}
+
+func callbackCommand() *commandSpec {
+	callback := &commandSpec{Name: "callback", Summary: "Manage ephemeral coordinator callback leases", Usage: "amux callback <command>"}
+	callback.Children = []*commandSpec{
+		callbackLeaf("register", "Register the exact live coordinator pane", true, "--group <id>", "--thread, -t <id>", "--pane <id>"),
+		callbackLeaf("clear", "Invalidate the current coordinator callback lease", true, "--group <id>"),
+	}
+	return callback
+}
+
+func callbackLeaf(name, summary string, mutating bool, flags ...string) *commandSpec {
+	return &commandSpec{Name: name, Summary: summary, Usage: "amux callback " + name + " [selectors]", Flags: flags, NeedsConfig: true, Mutating: mutating}
 }
 
 func reportLeaf(name, summary string, mutating bool, flags ...string) *commandSpec {
@@ -653,7 +668,7 @@ func parseSelectors(args []string) (selectors, []string, error) {
 			if err := setSelector(&parsed.IdempotencyKey, value, "--idempotency-key"); err != nil {
 				return parsed, nil, err
 			}
-		case "--report-id", "--status", "--issue", "--reference", "--pr", "--summary":
+		case "--report-id", "--pane", "--status", "--issue", "--reference", "--pr", "--summary":
 			value, next, err := selectorValue(args, i, name, inline, hasInline)
 			if err != nil {
 				return parsed, nil, err
@@ -661,6 +676,7 @@ func parseSelectors(args []string) (selectors, []string, error) {
 			i = next
 			target := map[string]*string{
 				"--report-id": &parsed.ReportID,
+				"--pane":      &parsed.Pane,
 				"--status":    &parsed.Status,
 				"--issue":     &parsed.Issue,
 				"--reference": &parsed.Reference,
@@ -751,6 +767,7 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 		{"--shelf", parsed.Shelf},
 		{"--idempotency-key", parsed.IdempotencyKey},
 		{"--report-id", parsed.ReportID},
+		{"--pane", parsed.Pane},
 		{"--status", parsed.Status},
 		{"--issue", parsed.Issue},
 		{"--reference", parsed.Reference},
@@ -879,7 +896,7 @@ func compactStrings(values []string) []string {
 }
 
 func selectorsEmpty(parsed selectors) bool {
-	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin
+	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin
 }
 
 func isGroupPath(path []string) bool {
@@ -888,6 +905,10 @@ func isGroupPath(path []string) bool {
 
 func isReportPath(path []string) bool {
 	return len(path) == 2 && path[0] == "report"
+}
+
+func isCallbackPath(path []string) bool {
+	return len(path) == 2 && path[0] == "callback"
 }
 
 func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
@@ -935,7 +956,7 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 		return a.executeMaintenance(parsed, dir)
 	}
 
-	if !parsed.Command.FoundationOnly && !isAggregateLifecycle(parsed.Path) && !isWorkspaceList(parsed.Path) && !isGroupPath(parsed.Path) && !isReportPath(parsed.Path) && (len(parsed.Path) != 2 || parsed.Path[0] != "worker" && parsed.Path[0] != "runner") && !isWorkerConvenience(parsed.Path) {
+	if !parsed.Command.FoundationOnly && !isAggregateLifecycle(parsed.Path) && !isWorkspaceList(parsed.Path) && !isGroupPath(parsed.Path) && !isReportPath(parsed.Path) && !isCallbackPath(parsed.Path) && (len(parsed.Path) != 2 || parsed.Path[0] != "worker" && parsed.Path[0] != "runner") && !isWorkerConvenience(parsed.Path) {
 		return nil, result.Preflight(fmt.Errorf("%s is reserved for its lifecycle implementation phase and is not available in the CLI foundations", strings.Join(parsed.Path, " ")))
 	}
 
@@ -952,6 +973,9 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 	}
 	if isReportPath(parsed.Path) {
 		return a.executeReport(parsed, dir)
+	}
+	if isCallbackPath(parsed.Path) {
+		return a.executeCallback(parsed, dir)
 	}
 
 	switch parsed.Command.Name {

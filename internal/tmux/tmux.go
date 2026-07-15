@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -38,10 +39,18 @@ type WindowPane struct {
 	Command      string
 	StartCommand string
 	Dead         bool
+	PID          int
 	StartTime    int64
 }
 
-const restartPaneFormat = "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}\t#{pane_dead}\t#{pane_created}"
+type ProcessMetadata struct {
+	PID      int
+	Name     string
+	Command  string
+	Identity string
+}
+
+const restartPaneFormat = "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}\t#{pane_dead}\t#{pane_pid}\t#{pane_created}"
 
 func parseRestartPanes(out []byte) ([]WindowPane, error) {
 	text := strings.TrimSuffix(string(out), "\n")
@@ -51,12 +60,24 @@ func parseRestartPanes(out []byte) ([]WindowPane, error) {
 	var panes []WindowPane
 	for _, line := range strings.Split(text, "\n") {
 		fields := strings.Split(line, "\t")
-		if (len(fields) != 8 && len(fields) != 9) || (fields[7] != "0" && fields[7] != "1") {
+		if (len(fields) != 8 && len(fields) != 9 && len(fields) != 10) || (fields[7] != "0" && fields[7] != "1") {
 			return nil, fmt.Errorf("unexpected tmux restart pane row %q", line)
 		}
 		pane := WindowPane{Session: fields[0], Window: fields[1], WindowID: fields[2], PaneID: fields[3], Path: fields[4], Command: fields[5], StartCommand: fields[6], Dead: fields[7] == "1"}
-		if len(fields) == 9 {
+		if len(fields) == 9 { // Compatibility with older focused parser tests.
 			pane.StartTime, _ = strconv.ParseInt(fields[8], 10, 64)
+		} else if len(fields) == 10 {
+			var err error
+			pane.PID, err = strconv.Atoi(fields[8])
+			if err != nil || pane.PID <= 0 {
+				return nil, fmt.Errorf("unexpected tmux pane PID in row %q", line)
+			}
+			if fields[9] != "" {
+				pane.StartTime, err = strconv.ParseInt(fields[9], 10, 64)
+				if err != nil || pane.StartTime < 0 {
+					return nil, fmt.Errorf("unexpected tmux pane creation time in row %q", line)
+				}
+			}
 		}
 		panes = append(panes, pane)
 	}
@@ -105,6 +126,45 @@ func (r Runner) RestartPaneByID(paneID string) (WindowPane, error) {
 		}
 	}
 	return WindowPane{}, fmt.Errorf("tmux pane %s was not found", paneID)
+}
+
+// InspectProcess returns portable process metadata used to detect PID reuse.
+// Both Linux and macOS ps provide comm and lstart for a selected PID.
+func InspectProcess(pid int) (ProcessMetadata, error) {
+	if pid <= 0 {
+		return ProcessMetadata{}, errors.New("process PID is unavailable")
+	}
+	name, err := processField(pid, "comm=")
+	if err != nil {
+		return ProcessMetadata{}, err
+	}
+	identity, err := processField(pid, "lstart=")
+	if err != nil {
+		return ProcessMetadata{}, err
+	}
+	command, err := processField(pid, "command=")
+	if err != nil {
+		return ProcessMetadata{}, err
+	}
+	if name == "" || command == "" || identity == "" {
+		return ProcessMetadata{}, fmt.Errorf("process %d returned incomplete metadata", pid)
+	}
+	return ProcessMetadata{PID: pid, Name: filepath.Base(name), Command: command, Identity: identity}, nil
+}
+
+func processField(pid int, field string) (string, error) {
+	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", field)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if message != "" {
+			return "", fmt.Errorf("inspect process %d: %w: %s", pid, err, message)
+		}
+		return "", fmt.Errorf("inspect process %d: %w", pid, err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func exactSessionTarget(session string) string {
@@ -361,6 +421,17 @@ func (r Runner) SendEnter(target string) error {
 	args := []string{"send-keys", "-t", target, "Enter"}
 	if r.DryRun {
 		fmt.Printf("tmux %s\n", shellJoin(args))
+		return nil
+	}
+	return tmuxRun(args...)
+}
+
+// Notify sends text and its submitting Enter in one tmux client invocation so
+// callers can safely retry after a command-level failure.
+func (r Runner) Notify(target, text string) error {
+	args := []string{"send-keys", "-t", target, text, "Enter"}
+	if r.DryRun {
+		fmt.Fprintf(r.output(), "tmux %s\n", shellJoin(args))
 		return nil
 	}
 	return tmuxRun(args...)

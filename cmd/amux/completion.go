@@ -48,6 +48,10 @@ var completionCommands = []completionCommand{
 		{Name: "show", Description: "Show one durable group", Flags: []string{"--group"}},
 		{Name: "reconcile", Description: "Add-only ensure group labels", Flags: []string{"--group", "--thread", "--all", "-t"}},
 	}},
+	{Name: "callback", Description: "Manage ephemeral coordinator callback leases", Subcommands: []completionCommand{
+		{Name: "register", Description: "Register an exact coordinator pane", Flags: []string{"--group", "--thread", "--pane", "-t"}},
+		{Name: "clear", Description: "Invalidate a coordinator callback lease", Flags: []string{"--group"}},
+	}},
 	{Name: "report", Description: "Manage durable worker reports and finish authorization", Subcommands: []completionCommand{
 		{Name: "submit", Description: "Submit or progress a durable report", Flags: []string{"--report-id", "--group", "--thread", "--status", "--issue", "--reference", "--pr", "--summary", "-t"}},
 		{Name: "pending", Description: "List unacknowledged reports", Flags: []string{"--group", "--thread", "--all", "-t"}},
@@ -96,7 +100,7 @@ _amux_complete() {
     word="${COMP_WORDS[i]}"
     if [[ "$word" == --config-dir || "$word" == -c ]]; then ((i++)); continue; fi
     if [[ "$word" == --config-dir=* || "$word" == -c=* || "$word" == --json || "$word" == -j || "$word" == --dry-run || "$word" == -n ]]; then continue; fi
-    if [[ -z "$command" ]]; then command="$word"; elif [[ ( "$command" == worker || "$command" == group || "$command" == report || "$command" == install ) && -z "$leaf" ]]; then leaf="$word"; fi
+    if [[ -z "$command" ]]; then command="$word"; elif [[ ( "$command" == worker || "$command" == group || "$command" == callback || "$command" == report || "$command" == install ) && -z "$leaf" ]]; then leaf="$word"; fi
   done
   if [[ -z "$command" ]]; then
     COMPREPLY=( $(compgen -W "%s %s" -- "$cur") )
@@ -128,6 +132,15 @@ _amux_complete() {
           list|reconcile) COMPREPLY=( $(compgen -W "--group --thread --all -t" -- "$cur") ) ;;
           *) COMPREPLY=( $(compgen -W "--group --thread -t" -- "$cur") ) ;;
         esac
+      fi
+      ;;
+    callback)
+      if [[ -z "$leaf" ]]; then
+        COMPREPLY=( $(compgen -W "register clear" -- "$cur") )
+      elif [[ "$leaf" == register ]]; then
+        COMPREPLY=( $(compgen -W "--group --thread --pane -t" -- "$cur") )
+      else
+        COMPREPLY=( $(compgen -W "--group" -- "$cur") )
       fi
       ;;
     report)
@@ -186,6 +199,13 @@ func writeZshCompletion(w io.Writer) {
 	}
 	fmt.Fprintln(w, ")")
 	fmt.Fprintln(w)
+	fmt.Fprintln(w, "local -a callback_commands")
+	fmt.Fprintln(w, "callback_commands=(")
+	for _, command := range callbackCompletionCommands() {
+		fmt.Fprintf(w, "  %q\n", command.Name+":"+command.Description)
+	}
+	fmt.Fprintln(w, ")")
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, `local command leaf i word
 i=2
 while (( i <= CURRENT )); do
@@ -193,7 +213,7 @@ while (( i <= CURRENT )); do
   case $word in
     --config-dir|-c) (( i += 2 )); continue ;;
     --config-dir=*|-c=*|--json|-j|--dry-run|-n) (( i++ )); continue ;;
-    *) command=$word; (( i++ )); if [[ $command == worker || $command == group || $command == report || $command == install ]]; then leaf=$words[$i]; fi; break ;;
+    *) command=$word; (( i++ )); if [[ $command == worker || $command == group || $command == callback || $command == report || $command == install ]]; then leaf=$words[$i]; fi; break ;;
   esac
 done`)
 	fmt.Fprintln(w)
@@ -243,6 +263,15 @@ case $state in
             list|reconcile) _arguments '--group[group id]:group:' '--thread[thread id or URL]:thread:' '--all[all memberships]' '-t[thread id or URL]:thread:' ;;
             *) _arguments '--group[group id]:group:' '--thread[thread id or URL]:thread:' '-t[thread id or URL]:thread:' ;;
           esac
+        fi
+        ;;
+      callback)
+        if [[ -z $leaf ]]; then
+          _describe -t callback-commands 'callback command' callback_commands
+        elif [[ $leaf == register ]]; then
+          _arguments '--group[group id]:group:' '--thread[coordinator thread]:thread:' '--pane[exact tmux pane id]:pane:' '-t[coordinator thread]:thread:'
+        else
+          _arguments '--group[group id]:group:'
         fi
         ;;
       report)
@@ -345,6 +374,14 @@ function __fish_amux_report_leaf
         echo $words[(math $index + 1)]
     end
 end`)
+	fmt.Fprintln(w, `
+function __fish_amux_callback_leaf
+    set -l words (commandline -opc)
+    set -l index (contains -i -- callback $words)
+    if test -n "$index"; and test (math $index + 1) -le (count $words)
+        echo $words[(math $index + 1)]
+    end
+end`)
 	for _, flag := range globalCompletionFlags {
 		writeFishFlag(w, "__fish_use_subcommand", flag, flagDescription(flag), flagTakesValue(flag))
 	}
@@ -381,6 +418,15 @@ end`)
 			for _, subcommand := range command.Subcommands {
 				fmt.Fprintf(w, "complete -c amux -f -n 'test (__fish_amux_root_command) = report; and test -z (__fish_amux_report_leaf)' -a %s -d %s\n", fishQuote(subcommand.Name), fishQuote(subcommand.Description))
 				condition := fmt.Sprintf("test (__fish_amux_root_command) = report; and test (__fish_amux_report_leaf) = %s", subcommand.Name)
+				for _, flag := range subcommand.Flags {
+					writeFishFlag(w, condition, flag, flagDescription(flag), flagTakesValue(flag))
+				}
+			}
+		}
+		if command.Name == "callback" {
+			for _, subcommand := range command.Subcommands {
+				fmt.Fprintf(w, "complete -c amux -f -n 'test (__fish_amux_root_command) = callback; and test -z (__fish_amux_callback_leaf)' -a %s -d %s\n", fishQuote(subcommand.Name), fishQuote(subcommand.Description))
+				condition := fmt.Sprintf("test (__fish_amux_root_command) = callback; and test (__fish_amux_callback_leaf) = %s", subcommand.Name)
 				for _, flag := range subcommand.Flags {
 					writeFishFlag(w, condition, flag, flagDescription(flag), flagTakesValue(flag))
 				}
@@ -462,6 +508,15 @@ func reportCompletionCommands() []completionCommand {
 	return nil
 }
 
+func callbackCompletionCommands() []completionCommand {
+	for _, command := range completionCommands {
+		if command.Name == "callback" {
+			return command.Subcommands
+		}
+	}
+	return nil
+}
+
 func flagDescription(flag string) string {
 	switch flag {
 	case "--config-dir":
@@ -486,6 +541,8 @@ func flagDescription(flag string) string {
 		return "Report status"
 	case "--report-id":
 		return "Stable report ID"
+	case "--pane":
+		return "Exact tmux pane ID"
 	case "--issue":
 		return "Issue identifier"
 	case "--reference":
@@ -537,7 +594,7 @@ func flagDescription(flag string) string {
 
 func flagTakesValue(flag string) bool {
 	switch flag {
-	case "--config-dir", "-c", "--thread", "-t", "--group", "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--shelf", "--mode", "-m", "--title-prefix", "--message", "--message-file", "--idempotency-key", "--report-id", "--status", "--issue", "--reference", "--pr", "--summary":
+	case "--config-dir", "-c", "--thread", "-t", "--group", "--pane", "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--shelf", "--mode", "-m", "--title-prefix", "--message", "--message-file", "--idempotency-key", "--report-id", "--status", "--issue", "--reference", "--pr", "--summary":
 		return true
 	default:
 		return false

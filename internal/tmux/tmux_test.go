@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,6 +39,48 @@ func TestSessionExistsDistinguishesAbsenceFromInspectionFailure(t *testing.T) {
 				t.Fatalf("SessionExists() error = %v, want %q", err, test.wantError)
 			}
 		})
+	}
+}
+
+func TestInspectProcessUsesLinuxAndMacOSCompatiblePSFields(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "ps.log")
+	writeExecutable(t, filepath.Join(tmp, "ps"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+case "$*" in
+  "-p 4242 -o comm=") printf '/opt/amp/bin/amp\n' ;;
+  "-p 4242 -o lstart=") printf 'Wed Jul 15 06:20:00 2026\n' ;;
+  "-p 4242 -o command=") printf 'amp threads continue T-coordinator\n' ;;
+  *) exit 2 ;;
+esac
+`)
+	t.Setenv("PATH", tmp)
+	metadata, err := InspectProcess(4242)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.PID != 4242 || metadata.Name != "amp" || metadata.Command != "amp threads continue T-coordinator" || metadata.Identity != "Wed Jul 15 06:20:00 2026" {
+		t.Fatalf("metadata = %+v", metadata)
+	}
+	log, _ := os.ReadFile(logPath)
+	if got := string(log); !strings.Contains(got, "-o comm=") || !strings.Contains(got, "-o lstart=") || !strings.Contains(got, "-o command=") {
+		t.Fatalf("ps calls = %q", got)
+	}
+}
+
+func TestParseRestartPanesRejectsMalformedRequiredNumericMetadata(t *testing.T) {
+	base := "amux\tworker\t@1\t%%1\t/tmp\tamp\tstart\t0\t%s\t%s\n"
+	for _, row := range []string{
+		fmt.Sprintf(base, "not-a-pid", "123"),
+		fmt.Sprintf(base, "42", "not-a-time"),
+	} {
+		if _, err := parseRestartPanes([]byte(row)); err == nil {
+			t.Fatalf("parseRestartPanes accepted %q", row)
+		}
+	}
+	panes, err := parseRestartPanes([]byte(fmt.Sprintf(base, "42", "")))
+	if err != nil || len(panes) != 1 || panes[0].PID != 42 || panes[0].StartTime != 0 {
+		t.Fatalf("optional unavailable pane creation time = %+v, %v", panes, err)
 	}
 }
 
@@ -159,6 +202,26 @@ exit 2
 	}
 	if got, want := strings.TrimSpace(string(logBytes)), "send-keys -t @1 Enter"; got != want {
 		t.Fatalf("SendEnter sent %q, want %q", got, want)
+	}
+}
+
+func TestNotifySendsTokenAndEnterInOneTmuxInvocation(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "calls.log")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+test "$1" = send-keys
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := (Runner{}).Notify("%16", "AMUX_REPORT group=issue-134 report=report-134"); err != nil {
+		t.Fatal(err)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(string(log)), "send-keys -t %16 AMUX_REPORT group=issue-134 report=report-134 Enter"; got != want {
+		t.Fatalf("Notify invocation = %q, want %q", got, want)
 	}
 }
 
