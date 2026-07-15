@@ -10,7 +10,7 @@ amux will model interactive thread-bound clients as workers and non-interactive 
 
 - A workspace is a lifecycle group represented by one same-named tmux session; the canonical API has no separate session selector.
 - A worker's machine-wide identity is its canonical Amp thread ID. A runner's machine-wide identity is its canonical workdir.
-- Runner pinning requires an already-locked Git worktree. amux verifies this invariant but does not own Git worktree lock or unlock operations.
+- Runner pinning requires stable Git worktree ownership: the repository's primary worktree is inherently stable, while a linked worktree must already be locked. amux verifies this invariant but does not own Git worktree lock or unlock operations.
 - Runner window names are generated as `runner-<directory>-<canonical-path-hash>` and are not public identifiers.
 - `list`, `launch`, `park`, `restart`, `remove`, and `doctor` aggregate workers and runners at the top level; their mode-specific forms narrow scope.
 - `spawn`, `shelve`, `unshelve`, and `teardown` are worker-only and may have concise top-level forms. Teardown changes a worker's remote thread state and never applies to a runner or remote agent thread.

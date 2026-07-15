@@ -156,11 +156,11 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 			pidDiagnostic = staleAmpPIDDiagnostic(row.Workdir)
 		}
 		if in.Command.Name == "doctor" {
-			lockState := "locked"
-			if lockErr := requireLockedWorktree(row.Workdir); lockErr != nil {
-				lockState = lockErr.Error()
+			ownership, ownershipErr := runnerWorktreeOwnership(row.Workdir)
+			if ownershipErr != nil {
+				ownership = ownershipErr.Error()
 			}
-			out.Message = fmt.Sprintf("local=%s worktree=%s%s", inspection.state, lockState, staleAmpPIDDiagnostic(row.Workdir))
+			out.Message = fmt.Sprintf("local=%s worktree=%s%s", inspection.state, ownership, staleAmpPIDDiagnostic(row.Workdir))
 			out.Runner = &result.RunnerDetails{LocalState: string(inspection.state), ProcessStart: inspection.pane.StartTime}
 			if inspection.pane.StartTime > 0 {
 				out.Runner.ProcessAgeSeconds = time.Now().Unix() - inspection.pane.StartTime
@@ -377,23 +377,28 @@ func runnerOutcome(row config.RunnerRow, action, message string) result.Outcome 
 }
 
 func requireLockedWorktree(workdir string) error {
+	_, err := runnerWorktreeOwnership(workdir)
+	return err
+}
+
+func runnerWorktreeOwnership(workdir string) (string, error) {
 	stat, err := os.Stat(workdir)
 	if err != nil || !stat.IsDir() {
-		return fmt.Errorf("runner workdir %s is missing", workdir)
+		return "", fmt.Errorf("runner workdir %s is missing", workdir)
 	}
 	top, err := exec.Command("git", "-C", workdir, "rev-parse", "--show-toplevel").Output()
 	if err != nil {
-		return fmt.Errorf("runner workdir %s is not a Git worktree", workdir)
+		return "", fmt.Errorf("runner workdir %s is not a Git worktree", workdir)
 	}
 	topInfo, topErr := os.Stat(strings.TrimSpace(string(top)))
 	if topErr != nil || !os.SameFile(stat, topInfo) {
-		return fmt.Errorf("runner workdir %s must be the Git worktree root", workdir)
+		return "", fmt.Errorf("runner workdir %s must be the Git worktree root", workdir)
 	}
 	out, err := exec.Command("git", "-C", workdir, "worktree", "list", "--porcelain").Output()
 	if err != nil {
-		return fmt.Errorf("inspect Git worktree lock for %s: %w", workdir, err)
+		return "", fmt.Errorf("inspect Git worktree lock for %s: %w", workdir, err)
 	}
-	for _, record := range strings.Split(strings.TrimSpace(string(out)), "\n\n") {
+	for index, record := range strings.Split(strings.TrimSpace(string(out)), "\n\n") {
 		lines := strings.Split(record, "\n")
 		if len(lines) == 0 || !strings.HasPrefix(lines[0], "worktree ") {
 			continue
@@ -402,14 +407,20 @@ func requireLockedWorktree(workdir string) error {
 		if candidateErr != nil || !os.SameFile(stat, candidateInfo) {
 			continue
 		}
+		// Git guarantees that the primary worktree is the first porcelain
+		// record. Unlike linked worktrees, it cannot carry a worktree lock and
+		// is stable because `git worktree prune` never removes it.
+		if index == 0 {
+			return "stable primary", nil
+		}
 		for _, line := range lines[1:] {
 			if line == "locked" || strings.HasPrefix(line, "locked ") {
-				return nil
+				return "locked", nil
 			}
 		}
-		return fmt.Errorf("runner worktree %s is not locked; lock it before pinning or launch", workdir)
+		return "", fmt.Errorf("runner worktree %s is not locked; lock it before pinning or launch", workdir)
 	}
-	return fmt.Errorf("runner workdir %s is not registered as a Git worktree", workdir)
+	return "", fmt.Errorf("runner workdir %s is not registered as a Git worktree", workdir)
 }
 
 func runnerStartCommand(workdir string) string {

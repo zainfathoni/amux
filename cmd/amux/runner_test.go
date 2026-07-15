@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -22,8 +23,9 @@ import (
 func TestRunnerPinRequiresLockedWorktreeAndIsCanonicalIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	locked := lockedTestWorktree(t)
-	unlocked := t.TempDir()
-	runGit(t, unlocked, "init", "-q")
+	unlockedRepo := primaryTestWorktree(t)
+	unlocked := filepath.Join(t.TempDir(), "unlocked")
+	runGit(t, unlockedRepo, "worktree", "add", "-q", "--detach", unlocked)
 	bin := t.TempDir()
 	called := filepath.Join(bin, "called")
 	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\ntouch '"+called+"'\nexit 2\n")
@@ -108,8 +110,9 @@ func TestRunnerListIsDeterministicLocalOnly(t *testing.T) {
 func TestRunnerLaunchPreflightsEveryLockedWorktreeBeforeTmuxMutation(t *testing.T) {
 	dir := t.TempDir()
 	locked := lockedTestWorktree(t)
-	unlocked := t.TempDir()
-	runGit(t, unlocked, "init", "-q")
+	unlockedRepo := primaryTestWorktree(t)
+	unlocked := filepath.Join(t.TempDir(), "unlocked")
+	runGit(t, unlockedRepo, "worktree", "add", "-q", "--detach", unlocked)
 	writeRunnerRegistry(t, dir, "alpha\t"+locked+"\nbeta\t"+unlocked+"\n")
 	bin := t.TempDir()
 	log := filepath.Join(bin, "tmux.log")
@@ -124,6 +127,82 @@ func TestRunnerLaunchPreflightsEveryLockedWorktreeBeforeTmuxMutation(t *testing.
 	data, _ := os.ReadFile(log)
 	if strings.Contains(string(data), "new-session") || strings.Contains(string(data), "new-window") {
 		t.Fatalf("bulk preflight mutated tmux:\n%s", data)
+	}
+}
+
+func TestRunnerPrimaryWorktreeOwnershipAgreesAcrossRestartAndDoctor(t *testing.T) {
+	dir := t.TempDir()
+	workdir := primaryTestWorktree(t)
+	window := config.RunnerWindow(workdir)
+	start := runnerStartCommand(workdir)
+	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
+	registryBefore, err := os.ReadFile(filepath.Join(dir, config.RunnersFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := t.TempDir()
+	runnerCacheDirBefore := runnerCacheDir
+	runnerCacheDir = func() (string, error) { return cache, nil }
+	t.Cleanup(func() { runnerCacheDir = runnerCacheDirBefore })
+	sum := sha256.Sum256([]byte(workdir))
+	marker := filepath.Join(cache, "amp", "pids", fmt.Sprintf("runner-%x.pid", sum[:8]))
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	markerBefore := []byte(strconv.Itoa(os.Getpid()) + "\n")
+	if err := os.WriteFile(marker, markerBefore, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) exit 0 ;;
+  list-panes) printf 'alpha\t`+window+`\t@7\t%%9\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(start)+` ;;
+  *) exit 2 ;;
+esac
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	restart := executeRunnerJSON(t, "--json", "--dry-run", "--config-dir", dir, "runner", "restart", "--workdir", workdir)
+	if len(restart.Planned) != 1 || len(restart.Failed) != 0 {
+		t.Fatalf("primary worktree restart = %+v", restart)
+	}
+	doctor := executeRunnerJSON(t, "--json", "--config-dir", dir, "runner", "doctor", "--workdir", workdir)
+	if len(doctor.Successful) != 1 || len(doctor.Failed) != 0 || !strings.Contains(doctor.Successful[0].Message, "worktree=stable primary") {
+		t.Fatalf("primary worktree doctor = %+v", doctor)
+	}
+	registryAfter, err := os.ReadFile(filepath.Join(dir, config.RunnersFile))
+	if err != nil || !bytes.Equal(registryAfter, registryBefore) {
+		t.Fatalf("primary worktree lifecycle changed migrated runner row: before=%q after=%q err=%v", registryBefore, registryAfter, err)
+	}
+	markerAfter, err := os.ReadFile(marker)
+	if err != nil || !bytes.Equal(markerAfter, markerBefore) {
+		t.Fatalf("primary worktree lifecycle changed private Amp PID marker: before=%q after=%q err=%v", markerBefore, markerAfter, err)
+	}
+}
+
+func TestRunnerRestartRejectsUnlockedLinkedWorktree(t *testing.T) {
+	dir := t.TempDir()
+	repo := primaryTestWorktree(t)
+	workdir := filepath.Join(t.TempDir(), "linked")
+	runGit(t, repo, "worktree", "add", "-q", "--detach", workdir)
+	window := config.RunnerWindow(workdir)
+	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) exit 0 ;;
+  list-panes) printf 'alpha\t`+window+`\t@7\t%%9\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(runnerStartCommand(workdir))+` ;;
+  *) exit 2 ;;
+esac
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	err := executeRunnerJSONError(t, "--json", "--dry-run", "--config-dir", dir, "runner", "restart", "--workdir", workdir)
+	if err == nil || !strings.Contains(err.Error(), "not locked") || result.ExitCode(err) != result.ExitRejected {
+		t.Fatalf("unlocked linked restart error = %v, exit=%d", err, result.ExitCode(err))
 	}
 }
 
@@ -480,6 +559,15 @@ func writeRunnerRegistry(t *testing.T, dir, rows string) {
 
 func lockedTestWorktree(t *testing.T) string {
 	t.Helper()
+	repo := primaryTestWorktree(t)
+	worktree := filepath.Join(t.TempDir(), "project")
+	runGit(t, repo, "worktree", "add", "-q", "--detach", worktree)
+	runGit(t, repo, "worktree", "lock", "--reason", "amux test", worktree)
+	return worktree
+}
+
+func primaryTestWorktree(t *testing.T) string {
+	t.Helper()
 	repo := t.TempDir()
 	runGit(t, repo, "init", "-q")
 	runGit(t, repo, "config", "user.email", "test@example.com")
@@ -489,10 +577,7 @@ func lockedTestWorktree(t *testing.T) string {
 	}
 	runGit(t, repo, "add", "README")
 	runGit(t, repo, "commit", "-qm", "initial")
-	worktree := filepath.Join(t.TempDir(), "project")
-	runGit(t, repo, "worktree", "add", "-q", "--detach", worktree)
-	runGit(t, repo, "worktree", "lock", "--reason", "amux test", worktree)
-	return worktree
+	return repo
 }
 
 func runGit(t *testing.T, dir string, args ...string) {
