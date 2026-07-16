@@ -139,7 +139,7 @@ Removed aliases and positional forms fail with remediation. In particular, do no
 amux --dry-run spawn --workspace amux --window install-diagnostics --workdir ~/Code/amux-issue-110 --mode medium --title-prefix '#110' --group issue-110 --message-file /tmp/issue-110.md --idempotency-key issue-110
 ```
 
-An exact `#<issue>` title prefix owns issue identity. The window must be an issue-unprefixed semantic slug; obvious duplicates such as `issue-110-install-diagnostics` are rejected before side effects. `--message`, `--message-file`, and `--message-stdin` are mutually exclusive. Spawn requires a stable idempotency key; if interrupted external creation cannot be recovered, the operation becomes indeterminate and is never blindly retried.
+An exact `#<issue>` title prefix owns issue identity. The window must be an issue-unprefixed semantic slug; obvious duplicates such as `issue-110-install-diagnostics` are rejected before side effects. `--message`, `--message-file`, and `--message-stdin` are mutually exclusive. Spawn requires a stable idempotency key. If verification times out after delivery starts, rerunning the identical request with the same key may recover only when the assignment is verified in the exact provisioned thread; amux never resubmits the message or adopts an alternate thread during this recovery. Other indeterminate outcomes remain terminal.
 
 ```sh
 amux shelve --thread T-example

@@ -416,6 +416,47 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		env.Skipped = append(env.Skipped, out)
 		return env, nil
 	}
+	if found && recoverableProvisionedVerificationFailure(existing) {
+		if in.Options.DryRun {
+			resource, _ := result.WorkerResource(existing.Resource.Thread)
+			env.Planned = append(env.Planned, result.Outcome{Resource: resource, Action: "spawn", Message: "would verify the exact provisioned thread and recover without resubmitting"})
+			return env, nil
+		}
+		matches, _, verifyErr := ampThreadContainsExactAssignment(existing.Resource.Thread, message, s.Workdir, false)
+		if verifyErr != nil {
+			return env, result.Runtime(fmt.Errorf("verify indeterminate provisioned thread %s without resubmitting: %w", existing.Resource.Thread, verifyErr))
+		}
+		if !matches {
+			return env, result.Preflight(fmt.Errorf("indeterminate assignment is not verified in exact provisioned thread %s; refusing to resubmit or adopt another thread", existing.Resource.Thread))
+		}
+		requested := config.Row{Workspace: workspace, Window: s.Window, Workdir: s.Workdir, Thread: existing.Resource.Thread}
+		rows, loadErr := config.LoadReadOnly(dir.WorkersPath())
+		if loadErr != nil {
+			return env, result.Preflight(loadErr)
+		}
+		for _, row := range rows {
+			if workerRowsEquivalent(row, requested) {
+				continue
+			}
+			if row.Workspace == workspace && row.Window == s.Window {
+				return env, result.Preflight(fmt.Errorf("indeterminate spawn cannot recover because worker window %s/%s is configured for thread %s", workspace, s.Window, row.Thread))
+			}
+			if row.Thread == existing.Resource.Thread {
+				return env, result.Preflight(fmt.Errorf("indeterminate spawn cannot recover because thread %s is configured as %s/%s", row.Thread, row.Workspace, row.Window))
+			}
+		}
+		inspection, inspectErr := inspectWorker(requested)
+		if inspectErr != nil {
+			return env, result.Preflight(inspectErr)
+		}
+		if inspection.state != workerPaneAbsent && inspection.state != workerPaneExact {
+			return env, result.Preflight(fmt.Errorf("indeterminate spawn cannot recover because worker tmux identity is %s", inspection.state))
+		}
+		existing, err = config.RecoverIndeterminateWorkerSpawn(dir.OperationsPath(), existing.Key, existing.Resource.Thread)
+		if err != nil {
+			return env, result.Runtime(err)
+		}
+	}
 	if found && existing.State != config.OperationStarted {
 		return env, result.Preflight(fmt.Errorf("spawn operation is terminal in state %s; refusing new work", existing.State))
 	}
@@ -477,21 +518,7 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 			requested := config.Row{Workspace: workspace, Window: s.Window, Workdir: s.Workdir, Thread: existing.Resource.Thread}
 			if workerRowsEquivalent(row, requested) {
 				switch existing.Phase {
-				case "", config.OperationPhaseMessageVerified:
-					if existing.Phase == config.OperationPhaseMessageVerified && len(s.Groups) != 0 {
-						existing.Phase = config.OperationPhaseConfigured
-						existing.Error = ""
-						existing.UpdatedAt = time.Now().UTC()
-						if _, storeErr := config.StoreOperation(dir.OperationsPath(), existing); storeErr != nil {
-							return env, result.Runtime(storeErr)
-						}
-						env.Skipped = append(env.Skipped, workerOutcome(row, "spawn", "worker already created; resuming grouping only"))
-						if !in.Options.JSON {
-							fmt.Fprintf(a.stdout, "Worker %s already exists; resuming durable grouping only.\n", row.Thread)
-						}
-						workerAlreadyConfigured = true
-						break rowsLoop
-					}
+				case "":
 					existing.Phase = config.OperationPhaseConfigured
 					existing.State = config.OperationSucceeded
 					existing.UpdatedAt = time.Now().UTC()
@@ -501,6 +528,17 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 					}
 					env.Skipped = append(env.Skipped, workerOutcome(row, "spawn", "recovered completed spawn"))
 					return env, nil
+				case config.OperationPhaseMessageVerified:
+					message := "worker already created; resuming verified spawn"
+					if len(s.Groups) != 0 {
+						message = "worker already created; resuming grouping only"
+					}
+					env.Skipped = append(env.Skipped, workerOutcome(row, "spawn", message))
+					if !in.Options.JSON {
+						fmt.Fprintf(a.stdout, "Worker %s already exists; resuming verified spawn.\n", row.Thread)
+					}
+					workerAlreadyConfigured = true
+					break rowsLoop
 				case config.OperationPhaseConfigured, config.OperationPhaseGroupIntent:
 					if len(s.Groups) == 0 {
 						existing.State = config.OperationSucceeded
@@ -700,6 +738,18 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 		}
 	}
 	if err == nil && record.Phase == config.OperationPhaseMessageVerified {
+		inspection, err = inspectWorker(row)
+		if err == nil && inspection.state == workerPaneAbsent {
+			err = createWorkerPane(row)
+			if err == nil {
+				inspection, err = inspectWorker(row)
+			}
+		}
+		if err == nil && inspection.state != workerPaneExact {
+			err = fmt.Errorf("verified worker tmux identity is %s", inspection.state)
+		}
+	}
+	if err == nil && record.Phase == config.OperationPhaseMessageVerified {
 		if in.Selectors.TitlePrefix != "" {
 			if renameErr := renameAmpThread(row.Thread, row.Window); renameErr != nil {
 				err = fmt.Errorf("rename Amp thread %s to %q: %w", row.Thread, row.Window, renameErr)
@@ -739,8 +789,20 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 	if err != nil {
 		return env, result.Runtime(err)
 	}
+	if workerAlreadyConfigured {
+		return env, nil
+	}
 	env.Successful = append(env.Successful, workerOutcome(row, "spawn", "spawned worker"))
 	return env, nil
+}
+
+func recoverableProvisionedVerificationFailure(operation config.OperationRecord) bool {
+	want := fmt.Sprintf("initial assignment was not found in provisioned thread %s or one unambiguous fresh receiving thread; recovery: inspect thread %s and do not resubmit", operation.Resource.Thread, operation.Resource.Thread)
+	return operation.State == config.OperationIndeterminate &&
+		operation.Phase == config.OperationPhaseDeliveryStarted &&
+		operation.Resource.Thread != "" &&
+		operation.ThreadAdoption == nil &&
+		operation.Error == want
 }
 
 func (a app) resumeSpawnGrouping(dir config.Directory, env *result.Envelope, record config.OperationRecord, row config.Row, groups []string, ampPath string, jsonOutput bool) (*result.Envelope, error) {
@@ -942,7 +1004,11 @@ func ampThreadContainsExactAssignment(thread, message, workdir string, requireWo
 	if err := json.Unmarshal(out, &payload); err != nil {
 		return false, false, fmt.Errorf("parse amp threads export for %s: %w", thread, err)
 	}
-	if !messagesContainExactUserAssignment(payload["messages"], message) {
+	matches := messagesContainExactUserAssignment(payload["messages"], message)
+	if !requireWorkdir {
+		matches = messagesContainProvisionedAssignment(payload["messages"], message)
+	}
+	if !matches {
 		return false, true, nil
 	}
 	if requireWorkdir && !threadEnvironmentContainsWorkdir(payload["env"], workdir) {
@@ -966,6 +1032,64 @@ func messagesContainExactUserAssignment(value any, message string) bool {
 		}
 	}
 	return false
+}
+
+func messagesContainProvisionedAssignment(value any, message string) bool {
+	messages, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range messages {
+		entry, ok := item.(map[string]any)
+		if !ok || entry["role"] != "user" {
+			continue
+		}
+		if jsonValueContainsProvisionedText(entry["content"], message) {
+			return true
+		}
+	}
+	return false
+}
+
+func jsonValueContainsProvisionedText(value any, want string) bool {
+	switch value := value.(type) {
+	case string:
+		return duplicatedPrefixAssignment(value, want)
+	case []any:
+		for _, item := range value {
+			if jsonValueContainsProvisionedText(item, want) {
+				return true
+			}
+		}
+	case map[string]any:
+		text, ok := value["text"].(string)
+		kind, _ := value["type"].(string)
+		if ok && (kind == "" || kind == "text") {
+			return duplicatedPrefixAssignment(text, want)
+		}
+	}
+	return false
+}
+
+func duplicatedPrefixAssignment(got, want string) bool {
+	if got == want {
+		return want != ""
+	}
+	contentEnd := len(want)
+	switch {
+	case strings.HasSuffix(want, "\r\n"):
+		contentEnd -= 2
+	case strings.HasSuffix(want, "\r"), strings.HasSuffix(want, "\n"):
+		contentEnd--
+	}
+	if contentEnd <= 0 {
+		return false
+	}
+	lastLine := strings.LastIndexAny(want[:contentEnd], "\r\n") + 1
+	if lastLine <= 0 || lastLine == contentEnd {
+		return false
+	}
+	return got == want[:lastLine]+want
 }
 
 func jsonValueContainsExactText(value any, want string) bool {

@@ -12,7 +12,7 @@ amux spawn --workspace <workspace> --window <semantic-slug> --workdir <path> --m
 amux worker list --thread <thread-id>
 ```
 
-Every skill-driven spawn MUST pass `--mode medium` unless the user explicitly requests another mode. Substitute the exact requested built-in or plugin mode; never infer `high` or `ultra` from complexity, size, urgency, or duration. Reuse the same idempotency key only for the identical request. If creation becomes indeterminate, inspect the operation and external state; do not retry blindly.
+Every skill-driven spawn MUST pass `--mode medium` unless the user explicitly requests another mode. Substitute the exact requested built-in or plugin mode; never infer `high` or `ultra` from complexity, size, urgency, or duration. Reuse the same idempotency key only for the identical request. If creation becomes indeterminate, inspect the operation and external state; never change the key or resubmit blindly. The identical request may recover the specific provisioned-thread verification timeout only by verifying that exact thread, without resubmission or alternate-thread adoption; other indeterminate outcomes remain terminal.
 
 ## Sprawl independent issue workers
 

@@ -2279,6 +2279,13 @@ func submitInitialMessage(runner tmux.Runner, target, message string) (bool, err
 	if err := sendInitialMessageText(runner, target, message); err != nil {
 		return false, fmt.Errorf("send initial message: %w", err)
 	}
+	if strings.ContainsAny(message, "\r\n") {
+		time.Sleep(spawnInputSettleDelay())
+		if err := runner.SendEnter(target); err != nil {
+			return false, fmt.Errorf("submit initial message: %w", err)
+		}
+		return true, nil
+	}
 	if !waitForComposerMessage(runner, target, message) {
 		if err := runner.ClearLine(target); err != nil {
 			return false, fmt.Errorf("clear initial message: %w", err)

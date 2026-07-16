@@ -179,6 +179,42 @@ func CompleteOperationThreadAdoption(path, key string) (OperationRecord, error) 
 	return OperationRecord{}, fmt.Errorf("idempotency key %q was not found", key)
 }
 
+func RecoverIndeterminateWorkerSpawn(path, key, provisionedThread string) (OperationRecord, error) {
+	provisionedThread, err := CanonicalThreadID(provisionedThread)
+	if err != nil {
+		return OperationRecord{}, err
+	}
+	operations, err := loadOperations(path)
+	if err != nil {
+		return OperationRecord{}, err
+	}
+	for i, operation := range operations {
+		if operation.Key != key {
+			continue
+		}
+		if operation.Kind != "worker-spawn" || operation.State != OperationIndeterminate || operation.Phase != OperationPhaseDeliveryStarted || operation.ThreadAdoption != nil {
+			return OperationRecord{}, fmt.Errorf("idempotency key %q is not an indeterminate provisioned worker-spawn delivery", key)
+		}
+		if operation.Resource.Thread != provisionedThread {
+			return OperationRecord{}, fmt.Errorf("idempotency key %q is bound to thread %s, not provisioned thread %s", key, operation.Resource.Thread, provisionedThread)
+		}
+		wantError := fmt.Sprintf("initial assignment was not found in provisioned thread %s or one unambiguous fresh receiving thread; recovery: inspect thread %s and do not resubmit", provisionedThread, provisionedThread)
+		if operation.Error != wantError {
+			return OperationRecord{}, fmt.Errorf("idempotency key %q does not have the recoverable provisioned-thread verification failure", key)
+		}
+		operation.State = OperationStarted
+		operation.Phase = OperationPhaseMessageVerified
+		operation.Error = ""
+		operation.UpdatedAt = time.Now().UTC()
+		operations[i] = operation
+		if err := writeOperations(path, operations); err != nil {
+			return OperationRecord{}, err
+		}
+		return operation, nil
+	}
+	return OperationRecord{}, fmt.Errorf("idempotency key %q was not found", key)
+}
+
 func operationTransitionAllowed(from, to OperationState) bool {
 	return from == to || from == OperationStarted
 }

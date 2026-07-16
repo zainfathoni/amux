@@ -16,7 +16,7 @@ Do not treat a tmux server command, name similarity, or stale output as ownershi
 
 ## Partial success and retries
 
-Exit `1` means mutation may have started. Inspect `successful`, `skipped`, and `failed`, then inspect config, tmux, Git worktrees, and remote thread state before retrying. Exit `2` means request/preflight rejection before mutation. A spawn operation marked indeterminate is terminal until identity is recovered; never change its stable idempotency key to force a duplicate creation.
+Exit `1` means mutation may have started. Inspect `successful`, `skipped`, and `failed`, then inspect config, tmux, Git worktrees, and remote thread state before retrying. Exit `2` means request/preflight rejection before mutation. Never change an indeterminate spawn's stable idempotency key to force a duplicate creation. For the specific timeout reporting that the assignment was not found in the provisioned thread or one fresh receiver, rerun only the identical request with the same key after inspection: amux verifies the exact provisioned thread and recovers without resubmitting or alternate-thread adoption. Other indeterminate outcomes remain terminal.
 
 `shelve` records intent before remote archive and local park. `unshelve` removes intent only after remote unarchive. Visible partial synchronization is retryable desired state, not a reason to roll back by hand.
 
