@@ -414,6 +414,58 @@ esac
 	}
 }
 
+func TestRunnerLaunchPreservesDetailedObservationBeforePaneLookupFailure(t *testing.T) {
+	workdir := t.TempDir()
+	window := config.RunnerWindow(workdir)
+	start := runnerStartCommand(workdir)
+	bin := t.TempDir()
+	calls := filepath.Join(bin, "calls")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) exit 1 ;;
+  new-session) printf 'alpha\t`+window+`\t@7\t%%9\n' ;;
+  list-panes)
+    n=0; test -e "`+calls+`" && n=$(cat "`+calls+`"); n=$((n+1)); echo "$n" > "`+calls+`"
+    if [ "$n" -eq 1 ]; then
+      printf 'alpha\t`+window+`\t@7\t%%9\t`+workdir+`\tzsh\t%s\t0\t4242\t123\n' `+shellSingleQuote(start)+`
+    else
+      echo 'transient pane lookup failure' >&2
+      exit 1
+    fi ;;
+  capture-pane) exit 0 ;;
+  kill-window) exit 0 ;;
+  *) exit 2 ;;
+esac
+`)
+	child := tmux.ProcessMetadata{PID: 5252, ParentPID: 4242, Name: "amp", Identity: "native-start-123"}
+	oldChildren, oldArgs := runnerChildProcesses, runnerProcessArgs
+	runnerChildProcesses = func(int) ([]tmux.ProcessMetadata, error) { return []tmux.ProcessMetadata{child}, nil }
+	runnerProcessArgs = func(int) ([]string, error) { return []string{"amp", "--no-tui"}, nil }
+	t.Cleanup(func() { runnerChildProcesses, runnerProcessArgs = oldChildren, oldArgs })
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	oldTimeout, oldPoll := runnerStartupTimeout, runnerPollInterval
+	runnerStartupTimeout, runnerPollInterval = 10*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { runnerStartupTimeout, runnerPollInterval = oldTimeout, oldPoll })
+
+	_, err := launchRunner(config.RunnerRow{Workspace: "alpha", Window: window, Workdir: workdir})
+	if err == nil {
+		t.Fatal("launch with final pane lookup failure succeeded")
+	}
+	for _, want := range []string{
+		"last detailed observation",
+		"retained-shell-pid=4242",
+		"pid=5252 ppid=4242 name=\"amp\" incarnation=\"native-start-123\"",
+		`argv=["amp" "--no-tui"]`,
+		"final observation",
+		"exact pane %9 unavailable",
+		"transient pane lookup failure",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("transient pane lookup diagnostic %q does not contain %q", err, want)
+		}
+	}
+}
+
 func TestRunnerLaunchKeepsIdentityAndProcessEvidenceWithLongValues(t *testing.T) {
 	workdir := t.TempDir()
 	wrongWorkdir := t.TempDir()
