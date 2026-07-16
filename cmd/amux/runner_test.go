@@ -242,6 +242,127 @@ esac
 	}
 }
 
+func TestRunnerLaunchVerifiesRetainedShellWithExactAmpChild(t *testing.T) {
+	dir := t.TempDir()
+	workdir := lockedTestWorktree(t)
+	window := config.RunnerWindow(workdir)
+	start := runnerStartCommand(workdir)
+	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
+	bin := t.TempDir()
+	state := filepath.Join(bin, "running")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) test -e "`+state+`" ;;
+  new-session) touch "`+state+`"; printf 'alpha\t`+window+`\t@7\t%%9\n' ;;
+  list-panes)
+    if [ -e "`+state+`" ]; then printf 'alpha\t`+window+`\t@7\t%%9\t`+workdir+`\tzsh\t%s\t0\t4242\t123\n' `+shellSingleQuote(start)+`; fi ;;
+  *) exit 2 ;;
+esac
+`)
+	writeExecutable(t, filepath.Join(bin, "ps"), `#!/bin/sh
+test "$*" = "-ax -o pid= -o ppid= -o comm=" || exit 2
+printf ' 4242     1 /bin/zsh\n'
+printf ' 5252  4242 /opt/amp/bin/amp\n'
+`)
+	oldProcessArgs := runnerProcessArgs
+	runnerProcessArgs = func(pid int) ([]string, error) { return []string{"amp", "--no-tui"}, nil }
+	t.Cleanup(func() { runnerProcessArgs = oldProcessArgs })
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	oldTimeout, oldPoll := runnerStartupTimeout, runnerPollInterval
+	runnerStartupTimeout, runnerPollInterval = 10*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { runnerStartupTimeout, runnerPollInterval = oldTimeout, oldPoll })
+
+	first := executeRunnerJSON(t, "--json", "--config-dir", dir, "runner", "launch", "--workdir", workdir)
+	if len(first.Successful) != 1 {
+		t.Fatalf("retained-shell launch = %+v", first)
+	}
+	second := executeRunnerJSON(t, "--json", "--config-dir", dir, "runner", "launch", "--workdir", workdir)
+	if len(second.Skipped) != 1 || second.Skipped[0].Message != "already running" {
+		t.Fatalf("second retained-shell launch = %+v", second)
+	}
+}
+
+func TestRunnerLaunchRejectsAmpDescendantOfUnrelatedShellChild(t *testing.T) {
+	dir := t.TempDir()
+	workdir := lockedTestWorktree(t)
+	window := config.RunnerWindow(workdir)
+	start := runnerStartCommand(workdir)
+	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
+	bin := t.TempDir()
+	state := filepath.Join(bin, "running")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) test -e "`+state+`" ;;
+  new-session) touch "`+state+`"; printf 'alpha\t`+window+`\t@7\t%%9\n' ;;
+  list-panes)
+    if [ -e "`+state+`" ]; then printf 'alpha\t`+window+`\t@7\t%%9\t`+workdir+`\tzsh\t%s\t0\t4242\t123\n' `+shellSingleQuote(start)+`; fi ;;
+  capture-pane) echo 'unrelated descendant rejected' ;;
+  kill-window) rm "`+state+`" ;;
+  *) exit 2 ;;
+esac
+`)
+	writeExecutable(t, filepath.Join(bin, "ps"), `#!/bin/sh
+test "$*" = "-ax -o pid= -o ppid= -o comm=" || exit 2
+printf ' 4242     1 /bin/zsh\n'
+printf ' 5151  4242 /usr/bin/node\n'
+printf ' 5252  5151 /opt/amp/bin/amp\n'
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	oldTimeout, oldPoll := runnerStartupTimeout, runnerPollInterval
+	runnerStartupTimeout, runnerPollInterval = 10*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { runnerStartupTimeout, runnerPollInterval = oldTimeout, oldPoll })
+
+	err := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", "launch", "--workdir", workdir)
+	if err == nil || !strings.Contains(err.Error(), "unrelated descendant rejected") {
+		t.Fatalf("unrelated descendant launch error = %v", err)
+	}
+	if _, statErr := os.Stat(state); !os.IsNotExist(statErr) {
+		t.Fatalf("rejected runner window remained: %v", statErr)
+	}
+}
+
+func TestRunnerLaunchRetainedShellKeepsProcessInspectionFailureDistinct(t *testing.T) {
+	workdir := t.TempDir()
+	window := config.RunnerWindow(workdir)
+	start := runnerStartCommand(workdir)
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) exit 1 ;;
+  new-session) printf 'alpha\t`+window+`\t@7\t%%9\n' ;;
+  list-panes) printf 'alpha\t`+window+`\t@7\t%%9\t`+workdir+`\tzsh\t%s\t0\t4242\t123\n' `+shellSingleQuote(start)+` ;;
+  capture-pane) echo 'pane remains alive' ;;
+  kill-window) exit 0 ;;
+  *) exit 2 ;;
+esac
+`)
+	writeExecutable(t, filepath.Join(bin, "ps"), "#!/bin/sh\nprintf ' 5252 4242 /opt/amp/bin/amp\\n'\n")
+	oldProcessArgs := runnerProcessArgs
+	calls := 0
+	runnerProcessArgs = func(pid int) ([]string, error) {
+		calls++
+		if calls == 1 {
+			return []string{"amp", "--no-tui"}, nil
+		}
+		return nil, errors.New("process argv inspection unavailable")
+	}
+	t.Cleanup(func() { runnerProcessArgs = oldProcessArgs })
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	oldTimeout, oldPoll := runnerStartupTimeout, runnerPollInterval
+	runnerStartupTimeout, runnerPollInterval = 2*time.Second, time.Millisecond
+	t.Cleanup(func() { runnerStartupTimeout, runnerPollInterval = oldTimeout, oldPoll })
+
+	_, err := launchRunner(config.RunnerRow{Workspace: "alpha", Window: window, Workdir: workdir})
+	if err == nil || !strings.Contains(err.Error(), "process argv inspection unavailable") || strings.Contains(err.Error(), "runner exited during startup") {
+		t.Fatalf("process inspection failure = %v", err)
+	}
+	if len(err.Error()) > 5000 {
+		t.Fatalf("process inspection diagnostic is unbounded: %d", len(err.Error()))
+	}
+}
+
 func TestRunnerLaunchEarlyExitReportsBoundedPaneAndStalePIDDiagnostics(t *testing.T) {
 	dir := t.TempDir()
 	workdir := lockedTestWorktree(t)

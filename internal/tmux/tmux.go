@@ -44,10 +44,11 @@ type WindowPane struct {
 }
 
 type ProcessMetadata struct {
-	PID      int
-	Name     string
-	Command  string
-	Identity string
+	PID       int
+	ParentPID int
+	Name      string
+	Command   string
+	Identity  string
 }
 
 const restartPaneFormat = "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}\t#{pane_dead}\t#{pane_pid}\t#{pane_created}"
@@ -165,6 +166,45 @@ func processField(pid int, field string) (string, error) {
 		return "", fmt.Errorf("inspect process %d: %w", pid, err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// InspectChildProcesses returns the direct children of parentPID. The selected
+// ps fields and flags are supported by both Linux and macOS. Exact argv is read
+// separately through ProcessArgs so ps presentation text is never trusted as
+// process identity.
+func InspectChildProcesses(parentPID int) ([]ProcessMetadata, error) {
+	if parentPID <= 0 {
+		return nil, errors.New("parent process PID is unavailable")
+	}
+	cmd := exec.Command("ps", "-ax", "-o", "pid=", "-o", "ppid=", "-o", "comm=")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if message != "" {
+			return nil, fmt.Errorf("inspect child processes of %d: %w: %s", parentPID, err, message)
+		}
+		return nil, fmt.Errorf("inspect child processes of %d: %w", parentPID, err)
+	}
+	var children []ProcessMetadata
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 3 {
+			continue
+		}
+		pid, pidErr := strconv.Atoi(fields[0])
+		ppid, ppidErr := strconv.Atoi(fields[1])
+		if pidErr != nil || ppidErr != nil || ppid != parentPID {
+			continue
+		}
+		children = append(children, ProcessMetadata{
+			PID:       pid,
+			ParentPID: ppid,
+			Name:      filepath.Base(fields[2]),
+		})
+	}
+	return children, nil
 }
 
 func exactSessionTarget(session string) string {

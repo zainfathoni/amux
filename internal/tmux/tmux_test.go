@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -65,6 +66,16 @@ esac
 	log, _ := os.ReadFile(logPath)
 	if got := string(log); !strings.Contains(got, "-o comm=") || !strings.Contains(got, "-o lstart=") || !strings.Contains(got, "-o command=") {
 		t.Fatalf("ps calls = %q", got)
+	}
+}
+
+func TestProcessArgsReturnsExactCurrentArgv(t *testing.T) {
+	args, err := ProcessArgs(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(args, os.Args) {
+		t.Fatalf("ProcessArgs(%d) = %#v, want %#v", os.Getpid(), args, os.Args)
 	}
 }
 
