@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -65,6 +66,82 @@ esac
 	log, _ := os.ReadFile(logPath)
 	if got := string(log); !strings.Contains(got, "-o comm=") || !strings.Contains(got, "-o lstart=") || !strings.Contains(got, "-o command=") {
 		t.Fatalf("ps calls = %q", got)
+	}
+}
+
+func TestProcessArgsReturnsExactCurrentArgv(t *testing.T) {
+	args, err := ProcessArgs(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(args, os.Args) {
+		t.Fatalf("ProcessArgs(%d) = %#v, want %#v", os.Getpid(), args, os.Args)
+	}
+}
+
+func TestProcessIdentityReturnsStableNativeStartToken(t *testing.T) {
+	first, err := ProcessIdentity(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ProcessIdentity(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == "" || first != second {
+		t.Fatalf("ProcessIdentity(%d) = %q then %q", os.Getpid(), first, second)
+	}
+}
+
+func TestProcessNameReturnsStableNativeName(t *testing.T) {
+	first, err := ProcessName(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ProcessName(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == "" || first != second {
+		t.Fatalf("ProcessName(%d) = %q then %q", os.Getpid(), first, second)
+	}
+}
+
+func TestInspectChildProcessesPreservesWhitespaceAndRejectsMalformedRows(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		output      string
+		processName string
+		wantError   bool
+	}{
+		{name: "leading whitespace", output: "5252 4242\n", processName: " amp"},
+		{name: "trailing whitespace", output: "5252 4242\n", processName: "amp "},
+		{name: "repeated whitespace", output: "5252 4242\n", processName: "amp  helper"},
+		{name: "tab whitespace", output: "5252 4242\n", processName: "amp\thelper"},
+		{name: "malformed pid", output: "not-a-pid 4242\n", wantError: true},
+		{name: "missing parent pid", output: "5252\n", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bin := t.TempDir()
+			writeExecutable(t, filepath.Join(bin, "ps"), "#!/bin/sh\ncat <<'EOF'\n"+test.output+"EOF\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			oldIdentity := inspectProcessIdentity
+			inspectProcessIdentity = func(pid int) (string, error) { return fmt.Sprintf("start-%d", pid), nil }
+			oldName := inspectProcessName
+			inspectProcessName = func(int) (string, error) { return test.processName, nil }
+			t.Cleanup(func() { inspectProcessIdentity, inspectProcessName = oldIdentity, oldName })
+
+			children, err := InspectChildProcesses(4242)
+			if test.wantError {
+				if err == nil {
+					t.Fatalf("InspectChildProcesses accepted malformed row: %+v", children)
+				}
+				return
+			}
+			if err != nil || len(children) != 1 || children[0].Name != test.processName {
+				t.Fatalf("InspectChildProcesses = %+v, %v", children, err)
+			}
+		})
 	}
 }
 

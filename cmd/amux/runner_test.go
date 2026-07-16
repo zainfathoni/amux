@@ -20,6 +20,15 @@ import (
 	"github.com/zainfathoni/amux/internal/tmux"
 )
 
+func TestMain(m *testing.M) {
+	runnerProcessArgs = func(int) ([]string, error) { return []string{"amp", "--no-tui"}, nil }
+	runnerProcessIdentity = func(pid int) (string, error) { return fmt.Sprintf("start-%d", pid), nil }
+	runnerChildProcesses = func(parentPID int) ([]tmux.ProcessMetadata, error) {
+		return []tmux.ProcessMetadata{{PID: parentPID + 10000, ParentPID: parentPID, Name: "amp", Identity: fmt.Sprintf("start-%d", parentPID)}}, nil
+	}
+	os.Exit(m.Run())
+}
+
 func TestRunnerPinRequiresLockedWorktreeAndIsCanonicalIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	locked := lockedTestWorktree(t)
@@ -242,6 +251,316 @@ esac
 	}
 }
 
+func TestRunnerLaunchVerifiesRetainedShellWithExactAmpChild(t *testing.T) {
+	dir := t.TempDir()
+	workdir := lockedTestWorktree(t)
+	window := config.RunnerWindow(workdir)
+	start := runnerStartCommand(workdir)
+	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
+	bin := t.TempDir()
+	state := filepath.Join(bin, "running")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) test -e "`+state+`" ;;
+  new-session) touch "`+state+`"; printf 'alpha\t`+window+`\t@7\t%%9\n' ;;
+  list-panes)
+    if [ -e "`+state+`" ]; then printf 'alpha\t`+window+`\t@7\t%%9\t`+workdir+`\tzsh\t%s\t0\t4242\t123\n' `+shellSingleQuote(start)+`; fi ;;
+  *) exit 2 ;;
+esac
+`)
+	writeExecutable(t, filepath.Join(bin, "ps"), `#!/bin/sh
+test "$*" = "-ax -o pid= -o ppid= -o comm=" || exit 2
+printf ' 4242     1 /bin/zsh\n'
+printf ' 5252  4242 /opt/amp/bin/amp\n'
+`)
+	oldProcessArgs := runnerProcessArgs
+	runnerProcessArgs = func(pid int) ([]string, error) { return []string{"amp", "--no-tui"}, nil }
+	t.Cleanup(func() { runnerProcessArgs = oldProcessArgs })
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	oldTimeout, oldPoll := runnerStartupTimeout, runnerPollInterval
+	runnerStartupTimeout, runnerPollInterval = 10*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { runnerStartupTimeout, runnerPollInterval = oldTimeout, oldPoll })
+
+	first := executeRunnerJSON(t, "--json", "--config-dir", dir, "runner", "launch", "--workdir", workdir)
+	if len(first.Successful) != 1 {
+		t.Fatalf("retained-shell launch = %+v", first)
+	}
+	second := executeRunnerJSON(t, "--json", "--config-dir", dir, "runner", "launch", "--workdir", workdir)
+	if len(second.Skipped) != 1 || second.Skipped[0].Message != "already running" {
+		t.Fatalf("second retained-shell launch = %+v", second)
+	}
+}
+
+func TestRunnerPaneExactProcessRevalidatesChildSnapshot(t *testing.T) {
+	oldChildren, oldArgs := runnerChildProcesses, runnerProcessArgs
+	calls := 0
+	runnerChildProcesses = func(parentPID int) ([]tmux.ProcessMetadata, error) {
+		calls++
+		identity := "start-one"
+		if calls > 1 {
+			identity = "start-two"
+		}
+		return []tmux.ProcessMetadata{{PID: 5252, ParentPID: parentPID, Name: "amp", Identity: identity}}, nil
+	}
+	runnerProcessArgs = func(pid int) ([]string, error) { return []string{"amp", "--no-tui"}, nil }
+	t.Cleanup(func() { runnerChildProcesses, runnerProcessArgs = oldChildren, oldArgs })
+
+	exact, err := runnerPaneHasExactProcess(tmux.WindowPane{Command: "zsh", PID: 4242}, true)
+	if err != nil || exact {
+		t.Fatalf("changed child snapshot exact=%t err=%v", exact, err)
+	}
+}
+
+func TestRunnerPaneRejectsChildNameWhitespaceChange(t *testing.T) {
+	oldChildren, oldArgs := runnerChildProcesses, runnerProcessArgs
+	calls := 0
+	runnerChildProcesses = func(parentPID int) ([]tmux.ProcessMetadata, error) {
+		calls++
+		name := "amp"
+		if calls > 1 {
+			name = "amp "
+		}
+		return []tmux.ProcessMetadata{{PID: 5252, ParentPID: parentPID, Name: name, Identity: "start-one"}}, nil
+	}
+	runnerProcessArgs = func(int) ([]string, error) { return []string{"amp", "--no-tui"}, nil }
+	t.Cleanup(func() { runnerChildProcesses, runnerProcessArgs = oldChildren, oldArgs })
+
+	exact, err := runnerPaneHasExactProcess(tmux.WindowPane{Command: "zsh", PID: 4242}, true)
+	if err != nil || exact {
+		t.Fatalf("whitespace-changed child exact=%t err=%v", exact, err)
+	}
+}
+
+func TestRunnerPaneLegacyDirectAmpRequiresExactArgs(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "exact", args: []string{"/opt/amp/bin/amp", "--no-tui"}, want: true},
+		{name: "extra argument", args: []string{"amp", "--no-tui", "unexpected"}},
+		{name: "wrong mode", args: []string{"amp", "threads"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			oldArgs := runnerProcessArgs
+			runnerProcessArgs = func(pid int) ([]string, error) { return test.args, nil }
+			t.Cleanup(func() { runnerProcessArgs = oldArgs })
+
+			exact, err := runnerPaneHasExactProcess(tmux.WindowPane{Command: "amp", PID: 5252}, false)
+			if err != nil || exact != test.want {
+				t.Fatalf("direct amp args %#v exact=%t err=%v, want %t", test.args, exact, err, test.want)
+			}
+		})
+	}
+}
+
+func TestRunnerPaneLegacyDirectAmpRejectsChangedProcessIdentity(t *testing.T) {
+	oldArgs, oldIdentity := runnerProcessArgs, runnerProcessIdentity
+	runnerProcessArgs = func(int) ([]string, error) { return []string{"amp", "--no-tui"}, nil }
+	calls := 0
+	runnerProcessIdentity = func(int) (string, error) {
+		calls++
+		return fmt.Sprintf("start-%d", calls), nil
+	}
+	t.Cleanup(func() { runnerProcessArgs, runnerProcessIdentity = oldArgs, oldIdentity })
+
+	exact, err := runnerPaneHasExactProcess(tmux.WindowPane{Command: "amp", PID: 5252}, false)
+	if err != nil || exact {
+		t.Fatalf("legacy changed process identity exact=%t err=%v", exact, err)
+	}
+}
+
+func TestRunnerLegacyPaneRevalidationRejectsChangedTmuxSnapshot(t *testing.T) {
+	oldPaneByID := runnerPaneByID
+	before := tmux.WindowPane{Session: "alpha", Window: "legacy", WindowID: "@1", PaneID: "%1", Path: "/tmp/project", Command: "amp", StartCommand: "exec amp --no-tui", PID: 5252, StartTime: 123}
+	runnerPaneByID = func(string) (tmux.WindowPane, error) {
+		after := before
+		after.StartTime++
+		return after, nil
+	}
+	t.Cleanup(func() { runnerPaneByID = oldPaneByID })
+
+	unchanged, err := legacyRunnerPaneUnchanged(before)
+	if err != nil || unchanged {
+		t.Fatalf("changed legacy pane unchanged=%t err=%v", unchanged, err)
+	}
+}
+
+func TestRunnerPaneCanonicalCurrentAmpVerifiesRetainedShellChild(t *testing.T) {
+	oldChildren, oldArgs := runnerChildProcesses, runnerProcessArgs
+	child := tmux.ProcessMetadata{PID: 5252, ParentPID: 4242, Name: "amp", Identity: "start-one"}
+	runnerChildProcesses = func(parentPID int) ([]tmux.ProcessMetadata, error) {
+		if parentPID != 4242 {
+			t.Fatalf("enumerated children of pid %d, want retained shell 4242", parentPID)
+		}
+		return []tmux.ProcessMetadata{child}, nil
+	}
+	runnerProcessArgs = func(pid int) ([]string, error) {
+		if pid != child.PID {
+			t.Fatalf("inspected argv for pid %d, want amp child %d", pid, child.PID)
+		}
+		return []string{"amp", "--no-tui"}, nil
+	}
+	t.Cleanup(func() { runnerChildProcesses, runnerProcessArgs = oldChildren, oldArgs })
+
+	exact, err := runnerPaneHasExactProcess(tmux.WindowPane{Command: "amp", PID: 4242}, true)
+	if err != nil || !exact {
+		t.Fatalf("canonical current amp exact=%t err=%v", exact, err)
+	}
+}
+
+func TestRunnerLaunchRejectsCanonicalCurrentAmpWithExtraArgv(t *testing.T) {
+	workdir := t.TempDir()
+	window := config.RunnerWindow(workdir)
+	start := runnerStartCommand(workdir)
+	bin := t.TempDir()
+	killed := filepath.Join(bin, "killed")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) exit 1 ;;
+  new-session) printf 'alpha\t`+window+`\t@7\t%%9\n' ;;
+  list-panes) printf 'alpha\t`+window+`\t@7\t%%9\t`+workdir+`\tamp\t%s\t0\t5252\t123\n' `+shellSingleQuote(start)+` ;;
+  capture-pane) echo 'direct amp had extra argv' ;;
+  kill-window) touch "`+killed+`" ;;
+  *) exit 2 ;;
+esac
+`)
+	oldArgs := runnerProcessArgs
+	runnerProcessArgs = func(int) ([]string, error) { return []string{"amp", "--no-tui", "unexpected"}, nil }
+	t.Cleanup(func() { runnerProcessArgs = oldArgs })
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	oldTimeout, oldPoll := runnerStartupTimeout, runnerPollInterval
+	runnerStartupTimeout, runnerPollInterval = 10*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { runnerStartupTimeout, runnerPollInterval = oldTimeout, oldPoll })
+
+	_, err := launchRunner(config.RunnerRow{Workspace: "alpha", Window: window, Workdir: workdir})
+	if err == nil || !strings.Contains(err.Error(), "direct amp had extra argv") {
+		t.Fatalf("direct amp with extra argv error = %v", err)
+	}
+	if _, statErr := os.Stat(killed); statErr != nil {
+		t.Fatalf("rejected direct amp window was not removed: %v", statErr)
+	}
+}
+
+func TestRunnerLaunchRejectsAmpDescendantOfUnrelatedShellChild(t *testing.T) {
+	dir := t.TempDir()
+	workdir := lockedTestWorktree(t)
+	window := config.RunnerWindow(workdir)
+	start := runnerStartCommand(workdir)
+	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
+	bin := t.TempDir()
+	state := filepath.Join(bin, "running")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) test -e "`+state+`" ;;
+  new-session) touch "`+state+`"; printf 'alpha\t`+window+`\t@7\t%%9\n' ;;
+  list-panes)
+    if [ -e "`+state+`" ]; then printf 'alpha\t`+window+`\t@7\t%%9\t`+workdir+`\tzsh\t%s\t0\t4242\t123\n' `+shellSingleQuote(start)+`; fi ;;
+  capture-pane) echo 'unrelated descendant rejected' ;;
+  kill-window) rm "`+state+`" ;;
+  *) exit 2 ;;
+esac
+`)
+	writeExecutable(t, filepath.Join(bin, "ps"), `#!/bin/sh
+test "$*" = "-ax -o pid= -o ppid= -o comm=" || exit 2
+printf ' 4242     1 /bin/zsh\n'
+printf ' 5151  4242 /usr/bin/node\n'
+printf ' 5252  5151 /opt/amp/bin/amp\n'
+`)
+	oldChildren := runnerChildProcesses
+	runnerChildProcesses = func(parentPID int) ([]tmux.ProcessMetadata, error) {
+		return []tmux.ProcessMetadata{{PID: 5151, ParentPID: parentPID, Name: "node", Identity: "start-node"}}, nil
+	}
+	t.Cleanup(func() { runnerChildProcesses = oldChildren })
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	oldTimeout, oldPoll := runnerStartupTimeout, runnerPollInterval
+	runnerStartupTimeout, runnerPollInterval = 10*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { runnerStartupTimeout, runnerPollInterval = oldTimeout, oldPoll })
+
+	err := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", "launch", "--workdir", workdir)
+	if err == nil || !strings.Contains(err.Error(), "unrelated descendant rejected") {
+		t.Fatalf("unrelated descendant launch error = %v", err)
+	}
+	if _, statErr := os.Stat(state); !os.IsNotExist(statErr) {
+		t.Fatalf("rejected runner window remained: %v", statErr)
+	}
+}
+
+func TestRunnerLaunchRetainedShellKeepsProcessInspectionFailureDistinct(t *testing.T) {
+	workdir := t.TempDir()
+	window := config.RunnerWindow(workdir)
+	start := runnerStartCommand(workdir)
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) exit 1 ;;
+  new-session) printf 'alpha\t`+window+`\t@7\t%%9\n' ;;
+  list-panes) printf 'alpha\t`+window+`\t@7\t%%9\t`+workdir+`\tzsh\t%s\t0\t4242\t123\n' `+shellSingleQuote(start)+` ;;
+  capture-pane) echo 'pane remains alive' ;;
+  kill-window) exit 0 ;;
+  *) exit 2 ;;
+esac
+`)
+	writeExecutable(t, filepath.Join(bin, "ps"), "#!/bin/sh\nprintf ' 5252 4242 /opt/amp/bin/amp\\n'\n")
+	oldProcessArgs := runnerProcessArgs
+	calls := 0
+	runnerProcessArgs = func(pid int) ([]string, error) {
+		calls++
+		if calls == 1 {
+			return []string{"amp", "--no-tui"}, nil
+		}
+		return nil, errors.New("process argv inspection unavailable")
+	}
+	t.Cleanup(func() { runnerProcessArgs = oldProcessArgs })
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	oldTimeout, oldPoll := runnerStartupTimeout, runnerPollInterval
+	runnerStartupTimeout, runnerPollInterval = 2*time.Second, time.Millisecond
+	t.Cleanup(func() { runnerStartupTimeout, runnerPollInterval = oldTimeout, oldPoll })
+
+	_, err := launchRunner(config.RunnerRow{Workspace: "alpha", Window: window, Workdir: workdir})
+	if err == nil || !strings.Contains(err.Error(), "process argv inspection unavailable") || strings.Contains(err.Error(), "runner exited during startup") {
+		t.Fatalf("process inspection failure = %v", err)
+	}
+	if len(err.Error()) > 5000 {
+		t.Fatalf("process inspection diagnostic is unbounded: %d", len(err.Error()))
+	}
+}
+
+func TestRunnerLaunchBoundsCompleteDiagnosticIncludingStalePIDText(t *testing.T) {
+	workdir := t.TempDir()
+	window := config.RunnerWindow(workdir)
+	start := runnerStartCommand(workdir)
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) exit 1 ;;
+  new-session) printf 'alpha\t`+window+`\t@7\t%%9\n' ;;
+  list-panes) printf 'alpha\t`+window+`\t@7\t%%9\t`+workdir+`\tzsh\t%s\t0\t4242\t123\n' `+shellSingleQuote(start)+` ;;
+  capture-pane) echo 'bounded pane failure' ;;
+  kill-window) exit 0 ;;
+  *) exit 2 ;;
+esac
+`)
+	oldChildren, oldCache := runnerChildProcesses, runnerCacheDir
+	runnerChildProcesses = func(int) ([]tmux.ProcessMetadata, error) { return nil, nil }
+	runnerCacheDir = func() (string, error) { return "/" + strings.Repeat("very-long-cache-path/", 1000), nil }
+	t.Cleanup(func() { runnerChildProcesses, runnerCacheDir = oldChildren, oldCache })
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	oldTimeout, oldPoll := runnerStartupTimeout, runnerPollInterval
+	runnerStartupTimeout, runnerPollInterval = 10*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { runnerStartupTimeout, runnerPollInterval = oldTimeout, oldPoll })
+
+	_, err := launchRunner(config.RunnerRow{Workspace: "alpha", Window: window, Workdir: workdir})
+	if err == nil || !strings.Contains(err.Error(), "Amp-owned PID marker") {
+		t.Fatalf("complete startup diagnostic = %v", err)
+	}
+	if len(err.Error()) > runnerStartupErrorLimit {
+		t.Fatalf("complete startup diagnostic len=%d, limit=%d", len(err.Error()), runnerStartupErrorLimit)
+	}
+}
+
 func TestRunnerLaunchEarlyExitReportsBoundedPaneAndStalePIDDiagnostics(t *testing.T) {
 	dir := t.TempDir()
 	workdir := lockedTestWorktree(t)
@@ -327,7 +646,7 @@ func TestStaleAmpPIDDiagnosticReportsLiveAmbiguousOwnershipWithoutDeletion(t *te
 	}
 }
 
-func TestRunnerLaunchRejectsAmpThatDoesNotSurviveVerificationWindow(t *testing.T) {
+func TestRunnerLaunchRejectsAmpChildThatDoesNotSurviveVerificationWindow(t *testing.T) {
 	dir := t.TempDir()
 	workdir := lockedTestWorktree(t)
 	window := config.RunnerWindow(workdir)
@@ -348,10 +667,20 @@ case "$1" in
   *) exit 2 ;;
 esac
 `)
+	oldChildren := runnerChildProcesses
+	childCalls := 0
+	runnerChildProcesses = func(parentPID int) ([]tmux.ProcessMetadata, error) {
+		childCalls++
+		if childCalls > 2 {
+			return nil, nil
+		}
+		return []tmux.ProcessMetadata{{PID: 5252, ParentPID: parentPID, Name: "amp", Identity: "start-one"}}, nil
+	}
+	t.Cleanup(func() { runnerChildProcesses = oldChildren })
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	oldTimeout, oldPoll := runnerStartupTimeout, runnerPollInterval
-	runnerStartupTimeout, runnerPollInterval = 30*time.Millisecond, time.Millisecond
+	runnerStartupTimeout, runnerPollInterval = 2*time.Second, time.Millisecond
 	t.Cleanup(func() { runnerStartupTimeout, runnerPollInterval = oldTimeout, oldPoll })
 
 	err := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", "launch", "--workdir", workdir)

@@ -19,11 +19,17 @@ import (
 )
 
 var (
-	runnerStartupTimeout = 750 * time.Millisecond
-	runnerPollInterval   = 50 * time.Millisecond
-	runnerProcessAlive   = processAlive
-	runnerCacheDir       = os.UserCacheDir
+	runnerStartupTimeout  = 750 * time.Millisecond
+	runnerPollInterval    = 50 * time.Millisecond
+	runnerProcessAlive    = processAlive
+	runnerProcessArgs     = tmux.ProcessArgs
+	runnerProcessIdentity = tmux.ProcessIdentity
+	runnerChildProcesses  = tmux.InspectChildProcesses
+	runnerPaneByID        = (tmux.Runner{}).RestartPaneByID
+	runnerCacheDir        = os.UserCacheDir
 )
+
+const runnerStartupErrorLimit = 4608
 
 type runnerPaneState string
 
@@ -148,8 +154,14 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 		}
 	}
 
+	restartFailed := false
 	for _, row := range rows {
 		out := runnerOutcome(row, in.Command.Name, "")
+		if restartFailed {
+			out.Message = "not attempted after earlier runner restart failure"
+			env.Skipped = append(env.Skipped, out)
+			continue
+		}
 		inspection := inspections[row.Workdir]
 		pidDiagnostic := ""
 		if in.Command.Name == "reconcile" {
@@ -248,12 +260,16 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 		if runtimeErr != nil {
 			out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: runtimeErr.Error()}
 			env.Failed = append(env.Failed, out)
+			if in.Command.Name == "restart" {
+				restartFailed = true
+			}
 			continue
 		}
 		env.Successful = append(env.Successful, out)
 	}
 	if len(env.Failed) > 0 {
-		return &env, result.Runtime(errors.New("one or more runner operations failed"))
+		failed := env.Failed[0]
+		return &env, result.Runtime(fmt.Errorf("runner %s %s failed: %s", failed.Resource.Workdir, failed.Action, failed.Error.Message))
 	}
 	return &env, nil
 }
@@ -473,10 +489,84 @@ func inspectRunnerWindow(row config.RunnerRow, window, expectedStart string) (ru
 	}
 	pane := panes[0]
 	path, pathErr := config.CanonicalWorkdir(pane.Path)
-	if pathErr != nil || path != row.Workdir || pane.Dead || pane.Command != "amp" || normalizedTmuxStartCommand(pane.StartCommand) != expectedStart {
+	retainedShell := expectedStart == runnerStartCommand(row.Workdir)
+	exactProcess, processErr := runnerPaneHasExactProcess(pane, retainedShell)
+	if processErr != nil {
+		return runnerInspection{}, fmt.Errorf("inspect runner process for pane %s pid %d: %w", pane.PaneID, pane.PID, processErr)
+	}
+	if exactProcess && !retainedShell {
+		unchanged, confirmErr := legacyRunnerPaneUnchanged(pane)
+		if confirmErr != nil {
+			return runnerInspection{}, fmt.Errorf("revalidate legacy runner pane %s: %w", pane.PaneID, confirmErr)
+		}
+		if !unchanged {
+			exactProcess = false
+		}
+	}
+	if pathErr != nil || path != row.Workdir || pane.Dead || !exactProcess || normalizedTmuxStartCommand(pane.StartCommand) != expectedStart {
 		return runnerInspection{state: runnerPaneConflict, pane: pane}, nil
 	}
 	return runnerInspection{state: runnerPaneExact, pane: pane}, nil
+}
+
+func runnerPaneHasExactProcess(pane tmux.WindowPane, retainedShell bool) (bool, error) {
+	if !retainedShell {
+		if pane.Command != "amp" {
+			return false, nil
+		}
+		before, err := runnerProcessIdentity(pane.PID)
+		if err != nil {
+			return false, err
+		}
+		exactArgs, err := runnerHasExactArgs(pane.PID)
+		if err != nil {
+			return false, err
+		}
+		after, err := runnerProcessIdentity(pane.PID)
+		if err != nil {
+			return false, err
+		}
+		return exactArgs && before == after, nil
+	}
+	children, err := runnerChildProcesses(pane.PID)
+	if err != nil {
+		return false, err
+	}
+	if len(children) != 1 {
+		return false, nil
+	}
+	child := children[0]
+	if child.ParentPID != pane.PID || child.Name != "amp" {
+		return false, nil
+	}
+	exactArgs, err := runnerHasExactArgs(child.PID)
+	if err != nil {
+		return false, err
+	}
+	if !exactArgs {
+		return false, nil
+	}
+	after, err := runnerChildProcesses(pane.PID)
+	if err != nil {
+		return false, err
+	}
+	return len(after) == 1 && after[0] == child, nil
+}
+
+func legacyRunnerPaneUnchanged(pane tmux.WindowPane) (bool, error) {
+	confirmed, err := runnerPaneByID(pane.PaneID)
+	if err != nil {
+		return false, err
+	}
+	return confirmed == pane, nil
+}
+
+func runnerHasExactArgs(pid int) (bool, error) {
+	args, err := runnerProcessArgs(pid)
+	if err != nil {
+		return false, err
+	}
+	return len(args) == 2 && filepath.Base(args[0]) == "amp" && args[1] == "--no-tui", nil
 }
 
 func launchRunner(row config.RunnerRow) (tmux.WindowPane, error) {
@@ -492,29 +582,46 @@ func launchRunner(row config.RunnerRow) (tmux.WindowPane, error) {
 	}
 	deadline := time.Now().Add(runnerStartupTimeout)
 	observedExact := false
+	lastProcessError := ""
 	for {
 		pane, inspectErr := runner.RestartPaneByID(created.PaneID)
 		if inspectErr == nil && pane.WindowID == created.WindowID && pane.PaneID == created.PaneID && pane.Session == row.Workspace && pane.Window == row.Window {
 			path, _ := config.CanonicalWorkdir(pane.Path)
-			if !pane.Dead && pane.Command == "amp" && path == row.Workdir && normalizedTmuxStartCommand(pane.StartCommand) == runnerStartCommand(row.Workdir) {
+			exactProcess, processErr := runnerPaneHasExactProcess(pane, true)
+			if processErr != nil {
+				lastProcessError = boundedDiagnostic(processErr.Error(), 1024)
+			}
+			if processErr == nil && !pane.Dead && exactProcess && path == row.Workdir && normalizedTmuxStartCommand(pane.StartCommand) == runnerStartCommand(row.Workdir) {
 				observedExact = true
 				if !time.Now().Before(deadline) {
 					return pane, nil
 				}
 			}
-			if pane.Dead || observedExact && pane.Command != "amp" {
+			if pane.Dead || processErr == nil && observedExact && !exactProcess {
 				diagnostic, _ := runner.CapturePaneHistory(created.PaneID, 100)
 				_ = runner.KillWindow(created.WindowID)
-				return tmux.WindowPane{}, fmt.Errorf("runner exited during startup: %s%s", boundedDiagnostic(diagnostic, 4096), staleAmpPIDDiagnostic(row.Workdir))
+				return tmux.WindowPane{}, runnerStartupError("runner exited during startup: %s%s", boundedDiagnostic(diagnostic, 4096), staleAmpPIDDiagnostic(row.Workdir))
 			}
 		}
 		if !time.Now().Before(deadline) {
 			diagnostic, _ := runner.CapturePaneHistory(created.PaneID, 100)
 			_ = runner.KillWindow(created.WindowID)
-			return tmux.WindowPane{}, fmt.Errorf("runner did not survive startup as exact pane %s/window %s: %s%s", created.PaneID, created.WindowID, boundedDiagnostic(diagnostic, 4096), staleAmpPIDDiagnostic(row.Workdir))
+			processDiagnostic := ""
+			if lastProcessError != "" {
+				processDiagnostic = "; process inspection failed: " + lastProcessError
+			}
+			return tmux.WindowPane{}, runnerStartupError("runner did not survive startup as exact pane %s/window %s: %s%s%s", created.PaneID, created.WindowID, boundedDiagnostic(diagnostic, 4096), processDiagnostic, staleAmpPIDDiagnostic(row.Workdir))
 		}
 		time.Sleep(runnerPollInterval)
 	}
+}
+
+func runnerStartupError(format string, args ...any) error {
+	message := fmt.Sprintf(format, args...)
+	if len(message) > runnerStartupErrorLimit {
+		message = message[:runnerStartupErrorLimit-len("…")] + "…"
+	}
+	return errors.New(message)
 }
 
 func stopRunner(row config.RunnerRow, before runnerInspection) error {

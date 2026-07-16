@@ -3,14 +3,17 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/zainfathoni/amux/internal/config"
 	"github.com/zainfathoni/amux/internal/result"
+	"github.com/zainfathoni/amux/internal/tmux"
 )
 
 func TestAggregateListUsesWorkerRunnerWorkspaceUnionAndCanonicalSelectors(t *testing.T) {
@@ -297,6 +300,87 @@ esac
 				t.Fatalf("aggregate %s dry-run = %+v", command, got)
 			}
 		})
+	}
+}
+
+func TestAggregateRestartStopsBeforeNextRunnerAfterReplacementFailure(t *testing.T) {
+	dir := t.TempDir()
+	workdirs := []string{lockedTestWorktree(t), lockedTestWorktree(t)}
+	sort.Strings(workdirs)
+	firstDir, secondDir := workdirs[0], workdirs[1]
+	firstWindow, secondWindow := config.RunnerWindow(firstDir), config.RunnerWindow(secondDir)
+	firstStart, secondStart := runnerStartCommand(firstDir), runnerStartCommand(secondDir)
+	writeRunnerRegistry(t, dir, "alpha\t"+firstDir+"\nalpha\t"+secondDir+"\n")
+	bin := t.TempDir()
+	log := filepath.Join(bin, "tmux.log")
+	firstOld := filepath.Join(bin, "first-old")
+	secondOld := filepath.Join(bin, "second-old")
+	firstBad := filepath.Join(bin, "first-bad")
+	secondBad := filepath.Join(bin, "second-bad")
+	for _, path := range []string{firstOld, secondOld} {
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "$*" >> "`+log+`"
+case "$1" in
+  has-session) exit 0 ;;
+  list-panes)
+    if [ -e "`+firstOld+`" ]; then printf 'alpha\t`+firstWindow+`\t@1\t%%1\t`+firstDir+`\tamp\t%s\t0\t101\t1\n' `+shellSingleQuote(firstStart)+`; fi
+    if [ -e "`+secondOld+`" ]; then printf 'alpha\t`+secondWindow+`\t@2\t%%2\t`+secondDir+`\tamp\t%s\t0\t102\t1\n' `+shellSingleQuote(secondStart)+`; fi
+    if [ -e "`+firstBad+`" ]; then printf 'alpha\t`+firstWindow+`\t@11\t%%11\t`+firstDir+`\tsleep\t%s\t0\t111\t1\n' `+shellSingleQuote(firstStart)+`; fi
+    if [ -e "`+secondBad+`" ]; then printf 'alpha\t`+secondWindow+`\t@12\t%%12\t`+secondDir+`\tsleep\t%s\t0\t112\t1\n' `+shellSingleQuote(secondStart)+`; fi ;;
+  kill-window)
+    case "$3" in
+      @1) rm "`+firstOld+`" ;; @2) rm "`+secondOld+`" ;;
+      @11) rm "`+firstBad+`" ;; @12) rm "`+secondBad+`" ;;
+    esac ;;
+  new-window)
+    if echo "$*" | grep -q '`+firstWindow+`'; then touch "`+firstBad+`"; printf 'alpha\t`+firstWindow+`\t@11\t%%11\n'
+    else touch "`+secondBad+`"; printf 'alpha\t`+secondWindow+`\t@12\t%%12\n'; fi ;;
+  capture-pane) echo 'replacement failed startup verification' ;;
+  *) exit 2 ;;
+esac
+`)
+	oldChildren := runnerChildProcesses
+	runnerChildProcesses = func(parentPID int) ([]tmux.ProcessMetadata, error) {
+		if parentPID >= 110 {
+			return nil, nil
+		}
+		return []tmux.ProcessMetadata{{PID: parentPID + 1000, ParentPID: parentPID, Name: "amp", Identity: fmt.Sprintf("start-%d", parentPID)}}, nil
+	}
+	t.Cleanup(func() { runnerChildProcesses = oldChildren })
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	oldTimeout, oldPoll := runnerStartupTimeout, runnerPollInterval
+	runnerStartupTimeout, runnerPollInterval = 10*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { runnerStartupTimeout, runnerPollInterval = oldTimeout, oldPoll })
+
+	var stdout bytes.Buffer
+	err := (app{stdout: &stdout}).execute([]string{"--json", "--config-dir", dir, "restart", "--all"})
+	if err == nil || result.ExitCode(err) != result.ExitRuntimeFailure {
+		t.Fatalf("aggregate restart error = %v exit=%d", err, result.ExitCode(err))
+	}
+	if !strings.Contains(err.Error(), firstDir) || !strings.Contains(err.Error(), "replacement failed startup verification") {
+		t.Fatalf("aggregate restart error lost per-runner startup diagnostic: %v", err)
+	}
+	var env result.Envelope
+	if decodeErr := json.NewDecoder(&stdout).Decode(&env); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if len(env.Failed) != 1 || env.Failed[0].Resource.Workdir != firstDir || env.Failed[0].Error == nil || !strings.Contains(env.Failed[0].Error.Message, "replacement failed startup verification") {
+		t.Fatalf("failed replacement outcome = %+v", env)
+	}
+	if len(env.Skipped) != 1 || env.Skipped[0].Resource.Workdir != secondDir || !strings.Contains(env.Skipped[0].Message, "not attempted") {
+		t.Fatalf("contained restart outcome = %+v", env)
+	}
+	if _, statErr := os.Stat(secondOld); statErr != nil {
+		t.Fatalf("second runner was stopped after first replacement failed: %v", statErr)
+	}
+	data, _ := os.ReadFile(log)
+	if strings.Contains(string(data), "kill-window -t @2") {
+		t.Fatalf("second runner window was killed after first replacement failed:\n%s", data)
 	}
 }
 

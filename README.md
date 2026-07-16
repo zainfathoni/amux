@@ -257,7 +257,7 @@ Workers are identified by `{ "kind": "worker", "thread": "T-..." }`; runners by 
 
 - `--dry-run` (`-n`) validates and plans without mutation. Prospective changes appear under `planned`, never `successful`.
 - Exit `0`: no failures. Exit `1`: runtime failure; some independent actions may have completed. Exit `2`: request/preflight rejection before mutation.
-- Bulk operations preflight the complete plan, then continue independent actions after runtime failures.
+- Bulk operations preflight the complete plan, then continue independent actions after runtime failures. Runner restart is the containment exception: after one replacement fails, later runner restarts are skipped so a shared launch defect cannot stop the remaining healthy fleet; independent worker actions may still continue.
 - Lifecycle commands are idempotent desired-state operations. Known no-ops are `skipped`, not errors.
 - Mutations and scheduled maintenance share one bounded machine-level lock. Contention fails with structured owner metadata and no mutation.
 
