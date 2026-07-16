@@ -11,3 +11,7 @@ func ProcessArgs(pid int) ([]string, error) {
 func ProcessIdentity(pid int) (string, error) {
 	return "", fmt.Errorf("exact process identity inspection is unsupported on this platform")
 }
+
+func ProcessName(pid int) (string, error) {
+	return "", fmt.Errorf("exact process name inspection is unsupported on this platform")
+}

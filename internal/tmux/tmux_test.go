@@ -93,16 +93,33 @@ func TestProcessIdentityReturnsStableNativeStartToken(t *testing.T) {
 	}
 }
 
+func TestProcessNameReturnsStableNativeName(t *testing.T) {
+	first, err := ProcessName(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ProcessName(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == "" || first != second {
+		t.Fatalf("ProcessName(%d) = %q then %q", os.Getpid(), first, second)
+	}
+}
+
 func TestInspectChildProcessesPreservesWhitespaceAndRejectsMalformedRows(t *testing.T) {
 	for _, test := range []struct {
-		name      string
-		output    string
-		wantName  string
-		wantError bool
+		name        string
+		output      string
+		processName string
+		wantError   bool
 	}{
-		{name: "whitespace in command name", output: "5252 4242 /tmp/helper with space\n", wantName: "helper with space"},
-		{name: "malformed pid", output: "not-a-pid 4242 /opt/amp/bin/amp\n", wantError: true},
-		{name: "missing command name", output: "5252 4242\n", wantError: true},
+		{name: "leading whitespace", output: "5252 4242\n", processName: " amp"},
+		{name: "trailing whitespace", output: "5252 4242\n", processName: "amp "},
+		{name: "repeated whitespace", output: "5252 4242\n", processName: "amp  helper"},
+		{name: "tab whitespace", output: "5252 4242\n", processName: "amp\thelper"},
+		{name: "malformed pid", output: "not-a-pid 4242\n", wantError: true},
+		{name: "missing parent pid", output: "5252\n", wantError: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			bin := t.TempDir()
@@ -110,7 +127,9 @@ func TestInspectChildProcessesPreservesWhitespaceAndRejectsMalformedRows(t *test
 			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 			oldIdentity := inspectProcessIdentity
 			inspectProcessIdentity = func(pid int) (string, error) { return fmt.Sprintf("start-%d", pid), nil }
-			t.Cleanup(func() { inspectProcessIdentity = oldIdentity })
+			oldName := inspectProcessName
+			inspectProcessName = func(int) (string, error) { return test.processName, nil }
+			t.Cleanup(func() { inspectProcessIdentity, inspectProcessName = oldIdentity, oldName })
 
 			children, err := InspectChildProcesses(4242)
 			if test.wantError {
@@ -119,7 +138,7 @@ func TestInspectChildProcessesPreservesWhitespaceAndRejectsMalformedRows(t *test
 				}
 				return
 			}
-			if err != nil || len(children) != 1 || children[0].Name != test.wantName {
+			if err != nil || len(children) != 1 || children[0].Name != test.processName {
 				t.Fatalf("InspectChildProcesses = %+v, %v", children, err)
 			}
 		})

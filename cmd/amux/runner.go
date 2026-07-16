@@ -19,12 +19,14 @@ import (
 )
 
 var (
-	runnerStartupTimeout = 750 * time.Millisecond
-	runnerPollInterval   = 50 * time.Millisecond
-	runnerProcessAlive   = processAlive
-	runnerProcessArgs    = tmux.ProcessArgs
-	runnerChildProcesses = tmux.InspectChildProcesses
-	runnerCacheDir       = os.UserCacheDir
+	runnerStartupTimeout  = 750 * time.Millisecond
+	runnerPollInterval    = 50 * time.Millisecond
+	runnerProcessAlive    = processAlive
+	runnerProcessArgs     = tmux.ProcessArgs
+	runnerProcessIdentity = tmux.ProcessIdentity
+	runnerChildProcesses  = tmux.InspectChildProcesses
+	runnerPaneByID        = (tmux.Runner{}).RestartPaneByID
+	runnerCacheDir        = os.UserCacheDir
 )
 
 const runnerStartupErrorLimit = 4608
@@ -492,6 +494,15 @@ func inspectRunnerWindow(row config.RunnerRow, window, expectedStart string) (ru
 	if processErr != nil {
 		return runnerInspection{}, fmt.Errorf("inspect runner process for pane %s pid %d: %w", pane.PaneID, pane.PID, processErr)
 	}
+	if exactProcess && !retainedShell {
+		unchanged, confirmErr := legacyRunnerPaneUnchanged(pane)
+		if confirmErr != nil {
+			return runnerInspection{}, fmt.Errorf("revalidate legacy runner pane %s: %w", pane.PaneID, confirmErr)
+		}
+		if !unchanged {
+			exactProcess = false
+		}
+	}
 	if pathErr != nil || path != row.Workdir || pane.Dead || !exactProcess || normalizedTmuxStartCommand(pane.StartCommand) != expectedStart {
 		return runnerInspection{state: runnerPaneConflict, pane: pane}, nil
 	}
@@ -503,7 +514,19 @@ func runnerPaneHasExactProcess(pane tmux.WindowPane, retainedShell bool) (bool, 
 		if pane.Command != "amp" {
 			return false, nil
 		}
-		return runnerHasExactArgs(pane.PID)
+		before, err := runnerProcessIdentity(pane.PID)
+		if err != nil {
+			return false, err
+		}
+		exactArgs, err := runnerHasExactArgs(pane.PID)
+		if err != nil {
+			return false, err
+		}
+		after, err := runnerProcessIdentity(pane.PID)
+		if err != nil {
+			return false, err
+		}
+		return exactArgs && before == after, nil
 	}
 	children, err := runnerChildProcesses(pane.PID)
 	if err != nil {
@@ -528,6 +551,14 @@ func runnerPaneHasExactProcess(pane tmux.WindowPane, retainedShell bool) (bool, 
 		return false, err
 	}
 	return len(after) == 1 && after[0] == child, nil
+}
+
+func legacyRunnerPaneUnchanged(pane tmux.WindowPane) (bool, error) {
+	confirmed, err := runnerPaneByID(pane.PaneID)
+	if err != nil {
+		return false, err
+	}
+	return confirmed == pane, nil
 }
 
 func runnerHasExactArgs(pid int) (bool, error) {

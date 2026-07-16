@@ -52,3 +52,21 @@ func ProcessIdentity(pid int) (string, error) {
 	}
 	return fields[startTimeIndex], nil
 }
+
+// ProcessName returns Linux's native comm value without normalizing whitespace.
+func ProcessName(pid int) (string, error) {
+	if pid <= 0 {
+		return "", fmt.Errorf("process PID is unavailable")
+	}
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil {
+		return "", fmt.Errorf("inspect process %d name: %w", pid, err)
+	}
+	if len(data) > 0 && data[len(data)-1] == '\n' {
+		data = data[:len(data)-1]
+	}
+	if len(data) == 0 {
+		return "", fmt.Errorf("process %d returned empty name", pid)
+	}
+	return string(data), nil
+}

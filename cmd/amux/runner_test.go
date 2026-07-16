@@ -22,6 +22,7 @@ import (
 
 func TestMain(m *testing.M) {
 	runnerProcessArgs = func(int) ([]string, error) { return []string{"amp", "--no-tui"}, nil }
+	runnerProcessIdentity = func(pid int) (string, error) { return fmt.Sprintf("start-%d", pid), nil }
 	runnerChildProcesses = func(parentPID int) ([]tmux.ProcessMetadata, error) {
 		return []tmux.ProcessMetadata{{PID: parentPID + 10000, ParentPID: parentPID, Name: "amp", Identity: fmt.Sprintf("start-%d", parentPID)}}, nil
 	}
@@ -311,6 +312,26 @@ func TestRunnerPaneExactProcessRevalidatesChildSnapshot(t *testing.T) {
 	}
 }
 
+func TestRunnerPaneRejectsChildNameWhitespaceChange(t *testing.T) {
+	oldChildren, oldArgs := runnerChildProcesses, runnerProcessArgs
+	calls := 0
+	runnerChildProcesses = func(parentPID int) ([]tmux.ProcessMetadata, error) {
+		calls++
+		name := "amp"
+		if calls > 1 {
+			name = "amp "
+		}
+		return []tmux.ProcessMetadata{{PID: 5252, ParentPID: parentPID, Name: name, Identity: "start-one"}}, nil
+	}
+	runnerProcessArgs = func(int) ([]string, error) { return []string{"amp", "--no-tui"}, nil }
+	t.Cleanup(func() { runnerChildProcesses, runnerProcessArgs = oldChildren, oldArgs })
+
+	exact, err := runnerPaneHasExactProcess(tmux.WindowPane{Command: "zsh", PID: 4242}, true)
+	if err != nil || exact {
+		t.Fatalf("whitespace-changed child exact=%t err=%v", exact, err)
+	}
+}
+
 func TestRunnerPaneLegacyDirectAmpRequiresExactArgs(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -331,6 +352,38 @@ func TestRunnerPaneLegacyDirectAmpRequiresExactArgs(t *testing.T) {
 				t.Fatalf("direct amp args %#v exact=%t err=%v, want %t", test.args, exact, err, test.want)
 			}
 		})
+	}
+}
+
+func TestRunnerPaneLegacyDirectAmpRejectsChangedProcessIdentity(t *testing.T) {
+	oldArgs, oldIdentity := runnerProcessArgs, runnerProcessIdentity
+	runnerProcessArgs = func(int) ([]string, error) { return []string{"amp", "--no-tui"}, nil }
+	calls := 0
+	runnerProcessIdentity = func(int) (string, error) {
+		calls++
+		return fmt.Sprintf("start-%d", calls), nil
+	}
+	t.Cleanup(func() { runnerProcessArgs, runnerProcessIdentity = oldArgs, oldIdentity })
+
+	exact, err := runnerPaneHasExactProcess(tmux.WindowPane{Command: "amp", PID: 5252}, false)
+	if err != nil || exact {
+		t.Fatalf("legacy changed process identity exact=%t err=%v", exact, err)
+	}
+}
+
+func TestRunnerLegacyPaneRevalidationRejectsChangedTmuxSnapshot(t *testing.T) {
+	oldPaneByID := runnerPaneByID
+	before := tmux.WindowPane{Session: "alpha", Window: "legacy", WindowID: "@1", PaneID: "%1", Path: "/tmp/project", Command: "amp", StartCommand: "exec amp --no-tui", PID: 5252, StartTime: 123}
+	runnerPaneByID = func(string) (tmux.WindowPane, error) {
+		after := before
+		after.StartTime++
+		return after, nil
+	}
+	t.Cleanup(func() { runnerPaneByID = oldPaneByID })
+
+	unchanged, err := legacyRunnerPaneUnchanged(before)
+	if err != nil || unchanged {
+		t.Fatalf("changed legacy pane unchanged=%t err=%v", unchanged, err)
 	}
 }
 

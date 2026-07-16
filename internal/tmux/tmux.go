@@ -54,6 +54,7 @@ type ProcessMetadata struct {
 const restartPaneFormat = "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}\t#{pane_dead}\t#{pane_pid}\t#{pane_created}"
 
 var inspectProcessIdentity = ProcessIdentity
+var inspectProcessName = ProcessName
 
 func parseRestartPanes(out []byte) ([]WindowPane, error) {
 	text := strings.TrimSuffix(string(out), "\n")
@@ -178,7 +179,7 @@ func InspectChildProcesses(parentPID int) ([]ProcessMetadata, error) {
 	if parentPID <= 0 {
 		return nil, errors.New("parent process PID is unavailable")
 	}
-	cmd := exec.Command("ps", "-ax", "-o", "pid=", "-o", "ppid=", "-o", "comm=")
+	cmd := exec.Command("ps", "-ax", "-o", "pid=", "-o", "ppid=")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -192,7 +193,7 @@ func InspectChildProcesses(parentPID int) ([]ProcessMetadata, error) {
 	var children []ProcessMetadata
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 3 {
+		if len(fields) != 2 {
 			return nil, fmt.Errorf("unexpected process row %q", line)
 		}
 		pid, pidErr := strconv.Atoi(fields[0])
@@ -203,6 +204,10 @@ func InspectChildProcesses(parentPID int) ([]ProcessMetadata, error) {
 		if ppid != parentPID {
 			continue
 		}
+		name, nameErr := inspectProcessName(pid)
+		if nameErr != nil {
+			return nil, nameErr
+		}
 		identity, identityErr := inspectProcessIdentity(pid)
 		if identityErr != nil {
 			return nil, identityErr
@@ -210,7 +215,7 @@ func InspectChildProcesses(parentPID int) ([]ProcessMetadata, error) {
 		children = append(children, ProcessMetadata{
 			PID:       pid,
 			ParentPID: ppid,
-			Name:      filepath.Base(strings.Join(fields[2:], " ")),
+			Name:      name,
 			Identity:  identity,
 		})
 	}

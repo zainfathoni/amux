@@ -70,17 +70,44 @@ func ProcessArgs(pid int) ([]string, error) {
 
 // ProcessIdentity returns Darwin's native per-incarnation process start time.
 func ProcessIdentity(pid int) (string, error) {
+	info, err := readProcBSDInfo(pid)
+	if err != nil {
+		return "", err
+	}
+	if info.StartSeconds == 0 {
+		return "", fmt.Errorf("process %d returned incomplete identity", pid)
+	}
+	return fmt.Sprintf("%d.%06d", info.StartSeconds, info.StartMicroseconds), nil
+}
+
+// ProcessName returns Darwin's native comm value without normalizing whitespace.
+func ProcessName(pid int) (string, error) {
+	info, err := readProcBSDInfo(pid)
+	if err != nil {
+		return "", err
+	}
+	end := bytes.IndexByte(info.Comm[:], 0)
+	if end < 0 {
+		end = len(info.Comm)
+	}
+	if end == 0 {
+		return "", fmt.Errorf("process %d returned empty name", pid)
+	}
+	return string(info.Comm[:end]), nil
+}
+
+func readProcBSDInfo(pid int) (procBSDInfo, error) {
 	if pid <= 0 {
-		return "", fmt.Errorf("process PID is unavailable")
+		return procBSDInfo{}, fmt.Errorf("process PID is unavailable")
 	}
 	var info procBSDInfo
 	size := unsafe.Sizeof(info)
 	written, _, errno := syscall.Syscall6(syscall.SYS_PROC_INFO, procPIDInfo, uintptr(pid), procPIDTBSDInfo, 0, uintptr(unsafe.Pointer(&info)), size)
 	if errno != 0 {
-		return "", fmt.Errorf("inspect process %d identity: %w", pid, errno)
+		return procBSDInfo{}, fmt.Errorf("inspect process %d metadata: %w", pid, errno)
 	}
-	if written != size || info.PID != uint32(pid) || info.StartSeconds == 0 {
-		return "", fmt.Errorf("process %d returned incomplete identity", pid)
+	if written != size || info.PID != uint32(pid) {
+		return procBSDInfo{}, fmt.Errorf("process %d returned incomplete metadata", pid)
 	}
-	return fmt.Sprintf("%d.%06d", info.StartSeconds, info.StartMicroseconds), nil
+	return info, nil
 }
