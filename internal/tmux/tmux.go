@@ -53,6 +53,8 @@ type ProcessMetadata struct {
 
 const restartPaneFormat = "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}\t#{pane_dead}\t#{pane_pid}\t#{pane_created}"
 
+var inspectProcessIdentity = ProcessIdentity
+
 func parseRestartPanes(out []byte) ([]WindowPane, error) {
 	text := strings.TrimSuffix(string(out), "\n")
 	if text == "" {
@@ -201,10 +203,15 @@ func InspectChildProcesses(parentPID int) ([]ProcessMetadata, error) {
 		if ppid != parentPID {
 			continue
 		}
+		identity, identityErr := inspectProcessIdentity(pid)
+		if identityErr != nil {
+			return nil, identityErr
+		}
 		children = append(children, ProcessMetadata{
 			PID:       pid,
 			ParentPID: ppid,
 			Name:      filepath.Base(strings.Join(fields[2:], " ")),
+			Identity:  identity,
 		})
 	}
 	return children, nil

@@ -79,6 +79,20 @@ func TestProcessArgsReturnsExactCurrentArgv(t *testing.T) {
 	}
 }
 
+func TestProcessIdentityReturnsStableNativeStartToken(t *testing.T) {
+	first, err := ProcessIdentity(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ProcessIdentity(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == "" || first != second {
+		t.Fatalf("ProcessIdentity(%d) = %q then %q", os.Getpid(), first, second)
+	}
+}
+
 func TestInspectChildProcessesPreservesWhitespaceAndRejectsMalformedRows(t *testing.T) {
 	for _, test := range []struct {
 		name      string
@@ -94,6 +108,9 @@ func TestInspectChildProcessesPreservesWhitespaceAndRejectsMalformedRows(t *test
 			bin := t.TempDir()
 			writeExecutable(t, filepath.Join(bin, "ps"), "#!/bin/sh\ncat <<'EOF'\n"+test.output+"EOF\n")
 			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			oldIdentity := inspectProcessIdentity
+			inspectProcessIdentity = func(pid int) (string, error) { return fmt.Sprintf("start-%d", pid), nil }
+			t.Cleanup(func() { inspectProcessIdentity = oldIdentity })
 
 			children, err := InspectChildProcesses(4242)
 			if test.wantError {

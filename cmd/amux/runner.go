@@ -487,7 +487,8 @@ func inspectRunnerWindow(row config.RunnerRow, window, expectedStart string) (ru
 	}
 	pane := panes[0]
 	path, pathErr := config.CanonicalWorkdir(pane.Path)
-	exactProcess, processErr := runnerPaneHasExactProcess(pane)
+	retainedShell := expectedStart == runnerStartCommand(row.Workdir)
+	exactProcess, processErr := runnerPaneHasExactProcess(pane, retainedShell)
 	if processErr != nil {
 		return runnerInspection{}, fmt.Errorf("inspect runner process for pane %s pid %d: %w", pane.PaneID, pane.PID, processErr)
 	}
@@ -497,8 +498,11 @@ func inspectRunnerWindow(row config.RunnerRow, window, expectedStart string) (ru
 	return runnerInspection{state: runnerPaneExact, pane: pane}, nil
 }
 
-func runnerPaneHasExactProcess(pane tmux.WindowPane) (bool, error) {
-	if pane.Command == "amp" {
+func runnerPaneHasExactProcess(pane tmux.WindowPane, retainedShell bool) (bool, error) {
+	if !retainedShell {
+		if pane.Command != "amp" {
+			return false, nil
+		}
 		return runnerHasExactArgs(pane.PID)
 	}
 	children, err := runnerChildProcesses(pane.PID)
@@ -552,7 +556,7 @@ func launchRunner(row config.RunnerRow) (tmux.WindowPane, error) {
 		pane, inspectErr := runner.RestartPaneByID(created.PaneID)
 		if inspectErr == nil && pane.WindowID == created.WindowID && pane.PaneID == created.PaneID && pane.Session == row.Workspace && pane.Window == row.Window {
 			path, _ := config.CanonicalWorkdir(pane.Path)
-			exactProcess, processErr := runnerPaneHasExactProcess(pane)
+			exactProcess, processErr := runnerPaneHasExactProcess(pane, true)
 			if processErr != nil {
 				lastProcessError = boundedDiagnostic(processErr.Error(), 1024)
 			}

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // ProcessArgs returns the kernel's exact argv vector for pid.
@@ -29,4 +30,25 @@ func ProcessArgs(pid int) ([]string, error) {
 		args[i] = string(field)
 	}
 	return args, nil
+}
+
+// ProcessIdentity returns Linux's per-incarnation process start ticks.
+func ProcessIdentity(pid int) (string, error) {
+	if pid <= 0 {
+		return "", fmt.Errorf("process PID is unavailable")
+	}
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return "", fmt.Errorf("inspect process %d identity: %w", pid, err)
+	}
+	endName := strings.LastIndexByte(string(data), ')')
+	if endName < 0 {
+		return "", fmt.Errorf("process %d returned malformed stat identity", pid)
+	}
+	fields := strings.Fields(string(data[endName+1:]))
+	const startTimeIndex = 19 // Field 22 after fields 1 (pid) and 2 (comm).
+	if len(fields) <= startTimeIndex || fields[startTimeIndex] == "" {
+		return "", fmt.Errorf("process %d returned incomplete stat identity", pid)
+	}
+	return fields[startTimeIndex], nil
 }

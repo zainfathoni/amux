@@ -10,9 +10,20 @@ import (
 )
 
 const (
-	ctlKern       = 1
-	kernProcArgs2 = 49
+	ctlKern         = 1
+	kernProcArgs2   = 49
+	procPIDInfo     = 2
+	procPIDTBSDInfo = 3
 )
+
+type procBSDInfo struct {
+	Flags, Status, XStatus, PID, PPID, UID, GID, RUID, RGID, SVUID, SVGID, Reserved uint32
+	Comm                                                                            [16]byte
+	Name                                                                            [32]byte
+	NFiles, PGID, PJobC, TDev, TPGID                                                uint32
+	Nice                                                                            int32
+	StartSeconds, StartMicroseconds                                                 uint64
+}
 
 // ProcessArgs returns the kernel's exact argv vector for pid.
 func ProcessArgs(pid int) ([]string, error) {
@@ -55,4 +66,21 @@ func ProcessArgs(pid int) ([]string, error) {
 		data = data[end+1:]
 	}
 	return args, nil
+}
+
+// ProcessIdentity returns Darwin's native per-incarnation process start time.
+func ProcessIdentity(pid int) (string, error) {
+	if pid <= 0 {
+		return "", fmt.Errorf("process PID is unavailable")
+	}
+	var info procBSDInfo
+	size := unsafe.Sizeof(info)
+	written, _, errno := syscall.Syscall6(syscall.SYS_PROC_INFO, procPIDInfo, uintptr(pid), procPIDTBSDInfo, 0, uintptr(unsafe.Pointer(&info)), size)
+	if errno != 0 {
+		return "", fmt.Errorf("inspect process %d identity: %w", pid, errno)
+	}
+	if written != size || info.PID != uint32(pid) || info.StartSeconds == 0 {
+		return "", fmt.Errorf("process %d returned incomplete identity", pid)
+	}
+	return fmt.Sprintf("%d.%06d", info.StartSeconds, info.StartMicroseconds), nil
 }

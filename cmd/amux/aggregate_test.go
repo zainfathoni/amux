@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/zainfathoni/amux/internal/config"
 	"github.com/zainfathoni/amux/internal/result"
+	"github.com/zainfathoni/amux/internal/tmux"
 )
 
 func TestAggregateListUsesWorkerRunnerWorkspaceUnionAndCanonicalSelectors(t *testing.T) {
@@ -325,10 +327,10 @@ echo "$*" >> "`+log+`"
 case "$1" in
   has-session) exit 0 ;;
   list-panes)
-    if [ -e "`+firstOld+`" ]; then printf 'alpha\t`+firstWindow+`\t@1\t%%1\t`+firstDir+`\tamp\t%s\t0\n' `+shellSingleQuote(firstStart)+`; fi
-    if [ -e "`+secondOld+`" ]; then printf 'alpha\t`+secondWindow+`\t@2\t%%2\t`+secondDir+`\tamp\t%s\t0\n' `+shellSingleQuote(secondStart)+`; fi
-    if [ -e "`+firstBad+`" ]; then printf 'alpha\t`+firstWindow+`\t@11\t%%11\t`+firstDir+`\tsleep\t%s\t0\n' `+shellSingleQuote(firstStart)+`; fi
-    if [ -e "`+secondBad+`" ]; then printf 'alpha\t`+secondWindow+`\t@12\t%%12\t`+secondDir+`\tsleep\t%s\t0\n' `+shellSingleQuote(secondStart)+`; fi ;;
+    if [ -e "`+firstOld+`" ]; then printf 'alpha\t`+firstWindow+`\t@1\t%%1\t`+firstDir+`\tamp\t%s\t0\t101\t1\n' `+shellSingleQuote(firstStart)+`; fi
+    if [ -e "`+secondOld+`" ]; then printf 'alpha\t`+secondWindow+`\t@2\t%%2\t`+secondDir+`\tamp\t%s\t0\t102\t1\n' `+shellSingleQuote(secondStart)+`; fi
+    if [ -e "`+firstBad+`" ]; then printf 'alpha\t`+firstWindow+`\t@11\t%%11\t`+firstDir+`\tsleep\t%s\t0\t111\t1\n' `+shellSingleQuote(firstStart)+`; fi
+    if [ -e "`+secondBad+`" ]; then printf 'alpha\t`+secondWindow+`\t@12\t%%12\t`+secondDir+`\tsleep\t%s\t0\t112\t1\n' `+shellSingleQuote(secondStart)+`; fi ;;
   kill-window)
     case "$3" in
       @1) rm "`+firstOld+`" ;; @2) rm "`+secondOld+`" ;;
@@ -341,6 +343,14 @@ case "$1" in
   *) exit 2 ;;
 esac
 `)
+	oldChildren := runnerChildProcesses
+	runnerChildProcesses = func(parentPID int) ([]tmux.ProcessMetadata, error) {
+		if parentPID >= 110 {
+			return nil, nil
+		}
+		return []tmux.ProcessMetadata{{PID: parentPID + 1000, ParentPID: parentPID, Name: "amp", Identity: fmt.Sprintf("start-%d", parentPID)}}, nil
+	}
+	t.Cleanup(func() { runnerChildProcesses = oldChildren })
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	oldTimeout, oldPoll := runnerStartupTimeout, runnerPollInterval
