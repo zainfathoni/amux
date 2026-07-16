@@ -407,6 +407,324 @@ func TestWorkerUnshelveRemovesIntentOnlyAfterRemoteSuccess(t *testing.T) {
 	}
 }
 
+func TestWorkerSpawnVerifiesDelayedExecutingProvisionedThreadWithoutDuplicatingMultilinePrompt(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	running := filepath.Join(bin, "running")
+	bufferPath := filepath.Join(bin, "buffer")
+	pasteCountPath := filepath.Join(bin, "paste-count")
+	delivered := filepath.Join(bin, "delivered")
+	exportCountPath := filepath.Join(bin, "export-count")
+	messagePath := filepath.Join(bin, "assignment.md")
+	exactExportPath := filepath.Join(bin, "exact.json")
+	duplicatedExportPath := filepath.Join(bin, "duplicated.json")
+	message := "Paragraph A\n\nParagraph B\n\nParagraph C\n\nParagraph D\n\nParagraph E\n\nParagraph F\n\nParagraph G"
+	duplicated := strings.TrimSuffix(message, "\n\nParagraph G") + "\n\n" + message
+	if err := os.WriteFile(messagePath, []byte(message), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for path, content := range map[string]string{
+		exactExportPath:      message,
+		duplicatedExportPath: duplicated,
+	} {
+		payload, err := json.Marshal(map[string]any{
+			"id": "T-created",
+			"messages": []map[string]any{
+				{"role": "user", "content": content},
+				{"role": "assistant", "content": "Starting the assignment", "state": "running_tools"},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-created"}
+	start := teardownExpectedStartCommand(teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}, row)
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+echo "amp $*" >> "`+logPath+`"
+if [ "$1 $2" = "threads new" ]; then echo T-created; exit 0; fi
+if [ "$1 $2" = "threads list" ]; then printf '%s\n' '[{"id":"T-created"}]'; exit 0; fi
+if [ "$1 $2 $3" = "threads export T-created" ]; then
+  count=0; if [ -f "`+exportCountPath+`" ]; then count=$(cat "`+exportCountPath+`"); fi
+  count=$((count + 1)); printf '%s\n' "$count" > "`+exportCountPath+`"
+  if [ ! -e "`+delivered+`" ] || [ "$count" -lt 3 ]; then printf '%s\n' '{"id":"T-created","messages":[]}'; exit 0; fi
+  pastes=$(cat "`+pasteCountPath+`")
+  if [ "$pastes" -gt 1 ]; then cat "`+duplicatedExportPath+`"; else cat "`+exactExportPath+`"; fi
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "tmux $*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then test -e "`+running+`"; exit $?; fi
+if [ "$1" = new-session ]; then touch "`+running+`"; exit 0; fi
+if [ "$1" = list-panes ]; then printf 'worker\t@1\t%s\n' `+shellSingleQuote(start)+`; exit 0; fi
+if [ "$1" = display-message ]; then echo %1; exit 0; fi
+if [ "$1" = load-buffer ]; then cat > "`+bufferPath+`"; exit 0; fi
+if [ "$1" = paste-buffer ]; then
+  count=0; if [ -f "`+pasteCountPath+`" ]; then count=$(cat "`+pasteCountPath+`"); fi
+  count=$((count + 1)); printf '%s\n' "$count" > "`+pasteCountPath+`"; exit 0
+fi
+if [ "$1" = capture-pane ]; then
+  if [ -f "`+pasteCountPath+`" ]; then printf '╭ composer ─╮\n│ Paragraph A │\n│ Paragraph B │\n╰────────────╯\n'; else printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; fi
+  exit 0
+fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then touch "`+delivered+`"; exit 0; fi
+if [ "$1" = send-keys ]; then exit 0; fi
+if [ "$1" = kill-window ]; then rm -f "`+running+`"; exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "50ms")
+
+	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message-file", messagePath, "--idempotency-key", "delayed-executing")
+	if len(got.Successful) != 1 || got.Successful[0].Resource.Thread != "T-created" {
+		t.Fatalf("spawn result = %+v", got)
+	}
+	count, err := os.ReadFile(pasteCountPath)
+	if err != nil || strings.TrimSpace(string(count)) != "1" {
+		t.Fatalf("multiline assignment paste count = %q, err=%v", count, err)
+	}
+	rows, err := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
+	if err != nil || len(rows) != 1 || rows[0].Thread != "T-created" {
+		t.Fatalf("worker registry = %+v, err=%v", rows, err)
+	}
+}
+
+func TestWorkerSpawnRecoversVerifiedProvisionedThreadFromIndeterminateWithoutResubmitting(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	running := filepath.Join(bin, "running")
+	messagePath := filepath.Join(bin, "assignment.md")
+	exportPath := filepath.Join(bin, "export.json")
+	message := "Paragraph A\n\nParagraph B\n\nParagraph C"
+	duplicated := strings.TrimSuffix(message, "\n\nParagraph C") + "\n\n" + message
+	if err := os.WriteFile(messagePath, []byte(message), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"id": "T-provisioned",
+		"messages": []map[string]any{
+			{"role": "user", "content": duplicated},
+			{"role": "assistant", "content": "Continuing work", "state": "running_tools"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(exportPath, append(payload, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := strings.Join([]string{"alpha", "worker", workdir, "", message}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Now().UTC()
+	record := config.OperationRecord{
+		Key:         "recover-indeterminate",
+		Kind:        "worker-spawn",
+		RequestHash: hex.EncodeToString(sum[:]),
+		State:       config.OperationIndeterminate,
+		Phase:       config.OperationPhaseDeliveryStarted,
+		Resource:    config.OperationResource{Kind: "worker", Thread: "T-provisioned"},
+		Error:       "initial assignment was not found in provisioned thread T-provisioned or one unambiguous fresh receiving thread; recovery: inspect thread T-provisioned and do not resubmit",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if _, err := config.StoreOperation(filepath.Join(dir, config.OperationsFile), record); err != nil {
+		t.Fatal(err)
+	}
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-provisioned"}
+	start := teardownExpectedStartCommand(teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}, row)
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+echo "amp $*" >> "`+logPath+`"
+if [ "$1 $2 $3" = "threads export T-provisioned" ]; then cat "`+exportPath+`"; exit 0; fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "tmux $*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then test -e "`+running+`"; exit $?; fi
+if [ "$1" = new-session ]; then touch "`+running+`"; exit 0; fi
+if [ "$1" = list-panes ]; then printf 'worker\t@1\t%s\n' `+shellSingleQuote(start)+`; exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message-file", messagePath, "--idempotency-key", record.Key)
+	if len(got.Successful) != 1 || got.Successful[0].Resource.Thread != "T-provisioned" {
+		t.Fatalf("recovered spawn result = %+v", got)
+	}
+	completed, found, err := config.LoadOperation(filepath.Join(dir, config.OperationsFile), record.Key)
+	if err != nil || !found || completed.State != config.OperationSucceeded || completed.Resource.Thread != "T-provisioned" {
+		t.Fatalf("recovered operation = %+v, found=%t, err=%v", completed, found, err)
+	}
+	rows, err := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
+	if err != nil || len(rows) != 1 || rows[0].Thread != "T-provisioned" {
+		t.Fatalf("recovered worker registry = %+v, err=%v", rows, err)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"threads new", "threads list", "threads search", "send-keys", "paste-buffer"} {
+		if strings.Contains(string(log), forbidden) {
+			t.Fatalf("indeterminate recovery performed forbidden %q work:\n%s", forbidden, log)
+		}
+	}
+}
+
+func TestWorkerSpawnIndeterminateRecoveryPreflightsConflictsBeforeOperationMutation(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	request := strings.Join([]string{"alpha", "worker", workdir, "", "hello"}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Now().UTC()
+	record := config.OperationRecord{
+		Key:         "conflicting-recovery",
+		Kind:        "worker-spawn",
+		RequestHash: hex.EncodeToString(sum[:]),
+		State:       config.OperationIndeterminate,
+		Phase:       config.OperationPhaseDeliveryStarted,
+		Resource:    config.OperationResource{Kind: "worker", Thread: "T-provisioned"},
+		Error:       "initial assignment was not found in provisioned thread T-provisioned or one unambiguous fresh receiving thread; recovery: inspect thread T-provisioned and do not resubmit",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	operationPath := filepath.Join(dir, config.OperationsFile)
+	if _, err := config.StoreOperation(operationPath, record); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkerRegistry(t, dir, config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-other"}.String()+"\n")
+	before, err := os.ReadFile(operationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	tmuxCalled := filepath.Join(bin, "tmux-called")
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+if [ "$1 $2 $3" = "threads export T-provisioned" ]; then printf '%s\n' '{"id":"T-provisioned","messages":[{"role":"user","content":"hello"}]}'; exit 0; fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+tmuxCalled+"'\nexit 99\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	err = executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", record.Key)
+	if err == nil || !strings.Contains(err.Error(), "configured for thread T-other") {
+		t.Fatalf("conflicting recovery error = %v", err)
+	}
+	after, err := os.ReadFile(operationPath)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("conflicting recovery mutated operation: err=%v\nbefore=%s\nafter=%s", err, before, after)
+	}
+	if _, err := os.Stat(tmuxCalled); !os.IsNotExist(err) {
+		t.Fatalf("conflicting recovery inspected or mutated tmux: %v", err)
+	}
+}
+
+func TestWorkerSpawnIndeterminateRecoveryRejectsTmuxConflictBeforeOperationMutation(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	request := strings.Join([]string{"alpha", "worker", workdir, "", "hello"}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Now().UTC()
+	record := config.OperationRecord{
+		Key:         "tmux-conflicting-recovery",
+		Kind:        "worker-spawn",
+		RequestHash: hex.EncodeToString(sum[:]),
+		State:       config.OperationIndeterminate,
+		Phase:       config.OperationPhaseDeliveryStarted,
+		Resource:    config.OperationResource{Kind: "worker", Thread: "T-provisioned"},
+		Error:       "initial assignment was not found in provisioned thread T-provisioned or one unambiguous fresh receiving thread; recovery: inspect thread T-provisioned and do not resubmit",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	operationPath := filepath.Join(dir, config.OperationsFile)
+	if _, err := config.StoreOperation(operationPath, record); err != nil {
+		t.Fatal(err)
+	}
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-provisioned"}
+	writeWorkerRegistry(t, dir, row.String()+"\n")
+	operationBefore, err := os.ReadFile(operationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workersBefore, err := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+echo "amp $*" >> "`+logPath+`"
+if [ "$1 $2 $3" = "threads export T-provisioned" ]; then printf '%s\n' '{"id":"T-provisioned","messages":[{"role":"user","content":"hello"}]}'; exit 0; fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "tmux $*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then exit 0; fi
+if [ "$1" = list-panes ]; then printf 'worker\t@1\tcd /tmp && exec amp threads continue T-other\n'; exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	err = executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", record.Key)
+	if err == nil || !strings.Contains(err.Error(), "worker tmux identity is conflict") {
+		t.Fatalf("tmux-conflicting recovery error = %v", err)
+	}
+	operationAfter, err := os.ReadFile(operationPath)
+	if err != nil || !bytes.Equal(operationAfter, operationBefore) {
+		t.Fatalf("tmux-conflicting recovery mutated operation: err=%v\nbefore=%s\nafter=%s", err, operationBefore, operationAfter)
+	}
+	workersAfter, err := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+	if err != nil || !bytes.Equal(workersAfter, workersBefore) {
+		t.Fatalf("tmux-conflicting recovery mutated workers: err=%v\nbefore=%s\nafter=%s", err, workersBefore, workersAfter)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"threads new", "threads list", "threads search", "send-keys", "paste-buffer", "new-session", "new-window"} {
+		if strings.Contains(string(log), forbidden) {
+			t.Fatalf("tmux-conflicting recovery performed forbidden %q work:\n%s", forbidden, log)
+		}
+	}
+}
+
+func TestDuplicatedPrefixAssignmentMatchesOnlyKnownMultilineCorruptionShape(t *testing.T) {
+	want := "Paragraph A\n\nParagraph B\n\nParagraph C"
+	knownDuplicate := strings.TrimSuffix(want, "Paragraph C") + want
+	for _, test := range []struct {
+		name        string
+		got         string
+		wantMessage string
+		want        bool
+	}{
+		{name: "exact", got: want, wantMessage: want, want: true},
+		{name: "known multiline prefix", got: knownDuplicate, wantMessage: want, want: true},
+		{name: "known multiline prefix with LF terminator", got: knownDuplicate + "\n", wantMessage: want + "\n", want: true},
+		{name: "known multiline prefix with CRLF terminator", got: strings.ReplaceAll(knownDuplicate, "\n", "\r\n") + "\r\n", wantMessage: strings.ReplaceAll(want, "\n", "\r\n") + "\r\n", want: true},
+		{name: "one byte prefix", got: want[:1] + want, wantMessage: want},
+		{name: "earlier line prefix", got: "Paragraph A\n" + want, wantMessage: want},
+		{name: "whole multiline message duplicated", got: want + want, wantMessage: want},
+		{name: "single line duplicated", got: "hellohello", wantMessage: "hello"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := duplicatedPrefixAssignment(test.got, test.wantMessage); got != test.want {
+				t.Fatalf("duplicatedPrefixAssignment() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestWorkerSpawnPersistsOperationAndReplaysWithoutDuplicateCreation(t *testing.T) {
 	dir := t.TempDir()
 	workdir := t.TempDir()
@@ -659,7 +977,17 @@ func TestWorkerSpawnExactRowPartialPhasesResumeGroupingWithoutWorkerSuccess(t *t
 			bin := t.TempDir()
 			called := filepath.Join(bin, "called")
 			writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
-			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+			if phase == config.OperationPhaseMessageVerified {
+				start := teardownExpectedStartCommand(teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}, row)
+				writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then exit 0; fi
+if [ "$1" = list-panes ]; then printf 'worker\t@1\t%s\n' `+shellSingleQuote(start)+`; exit 0; fi
+touch "`+called+`"
+exit 99
+`)
+			} else {
+				writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+			}
 			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 			got := executeWorkerJSON(t, "--json", "--config-dir", dir, "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--group", "issue-132", "--message", "hello", "--idempotency-key", "phase-replay")
@@ -885,15 +1213,22 @@ func TestWorkerSpawnRecoversCanonicalExactRow(t *testing.T) {
 	bin := t.TempDir()
 	called := filepath.Join(bin, "called")
 	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
-	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-bound"}
+	start := teardownExpectedStartCommand(teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}, row)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then exit 0; fi
+if [ "$1" = list-panes ]; then printf 'worker\t@1\t%s\n' `+shellSingleQuote(start)+`; exit 0; fi
+touch "`+called+`"
+exit 99
+`)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	result := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", "canonical-recovery")
-	if len(result.Skipped) != 1 || result.Skipped[0].Message != "recovered completed spawn" {
+	if len(result.Skipped) != 1 || result.Skipped[0].Message != "worker already created; resuming verified spawn" {
 		t.Fatalf("canonical recovery result = %+v", result)
 	}
 	if _, err := os.Stat(called); !os.IsNotExist(err) {
-		t.Fatalf("canonical recovery called amp or tmux: %v", err)
+		t.Fatalf("canonical recovery performed unexpected external work: %v", err)
 	}
 }
 
