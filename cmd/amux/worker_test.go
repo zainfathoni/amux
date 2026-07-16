@@ -420,13 +420,14 @@ func TestWorkerSpawnVerifiesDelayedExecutingProvisionedThreadWithoutDuplicatingM
 	messagePath := filepath.Join(bin, "assignment.md")
 	exactExportPath := filepath.Join(bin, "exact.json")
 	duplicatedExportPath := filepath.Join(bin, "duplicated.json")
-	message := "Paragraph A\n\nParagraph B\n\nParagraph C\n\nParagraph D\n\nParagraph E\n\nParagraph F\n\nParagraph G"
-	duplicated := strings.TrimSuffix(message, "\n\nParagraph G") + "\n\n" + message
+	transportedMessage := "Paragraph A\n\nParagraph B\n\nParagraph C\n\nParagraph D\n\nParagraph E\n\nParagraph F\n\nParagraph G"
+	message := transportedMessage + "\n"
+	duplicated := strings.TrimSuffix(transportedMessage, "\n\nParagraph G") + "\n\n" + transportedMessage
 	if err := os.WriteFile(messagePath, []byte(message), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for path, content := range map[string]string{
-		exactExportPath:      message,
+		exactExportPath:      transportedMessage,
 		duplicatedExportPath: duplicated,
 	} {
 		payload, err := json.Marshal(map[string]any{
@@ -495,6 +496,10 @@ exit 2
 	if err != nil || len(rows) != 1 || rows[0].Thread != "T-created" {
 		t.Fatalf("worker registry = %+v, err=%v", rows, err)
 	}
+	operation, found, err := config.LoadOperation(filepath.Join(dir, config.OperationsFile), "delayed-executing")
+	if err != nil || !found || operation.MessageSource != config.OperationMessageSourceFile {
+		t.Fatalf("spawn operation message source = %q, found=%t, err=%v", operation.MessageSource, found, err)
+	}
 }
 
 func TestWorkerSpawnRecoversVerifiedProvisionedThreadFromIndeterminateWithoutResubmitting(t *testing.T) {
@@ -505,15 +510,15 @@ func TestWorkerSpawnRecoversVerifiedProvisionedThreadFromIndeterminateWithoutRes
 	running := filepath.Join(bin, "running")
 	messagePath := filepath.Join(bin, "assignment.md")
 	exportPath := filepath.Join(bin, "export.json")
-	message := "Paragraph A\n\nParagraph B\n\nParagraph C"
-	duplicated := strings.TrimSuffix(message, "\n\nParagraph C") + "\n\n" + message
+	transportedMessage := "Paragraph A\n\nParagraph B\n\nParagraph C"
+	message := transportedMessage + "\n"
 	if err := os.WriteFile(messagePath, []byte(message), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	payload, err := json.Marshal(map[string]any{
 		"id": "T-provisioned",
 		"messages": []map[string]any{
-			{"role": "user", "content": duplicated},
+			{"role": "user", "content": transportedMessage},
 			{"role": "assistant", "content": "Continuing work", "state": "running_tools"},
 		},
 	})
@@ -577,6 +582,77 @@ exit 2
 		if strings.Contains(string(log), forbidden) {
 			t.Fatalf("indeterminate recovery performed forbidden %q work:\n%s", forbidden, log)
 		}
+	}
+}
+
+func TestWorkerSpawnIndeterminateRecoveryUsesOriginalMessageSource(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		originalSource config.OperationMessageSource
+		replayWithFile bool
+		wantVerified   bool
+	}{
+		{name: "message replayed with file remains exact", originalSource: config.OperationMessageSourceMessage, replayWithFile: true},
+		{name: "file replayed with message retains normalization", originalSource: config.OperationMessageSourceFile, wantVerified: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			workdir := t.TempDir()
+			message := "assignment\n"
+			request := strings.Join([]string{"alpha", "worker", workdir, "", message}, "\x00")
+			sum := sha256.Sum256([]byte(request))
+			now := time.Now().UTC()
+			record := config.OperationRecord{
+				Key:           "source-bound-recovery",
+				Kind:          "worker-spawn",
+				RequestHash:   hex.EncodeToString(sum[:]),
+				MessageSource: test.originalSource,
+				State:         config.OperationIndeterminate,
+				Phase:         config.OperationPhaseDeliveryStarted,
+				Resource:      config.OperationResource{Kind: "worker", Thread: "T-provisioned"},
+				Error:         "initial assignment was not found in provisioned thread T-provisioned or one unambiguous fresh receiving thread; recovery: inspect thread T-provisioned and do not resubmit",
+				CreatedAt:     now,
+				UpdatedAt:     now,
+			}
+			if _, err := config.StoreOperation(filepath.Join(dir, config.OperationsFile), record); err != nil {
+				t.Fatal(err)
+			}
+			bin := t.TempDir()
+			tmuxCalled := filepath.Join(bin, "tmux-called")
+			writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+if [ "$1 $2 $3" = "threads export T-provisioned" ]; then printf '%s\n' '{"id":"T-provisioned","messages":[{"role":"user","content":"assignment"}]}'; exit 0; fi
+exit 2
+`)
+			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+tmuxCalled+"'\nexit 99\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+			args := []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", message, "--idempotency-key", record.Key}
+			if test.replayWithFile {
+				messagePath := filepath.Join(dir, "assignment.md")
+				if err := os.WriteFile(messagePath, []byte(message), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				args = []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message-file", messagePath, "--idempotency-key", record.Key}
+			}
+
+			err := executeWorkerJSONError(t, args...)
+			if test.wantVerified {
+				if err == nil || strings.Contains(err.Error(), "not verified in exact provisioned thread") {
+					t.Fatalf("source-bound recovery did not retain file normalization: %v", err)
+				}
+				if _, statErr := os.Stat(tmuxCalled); statErr != nil {
+					t.Fatalf("verified recovery did not reach tmux identity preflight: %v", statErr)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), "not verified in exact provisioned thread") {
+					t.Fatalf("source-bound recovery accepted replay-source normalization: %v", err)
+				}
+				if _, statErr := os.Stat(tmuxCalled); !os.IsNotExist(statErr) {
+					t.Fatalf("unverified recovery reached tmux: %v", statErr)
+				}
+			}
+		})
 	}
 }
 
@@ -722,6 +798,49 @@ func TestDuplicatedPrefixAssignmentMatchesOnlyKnownMultilineCorruptionShape(t *t
 				t.Fatalf("duplicatedPrefixAssignment() = %t, want %t", got, test.want)
 			}
 		})
+	}
+}
+
+func TestProvisionedAssignmentMatchesOnlyOneRemovedTerminalLineEnding(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		got  string
+		want string
+		ok   bool
+	}{
+		{name: "no newline exact", got: "assignment", want: "assignment", ok: true},
+		{name: "LF removed", got: "assignment", want: "assignment\n", ok: true},
+		{name: "CRLF removed", got: "assignment", want: "assignment\r\n", ok: true},
+		{name: "one of two LFs removed", got: "assignment\n", want: "assignment\n\n", ok: true},
+		{name: "one of two CRLFs removed", got: "assignment\r\n", want: "assignment\r\n\r\n", ok: true},
+		{name: "trailing spaces preserved", got: "assignment  ", want: "assignment  \n", ok: true},
+		{name: "leading spaces preserved", got: "  assignment", want: "  assignment\n", ok: true},
+		{name: "empty remains rejected", got: "", want: ""},
+		{name: "LF-only becomes empty", got: "", want: "\n", ok: true},
+		{name: "CRLF-only becomes empty", got: "", want: "\r\n", ok: true},
+		{name: "two LFs retain one", got: "\n", want: "\n\n", ok: true},
+		{name: "two CRLFs retain one", got: "\r\n", want: "\r\n\r\n", ok: true},
+		{name: "unrelated content", got: "different", want: "assignment\n"},
+		{name: "trailing space not trimmed", got: "assignment", want: "assignment \n"},
+		{name: "additional newline not trimmed", got: "assignment", want: "assignment\n\n"},
+		{name: "bare CR is not a transport line ending", got: "assignment", want: "assignment\r"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			messages := []any{map[string]any{"role": "user", "content": test.got}}
+			if got := messagesContainProvisionedAssignment(messages, test.want, true); got != test.ok {
+				t.Fatalf("messagesContainProvisionedAssignment() = %t, want %t", got, test.ok)
+			}
+		})
+	}
+}
+
+func TestExactAssignmentMatcherDoesNotNormalizeAlternateThreadContent(t *testing.T) {
+	messages := []any{map[string]any{"role": "user", "content": "assignment"}}
+	if messagesContainExactUserAssignment(messages, "assignment\n") {
+		t.Fatal("alternate-thread matcher accepted a removed terminal line ending")
+	}
+	if messagesContainProvisionedAssignment(messages, "assignment\n", false) {
+		t.Fatal("non-file provisioned assignment accepted a removed terminal line ending")
 	}
 }
 
@@ -1101,6 +1220,7 @@ func TestWorkerSpawnAlternateDeliveryFailsClosedWhenOwnershipIsAmbiguous(t *test
 		{name: "duplicate", wantErr: "multiple fresh receiving threads T-receiver, T-second"},
 		{name: "bound-duplicate", wantErr: "identity conflict between provisioned thread T-created and fresh receiving thread(s) T-receiver"},
 		{name: "delayed-bound-duplicate", wantErr: "identity conflict between provisioned thread T-created and fresh receiving thread(s) T-receiver"},
+		{name: "terminal-newline-normalized-alternate", wantErr: "initial assignment was not found in provisioned thread T-created"},
 		{name: "timeout", wantErr: "list fresh receiving threads after delivery"},
 		{name: "identity-conflict", wantErr: "receiving thread T-receiver is already configured as beta/existing"},
 	}
@@ -1153,6 +1273,8 @@ if [ "$1" = new-session ]; then touch "`+running+`"; exit 0; fi
 if [ "$1" = list-panes ]; then printf 'worker\t@1\t%s\n' `+shellSingleQuote(start)+`; exit 0; fi
 if [ "$1" = display-message ]; then echo %1; exit 0; fi
 if [ "$1" = capture-pane ]; then printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; exit 0; fi
+if [ "$1" = load-buffer ]; then cat >/dev/null; exit 0; fi
+if [ "$1" = paste-buffer ]; then exit 0; fi
 if [ "$1" = send-keys ]; then if [ "$4" = Enter ]; then touch "`+delivered+`"; fi; exit 0; fi
 if [ "$1" = kill-window ]; then rm -f "`+running+`"; exit 0; fi
 exit 2
@@ -1161,6 +1283,13 @@ exit 2
 			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 			t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
 			args := []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", "ambiguous-1"}
+			if tt.name == "terminal-newline-normalized-alternate" {
+				messagePath := filepath.Join(dir, "assignment.md")
+				if err := os.WriteFile(messagePath, []byte("hello\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				args = []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message-file", messagePath, "--idempotency-key", "ambiguous-1"}
+			}
 
 			err := executeWorkerJSONError(t, args...)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) || !strings.Contains(err.Error(), "recovery:") {
@@ -1183,11 +1312,25 @@ exit 2
 				t.Fatalf("ambiguous spawn did not stop unconfigured window: err=%v\n%s", readErr, log)
 			}
 			beforeReplay := string(log)
-			if replayErr := executeWorkerJSONError(t, args...); replayErr == nil || !strings.Contains(replayErr.Error(), "terminal in state indeterminate") {
+			replayWant := "terminal in state indeterminate"
+			if tt.name == "terminal-newline-normalized-alternate" {
+				replayWant = "not verified in exact provisioned thread T-created"
+			}
+			if replayErr := executeWorkerJSONError(t, args...); replayErr == nil || !strings.Contains(replayErr.Error(), replayWant) {
 				t.Fatalf("ambiguous replay error = %v", replayErr)
 			}
 			afterReplay, readErr := os.ReadFile(logPath)
-			if readErr != nil || string(afterReplay) != beforeReplay {
+			if tt.name == "terminal-newline-normalized-alternate" {
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				replayLog := strings.TrimPrefix(string(afterReplay), beforeReplay)
+				for _, forbidden := range []string{"threads new", "threads list", "send-keys", "paste-buffer", "new-session", "new-window"} {
+					if strings.Contains(replayLog, forbidden) {
+						t.Fatalf("alternate-only indeterminate replay performed forbidden %q work:\n%s", forbidden, replayLog)
+					}
+				}
+			} else if readErr != nil || string(afterReplay) != beforeReplay {
 				t.Fatalf("ambiguous replay performed external work: err=%v\nbefore=%s\nafter=%s", readErr, beforeReplay, afterReplay)
 			}
 		})

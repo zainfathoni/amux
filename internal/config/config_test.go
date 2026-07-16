@@ -467,13 +467,14 @@ func TestOperationRecordsPersistIdempotencyStateAndRejectKeyReuse(t *testing.T) 
 	path := filepath.Join(t.TempDir(), OperationsFile)
 	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
 	record := OperationRecord{
-		Key:         "request-123",
-		Kind:        "worker.spawn",
-		RequestHash: "sha256:abc",
-		State:       OperationStarted,
-		Resource:    OperationResource{Kind: "worker"},
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		Key:           "request-123",
+		Kind:          "worker-spawn",
+		RequestHash:   "sha256:abc",
+		MessageSource: OperationMessageSourceFile,
+		State:         OperationStarted,
+		Resource:      OperationResource{Kind: "worker"},
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 	created, err := StoreOperation(path, record)
 	if err != nil {
@@ -497,7 +498,7 @@ func TestOperationRecordsPersistIdempotencyStateAndRejectKeyReuse(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !found || got.State != OperationSucceeded || got.Resource.Thread != "T-worker" {
+	if !found || got.State != OperationSucceeded || got.Resource.Thread != "T-worker" || got.MessageSource != OperationMessageSourceFile {
 		t.Fatalf("loaded operation = %+v, found=%v", got, found)
 	}
 
@@ -512,6 +513,12 @@ func TestOperationRecordsPersistIdempotencyStateAndRejectKeyReuse(t *testing.T) 
 	}
 	if !found || got.RequestHash != record.RequestHash {
 		t.Fatalf("conflicting write changed operation: %+v", got)
+	}
+
+	sourceConflict := record
+	sourceConflict.MessageSource = OperationMessageSourceMessage
+	if _, err := StoreOperation(path, sourceConflict); err == nil || !strings.Contains(err.Error(), "different request") {
+		t.Fatalf("StoreOperation conflicting message source error = %v", err)
 	}
 
 	rebound := record
