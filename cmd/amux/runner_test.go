@@ -292,6 +292,217 @@ printf ' 5252  4242 /opt/amp/bin/amp\n'
 	}
 }
 
+func TestRunnerLaunchAcceptsExactPaneAtEquivalentTmuxWorkdir(t *testing.T) {
+	realWorkdir := t.TempDir()
+	aliasParent := t.TempDir()
+	workdir := filepath.Join(aliasParent, "primary")
+	if err := os.Symlink(realWorkdir, workdir); err != nil {
+		t.Fatal(err)
+	}
+	window := config.RunnerWindow(workdir)
+	start := runnerStartCommand(workdir)
+	tmuxStart := `"` + strings.Replace(start, "exit $status", `exit \$status`, 1) + `"`
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) exit 1 ;;
+  new-session) printf 'alpha\t`+window+`\t@7\t%%9\n' ;;
+  list-panes) printf 'alpha\t`+window+`\t@7\t%%9\t`+realWorkdir+`\tzsh\t%s\t0\t4242\t123\n' `+shellSingleQuote(tmuxStart)+` ;;
+  *) exit 2 ;;
+esac
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	oldTimeout, oldPoll := runnerStartupTimeout, runnerPollInterval
+	runnerStartupTimeout, runnerPollInterval = 10*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { runnerStartupTimeout, runnerPollInterval = oldTimeout, oldPoll })
+
+	pane, err := launchRunner(config.RunnerRow{Workspace: "alpha", Window: window, Workdir: workdir})
+	if err != nil {
+		t.Fatalf("launch through equivalent tmux workdir: %v", err)
+	}
+	if pane.PaneID != "%9" || pane.WindowID != "@7" {
+		t.Fatalf("launch returned pane %+v", pane)
+	}
+}
+
+func TestRunnerStartCommandMatcherAcceptsOnlyMeasuredTmuxEscaping(t *testing.T) {
+	expected := runnerStartCommand("/tmp/primary")
+	measured := `"` + strings.Replace(expected, "exit $status", `exit \$status`, 1) + `"`
+	additionalEscape := `"` + strings.ReplaceAll(expected, "$", `\$`) + `"`
+
+	if !runnerStartCommandMatches(measured, expected) {
+		t.Fatalf("measured tmux command did not match: %q", measured)
+	}
+	if runnerStartCommandMatches(additionalEscape, expected) {
+		t.Fatalf("command with unmeasured escaping matched: %q", additionalEscape)
+	}
+}
+
+func TestRunnerLaunchReportsLastObservedIdentityRejection(t *testing.T) {
+	workdir := t.TempDir()
+	wrongWorkdir := t.TempDir()
+	window := config.RunnerWindow(workdir)
+	start := runnerStartCommand(workdir)
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) exit 1 ;;
+  new-session) printf 'alpha\t`+window+`\t@7\t%%9\n' ;;
+  list-panes) printf 'alpha\t`+window+`\t@7\t%%9\t`+wrongWorkdir+`\tzsh\t%s\t0\t4242\t123\n' `+shellSingleQuote(start)+` ;;
+  capture-pane) exit 0 ;;
+  kill-window) exit 0 ;;
+  *) exit 2 ;;
+esac
+`)
+	child := tmux.ProcessMetadata{PID: 5252, ParentPID: 4242, Name: "amp", Identity: "native-start-123"}
+	oldChildren, oldArgs := runnerChildProcesses, runnerProcessArgs
+	runnerChildProcesses = func(int) ([]tmux.ProcessMetadata, error) { return []tmux.ProcessMetadata{child}, nil }
+	runnerProcessArgs = func(int) ([]string, error) { return []string{"/opt/amp/bin/amp", "--no-tui"}, nil }
+	t.Cleanup(func() { runnerChildProcesses, runnerProcessArgs = oldChildren, oldArgs })
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	oldTimeout, oldPoll := runnerStartupTimeout, runnerPollInterval
+	runnerStartupTimeout, runnerPollInterval = 10*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { runnerStartupTimeout, runnerPollInterval = oldTimeout, oldPoll })
+
+	_, err := launchRunner(config.RunnerRow{Workspace: "alpha", Window: window, Workdir: workdir})
+	if err == nil {
+		t.Fatal("identity-rejected launch succeeded")
+	}
+	message := err.Error()
+	for _, want := range []string{
+		"last observed at +",
+		"pane=%9 window=@7",
+		"start-command-match=true",
+		"workdir-equivalent=false",
+		"retained-shell-pid=4242",
+		"pid=5252 ppid=4242 name=\"amp\" incarnation=\"native-start-123\"",
+		`argv=["/opt/amp/bin/amp" "--no-tui"]`,
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("identity rejection diagnostic %q does not contain %q", message, want)
+		}
+	}
+}
+
+func TestRunnerLaunchReportsCreatedPaneIdentityDrift(t *testing.T) {
+	workdir := t.TempDir()
+	window := config.RunnerWindow(workdir)
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) exit 1 ;;
+  new-session) printf 'alpha\t`+window+`\t@7\t%%9\n' ;;
+  list-panes) printf 'other\tdrifted\t@8\t%%9\t`+workdir+`\tzsh\tignored\t0\t4242\t123\n' ;;
+  capture-pane) exit 0 ;;
+  kill-window) exit 0 ;;
+  *) exit 2 ;;
+esac
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	oldTimeout, oldPoll := runnerStartupTimeout, runnerPollInterval
+	runnerStartupTimeout, runnerPollInterval = 10*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { runnerStartupTimeout, runnerPollInterval = oldTimeout, oldPoll })
+
+	_, err := launchRunner(config.RunnerRow{Workspace: "alpha", Window: window, Workdir: workdir})
+	if err == nil {
+		t.Fatal("identity-drifted launch succeeded")
+	}
+	for _, want := range []string{"expected session=\"alpha\"", "window-name=\"" + window + "\"", "window=@7 pane=%9", "observed session=\"other\"", "window-name=\"drifted\"", "window=@8 pane=%9"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("identity drift diagnostic %q does not contain %q", err, want)
+		}
+	}
+}
+
+func TestRunnerLaunchPreservesDetailedObservationBeforePaneLookupFailure(t *testing.T) {
+	workdir := t.TempDir()
+	window := config.RunnerWindow(workdir)
+	start := runnerStartCommand(workdir)
+	bin := t.TempDir()
+	calls := filepath.Join(bin, "calls")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) exit 1 ;;
+  new-session) printf 'alpha\t`+window+`\t@7\t%%9\n' ;;
+  list-panes)
+    n=0; test -e "`+calls+`" && n=$(cat "`+calls+`"); n=$((n+1)); echo "$n" > "`+calls+`"
+    if [ "$n" -eq 1 ]; then
+      printf 'alpha\t`+window+`\t@7\t%%9\t`+workdir+`\tzsh\t%s\t0\t4242\t123\n' `+shellSingleQuote(start)+`
+    else
+      echo 'transient pane lookup failure' >&2
+      exit 1
+    fi ;;
+  capture-pane) exit 0 ;;
+  kill-window) exit 0 ;;
+  *) exit 2 ;;
+esac
+`)
+	child := tmux.ProcessMetadata{PID: 5252, ParentPID: 4242, Name: "amp", Identity: "native-start-123"}
+	oldChildren, oldArgs := runnerChildProcesses, runnerProcessArgs
+	runnerChildProcesses = func(int) ([]tmux.ProcessMetadata, error) { return []tmux.ProcessMetadata{child}, nil }
+	runnerProcessArgs = func(int) ([]string, error) { return []string{"amp", "--no-tui"}, nil }
+	t.Cleanup(func() { runnerChildProcesses, runnerProcessArgs = oldChildren, oldArgs })
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	oldTimeout, oldPoll := runnerStartupTimeout, runnerPollInterval
+	runnerStartupTimeout, runnerPollInterval = 10*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { runnerStartupTimeout, runnerPollInterval = oldTimeout, oldPoll })
+
+	_, err := launchRunner(config.RunnerRow{Workspace: "alpha", Window: window, Workdir: workdir})
+	if err == nil {
+		t.Fatal("launch with final pane lookup failure succeeded")
+	}
+	for _, want := range []string{
+		"last detailed observation",
+		"retained-shell-pid=4242",
+		"pid=5252 ppid=4242 name=\"amp\" incarnation=\"native-start-123\"",
+		`argv=["amp" "--no-tui"]`,
+		"final observation",
+		"exact pane %9 unavailable",
+		"transient pane lookup failure",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("transient pane lookup diagnostic %q does not contain %q", err, want)
+		}
+	}
+}
+
+func TestRunnerLaunchKeepsIdentityAndProcessEvidenceWithLongValues(t *testing.T) {
+	workdir := t.TempDir()
+	wrongWorkdir := t.TempDir()
+	window := config.RunnerWindow(workdir)
+	bin := t.TempDir()
+	longStart := strings.Repeat("x", 1600)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) exit 1 ;;
+  new-session) printf 'alpha\t`+window+`\t@7\t%%9\n' ;;
+  list-panes) printf 'alpha\t`+window+`\t@7\t%%9\t`+wrongWorkdir+`\tzsh\t%s\t0\t4242\t123\n' `+shellSingleQuote(longStart)+` ;;
+  capture-pane) exit 0 ;;
+  kill-window) exit 0 ;;
+  *) exit 2 ;;
+esac
+`)
+	child := tmux.ProcessMetadata{PID: 5252, ParentPID: 4242, Name: "amp", Identity: "native-start-123"}
+	oldChildren, oldArgs := runnerChildProcesses, runnerProcessArgs
+	runnerChildProcesses = func(int) ([]tmux.ProcessMetadata, error) { return []tmux.ProcessMetadata{child}, nil }
+	runnerProcessArgs = func(int) ([]string, error) { return []string{"amp", "--no-tui"}, nil }
+	t.Cleanup(func() { runnerChildProcesses, runnerProcessArgs = oldChildren, oldArgs })
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	oldTimeout, oldPoll := runnerStartupTimeout, runnerPollInterval
+	runnerStartupTimeout, runnerPollInterval = 10*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { runnerStartupTimeout, runnerPollInterval = oldTimeout, oldPoll })
+
+	_, err := launchRunner(config.RunnerRow{Workspace: "alpha", Window: window, Workdir: workdir})
+	if err == nil {
+		t.Fatal("long identity-rejected launch succeeded")
+	}
+	for _, want := range []string{"start-command-match=false", "workdir-equivalent=false", "retained-shell-pid=4242", "incarnation=\"native-start-123\"", `argv=["amp" "--no-tui"]`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("long-value diagnostic %q does not contain %q", err, want)
+		}
+	}
+}
+
 func TestRunnerPaneExactProcessRevalidatesChildSnapshot(t *testing.T) {
 	oldChildren, oldArgs := runnerChildProcesses, runnerProcessArgs
 	calls := 0
