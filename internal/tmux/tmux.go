@@ -190,18 +190,21 @@ func InspectChildProcesses(parentPID int) ([]ProcessMetadata, error) {
 	var children []ProcessMetadata
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) != 3 {
-			continue
+		if len(fields) < 3 {
+			return nil, fmt.Errorf("unexpected process row %q", line)
 		}
 		pid, pidErr := strconv.Atoi(fields[0])
 		ppid, ppidErr := strconv.Atoi(fields[1])
-		if pidErr != nil || ppidErr != nil || ppid != parentPID {
+		if pidErr != nil || pid <= 0 || ppidErr != nil || ppid < 0 {
+			return nil, fmt.Errorf("unexpected process row %q", line)
+		}
+		if ppid != parentPID {
 			continue
 		}
 		children = append(children, ProcessMetadata{
 			PID:       pid,
 			ParentPID: ppid,
-			Name:      filepath.Base(fields[2]),
+			Name:      filepath.Base(strings.Join(fields[2:], " ")),
 		})
 	}
 	return children, nil

@@ -23,8 +23,11 @@ var (
 	runnerPollInterval   = 50 * time.Millisecond
 	runnerProcessAlive   = processAlive
 	runnerProcessArgs    = tmux.ProcessArgs
+	runnerChildProcesses = tmux.InspectChildProcesses
 	runnerCacheDir       = os.UserCacheDir
 )
+
+const runnerStartupErrorLimit = 4608
 
 type runnerPaneState string
 
@@ -496,9 +499,9 @@ func inspectRunnerWindow(row config.RunnerRow, window, expectedStart string) (ru
 
 func runnerPaneHasExactProcess(pane tmux.WindowPane) (bool, error) {
 	if pane.Command == "amp" {
-		return true, nil
+		return runnerHasExactArgs(pane.PID)
 	}
-	children, err := tmux.InspectChildProcesses(pane.PID)
+	children, err := runnerChildProcesses(pane.PID)
 	if err != nil {
 		return false, err
 	}
@@ -509,7 +512,22 @@ func runnerPaneHasExactProcess(pane tmux.WindowPane) (bool, error) {
 	if child.ParentPID != pane.PID || child.Name != "amp" {
 		return false, nil
 	}
-	args, err := runnerProcessArgs(child.PID)
+	exactArgs, err := runnerHasExactArgs(child.PID)
+	if err != nil {
+		return false, err
+	}
+	if !exactArgs {
+		return false, nil
+	}
+	after, err := runnerChildProcesses(pane.PID)
+	if err != nil {
+		return false, err
+	}
+	return len(after) == 1 && after[0] == child, nil
+}
+
+func runnerHasExactArgs(pid int) (bool, error) {
+	args, err := runnerProcessArgs(pid)
 	if err != nil {
 		return false, err
 	}
@@ -547,7 +565,7 @@ func launchRunner(row config.RunnerRow) (tmux.WindowPane, error) {
 			if pane.Dead || processErr == nil && observedExact && !exactProcess {
 				diagnostic, _ := runner.CapturePaneHistory(created.PaneID, 100)
 				_ = runner.KillWindow(created.WindowID)
-				return tmux.WindowPane{}, fmt.Errorf("runner exited during startup: %s%s", boundedDiagnostic(diagnostic, 4096), staleAmpPIDDiagnostic(row.Workdir))
+				return tmux.WindowPane{}, runnerStartupError("runner exited during startup: %s%s", boundedDiagnostic(diagnostic, 4096), staleAmpPIDDiagnostic(row.Workdir))
 			}
 		}
 		if !time.Now().Before(deadline) {
@@ -557,10 +575,18 @@ func launchRunner(row config.RunnerRow) (tmux.WindowPane, error) {
 			if lastProcessError != "" {
 				processDiagnostic = "; process inspection failed: " + lastProcessError
 			}
-			return tmux.WindowPane{}, fmt.Errorf("runner did not survive startup as exact pane %s/window %s: %s%s%s", created.PaneID, created.WindowID, boundedDiagnostic(diagnostic, 4096), processDiagnostic, staleAmpPIDDiagnostic(row.Workdir))
+			return tmux.WindowPane{}, runnerStartupError("runner did not survive startup as exact pane %s/window %s: %s%s%s", created.PaneID, created.WindowID, boundedDiagnostic(diagnostic, 4096), processDiagnostic, staleAmpPIDDiagnostic(row.Workdir))
 		}
 		time.Sleep(runnerPollInterval)
 	}
+}
+
+func runnerStartupError(format string, args ...any) error {
+	message := fmt.Sprintf(format, args...)
+	if len(message) > runnerStartupErrorLimit {
+		message = message[:runnerStartupErrorLimit-len("…")] + "…"
+	}
+	return errors.New(message)
 }
 
 func stopRunner(row config.RunnerRow, before runnerInspection) error {

@@ -79,6 +79,36 @@ func TestProcessArgsReturnsExactCurrentArgv(t *testing.T) {
 	}
 }
 
+func TestInspectChildProcessesPreservesWhitespaceAndRejectsMalformedRows(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		output    string
+		wantName  string
+		wantError bool
+	}{
+		{name: "whitespace in command name", output: "5252 4242 /tmp/helper with space\n", wantName: "helper with space"},
+		{name: "malformed pid", output: "not-a-pid 4242 /opt/amp/bin/amp\n", wantError: true},
+		{name: "missing command name", output: "5252 4242\n", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bin := t.TempDir()
+			writeExecutable(t, filepath.Join(bin, "ps"), "#!/bin/sh\ncat <<'EOF'\n"+test.output+"EOF\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			children, err := InspectChildProcesses(4242)
+			if test.wantError {
+				if err == nil {
+					t.Fatalf("InspectChildProcesses accepted malformed row: %+v", children)
+				}
+				return
+			}
+			if err != nil || len(children) != 1 || children[0].Name != test.wantName {
+				t.Fatalf("InspectChildProcesses = %+v, %v", children, err)
+			}
+		})
+	}
+}
+
 func TestParseRestartPanesRejectsMalformedRequiredNumericMetadata(t *testing.T) {
 	base := "amux\tworker\t@1\t%%1\t/tmp\tamp\tstart\t0\t%s\t%s\n"
 	for _, row := range []string{
