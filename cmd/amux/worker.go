@@ -352,7 +352,9 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		in.Selectors.Window = s.Window
 	}
 	message := s.Message
+	messageSource := config.OperationMessageSourceMessage
 	if s.MessageFile != "" {
+		messageSource = config.OperationMessageSourceFile
 		file, err := os.Open(s.MessageFile)
 		if err != nil {
 			return env, result.Preflight(fmt.Errorf("read --message-file: %w", err))
@@ -366,6 +368,7 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 			return env, result.Preflight(fmt.Errorf("close --message-file: %w", closeErr))
 		}
 	} else if s.MessageStdin {
+		messageSource = config.OperationMessageSourceStdin
 		var err error
 		message, err = readSpawnMessage(a.stdin)
 		if err != nil {
@@ -422,7 +425,7 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 			env.Planned = append(env.Planned, result.Outcome{Resource: resource, Action: "spawn", Message: "would verify the exact provisioned thread and recover without resubmitting"})
 			return env, nil
 		}
-		matches, _, verifyErr := ampThreadContainsExactAssignment(existing.Resource.Thread, message, s.Workdir, false)
+		matches, _, verifyErr := ampThreadContainsExactAssignment(existing.Resource.Thread, message, s.Workdir, false, operationAllowsTerminalLineEndingNormalization(existing, messageSource))
 		if verifyErr != nil {
 			return env, result.Runtime(fmt.Errorf("verify indeterminate provisioned thread %s without resubmitting: %w", existing.Resource.Thread, verifyErr))
 		}
@@ -600,7 +603,7 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		return env, result.Preflight(fmt.Errorf("window %q already exists in tmux session %q", s.Window, workspace))
 	}
 	now := time.Now().UTC()
-	record := config.OperationRecord{Key: s.IdempotencyKey, Kind: "worker-spawn", RequestHash: hash, State: config.OperationStarted, Phase: config.OperationPhaseCreatingThread, Resource: config.OperationResource{Kind: "worker"}, CreatedAt: now, UpdatedAt: now}
+	record := config.OperationRecord{Key: s.IdempotencyKey, Kind: "worker-spawn", RequestHash: hash, MessageSource: messageSource, State: config.OperationStarted, Phase: config.OperationPhaseCreatingThread, Resource: config.OperationResource{Kind: "worker"}, CreatedAt: now, UpdatedAt: now}
 	if _, err := config.StoreOperation(dir.OperationsPath(), record); err != nil {
 		return env, result.Preflight(err)
 	}
@@ -686,7 +689,7 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 		} else {
 			var authoritative string
 			provisionedRow := row
-			authoritative, err = resolveSpawnReceivingThread(row.Thread, message, workdir, preDeliveryThreads)
+			authoritative, err = resolveSpawnReceivingThread(row.Thread, message, workdir, preDeliveryThreads, operationAllowsTerminalLineEndingNormalization(record, messageSourceFromSelectors(in.Selectors)))
 			if err == nil && authoritative != row.Thread {
 				provisioned := row.Thread
 				var rows []config.Row
@@ -805,6 +808,24 @@ func recoverableProvisionedVerificationFailure(operation config.OperationRecord)
 		operation.Error == want
 }
 
+func messageSourceFromSelectors(selectors selectors) config.OperationMessageSource {
+	switch {
+	case selectors.MessageFile != "":
+		return config.OperationMessageSourceFile
+	case selectors.MessageStdin:
+		return config.OperationMessageSourceStdin
+	default:
+		return config.OperationMessageSourceMessage
+	}
+}
+
+func operationAllowsTerminalLineEndingNormalization(operation config.OperationRecord, replaySource config.OperationMessageSource) bool {
+	if operation.MessageSource == "" {
+		return replaySource == config.OperationMessageSourceFile
+	}
+	return operation.MessageSource == config.OperationMessageSourceFile
+}
+
 func (a app) resumeSpawnGrouping(dir config.Directory, env *result.Envelope, record config.OperationRecord, row config.Row, groups []string, ampPath string, jsonOutput bool) (*result.Envelope, error) {
 	if record.Phase == config.OperationPhaseConfigured {
 		memberships, err := config.LoadGroupsReadOnly(dir.GroupsPath())
@@ -904,11 +925,11 @@ func prefixedSpawnName(titlePrefix, window string) string {
 	return strings.TrimSpace(strings.TrimSpace(titlePrefix) + " " + window)
 }
 
-func resolveSpawnReceivingThread(boundThread, message, workdir string, preDeliveryThreads map[string]bool) (string, error) {
+func resolveSpawnReceivingThread(boundThread, message, workdir string, preDeliveryThreads map[string]bool, allowTerminalLineEndingNormalization bool) (string, error) {
 	deadline := time.Now().Add(spawnSubmitTimeout())
 	var authoritative string
 	for {
-		boundContainsMessage, _, err := ampThreadContainsExactAssignment(boundThread, message, workdir, false)
+		boundContainsMessage, _, err := ampThreadContainsExactAssignment(boundThread, message, workdir, false, allowTerminalLineEndingNormalization)
 		if err != nil {
 			return "", fmt.Errorf("verify provisioned thread %s: %w; recovery: inspect thread %s and do not resubmit", boundThread, err, boundThread)
 		}
@@ -925,7 +946,7 @@ func resolveSpawnReceivingThread(boundThread, message, workdir string, preDelive
 			if candidate == canonicalThreadID(boundThread) || preDeliveryThreads[candidate] {
 				continue
 			}
-			matches, _, exportErr := ampThreadContainsExactAssignment(candidate, message, workdir, true)
+			matches, _, exportErr := ampThreadContainsExactAssignment(candidate, message, workdir, true, false)
 			if exportErr != nil {
 				return "", fmt.Errorf("verify fresh receiving candidate %s: %w; recovery: inspect %s and provisioned thread %s before choosing an identity", candidate, exportErr, candidate, boundThread)
 			}
@@ -994,7 +1015,7 @@ func strictAmpThreadIDSet(includeArchived bool) (map[string]bool, error) {
 	}
 }
 
-func ampThreadContainsExactAssignment(thread, message, workdir string, requireWorkdir bool) (bool, bool, error) {
+func ampThreadContainsExactAssignment(thread, message, workdir string, requireWorkdir bool, allowTerminalLineEndingNormalization bool) (bool, bool, error) {
 	cmd := exec.Command("amp", "threads", "export", thread)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1006,7 +1027,7 @@ func ampThreadContainsExactAssignment(thread, message, workdir string, requireWo
 	}
 	matches := messagesContainExactUserAssignment(payload["messages"], message)
 	if !requireWorkdir {
-		matches = messagesContainProvisionedAssignment(payload["messages"], message)
+		matches = messagesContainProvisionedAssignment(payload["messages"], message, allowTerminalLineEndingNormalization)
 	}
 	if !matches {
 		return false, true, nil
@@ -1034,7 +1055,7 @@ func messagesContainExactUserAssignment(value any, message string) bool {
 	return false
 }
 
-func messagesContainProvisionedAssignment(value any, message string) bool {
+func messagesContainProvisionedAssignment(value any, message string, allowTerminalLineEndingNormalization bool) bool {
 	messages, ok := value.([]any)
 	if !ok {
 		return false
@@ -1044,20 +1065,20 @@ func messagesContainProvisionedAssignment(value any, message string) bool {
 		if !ok || entry["role"] != "user" {
 			continue
 		}
-		if jsonValueContainsProvisionedText(entry["content"], message) {
+		if jsonValueContainsProvisionedText(entry["content"], message, allowTerminalLineEndingNormalization) {
 			return true
 		}
 	}
 	return false
 }
 
-func jsonValueContainsProvisionedText(value any, want string) bool {
+func jsonValueContainsProvisionedText(value any, want string, allowTerminalLineEndingNormalization bool) bool {
 	switch value := value.(type) {
 	case string:
-		return duplicatedPrefixAssignment(value, want)
+		return provisionedAssignmentMatches(value, want, allowTerminalLineEndingNormalization)
 	case []any:
 		for _, item := range value {
-			if jsonValueContainsProvisionedText(item, want) {
+			if jsonValueContainsProvisionedText(item, want, allowTerminalLineEndingNormalization) {
 				return true
 			}
 		}
@@ -1065,10 +1086,27 @@ func jsonValueContainsProvisionedText(value any, want string) bool {
 		text, ok := value["text"].(string)
 		kind, _ := value["type"].(string)
 		if ok && (kind == "" || kind == "text") {
-			return duplicatedPrefixAssignment(text, want)
+			return provisionedAssignmentMatches(text, want, allowTerminalLineEndingNormalization)
 		}
 	}
 	return false
+}
+
+func provisionedAssignmentMatches(got, want string, allowTerminalLineEndingNormalization bool) bool {
+	if duplicatedPrefixAssignment(got, want) {
+		return true
+	}
+	if !allowTerminalLineEndingNormalization {
+		return false
+	}
+	switch {
+	case strings.HasSuffix(want, "\r\n"):
+		return got == strings.TrimSuffix(want, "\r\n")
+	case strings.HasSuffix(want, "\n"):
+		return got == strings.TrimSuffix(want, "\n")
+	default:
+		return false
+	}
 }
 
 func duplicatedPrefixAssignment(got, want string) bool {

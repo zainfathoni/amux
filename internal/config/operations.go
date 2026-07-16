@@ -14,6 +14,7 @@ const OperationSchemaVersion = 1
 
 type OperationState string
 type OperationPhase string
+type OperationMessageSource string
 
 const (
 	OperationStarted       OperationState = "started"
@@ -32,6 +33,12 @@ const (
 	OperationPhaseGrouped         OperationPhase = "grouped"
 )
 
+const (
+	OperationMessageSourceMessage OperationMessageSource = "message"
+	OperationMessageSourceFile    OperationMessageSource = "file"
+	OperationMessageSourceStdin   OperationMessageSource = "stdin"
+)
+
 type OperationResource struct {
 	Kind    string `json:"kind"`
 	Thread  string `json:"thread,omitempty"`
@@ -48,6 +55,7 @@ type OperationRecord struct {
 	Key            string                   `json:"key"`
 	Kind           string                   `json:"kind"`
 	RequestHash    string                   `json:"request_hash"`
+	MessageSource  OperationMessageSource   `json:"message_source,omitempty"`
 	State          OperationState           `json:"state"`
 	Phase          OperationPhase           `json:"phase,omitempty"`
 	Resource       OperationResource        `json:"resource"`
@@ -90,7 +98,7 @@ func StoreOperation(path string, operation OperationRecord) (bool, error) {
 			continue
 		}
 		created = false
-		if existing.Kind != operation.Kind || existing.RequestHash != operation.RequestHash || existing.Resource.Kind != operation.Resource.Kind {
+		if existing.Kind != operation.Kind || existing.RequestHash != operation.RequestHash || existing.MessageSource != operation.MessageSource || existing.Resource.Kind != operation.Resource.Kind {
 			return false, fmt.Errorf("idempotency key %q is already bound to a different request", operation.Key)
 		}
 		if !existing.CreatedAt.Equal(operation.CreatedAt) {
@@ -247,6 +255,15 @@ func canonicalOperation(operation OperationRecord) (OperationRecord, error) {
 	}
 	if operation.Phase != "" && operation.Kind != "worker-spawn" {
 		return operation, fmt.Errorf("operation phase %q is only valid for worker-spawn", operation.Phase)
+	}
+	switch operation.MessageSource {
+	case "":
+	case OperationMessageSourceMessage, OperationMessageSourceFile, OperationMessageSourceStdin:
+		if operation.Kind != "worker-spawn" {
+			return operation, errors.New("message source is only valid for worker-spawn")
+		}
+	default:
+		return operation, fmt.Errorf("invalid operation message source %q", operation.MessageSource)
 	}
 	if operation.ThreadAdoption != nil {
 		if operation.Kind != "worker-spawn" || operation.Phase != OperationPhaseDeliveryStarted && operation.Phase != OperationPhaseMessageVerified && operation.Phase != OperationPhaseConfigured && operation.Phase != OperationPhaseGroupIntent && operation.Phase != OperationPhaseGrouped {
