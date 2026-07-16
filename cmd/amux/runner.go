@@ -443,6 +443,18 @@ func runnerStartCommand(workdir string) string {
 	return "cd " + shellSingleQuote(workdir) + " && amp --no-tui; status=$?; sleep 2; exit $status"
 }
 
+func runnerStartCommandMatches(actual, expected string) bool {
+	if normalizedTmuxStartCommand(actual) == expected {
+		return true
+	}
+	const suffix = "exit $status"
+	if !strings.HasSuffix(expected, suffix) {
+		return false
+	}
+	measured := `"` + strings.TrimSuffix(expected, suffix) + `exit \$status"`
+	return actual == measured
+}
+
 func inspectRunner(row config.RunnerRow) (runnerInspection, error) {
 	legacy := row.LegacyWindow && row.Window != config.RunnerWindow(row.Workdir)
 	primary, err := inspectRunnerWindow(row, row.Window, map[bool]string{true: tmux.RunnerCommand(row.Workdir), false: runnerStartCommand(row.Workdir)}[legacy])
@@ -488,7 +500,6 @@ func inspectRunnerWindow(row config.RunnerRow, window, expectedStart string) (ru
 		return runnerInspection{state: runnerPaneAmbiguous}, nil
 	}
 	pane := panes[0]
-	path, pathErr := config.CanonicalWorkdir(pane.Path)
 	retainedShell := expectedStart == runnerStartCommand(row.Workdir)
 	exactProcess, processErr := runnerPaneHasExactProcess(pane, retainedShell)
 	if processErr != nil {
@@ -503,54 +514,115 @@ func inspectRunnerWindow(row config.RunnerRow, window, expectedStart string) (ru
 			exactProcess = false
 		}
 	}
-	if pathErr != nil || path != row.Workdir || pane.Dead || !exactProcess || normalizedTmuxStartCommand(pane.StartCommand) != expectedStart {
+	if !runnerPaneWorkdirMatches(pane.Path, row.Workdir) || pane.Dead || !exactProcess || !runnerStartCommandMatches(pane.StartCommand, expectedStart) {
 		return runnerInspection{state: runnerPaneConflict, pane: pane}, nil
 	}
 	return runnerInspection{state: runnerPaneExact, pane: pane}, nil
 }
 
+func runnerPaneWorkdirMatches(panePath, workdir string) bool {
+	path, pathErr := config.CanonicalWorkdir(panePath)
+	if pathErr != nil {
+		return false
+	}
+	if path == workdir {
+		return true
+	}
+	paneInfo, paneErr := os.Stat(path)
+	workdirInfo, workdirErr := os.Stat(workdir)
+	return paneErr == nil && workdirErr == nil && os.SameFile(paneInfo, workdirInfo)
+}
+
 func runnerPaneHasExactProcess(pane tmux.WindowPane, retainedShell bool) (bool, error) {
+	exact, _, err := observeRunnerPaneProcess(pane, retainedShell)
+	return exact, err
+}
+
+func observeRunnerPaneProcess(pane tmux.WindowPane, retainedShell bool) (bool, string, error) {
 	if !retainedShell {
 		if pane.Command != "amp" {
-			return false, nil
+			return false, fmt.Sprintf("pane-pid=%d current-command=%q", pane.PID, pane.Command), nil
 		}
 		before, err := runnerProcessIdentity(pane.PID)
 		if err != nil {
-			return false, err
+			return false, fmt.Sprintf("pane-pid=%d current-command=%q", pane.PID, pane.Command), err
 		}
-		exactArgs, err := runnerHasExactArgs(pane.PID)
+		args, err := runnerProcessArgs(pane.PID)
 		if err != nil {
-			return false, err
+			return false, fmt.Sprintf("pane-pid=%d current-command=%q incarnation=%q", pane.PID, pane.Command, before), err
 		}
 		after, err := runnerProcessIdentity(pane.PID)
 		if err != nil {
-			return false, err
+			return false, fmt.Sprintf("pane-pid=%d current-command=%q incarnation=%q argv=%s", pane.PID, pane.Command, before, runnerArgsDiagnostic(args)), err
 		}
-		return exactArgs && before == after, nil
+		exactArgs := len(args) == 2 && filepath.Base(args[0]) == "amp" && args[1] == "--no-tui"
+		return exactArgs && before == after, fmt.Sprintf("pane-pid=%d current-command=%q incarnation=%q argv=%s revalidated-incarnation=%q", pane.PID, pane.Command, before, runnerArgsDiagnostic(args), after), nil
 	}
 	children, err := runnerChildProcesses(pane.PID)
+	diagnostic := fmt.Sprintf("retained-shell-pid=%d direct-children=%s", pane.PID, runnerProcessListDiagnostic(children))
 	if err != nil {
-		return false, err
+		return false, diagnostic, err
 	}
 	if len(children) != 1 {
-		return false, nil
+		return false, diagnostic, nil
 	}
 	child := children[0]
 	if child.ParentPID != pane.PID || child.Name != "amp" {
-		return false, nil
+		return false, diagnostic, nil
 	}
-	exactArgs, err := runnerHasExactArgs(child.PID)
+	args, err := runnerProcessArgs(child.PID)
+	diagnostic += " argv=" + runnerArgsDiagnostic(args)
 	if err != nil {
-		return false, err
+		return false, diagnostic, err
 	}
+	exactArgs := len(args) == 2 && filepath.Base(args[0]) == "amp" && args[1] == "--no-tui"
 	if !exactArgs {
-		return false, nil
+		return false, diagnostic, nil
 	}
 	after, err := runnerChildProcesses(pane.PID)
+	diagnostic += " revalidated-direct-children=" + runnerProcessListDiagnostic(after)
 	if err != nil {
-		return false, err
+		return false, diagnostic, err
 	}
-	return len(after) == 1 && after[0] == child, nil
+	return len(after) == 1 && after[0] == child, diagnostic, nil
+}
+
+func runnerProcessListDiagnostic(processes []tmux.ProcessMetadata) string {
+	if len(processes) == 0 {
+		return "[]"
+	}
+	items := make([]string, 0, len(processes))
+	for _, process := range processes {
+		item := fmt.Sprintf("{pid=%d ppid=%d name=%q incarnation=%q}", process.PID, process.ParentPID, boundedValue(process.Name, 64), boundedValue(process.Identity, 128))
+		if len(strings.Join(items, ", "))+len(item) > 480 {
+			items = append(items, "…")
+			break
+		}
+		items = append(items, item)
+	}
+	return "[" + strings.Join(items, ", ") + "]"
+}
+
+func runnerArgsDiagnostic(args []string) string {
+	parts := make([]string, 0, len(args))
+	length := 2
+	for _, arg := range args {
+		part := fmt.Sprintf("%q", boundedValue(arg, 256))
+		if length+len(part)+1 > 480 {
+			parts = append(parts, "…")
+			break
+		}
+		parts = append(parts, part)
+		length += len(part) + 1
+	}
+	return "[" + strings.Join(parts, " ") + "]"
+}
+
+func boundedValue(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit-len("…")] + "…"
 }
 
 func legacyRunnerPaneUnchanged(pane tmux.WindowPane) (bool, error) {
@@ -559,14 +631,6 @@ func legacyRunnerPaneUnchanged(pane tmux.WindowPane) (bool, error) {
 		return false, err
 	}
 	return confirmed == pane, nil
-}
-
-func runnerHasExactArgs(pid int) (bool, error) {
-	args, err := runnerProcessArgs(pid)
-	if err != nil {
-		return false, err
-	}
-	return len(args) == 2 && filepath.Base(args[0]) == "amp" && args[1] == "--no-tui", nil
 }
 
 func launchRunner(row config.RunnerRow) (tmux.WindowPane, error) {
@@ -580,18 +644,22 @@ func launchRunner(row config.RunnerRow) (tmux.WindowPane, error) {
 	if err != nil {
 		return tmux.WindowPane{}, err
 	}
-	deadline := time.Now().Add(runnerStartupTimeout)
+	startupBegan := time.Now()
+	deadline := startupBegan.Add(runnerStartupTimeout)
 	observedExact := false
 	lastProcessError := ""
+	lastObservation := ""
 	for {
 		pane, inspectErr := runner.RestartPaneByID(created.PaneID)
 		if inspectErr == nil && pane.WindowID == created.WindowID && pane.PaneID == created.PaneID && pane.Session == row.Workspace && pane.Window == row.Window {
-			path, _ := config.CanonicalWorkdir(pane.Path)
-			exactProcess, processErr := runnerPaneHasExactProcess(pane, true)
+			exactProcess, processDiagnostic, processErr := observeRunnerPaneProcess(pane, true)
 			if processErr != nil {
 				lastProcessError = boundedDiagnostic(processErr.Error(), 1024)
 			}
-			if processErr == nil && !pane.Dead && exactProcess && path == row.Workdir && normalizedTmuxStartCommand(pane.StartCommand) == runnerStartCommand(row.Workdir) {
+			workdirMatches := runnerPaneWorkdirMatches(pane.Path, row.Workdir)
+			startMatches := runnerStartCommandMatches(pane.StartCommand, runnerStartCommand(row.Workdir))
+			lastObservation = fmt.Sprintf("last observed at +%s: session=%q window-name=%q pane=%s window=%s dead=%t start-command-match=%t workdir-equivalent=%t; %s; path=%q current-command=%q start-command=%q", time.Since(startupBegan).Round(time.Millisecond), pane.Session, pane.Window, pane.PaneID, pane.WindowID, pane.Dead, startMatches, workdirMatches, boundedValue(processDiagnostic, 512), boundedValue(pane.Path, 128), boundedValue(pane.Command, 64), boundedValue(pane.StartCommand, 256))
+			if processErr == nil && !pane.Dead && exactProcess && workdirMatches && startMatches {
 				observedExact = true
 				if !time.Now().Before(deadline) {
 					return pane, nil
@@ -600,8 +668,12 @@ func launchRunner(row config.RunnerRow) (tmux.WindowPane, error) {
 			if pane.Dead || processErr == nil && observedExact && !exactProcess {
 				diagnostic, _ := runner.CapturePaneHistory(created.PaneID, 100)
 				_ = runner.KillWindow(created.WindowID)
-				return tmux.WindowPane{}, runnerStartupError("runner exited during startup: %s%s", boundedDiagnostic(diagnostic, 4096), staleAmpPIDDiagnostic(row.Workdir))
+				return tmux.WindowPane{}, runnerStartupError("runner exited during startup: %s; %s%s", boundedDiagnostic(diagnostic, 3072), boundedDiagnostic(lastObservation, 1024), staleAmpPIDDiagnostic(row.Workdir))
 			}
+		} else if inspectErr == nil {
+			lastObservation = fmt.Sprintf("last observed at +%s: created pane identity drifted: expected session=%q window-name=%q window=%s pane=%s; observed session=%q window-name=%q window=%s pane=%s", time.Since(startupBegan).Round(time.Millisecond), row.Workspace, row.Window, created.WindowID, created.PaneID, pane.Session, pane.Window, pane.WindowID, pane.PaneID)
+		} else {
+			lastObservation = fmt.Sprintf("last observed at +%s: exact pane %s unavailable: %s", time.Since(startupBegan).Round(time.Millisecond), created.PaneID, boundedDiagnostic(inspectErr.Error(), 1024))
 		}
 		if !time.Now().Before(deadline) {
 			diagnostic, _ := runner.CapturePaneHistory(created.PaneID, 100)
@@ -610,7 +682,7 @@ func launchRunner(row config.RunnerRow) (tmux.WindowPane, error) {
 			if lastProcessError != "" {
 				processDiagnostic = "; process inspection failed: " + lastProcessError
 			}
-			return tmux.WindowPane{}, runnerStartupError("runner did not survive startup as exact pane %s/window %s: %s%s%s", created.PaneID, created.WindowID, boundedDiagnostic(diagnostic, 4096), processDiagnostic, staleAmpPIDDiagnostic(row.Workdir))
+			return tmux.WindowPane{}, runnerStartupError("runner did not survive startup as exact pane %s/window %s: %s; %s%s%s", created.PaneID, created.WindowID, boundedDiagnostic(diagnostic, 3072), boundedDiagnostic(lastObservation, 1024), processDiagnostic, staleAmpPIDDiagnostic(row.Workdir))
 		}
 		time.Sleep(runnerPollInterval)
 	}
