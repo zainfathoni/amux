@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import copy
 import ctypes
@@ -819,17 +820,16 @@ def inspect_amp_target(pane_id: str, origin_thread: str) -> dict[str, Any]:
             "-p",
             "-t",
             pane_id,
-            "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_created}\t#{pane_current_path}\t#{pane_current_command}",
+            "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}",
         ]
     ).split("\t")
-    if len(fields) != 8 or fields[3] != pane_id or fields[7] != "amp":
+    if len(fields) != 7 or fields[3] != pane_id or fields[6] != "amp":
         raise HelperError("target is not one exact live Amp pane")
     try:
         pane_pid = int(fields[4])
-        pane_created = int(fields[5])
     except ValueError as error:
         raise HelperError("Amp target returned invalid tmux process identity") from error
-    workdir = str(pathlib.Path(fields[6]).resolve(strict=True))
+    workdir = str(pathlib.Path(fields[5]).resolve(strict=True))
     process_name, process_identity, process_args, process_command_digest = exact_process_identity(pane_pid)
     if (
         process_name != "amp"
@@ -846,9 +846,8 @@ def inspect_amp_target(pane_id: str, origin_thread: str) -> dict[str, Any]:
         "window_id": fields[2],
         "pane_id": fields[3],
         "pane_pid": pane_pid,
-        "pane_created": pane_created,
         "workdir": workdir,
-        "current_command": fields[7],
+        "current_command": fields[6],
         "process_name": process_name,
         "process_identity": process_identity,
         "process_command_digest": process_command_digest,
@@ -865,7 +864,6 @@ def validate_amp_target(value: Any) -> dict[str, Any]:
         "window_id",
         "pane_id",
         "pane_pid",
-        "pane_created",
         "workdir",
         "current_command",
         "process_name",
@@ -873,12 +871,10 @@ def validate_amp_target(value: Any) -> dict[str, Any]:
         "process_command_digest",
     }
     reject_unknown(value, fields, "notification target")
-    for key in fields - {"pane_pid", "pane_created"}:
+    for key in fields - {"pane_pid"}:
         required_string(value, key, 2048 if key == "workdir" else 256)
     if not isinstance(value.get("pane_pid"), int) or value["pane_pid"] <= 0:
         raise HelperError("notification target pane_pid is invalid")
-    if not isinstance(value.get("pane_created"), int) or value["pane_created"] <= 0:
-        raise HelperError("notification target pane_created is invalid")
     return copy.deepcopy(value)
 
 
@@ -892,23 +888,29 @@ def inspect_claude_identity(pane_id: str, claude_session_id: str) -> dict[str, A
             "-p",
             "-t",
             pane_id,
-            "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_created}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}",
+            "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}",
         ]
     ).split("\t")
-    if len(fields) != 9 or fields[3] != pane_id or not fields[7] or not fields[8]:
+    if len(fields) != 8 or fields[3] != pane_id or not fields[6] or not fields[7]:
         raise HelperError("Claude pane is missing exact live tmux identity")
     try:
         pane_pid = int(fields[4])
-        pane_created = int(fields[5])
     except ValueError as error:
         raise HelperError("Claude pane returned invalid process identity") from error
-    workdir = str(pathlib.Path(fields[6]).resolve(strict=True))
+    workdir = str(pathlib.Path(fields[5]).resolve(strict=True))
+    start_command = fields[7]
+    if start_command.startswith('"') and start_command.endswith('"'):
+        try:
+            decoded = ast.literal_eval(start_command)
+        except (SyntaxError, ValueError) as error:
+            raise HelperError("Claude pane launch command has invalid tmux quoting") from error
+        if not isinstance(decoded, str):
+            raise HelperError("Claude pane launch command has invalid tmux quoting")
+        start_command = decoded
     process_name, process_identity, process_args, process_command_digest = exact_process_identity(pane_pid)
     session_positions = [index for index, argument in enumerate(process_args) if argument == "--session-id"]
     if (
-        process_name != "claude"
-        or fields[7] != "claude"
-        or pathlib.Path(process_args[0]).name != "claude"
+        pathlib.Path(process_args[0]).name != "claude"
         or len(session_positions) != 1
         or session_positions[0] + 1 >= len(process_args)
         or process_args[session_positions[0] + 1] != claude_session_id
@@ -921,13 +923,12 @@ def inspect_claude_identity(pane_id: str, claude_session_id: str) -> dict[str, A
         "window_id": fields[2],
         "pane_id": fields[3],
         "pane_pid": pane_pid,
-        "pane_created": pane_created,
         "workdir": workdir,
-        "current_command": fields[7],
+        "current_command": fields[6],
         "process_name": process_name,
         "process_identity": process_identity,
         "process_command_digest": process_command_digest,
-        "launch_command_digest": hashlib.sha256(fields[8].encode()).hexdigest(),
+        "launch_command_digest": hashlib.sha256(start_command.encode()).hexdigest(),
     }
 
 

@@ -311,7 +311,7 @@ func TestNotificationFailsClosedAndRunsOnlyAfterDurableReport(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "tmux"), `#!/bin/sh
 set -eu
 case "$1" in
-  display-message) printf 'Amp\tcoordinator\t@9\t%%9\t%s\t1700000000\t%s\tamp\n' "$PANE_PID" "$TARGET_WORKDIR" ;;
+  display-message) printf 'Amp\tcoordinator\t@9\t%%9\t%s\t%s\tamp\n' "$PANE_PID" "$TARGET_WORKDIR" ;;
   send-keys)
     grep -q '"state":"valid_report"' "$STATE_DIR/receipts.json"
     printf '%s\n' "$*" >> "$TMUX_LOG"
@@ -407,7 +407,7 @@ esac
 
 	stale := cloneJSONMap(t, notify)
 	stale["event_id"] = "notify-stale"
-	stale["target"].(map[string]any)["pane_created"] = float64(1)
+	stale["target"].(map[string]any)["process_identity"] = "changed-process-start"
 	assertHelperOutcomeEnv(t, stateDir, environment, "unavailable", stale, "notify", "amp-pane")
 	logAfter, err := os.ReadFile(logPath)
 	if err != nil {
@@ -435,7 +435,7 @@ set -eu
 case "$1" in
   display-message)
     test ! -e "$IDENTITY_UNAVAILABLE"
-    printf 'Claude\tthinker\t@10\t%s\t%s\t1700000010\t%s\tclaude\t%s\n' "$CLAUDE_PANE_ID" "$PANE_PID" "$TARGET_WORKDIR" "$START_COMMAND"
+    printf 'Claude\tthinker\t@10\t%s\t%s\t%s\t2.1.212\t"%s"\n' "$CLAUDE_PANE_ID" "$PANE_PID" "$TARGET_WORKDIR" "$START_COMMAND"
     ;;
   list-panes) exit 0 ;;
   kill-pane) printf '%s\n' "$*" >> "$TMUX_LOG" ;;
