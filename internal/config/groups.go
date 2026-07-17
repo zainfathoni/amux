@@ -33,6 +33,9 @@ func ValidateGroupID(value string) error {
 	if !groupIDPattern.MatchString(value) {
 		return fmt.Errorf("invalid group ID %q: must match ^[a-z0-9]+(?:-[a-z0-9]+)*$ exactly", value)
 	}
+	if len(value) > 32 {
+		return fmt.Errorf("invalid group ID %q: must be at most 32 characters", value)
+	}
 	return nil
 }
 

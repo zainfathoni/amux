@@ -100,12 +100,12 @@ func TestGroupsWriteValidatesBeforeAtomicReplacement(t *testing.T) {
 }
 
 func TestValidateGroupIDIsBytePreservingAndRejectsNormalizationCandidates(t *testing.T) {
-	for _, valid := range []string{"a", "007", "amux-agent-first", "a1-b2"} {
+	for _, valid := range []string{"a", "007", "amux-agent-first", "a1-b2", strings.Repeat("a", 32)} {
 		if err := ValidateGroupID(valid); err != nil {
 			t.Errorf("ValidateGroupID(%q) = %v", valid, err)
 		}
 	}
-	for _, invalid := range []string{"", "Group", " group", "group ", "group_name", "-group", "group-", "group--name"} {
+	for _, invalid := range []string{"", "Group", " group", "group ", "group_name", "-group", "group-", "group--name", strings.Repeat("a", 33)} {
 		if err := ValidateGroupID(invalid); err == nil {
 			t.Errorf("ValidateGroupID(%q) succeeded", invalid)
 		}

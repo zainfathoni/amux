@@ -164,6 +164,28 @@ func TestWorkerSpawnRejectsAnyInvalidGroupBeforeSideEffects(t *testing.T) {
 	}
 }
 
+func TestWorkerSpawnRejectsOverlongGroupBeforeSideEffects(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	bin := t.TempDir()
+	called := filepath.Join(bin, "called")
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--group", strings.Repeat("a", 33), "--message", "hello", "--idempotency-key", "overlong-group")
+	if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), "at most 32 characters") {
+		t.Fatalf("overlong group error = %v, exit = %d", err, result.ExitCode(err))
+	}
+	if _, err := os.Stat(called); !os.IsNotExist(err) {
+		t.Fatalf("overlong group called amp or tmux: %v", err)
+	}
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil || len(entries) != 0 {
+		t.Fatalf("overlong group mutated config: entries=%v err=%v", entries, readErr)
+	}
+}
+
 func TestWorkerSpawnDeliveryReplayNeverResubmitsOrSearchesOtherThreads(t *testing.T) {
 	dir := t.TempDir()
 	workdir := t.TempDir()
