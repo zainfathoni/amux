@@ -1,6 +1,6 @@
 ---
 name: amux
-description: "Manage local Amp worker, runner, workspace, and durable work-group orchestration with amux. Use for 'Pin it', 'Unpin it', 'forget this on restore', 'Park it', 'Restart unresponsive clients', 'Shelve this', 'defer this workspace', 'hide it for now', 'Show shelved work', 'Unshelve this', 'Restore my workspace', 'Spawn a worker for', 'Coordinate issue workers', 'Teardown this worker', 'Doctor amux', '/amux health', '/amux sprawl', and '/amux finish'. Health, sprawl, coordinator orchestration, and finish are skill-only workflows, not CLI commands."
+description: "Manage local Amp worker, runner, workspace, and durable work-group orchestration with amux. Use for 'Pin it', 'Unpin it', 'forget this on restore', 'Park it', 'Restart unresponsive clients', 'Shelve this', 'defer this workspace', 'hide it for now', 'Show shelved work', 'Unshelve this', 'Restore my workspace', 'Spawn a worker for', 'Coordinate issue workers', 'Delegate read-only analysis to Claude', 'Teardown this worker', 'Doctor amux', '/amux health', '/amux sprawl', and '/amux finish'. Health, sprawl, coordinator orchestration, experimental Claude delegation, and finish are skill-only workflows, not CLI commands."
 ---
 
 # amux
@@ -34,6 +34,7 @@ Do not edit `workers.tsv`, `runners.tsv`, or `shelves.tsv` directly when the CLI
 - **Doctor amux**: `amux doctor --all`, `amux doctor --workspace <name>`, or a mode-specific doctor route. Doctor inspects only.
 - **Spawn a worker for ...**: load [`reference/workflows.md`](reference/workflows.md), then use `amux spawn --mode medium ...` unless the user explicitly requested another mode.
 - **Coordinate issue workers**: load [`reference/workflows.md`](reference/workflows.md#coordinate-a-durable-issue-work-group); inspect dependencies/overlap, use fresh `origin/main` worktrees, attach only authoritative threads to a durable group, register and verify the coordinator lease, and drive reports through acknowledgement, independent verification, explicit finish authorization, post-merge CI, merged reporting, and teardown-last finish.
+- **Delegate read-only analysis to Claude**: only after an explicit delegation request, load [`reference/claude-read-only-delegation.md`](reference/claude-read-only-delegation.md). This is an unstable macOS-first local experiment, not an `amux` CLI resource or an Amp worker. Never activate it from an incidental Claude mention, available capacity, or a generic review request.
 - **Teardown this worker**: `amux teardown --current` or `amux teardown --thread <id>`. Teardown archives the verified thread, removes worker and shelf configuration, and stops its verified local client.
 - **/amux health**: load [`reference/workflows.md`](reference/workflows.md); aggregate worker responsiveness and runner process probes, with optional workspace/mode filters.
 - **/amux sprawl #12 #34 ...**: load [`reference/workflows.md`](reference/workflows.md); worker-only issue orchestration with dependency inspection before side effects.
@@ -45,6 +46,7 @@ Do not edit `workers.tsv`, `runners.tsv`, or `shelves.tsv` directly when the CLI
 - Spawn, health, sprawl, teardown, callback, and finish procedures: [`reference/workflows.md`](reference/workflows.md).
 - Partial failures, stuck clients, and safe replacement: [`reference/troubleshooting.md`](reference/troubleshooting.md).
 - Complete activation/routing checklist: [`reference/trigger-phrases.md`](reference/trigger-phrases.md).
+- Experimental read-only Claude definitions and protocol: [`reference/claude-delegation-contract.md`](reference/claude-delegation-contract.md); load its recovery branches only when needed from [`reference/claude-delegation-recovery.md`](reference/claude-delegation-recovery.md).
 
 ## Safety
 
