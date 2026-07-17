@@ -30,8 +30,8 @@ func TestTriggerChecklistMatchesSkillActivationAndRouting(t *testing.T) {
 
 	triggerPattern := regexp.MustCompile(`(?m)^\| \x60([^\x60]+)\x60 \|`)
 	matches := triggerPattern.FindAllStringSubmatch(checklist, -1)
-	if len(matches) != 18 {
-		t.Fatalf("trigger checklist has %d routes, want 18", len(matches))
+	if len(matches) != 19 {
+		t.Fatalf("trigger checklist has %d routes, want 19", len(matches))
 	}
 	for _, match := range matches {
 		trigger := match[1]
@@ -45,12 +45,48 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
-	for _, name := range []string{"commands.md", "workflows.md", "troubleshooting.md", "trigger-phrases.md"} {
+	for _, name := range []string{
+		"commands.md",
+		"workflows.md",
+		"troubleshooting.md",
+		"trigger-phrases.md",
+		"claude-read-only-delegation.md",
+		"claude-delegation-contract.md",
+		"claude-delegation-recovery.md",
+	} {
 		if !strings.Contains(skill, "reference/"+name) {
 			t.Errorf("SKILL.md does not link reference/%s", name)
 		}
 		if _, err := os.Stat(filepath.Join(root, "skills", "amux", "reference", name)); err != nil {
 			t.Errorf("reference/%s is missing: %v", name, err)
+		}
+	}
+}
+
+func TestExperimentalClaudeDelegationReferencesStayNarrowAndConsistent(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-read-only-delegation.md"))
+	contract := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-delegation-contract.md"))
+	recovery := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-delegation-recovery.md"))
+
+	stages := []string{"## 1. Preflight", "## 2. Create the receipt", "## 3. Launch and acquire", "## 4. Recover and deliver", "## 5. Acknowledge", "## 6. Park explicitly"}
+	last := -1
+	for _, stage := range stages {
+		at := strings.Index(workflow, stage)
+		if at <= last {
+			t.Errorf("experimental Claude stage missing or out of order: %q", stage)
+		}
+		last = at
+	}
+	for _, required := range []string{"valid_report → delivered → acknowledged → verified_parked", "machine-local inbox", "notification is not delivery", "no automatic response injection", "cleanup-eligible", "no compatibility guarantee"} {
+		if !strings.Contains(contract, required) {
+			t.Errorf("experimental Claude contract is missing %q", required)
+		}
+	}
+	for _, required := range []string{"same event ID", "leave the receipt recoverable", "Do not infer", "Do not automatically"} {
+		if !strings.Contains(recovery, required) {
+			t.Errorf("experimental Claude recovery is missing %q", required)
 		}
 	}
 }

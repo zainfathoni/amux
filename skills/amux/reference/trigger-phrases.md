@@ -17,6 +17,7 @@ This table is the complete activation and routing contract for [`../SKILL.md`](.
 | `Restore my workspace` | `amux launch --workspace <name>` | Aggregate by default; worker route narrows. |
 | `Spawn a worker for` | workflow, then `amux spawn --mode medium ...` | Explicit medium unless user chose another mode. |
 | `Coordinate issue workers` | [`workflows.md#coordinate-a-durable-issue-work-group`](workflows.md#coordinate-a-durable-issue-work-group) | Durable group/report/auth workflow; callback is wake-up only. |
+| `Delegate read-only analysis to Claude` | [`claude-read-only-delegation.md`](claude-read-only-delegation.md) | Explicit-only, skill-owned local experiment; never creates an Amp worker or runs autonomously. |
 | `Teardown this worker` | `amux teardown --current` or `--thread <id>` | Archive, remove worker/shelf config, stop verified worker. |
 | `Doctor amux` | aggregate or mode-specific `doctor` | Read-only diagnosis. |
 | `/amux health` | [`workflows.md#health-workers-and-runners`](workflows.md#health-workers-and-runners) | Skill-only aggregate, safe mode-specific probes. |
