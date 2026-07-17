@@ -88,6 +88,20 @@ func TestGroupAddPersistsBeforeLabelAndRetainsIntentOnFailure(t *testing.T) {
 	}
 }
 
+func TestGroupCapabilityPreflightAcceptsCurrentThreadUsage(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	help := strings.ReplaceAll(supportedGroupHelp, groupLabelUsageLine, "Usage: amp threads label [options] <thread> <labels...>")
+	calls := installGroupAmp(t, minimumGroupAmpVersion+"\n", help, nil)
+
+	if err := (app{}).execute([]string{"--config-dir", dir, "group", "add", "--group", "group", "--thread", "T-one"}); err != nil {
+		t.Fatalf("current Amp label usage rejected: %v", err)
+	}
+	if countMutationCommands(*calls) != 1 {
+		t.Fatalf("label mutation commands = %d, commands=%v", countMutationCommands(*calls), *calls)
+	}
+}
+
 func TestGroupCapabilityPreflightUsesOneExecutableAndWritesNothingWhenUnsupported(t *testing.T) {
 	tests := []struct {
 		name    string
