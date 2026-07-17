@@ -420,6 +420,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            launch_identity = completed_launch_identity(receipt)
             replay = find_event(receipt, event_id)
             if replay is not None:
                 replay_identity = replay.get("identity", {})
@@ -435,6 +436,10 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            launch_identity = completed_launch_identity(receipt)
+            for key in ("session", "window", "window_id", "pane_id"):
+                if identity[key] != launch_identity[key]:
+                    raise HelperError("Claude session does not match the exact pane created by this receipt")
             if identity["workdir"] != str(pathlib.Path(receipt["binding"]["workdir"]).resolve(strict=True)):
                 raise HelperError("Claude session workdir does not match immutable receipt binding")
             if identity["launch_command_digest"] != receipt["binding"]["launch_command_digest"]:
@@ -482,6 +487,18 @@ class ReceiptStore:
                     raise HelperError("event ID is already bound to a conflicting event")
                 if result is not None:
                     return "notified" if result.get("result") == "notified" else "unavailable"
+                interrupted = {
+                    "event_id": result_id,
+                    "kind": "notification_result",
+                    "operation_event_id": event_id,
+                    "message_id": message_id,
+                    "result": "unavailable",
+                    "reason": "notification attempt was interrupted before a durable result; wake-up was not resent",
+                    "at": utc_now(),
+                }
+                receipt["events"].append(interrupted)
+                receipt["updated_at"] = interrupted["at"]
+                self.commit(store)
                 return "unavailable"
             else:
                 attempt["at"] = utc_now()
@@ -1130,6 +1147,8 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
             if result.get("kind") != "launch_completed" or result.get("operation_event_id") != event_id:
                 raise HelperError("launch result event conflicts with an existing event")
             return {"outcome": "duplicate", **result["identity"]}
+        if any(event.get("kind") == "launch_intent" for event in receipt["events"]):
+            raise HelperError("receipt already has a different launch operation")
 
     components = launch_components(store, request_data)
     intent = {
@@ -1151,6 +1170,8 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
         replay = find_event(receipt, event_id)
         if replay is not None:
             raise HelperError("launch event appeared concurrently; retry the exact request")
+        if any(event.get("kind") == "launch_intent" for event in receipt["events"]):
+            raise HelperError("receipt acquired a different launch operation concurrently")
 
         intent["at"] = utc_now()
         receipt["events"].append(intent)
@@ -1422,6 +1443,17 @@ def find_event(receipt: dict[str, Any], event_id: str) -> dict[str, Any] | None:
         if event.get("event_id") == event_id:
             return event
     return None
+
+
+def completed_launch_identity(receipt: dict[str, Any]) -> dict[str, str]:
+    completed = [event for event in receipt["events"] if event.get("kind") == "launch_completed"]
+    if len(completed) != 1 or not isinstance(completed[0].get("identity"), dict):
+        raise HelperError("session acquisition requires one completed receipt launch")
+    identity = completed[0]["identity"]
+    for key in ("session", "window", "window_id", "pane_id"):
+        if not isinstance(identity.get(key), str) or not identity[key]:
+            raise HelperError("completed receipt launch has incomplete tmux identity")
+    return identity
 
 
 def event_without_time(event: dict[str, Any]) -> dict[str, Any]:

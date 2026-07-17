@@ -60,6 +60,8 @@ npx skills add zainfathoni/amux --skill amux --global
 
 The skill teaches agents the canonical selectors, side-effect boundaries, and skill-only health/sprawl/finish workflows. See the [dedicated skill guide](https://amux.zainf.dev/skill/). Local symlinking is only for contributors developing the bundled skill; see [CONTRIBUTING.md](CONTRIBUTING.md#develop-the-bundled-skill).
 
+The skill also includes an explicit-only, macOS-first **experimental read-only Claude delegation** route. It is an unstable skill-owned helper, not an `amux` lifecycle command, worker, runner, group member, or compatibility promise. It launches one policy-confined interactive thinker only after explicit invocation, accepts bounded semantic reports through a strict local MCP surface, recovers them from a private machine-local receipt, and keeps notification, delivery, acknowledgement, and identity-verified parking separate. It does not provide OS-level read confinement, mutation, automatic follow-up injection, autonomous selection, teleport/adoption, synthetic Amp identity, automatic cleanup, or evidence that a real delegation pilot succeeded. Load the bundled skill's experimental workflow and contract before use.
+
 ## Quick start
 
 The CLI writes schema-marked registries under `~/.config/amux` by default. Select another directory with `--config-dir` (`-c`) or `AMUX_CONFIG_DIR`. Do not create or edit registry rows manually when a command exists.

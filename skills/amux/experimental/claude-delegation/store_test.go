@@ -367,6 +367,43 @@ esac
 	if !strings.Contains(string(log), "AMUX_CLAUDE_REPORT delegation_sha256=") || !strings.Contains(string(log), "message_sha256=") {
 		t.Fatalf("wake-up token missing or contains semantic content: %s", log)
 	}
+	receiptPath := filepath.Join(stateDir, "receipts.json")
+	receiptBytes, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var interruptedStore map[string]any
+	if err := json.Unmarshal(receiptBytes, &interruptedStore); err != nil {
+		t.Fatal(err)
+	}
+	receipt := interruptedStore["receipts"].([]any)[0].(map[string]any)
+	events := receipt["events"].([]any)
+	withoutResult := events[:0]
+	for _, raw := range events {
+		if raw.(map[string]any)["kind"] != "notification_result" {
+			withoutResult = append(withoutResult, raw)
+		}
+	}
+	receipt["events"] = withoutResult
+	interruptedBytes, err := json.Marshal(interruptedStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(receiptPath, interruptedBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertHelperOutcomeEnv(t, stateDir, environment, "unavailable", notify, "notify", "amp-pane")
+	logAfterRecovery, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(logAfterRecovery) != string(log) {
+		t.Fatal("interrupted notification recovery resent a wake-up")
+	}
+	recovered, stderr, err := runHelperEnv(t, stateDir, environment, map[string]any{}, "receipt", "show", "--delegation-id", binding["delegation_id"].(string))
+	if err != nil || !strings.Contains(recovered, "interrupted before a durable result") {
+		t.Fatalf("interrupted notification result was not persisted: %v: %s%s", err, recovered, stderr)
+	}
 
 	stale := cloneJSONMap(t, notify)
 	stale["event_id"] = "notify-stale"
@@ -398,7 +435,7 @@ set -eu
 case "$1" in
   display-message)
     test ! -e "$IDENTITY_UNAVAILABLE"
-    printf 'Claude\tthinker\t@10\t%%10\t%s\t1700000010\t%s\tclaude\t%s\n' "$PANE_PID" "$TARGET_WORKDIR" "$START_COMMAND"
+    printf 'Claude\tthinker\t@10\t%s\t%s\t1700000010\t%s\tclaude\t%s\n' "$CLAUDE_PANE_ID" "$PANE_PID" "$TARGET_WORKDIR" "$START_COMMAND"
     ;;
   list-panes) exit 0 ;;
   kill-pane) printf '%s\n' "$*" >> "$TMUX_LOG" ;;
@@ -422,6 +459,7 @@ esac
 		"CLAUDE_SESSION_ID="+sessionID,
 		"IDENTITY_UNAVAILABLE="+identityUnavailable,
 		fmt.Sprintf("PANE_PID=%d", panePID),
+		"CLAUDE_PANE_ID=%10",
 	)
 	binding := testBinding("delegation-park")
 	binding["workdir"] = stateDir
@@ -430,6 +468,17 @@ esac
 	assertHelperOutcomeEnv(t, stateDir, environment, "recorded", map[string]any{
 		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
 	}, "receipt", "create")
+	recordTestLaunch(t, stateDir, binding["delegation_id"].(string), map[string]any{
+		"session": "Claude", "window": "thinker", "window_id": "@10", "pane_id": "%10",
+	})
+	wrongEnvironment := replaceEnvironment(environment, "CLAUDE_PANE_ID", "%11")
+	wrongAcquire := map[string]any{
+		"delegation_id": binding["delegation_id"], "event_id": "acquire-wrong-pane", "pane_id": "%11", "claude_session_id": sessionID,
+	}
+	_, stderr, err := runHelperEnv(t, stateDir, wrongEnvironment, wrongAcquire, "session", "acquire")
+	if err == nil || !strings.Contains(stderr, "exact pane created by this receipt") {
+		t.Fatalf("wrong launch pane acquisition error = %v, stderr %q", err, stderr)
+	}
 	acquire := map[string]any{
 		"delegation_id": binding["delegation_id"], "event_id": "acquire-1", "pane_id": "%10", "claude_session_id": sessionID,
 	}
@@ -440,7 +489,7 @@ esac
 	assertHelperOutcomeEnv(t, stateDir, environment, "duplicate", acquire, "session", "acquire")
 	conflictingAcquire := cloneJSONMap(t, acquire)
 	conflictingAcquire["pane_id"] = "%11"
-	_, stderr, err := runHelperEnv(t, stateDir, environment, conflictingAcquire, "session", "acquire")
+	_, stderr, err = runHelperEnv(t, stateDir, environment, conflictingAcquire, "session", "acquire")
 	if err == nil || !strings.Contains(stderr, "conflicting event") {
 		t.Fatalf("conflicting acquisition replay error = %v, stderr %q", err, stderr)
 	}
@@ -510,10 +559,12 @@ func TestLaunchPlanAndExecutionKeepPacketOutOfReceiptAndDenyMutationTools(t *tes
 		t.Fatal(err)
 	}
 	packetPath := filepath.Join(t.TempDir(), "packet.json")
-	if err := os.WriteFile(packetPath, []byte("{}"), 0o600); err != nil {
+	packet := "line one\nline 'two' \"$HOME\"; $(echo must-not-run)\nthird\tcolumn"
+	if err := os.WriteFile(packetPath, []byte(packet), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	logPath := filepath.Join(t.TempDir(), "tmux.log")
+	argvPath := filepath.Join(t.TempDir(), "claude.argv")
 	base := "0123456789abcdef0123456789abcdef01234567"
 	writeExecutable(t, filepath.Join(binDir, "git"), `#!/bin/sh
 set -eu
@@ -529,18 +580,27 @@ esac
 `)
 	writeExecutable(t, filepath.Join(binDir, "tmux"), `#!/bin/sh
 set -eu
+if [ "$1" = "-V" ]; then
+  printf '%s\n' 'tmux 3.7b'
+  exit 0
+fi
 printf '%s\n' "$*" >> "$TMUX_LOG"
+for argument do start_command=$argument; done
+/bin/sh -c "$start_command"
 printf '%s\n' 'Claude	thinker	@20	%20'
 `)
 	writeExecutable(t, filepath.Join(binDir, "claude"), `#!/bin/sh
 case "$1" in
   --version) printf '%s\n' '2.1.212 (Claude Code)' ;;
   --help) printf '%s\n' '--allowed-tools --disable-slash-commands --disallowed-tools --mcp-config --no-chrome --permission-mode --prompt-suggestions --session-id --setting-sources --settings --strict-mcp-config --tools' ;;
-  *) exit 0 ;;
+  *)
+    : > "$ARGV_LOG"
+    for argument do printf '%s\0' "$argument" >> "$ARGV_LOG"; done
+    ;;
 esac
 `)
 	environment := append(os.Environ(),
-		"PATH="+binDir+":"+os.Getenv("PATH"), "WORKDIR="+workdir, "BASE="+base, "TMUX_LOG="+logPath,
+		"PATH="+binDir+":"+os.Getenv("PATH"), "WORKDIR="+workdir, "BASE="+base, "TMUX_LOG="+logPath, "ARGV_LOG="+argvPath,
 	)
 	request := map[string]any{
 		"delegation_id": "../delegation-launch", "event_id": "launch-1", "workdir": workdir, "packet_file": packetPath,
@@ -551,7 +611,7 @@ esac
 	if err != nil {
 		t.Fatalf("launch plan: %v: %s", err, stderr)
 	}
-	if strings.Contains(stdout, "{}") {
+	if strings.Contains(stdout, packet) {
 		t.Fatalf("launch plan exposed packet content: %s", stdout)
 	}
 	var plan struct {
@@ -585,11 +645,27 @@ esac
 	if strings.Count(string(log), "new-window") != 1 {
 		t.Fatalf("exact launch replay created another window:\n%s", log)
 	}
+	argvBytes, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedArgs := bytes.Split(argvBytes, []byte{0})
+	if len(encodedArgs) < 2 || len(encodedArgs[len(encodedArgs)-1]) != 0 {
+		t.Fatalf("fake Claude argv is not NUL-delimited: %q", argvBytes)
+	}
+	encodedArgs = encodedArgs[:len(encodedArgs)-1]
+	if got := string(encodedArgs[len(encodedArgs)-1]); got != packet {
+		t.Fatalf("multiline packet argv changed:\ngot:  %q\nwant: %q", got, packet)
+	}
+	assertExactArgValue(t, encodedArgs, "--tools", "Read,Grep,Glob")
+	assertExactArgValue(t, encodedArgs, "--allowed-tools", "Read,Grep,Glob,mcp__amux-claude-delegation__submit_report,mcp__amux-claude-delegation__submit_input_request")
+	assertExactArgValue(t, encodedArgs, "--disallowed-tools", "Bash,Edit,Write,NotebookEdit,Agent,WebFetch,WebSearch,Skill")
+	assertExactArgValue(t, encodedArgs, "--setting-sources", "")
 	stored, err := os.ReadFile(filepath.Join(stateDir, "receipts.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(stored, []byte("{}")) {
+	if bytes.Contains(stored, []byte(packet)) {
 		t.Fatal("receipt persisted complete launch packet content")
 	}
 	runtimeKey := fmt.Sprintf("%x", sha256.Sum256([]byte("../delegation-launch")))
@@ -611,6 +687,19 @@ esac
 			t.Errorf("private runtime file %s mode = %o, want 600", name, info.Mode().Perm())
 		}
 	}
+}
+
+func assertExactArgValue(t *testing.T, arguments [][]byte, flag, want string) {
+	t.Helper()
+	for index, argument := range arguments {
+		if string(argument) == flag && index+1 < len(arguments) {
+			if got := string(arguments[index+1]); got != want {
+				t.Fatalf("%s value = %q, want %q", flag, got, want)
+			}
+			return
+		}
+	}
+	t.Fatalf("exact argv is missing %s", flag)
 }
 
 func TestDiagnosticsClassifySupportedUnavailableAndUntestedCapabilities(t *testing.T) {
@@ -709,6 +798,45 @@ func startProcessFixture(t *testing.T, name string, arguments ...string) int {
 		_ = process.Wait()
 	})
 	return process.Process.Pid
+}
+
+func recordTestLaunch(t *testing.T, stateDir, delegationID string, identity map[string]any) {
+	t.Helper()
+	path := filepath.Join(stateDir, "receipts.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var store map[string]any
+	if err := json.Unmarshal(data, &store); err != nil {
+		t.Fatal(err)
+	}
+	receipt := store["receipts"].([]any)[0].(map[string]any)
+	if receipt["binding"].(map[string]any)["delegation_id"] != delegationID {
+		t.Fatal("test receipt identity mismatch")
+	}
+	receipt["events"] = append(receipt["events"].([]any),
+		map[string]any{"event_id": "launch-fixture", "kind": "launch_intent", "at": "2026-07-17T12:00:00Z"},
+		map[string]any{"event_id": "amux:test-launch-result", "kind": "launch_completed", "operation_event_id": "launch-fixture", "identity": identity, "at": "2026-07-17T12:00:01Z"},
+	)
+	updated, err := json.Marshal(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, updated, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func replaceEnvironment(environment []string, key, value string) []string {
+	prefix := key + "="
+	result := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, prefix) {
+			result = append(result, entry)
+		}
+	}
+	return append(result, prefix+value)
 }
 
 func assertHelperOutcome(t *testing.T, stateDir, want string, input map[string]any, args ...string) {

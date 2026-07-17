@@ -20,7 +20,7 @@ Consume the request to mark it seen without resolving it. Handle the response ma
 
 ## Notification unavailable or failed
 
-Do not search for a convenient Amp pane or weaken identity checks. Recover the report through `receipt show` and `inbox consume`; leave the receipt recoverable until that succeeds. A wake-up token, including a duplicate token after interrupted notification bookkeeping, never establishes delivery.
+Do not search for a convenient Amp pane or weaken identity checks. Recover the report through `receipt show` and `inbox consume`; leave the receipt recoverable until that succeeds. Exact replay of an attempt missing its result records `unavailable` without resending. A wake-up token never establishes delivery.
 
 ## Delivery, acknowledgement, or parking rejection
 
