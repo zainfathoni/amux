@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	minimumGroupAmpVersion = "0.0.1784084982-g029ec3"
-	groupLabelUsageLine    = "Usage: amp threads label [options] <threadIDOrURL> <labels...>"
-	groupLabelAdditiveLine = "Add one or more labels to an existing thread without removing the labels it already has."
+	minimumGroupAmpVersion     = "0.0.1784084982-g029ec3"
+	groupLabelUsageLine        = "Usage: amp threads label [options] <threadIDOrURL> <labels...>"
+	groupLabelCurrentUsageLine = "Usage: amp threads label [options] <thread> <labels...>"
+	groupLabelAdditiveLine     = "Add one or more labels to an existing thread without removing the labels it already has."
 )
 
 var (
@@ -327,7 +328,8 @@ func preflightGroupAmp() (string, error) {
 		return "", fmt.Errorf("add-only Amp label capability unavailable: amp threads label --help failed: %w", err)
 	}
 	lines := strings.Split(normalizeAmpOutput(helpOutput), "\n")
-	if !containsExactLine(lines, groupLabelUsageLine) || !containsExactLine(lines, groupLabelAdditiveLine) {
+	hasSupportedUsage := containsExactLine(lines, groupLabelUsageLine) || containsExactLine(lines, groupLabelCurrentUsageLine)
+	if !hasSupportedUsage || !containsExactLine(lines, groupLabelAdditiveLine) {
 		return "", errors.New("add-only Amp label capability unavailable: amp threads label help does not contain the exact documented usage and additive-preservation lines")
 	}
 	return path, nil
