@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# This repository has no persistent local services. Fail quickly if a tool from
+# the setup snapshot is unavailable so Amp can surface a damaged environment.
+command -v go >/dev/null
+command -v tmux >/dev/null
+
+echo "Orb ready: $(go version); $(tmux -V)"

@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Installing required system tools..."
+missing_tools=()
+for tool in curl git tmux; do
+	command -v "$tool" >/dev/null 2>&1 || missing_tools+=("$tool")
+done
+if ((${#missing_tools[@]})); then
+	sudo apt-get update
+	sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git tmux
+fi
+
+if ! command -v dcg >/dev/null 2>&1; then
+	echo "Installing Destructive Command Guard..."
+	dcg_installer=$(mktemp)
+	trap 'rm -f "$dcg_installer"' EXIT
+	curl -fsSL \
+		https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/3423576da804a2578990d9a62791fc9fe46c5f3b/install.sh \
+		-o "$dcg_installer"
+	bash "$dcg_installer" --no-configure
+	rm -f "$dcg_installer"
+	trap - EXIT
+fi
+
+go_minor=$(awk '$1 == "go" { print $2; exit }' go.mod)
+case "$go_minor" in
+	[0-9]*.[0-9]*) ;;
+	*) echo "Unable to determine the Go version from go.mod" >&2; exit 1 ;;
+esac
+
+case "$(uname -m)" in
+	x86_64) go_arch=amd64 ;;
+	aarch64|arm64) go_arch=arm64 ;;
+	*) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+
+download_index=$(curl -fsSL 'https://go.dev/dl/?mode=json&include=all')
+go_pattern="go${go_minor//./\\.}\\.[0-9]+"
+if [[ $download_index =~ $go_pattern ]]; then
+	go_version=${BASH_REMATCH[0]}
+else
+	echo "Unable to resolve the latest Go $go_minor patch release" >&2
+	exit 1
+fi
+
+go_root="$HOME/.local/share/go/$go_version"
+if [[ ! -x "$go_root/bin/go" ]]; then
+	echo "Installing $go_version for linux/$go_arch..."
+	tmp_dir=$(mktemp -d)
+	trap 'rm -rf "$tmp_dir"' EXIT
+	archive="$tmp_dir/$go_version.linux-$go_arch.tar.gz"
+	url="https://go.dev/dl/$go_version.linux-$go_arch.tar.gz"
+	checksum=$(awk -v filename="$(basename "$archive")" '
+		index($0, "\"filename\": \"" filename "\"") { wanted = 1 }
+		wanted && /"sha256":/ {
+			sub(/^.*"sha256": "/, "")
+			sub(/".*$/, "")
+			print
+			exit
+		}
+	' <<<"$download_index")
+	if [[ ! $checksum =~ ^[0-9a-f]{64}$ ]]; then
+		echo "Unable to resolve the checksum for $(basename "$archive")" >&2
+		exit 1
+	fi
+	curl -fsSL "$url" -o "$archive"
+	printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check --status
+	tar -xzf "$archive" -C "$tmp_dir"
+	mkdir -p "$(dirname "$go_root")"
+	mv "$tmp_dir/go" "$go_root"
+	trap - EXIT
+	rm -rf "$tmp_dir"
+fi
+
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$go_root/bin/go" "$HOME/.local/bin/go"
+ln -sfn "$go_root/bin/gofmt" "$HOME/.local/bin/gofmt"
+export PATH="$HOME/.local/bin:$PATH"
+
+echo "Downloading Go module dependencies..."
+go mod download
+
+echo "Orb setup complete: $(go version); $(tmux -V)"
