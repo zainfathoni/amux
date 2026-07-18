@@ -94,6 +94,7 @@ class ReceiptStore:
         if not isinstance(receipts, list):
             raise HelperError("invalid receipt store receipts")
         identities: set[str] = set()
+        writer_leases: set[str] = set()
         for receipt in receipts:
             if not isinstance(receipt, dict):
                 raise HelperError("invalid receipt record")
@@ -109,6 +110,11 @@ class ReceiptStore:
                 if not isinstance(event_id, str) or not event_id or event_id in event_ids:
                     raise HelperError("invalid or duplicate receipt event identity")
                 event_ids.add(event_id)
+            lease = receipt_writer_lease(receipt)
+            if receipt.get("state") != "verified_parked" and lease is not None:
+                if lease in writer_leases:
+                    raise HelperError("invalid duplicate unresolved mutating writer lease")
+                writer_leases.add(lease)
             identities.add(delegation_id)
         return store
 
@@ -156,25 +162,31 @@ class ReceiptStore:
                 if receipt["events"][0]["routing"] != routing:
                     raise HelperError("delegation ID create event conflicts with its original routing")
                 return "duplicate"
+            lease = mutating_writer_lease(binding)
+            if lease is not None:
+                for receipt in store["receipts"]:
+                    if receipt.get("state") != "verified_parked" and receipt_writer_lease(receipt) == lease:
+                        raise HelperError("worktree already has an unresolved exclusive logical writer lease")
             created_at = utc_now()
-            store["receipts"].append(
-                {
-                    "binding": binding,
-                    "routing": routing,
-                    "state": "created",
-                    "report_message_id": "",
-                    "created_at": created_at,
-                    "updated_at": created_at,
-                    "events": [
-                        {
-                            "event_id": f"create:{binding['delegation_id']}",
-                            "kind": "created",
-                            "at": created_at,
-                            "routing": routing,
-                        }
-                    ],
-                }
-            )
+            receipt = {
+                "binding": binding,
+                "routing": routing,
+                "state": "created",
+                "report_message_id": "",
+                "created_at": created_at,
+                "updated_at": created_at,
+                "events": [
+                    {
+                        "event_id": f"create:{binding['delegation_id']}",
+                        "kind": "created",
+                        "at": created_at,
+                        "routing": routing,
+                    }
+                ],
+            }
+            if lease is not None:
+                receipt["writer_lease"] = lease
+            store["receipts"].append(receipt)
             self.commit(store)
             return "recorded"
 
@@ -641,6 +653,19 @@ def validate_binding(value: Any) -> dict[str, Any]:
         if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
             raise HelperError("capacity_decision_digest must be a lowercase SHA-256 value")
     return copy.deepcopy(value)
+
+
+def mutating_writer_lease(binding: dict[str, Any]) -> str | None:
+    if binding.get("producer_role") != "mutating_delegate":
+        return None
+    return str(pathlib.Path(binding["workdir"]).resolve())
+
+
+def receipt_writer_lease(receipt: dict[str, Any]) -> str | None:
+    lease = receipt.get("writer_lease")
+    if isinstance(lease, str):
+        return lease
+    return mutating_writer_lease(receipt["binding"])
 
 
 def validate_envelope(value: Any, expected_kind: str) -> dict[str, Any]:
@@ -1411,6 +1436,8 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
             raise HelperError("receipt acquired a different launch operation concurrently")
 
         require_tmux_session(request_data["tmux_session"])
+        if components["workflow"] == "mutating":
+            revalidate_mutating_launch_lease(receipt_store, receipt, request_data)
         intent["at"] = utc_now()
         receipt["events"].append(intent)
         receipt["updated_at"] = intent["at"]
@@ -1694,6 +1721,38 @@ def prepare_mutation(request: Any) -> dict[str, Any]:
         "shared_writable": False,
         "handoff": request["handoff"],
     }
+
+
+def revalidate_mutating_launch_lease(
+    receipt_store: dict[str, Any], receipt: dict[str, Any], request: dict[str, Any]
+) -> None:
+    binding = receipt["binding"]
+    prepared = prepare_mutation(
+        {
+            "workdir": request["workdir"],
+            "repository": request["repository"],
+            "writer_owner": request["writer_owner"],
+            "integration_owner": request["integration_owner"],
+            "coordinator_write_frozen": request["coordinator_write_frozen"],
+            "shared_writable": request["shared_writable"],
+            "handoff": request["handoff"],
+        }
+    )
+    if (
+        prepared["workdir"] != receipt_writer_lease(receipt)
+        or prepared["repository"] != binding["repository"]
+        or prepared["baseline_branch"] != binding["baseline_branch"]
+        or prepared["baseline_commit"] != binding["base"]
+    ):
+        raise HelperError("mutating launch no longer matches the immutable leased baseline")
+    owners = [
+        candidate
+        for candidate in receipt_store["receipts"]
+        if candidate.get("state") != "verified_parked"
+        and receipt_writer_lease(candidate) == prepared["workdir"]
+    ]
+    if len(owners) != 1 or owners[0]["binding"]["delegation_id"] != binding["delegation_id"]:
+        raise HelperError("mutating launch receipt does not exclusively own the logical writer lease")
 
 
 def validate_frozen_handoff(store: ReceiptStore, request: Any) -> dict[str, Any]:

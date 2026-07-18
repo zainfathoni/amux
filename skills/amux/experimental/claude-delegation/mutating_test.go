@@ -211,6 +211,51 @@ func TestMutatingBindingBaselineIsImmutable(t *testing.T) {
 	}
 }
 
+func TestMutatingReceiptRejectsASecondUnresolvedWorktreeLeaseWithoutChangingStore(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		alias bool
+	}{
+		{name: "canonical path"},
+		{name: "symlink alias", alias: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newMutatingGitFixture(t)
+			stateDir := t.TempDir()
+			first := mutatingBinding("delegation-lease-first", fixture.worktree, fixture.baseline, "delegate")
+			assertHelperOutcome(t, stateDir, "recorded", map[string]any{
+				"binding": first, "routing": map[string]any{"target": "machine_local_inbox"},
+			}, "receipt", "create")
+			before, err := os.ReadFile(filepath.Join(stateDir, "receipts.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			workdir := fixture.worktree
+			if test.alias {
+				workdir = filepath.Join(t.TempDir(), "delegate-alias")
+				if err := os.Symlink(fixture.worktree, workdir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			second := mutatingBinding("delegation-lease-second", workdir, fixture.baseline, "delegate")
+			_, stderr, err := runHelper(t, stateDir, map[string]any{
+				"binding": second, "routing": map[string]any{"target": "machine_local_inbox"},
+			}, "receipt", "create")
+			if err == nil || !strings.Contains(stderr, "exclusive logical writer lease") {
+				t.Fatalf("second lease error = %v, stderr %q", err, stderr)
+			}
+			after, err := os.ReadFile(filepath.Join(stateDir, "receipts.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatalf("rejected lease changed store bytes:\nbefore: %s\nafter:  %s", before, after)
+			}
+		})
+	}
+}
+
 func TestMutatingSubmissionAcceptsOnlyOneCleanCommitAndFreezesWriter(t *testing.T) {
 	fixture := newMutatingGitFixture(t)
 	stateDir := t.TempDir()
@@ -484,6 +529,77 @@ func TestMutatingLaunchIsAnExplicitSeparateWriterPolicy(t *testing.T) {
 		if !strings.Contains(string(log), want) {
 			t.Errorf("mutating launch command missing %q:\n%s", want, log)
 		}
+	}
+}
+
+func TestMutatingLaunchRevalidatesTheLeasedBaselineBeforeRecordingIntent(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("experimental Claude launch is Darwin-only")
+	}
+	fixture := newLaunchFixture(t)
+	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	capacityRequest := map[string]any{
+		"capacity": map[string]any{
+			"status": "supported", "source": "web", "confidence": "reported",
+			"windows": []any{
+				map[string]any{"name": "primary", "used_percent": 20, "window_minutes": 300},
+				map[string]any{"name": "secondary", "used_percent": 30, "window_minutes": 10080},
+			},
+		},
+		"reserve_floors":                map[string]any{"five_hour": 20, "weekly": 20, "model_specific": map[string]any{}},
+		"acknowledged_unknown_capacity": false,
+	}
+	fixture.request["workflow"] = "mutating"
+	fixture.request["baseline_branch"] = "delegate"
+	fixture.request["writer_owner"] = "claude_mutating_delegate"
+	fixture.request["integration_owner"] = "amp_coordinator"
+	fixture.request["coordinator_write_frozen"] = true
+	fixture.request["shared_writable"] = false
+	fixture.request["handoff"] = "one_clean_local_commit"
+	fixture.request["capacity_request"] = capacityRequest
+
+	stdout, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "plan")
+	if err != nil {
+		t.Fatalf("mutating launch plan: %v: %s", err, stderr)
+	}
+	plan := decodeJSONMap(t, stdout)
+	binding := mutatingBinding("delegation-session-preflight", fixture.request["workdir"].(string), fixture.request["base"].(string), "delegate")
+	binding["packet_digest"] = plan["packet_digest"]
+	binding["launch_policy_digest"] = plan["launch_policy_digest"]
+	binding["launch_command_digest"] = plan["launch_command_digest"]
+	binding["capacity_decision_digest"] = plan["capacity_decision"].(map[string]any)["decision_digest"]
+	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "recorded", map[string]any{
+		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	receiptPath := filepath.Join(fixture.stateDir, "receipts.json")
+	before, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.dirtyAfterPreflight, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute")
+	if err == nil || !strings.Contains(stderr, "clean immutable baseline") {
+		t.Fatalf("dirty final baseline error = %v, stderr %q", err, stderr)
+	}
+	after, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) || bytes.Contains(after, []byte(`"kind":"launch_intent"`)) {
+		t.Fatalf("dirty final baseline changed receipt before launch:\nbefore: %s\nafter:  %s", before, after)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.stateDir, "runtime")); !os.IsNotExist(err) {
+		t.Fatalf("dirty final baseline created runtime state: %v", err)
+	}
+	if log, err := os.ReadFile(fixture.tmuxLog); err == nil && strings.Contains(string(log), "new-window") {
+		t.Fatalf("dirty final baseline created a tmux window:\n%s", log)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
 	}
 }
 

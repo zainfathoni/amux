@@ -638,6 +638,8 @@ type launchFixture struct {
 	tmuxLog             string
 	session             string
 	disappearAfterCheck string
+	dirtyAfterPreflight string
+	dirtyState          string
 }
 
 func newLaunchFixture(t *testing.T) launchFixture {
@@ -655,6 +657,8 @@ func newLaunchFixture(t *testing.T) launchFixture {
 	tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
 	session := filepath.Join(t.TempDir(), "session-exists")
 	disappearAfterCheck := filepath.Join(t.TempDir(), "disappear-after-check")
+	dirtyAfterPreflight := filepath.Join(t.TempDir(), "dirty-after-preflight")
+	dirtyState := filepath.Join(t.TempDir(), "dirty-state")
 	base := "0123456789abcdef0123456789abcdef01234567"
 	writeExecutable(t, filepath.Join(binDir, "git"), `#!/bin/sh
 set -eu
@@ -663,8 +667,8 @@ case "$*" in
   *'rev-parse HEAD'*) printf '%s\n' "$BASE" ;;
   *'rev-parse --git-dir'*) printf '%s\n' "$WORKDIR/.git/worktrees/fixture" ;;
   *'rev-parse --git-common-dir'*) printf '%s\n' '/tmp/source/.git' ;;
-	  *'symbolic-ref --short HEAD'*) printf '%s\n' 'delegate' ;;
-  *'status --porcelain'*) exit 0 ;;
+  *'symbolic-ref --short HEAD'*) printf '%s\n' 'delegate' ;;
+  *'status --porcelain'*) if [ -e "$DIRTY_STATE" ]; then printf '%s\n' '?? changed'; fi ;;
   *'remote get-url origin'*) printf '%s\n' 'git@github.com:zainfathoni/amux.git' ;;
   *) exit 2 ;;
 esac
@@ -697,6 +701,10 @@ case "$1" in
     if [ -e "$DISAPPEAR_AFTER_CHECK" ]; then
       rm "$DISAPPEAR_AFTER_CHECK" "$TMUX_SESSION"
     fi
+    if [ -e "$DIRTY_AFTER_PREFLIGHT" ]; then
+      rm "$DIRTY_AFTER_PREFLIGHT"
+      : > "$DIRTY_STATE"
+    fi
     ;;
   *) exit 0 ;;
 esac
@@ -704,6 +712,7 @@ esac
 	environment := append(os.Environ(),
 		"PATH="+binDir+":"+os.Getenv("PATH"), "WORKDIR="+workdir, "BASE="+base,
 		"TMUX_LOG="+tmuxLog, "TMUX_SESSION="+session, "DISAPPEAR_AFTER_CHECK="+disappearAfterCheck,
+		"DIRTY_AFTER_PREFLIGHT="+dirtyAfterPreflight, "DIRTY_STATE="+dirtyState,
 	)
 	request := map[string]any{
 		"delegation_id": "delegation-session-preflight", "event_id": "launch-session-preflight", "workdir": workdir,
@@ -713,6 +722,7 @@ esac
 	return launchFixture{
 		stateDir: stateDir, environment: environment, request: request, tmuxLog: tmuxLog,
 		session: session, disappearAfterCheck: disappearAfterCheck,
+		dirtyAfterPreflight: dirtyAfterPreflight, dirtyState: dirtyState,
 	}
 }
 
