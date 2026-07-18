@@ -590,6 +590,9 @@ func TestLaunchExecutionRejectsDisappearedTargetSessionBeforeIntent(t *testing.T
 	if err := json.Unmarshal([]byte(stdout), &plan); err != nil {
 		t.Fatal(err)
 	}
+	if plan.LaunchPolicyDigest != "bf1c109e7270e8d6a37a3a1a30198172bc23472be0cc29ca84cf6a3fef927445" {
+		t.Fatalf("read-only launch policy digest changed: %s", plan.LaunchPolicyDigest)
+	}
 	binding := testBinding(fixture.request["delegation_id"].(string))
 	binding["workdir"] = fixture.request["workdir"]
 	binding["base"] = fixture.request["base"]
@@ -660,6 +663,7 @@ case "$*" in
   *'rev-parse HEAD'*) printf '%s\n' "$BASE" ;;
   *'rev-parse --git-dir'*) printf '%s\n' "$WORKDIR/.git/worktrees/fixture" ;;
   *'rev-parse --git-common-dir'*) printf '%s\n' '/tmp/source/.git' ;;
+	  *'symbolic-ref --short HEAD'*) printf '%s\n' 'delegate' ;;
   *'status --porcelain'*) exit 0 ;;
   *'remote get-url origin'*) printf '%s\n' 'git@github.com:zainfathoni/amux.git' ;;
   *) exit 2 ;;
@@ -680,7 +684,7 @@ fi
 printf '%s\n' "$*" >> "$TMUX_LOG"
 if [ "$1" = "new-window" ]; then
   test -e "$TMUX_SESSION"
-  printf '%s\n' 'Claude\tthinker\t@20\t%20'
+  printf 'Claude\tthinker\t@20\t%%20\n'
   exit 0
 fi
 exit 2
