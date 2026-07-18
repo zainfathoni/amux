@@ -256,6 +256,55 @@ func TestMutatingReceiptRejectsASecondUnresolvedWorktreeLeaseWithoutChangingStor
 	}
 }
 
+func TestMutatingReceiptRejectsCaseVariantWorktreeLeaseWithoutChangingStore(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("case-variant lease identity is a Darwin filesystem regression")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureRoot, err := os.MkdirTemp(home, ".amux-lease-case-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(fixtureRoot) })
+	fixture := newMutatingGitFixtureUnder(t, fixtureRoot)
+	caseVariant := caseVariantPath(fixture.worktree)
+	originalInfo, err := os.Stat(fixture.worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	variantInfo, err := os.Stat(caseVariant)
+	if err != nil || !os.SameFile(originalInfo, variantInfo) {
+		t.Skip("test filesystem is case-sensitive")
+	}
+	stateDir := t.TempDir()
+	first := mutatingBinding("delegation-case-first", fixture.worktree, fixture.baseline, "delegate")
+	assertHelperOutcome(t, stateDir, "recorded", map[string]any{
+		"binding": first, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	before, err := os.ReadFile(filepath.Join(stateDir, "receipts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second := mutatingBinding("delegation-case-second", caseVariant, fixture.baseline, "delegate")
+	_, stderr, err := runHelper(t, stateDir, map[string]any{
+		"binding": second, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	if err == nil || !strings.Contains(stderr, "exclusive logical writer lease") {
+		t.Fatalf("case-variant lease error = %v, stderr %q", err, stderr)
+	}
+	after, err := os.ReadFile(filepath.Join(stateDir, "receipts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("rejected case-variant lease changed store bytes:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
 func TestMutatingSubmissionAcceptsOnlyOneCleanCommitAndFreezesWriter(t *testing.T) {
 	fixture := newMutatingGitFixture(t)
 	stateDir := t.TempDir()
@@ -610,8 +659,19 @@ type mutatingGitFixture struct {
 
 func newMutatingGitFixture(t *testing.T) mutatingGitFixture {
 	t.Helper()
-	root := filepath.Join(t.TempDir(), "repository")
-	worktree := filepath.Join(t.TempDir(), "delegate")
+	return newMutatingGitFixtureUnder(t, "")
+}
+
+func newMutatingGitFixtureUnder(t *testing.T, parent string) mutatingGitFixture {
+	t.Helper()
+	rootParent := parent
+	worktreeParent := parent
+	if parent == "" {
+		rootParent = t.TempDir()
+		worktreeParent = t.TempDir()
+	}
+	root := filepath.Join(rootParent, "repository")
+	worktree := filepath.Join(worktreeParent, "delegate")
 	runGit(t, "init", root)
 	runGit(t, "-C", root, "config", "user.name", "Test")
 	runGit(t, "-C", root, "config", "user.email", "test@example.com")
@@ -634,6 +694,18 @@ func runGit(t *testing.T, arguments ...string) string {
 		t.Fatalf("git %s: %v\n%s", strings.Join(arguments, " "), err, output)
 	}
 	return string(output)
+}
+
+func caseVariantPath(path string) string {
+	for index, character := range path {
+		if character >= 'a' && character <= 'z' {
+			return path[:index] + string(character-'a'+'A') + path[index+1:]
+		}
+		if character >= 'A' && character <= 'Z' {
+			return path[:index] + string(character-'A'+'a') + path[index+1:]
+		}
+	}
+	return path
 }
 
 func mutatingPrepareRequest(fixture mutatingGitFixture) map[string]any {

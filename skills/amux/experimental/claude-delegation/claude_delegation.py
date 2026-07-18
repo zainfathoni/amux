@@ -94,7 +94,7 @@ class ReceiptStore:
         if not isinstance(receipts, list):
             raise HelperError("invalid receipt store receipts")
         identities: set[str] = set()
-        writer_leases: set[str] = set()
+        writer_leases: list[str] = []
         for receipt in receipts:
             if not isinstance(receipt, dict):
                 raise HelperError("invalid receipt record")
@@ -112,9 +112,9 @@ class ReceiptStore:
                 event_ids.add(event_id)
             lease = receipt_writer_lease(receipt)
             if receipt.get("state") != "verified_parked" and lease is not None:
-                if lease in writer_leases:
+                if any(writer_leases_match(lease, existing) for existing in writer_leases):
                     raise HelperError("invalid duplicate unresolved mutating writer lease")
-                writer_leases.add(lease)
+                writer_leases.append(lease)
             identities.add(delegation_id)
         return store
 
@@ -165,7 +165,12 @@ class ReceiptStore:
             lease = mutating_writer_lease(binding)
             if lease is not None:
                 for receipt in store["receipts"]:
-                    if receipt.get("state") != "verified_parked" and receipt_writer_lease(receipt) == lease:
+                    existing_lease = receipt_writer_lease(receipt)
+                    if (
+                        receipt.get("state") != "verified_parked"
+                        and existing_lease is not None
+                        and writer_leases_match(existing_lease, lease)
+                    ):
                         raise HelperError("worktree already has an unresolved exclusive logical writer lease")
             created_at = utc_now()
             receipt = {
@@ -666,6 +671,17 @@ def receipt_writer_lease(receipt: dict[str, Any]) -> str | None:
     if isinstance(lease, str):
         return lease
     return mutating_writer_lease(receipt["binding"])
+
+
+def writer_leases_match(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    try:
+        return os.path.samefile(left, right)
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise HelperError("cannot safely compare mutating writer lease identities") from error
 
 
 def validate_envelope(value: Any, expected_kind: str) -> dict[str, Any]:
@@ -1749,7 +1765,8 @@ def revalidate_mutating_launch_lease(
         candidate
         for candidate in receipt_store["receipts"]
         if candidate.get("state") != "verified_parked"
-        and receipt_writer_lease(candidate) == prepared["workdir"]
+        and receipt_writer_lease(candidate) is not None
+        and writer_leases_match(receipt_writer_lease(candidate), prepared["workdir"])
     ]
     if len(owners) != 1 or owners[0]["binding"]["delegation_id"] != binding["delegation_id"]:
         raise HelperError("mutating launch receipt does not exclusively own the logical writer lease")
