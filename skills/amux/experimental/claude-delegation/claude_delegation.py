@@ -993,11 +993,19 @@ def private_runtime_paths(store: ReceiptStore, delegation_id: str) -> tuple[path
     return runtime / "mcp.json", runtime / "settings.json"
 
 
+def require_tmux_session(session: str) -> None:
+    try:
+        run_command(["tmux", "has-session", "-t", "=" + session])
+    except HelperError as error:
+        raise HelperError("target tmux session does not exist or cannot be verified") from error
+
+
 def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]:
     request = validate_launch_request(request_value)
     if platform.system() != "Darwin":
         raise HelperError("experimental Claude launch is available only on Darwin")
     run_command(["tmux", "-V"])
+    require_tmux_session(request["tmux_session"])
     workdir = preflight_worktree(request)
     packet_path = pathlib.Path(request["packet_file"]).resolve(strict=True)
     mode = packet_path.stat().st_mode & 0o777
@@ -1174,6 +1182,7 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
         if any(event.get("kind") == "launch_intent" for event in receipt["events"]):
             raise HelperError("receipt acquired a different launch operation concurrently")
 
+        require_tmux_session(request_data["tmux_session"])
         intent["at"] = utc_now()
         receipt["events"].append(intent)
         receipt["updated_at"] = intent["at"]
