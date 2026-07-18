@@ -1138,15 +1138,27 @@ def validate_launch_request(value: Any) -> dict[str, Any]:
         "handoff",
         "capacity_request",
     }
-    if value.get("workflow") == "mutating":
+    workflow = value.get("workflow", "read_only")
+    if workflow == "mutating":
         fields |= mutating_fields
+    else:
+        fields.add("expected_launch_policy_digest")
     reject_unknown(value, fields, "launch request")
     result: dict[str, Any] = {}
-    for key in fields - mutating_fields - {"workflow"}:
+    for key in fields - mutating_fields - {"workflow", "expected_launch_policy_digest"}:
         result[key] = required_string(value, key, 2048 if key in {"workdir", "packet_file"} else 256)
-    if value.get("workflow", "read_only") not in {"read_only", "mutating"}:
+    if workflow not in {"read_only", "mutating"}:
         raise HelperError("launch workflow must be read_only or mutating")
-    result["workflow"] = value.get("workflow", "read_only")
+    result["workflow"] = workflow
+    if workflow == "read_only":
+        expected_policy_digest = value.get("expected_launch_policy_digest")
+        if (
+            not isinstance(expected_policy_digest, str)
+            or len(expected_policy_digest) != 64
+            or any(character not in "0123456789abcdef" for character in expected_policy_digest)
+        ):
+            raise HelperError("expected_launch_policy_digest must be a lowercase SHA-256 value")
+        result["expected_launch_policy_digest"] = expected_policy_digest
     if result["workflow"] == "mutating":
         for key in ("baseline_branch", "writer_owner", "integration_owner", "handoff"):
             result[key] = required_string(value, key, 256)
@@ -1242,6 +1254,8 @@ def plan_launch_policy_digest(request: Any) -> dict[str, str]:
         raise HelperError("launch policy digest request must be an object")
     reject_unknown(request, {"workflow"}, "launch policy digest request")
     workflow = required_string(request, "workflow", 32)
+    if workflow != "read_only":
+        raise HelperError("launch policy digest preflight supports only read_only")
     policy = launch_policy(workflow)
     return {
         "workflow": workflow,
@@ -1249,8 +1263,17 @@ def plan_launch_policy_digest(request: Any) -> dict[str, str]:
     }
 
 
+def expected_launch_policy(request: dict[str, Any]) -> dict[str, Any]:
+    policy = launch_policy(request["workflow"])
+    digest = hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if request["workflow"] == "read_only" and request["expected_launch_policy_digest"] != digest:
+        raise HelperError("expected launch policy digest does not match selected workflow")
+    return policy
+
+
 def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]:
     request = validate_launch_request(request_value)
+    policy = expected_launch_policy(request)
     if platform.system() != "Darwin":
         raise HelperError("experimental Claude launch is available only on Darwin")
     run_command(["tmux", "-V"])
@@ -1303,7 +1326,6 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         raise HelperError("Claude Code is missing required flags: " + ", ".join(missing_flags))
     mcp_path, settings_path = private_runtime_paths(store, request["delegation_id"])
     mutating = workflow == "mutating"
-    policy = launch_policy(workflow)
     built_in_tools = policy["built_in_tools"]
     argv = [
         claude,
@@ -1407,6 +1429,7 @@ def plan_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
 
 def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
     request_data = validate_launch_request(request)
+    expected_launch_policy(request_data)
     request_digest = hashlib.sha256(json.dumps(request_data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     delegation_id = request_data["delegation_id"]
     event_id = request_data["event_id"]

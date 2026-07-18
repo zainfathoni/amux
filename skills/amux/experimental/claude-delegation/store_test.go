@@ -631,6 +631,44 @@ func TestLaunchExecutionRejectsDisappearedTargetSessionBeforeIntent(t *testing.T
 	}
 }
 
+func TestLaunchRequestsRejectMissingOrWrongExpectedPolicyDigestBeforeProbes(t *testing.T) {
+	fixture := newLaunchFixture(t)
+	for _, test := range []struct {
+		name    string
+		request map[string]any
+		want    string
+	}{
+		{name: "missing", request: cloneJSONMap(t, fixture.request), want: "expected_launch_policy_digest must be a lowercase SHA-256 value"},
+		{name: "wrong", request: cloneJSONMap(t, fixture.request), want: "expected launch policy digest does not match selected workflow"},
+	} {
+		for _, command := range []string{"plan", "execute"} {
+			t.Run(test.name+"_"+command, func(t *testing.T) {
+				if test.name == "missing" {
+					delete(test.request, "expected_launch_policy_digest")
+				} else {
+					test.request["expected_launch_policy_digest"] = strings.Repeat("f", 64)
+				}
+				_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, test.request, "launch", command)
+				if err == nil || !strings.Contains(stderr, test.want) {
+					t.Fatalf("launch %s error = %v, stderr %q; want %q", command, err, stderr, test.want)
+				}
+				entries, readErr := os.ReadDir(fixture.stateDir)
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if len(entries) != 0 {
+					t.Fatalf("rejected launch %s mutated private state: %#v", command, entries)
+				}
+				if log, readErr := os.ReadFile(fixture.tmuxLog); readErr == nil && len(log) != 0 {
+					t.Fatalf("rejected launch %s invoked tmux: %s", command, log)
+				} else if readErr != nil && !os.IsNotExist(readErr) {
+					t.Fatal(readErr)
+				}
+			})
+		}
+	}
+}
+
 func TestLaunchPolicyDigestCanFinalizeSelfContainedPacketBeforePlan(t *testing.T) {
 	fixture := newLaunchFixture(t)
 	stdout, stderr, err := runHelper(t, fixture.stateDir, map[string]any{"workflow": "read_only"}, "launch", "policy-digest")
@@ -659,6 +697,14 @@ func TestLaunchPolicyDigestCanFinalizeSelfContainedPacketBeforePlan(t *testing.T
 	} else if err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
+	if _, stderr, err := runHelper(t, fixture.stateDir, map[string]any{"workflow": "mutating"}, "launch", "policy-digest"); err == nil || !strings.Contains(stderr, "supports only read_only") {
+		t.Fatalf("mutating policy digest preflight error = %v, stderr %q", err, stderr)
+	}
+	mutatingLaunch := cloneJSONMap(t, fixture.request)
+	mutatingLaunch["workflow"] = "mutating"
+	if _, stderr, err := runHelper(t, fixture.stateDir, mutatingLaunch, "launch", "plan"); err == nil || !strings.Contains(stderr, "unknown fields: expected_launch_policy_digest") {
+		t.Fatalf("mutating launch expected policy field error = %v, stderr %q", err, stderr)
+	}
 	if runtime.GOOS != "darwin" {
 		t.Skip("experimental Claude launch is macOS-first")
 	}
@@ -667,6 +713,7 @@ func TestLaunchPolicyDigestCanFinalizeSelfContainedPacketBeforePlan(t *testing.T
 	if err := os.WriteFile(fixture.request["packet_file"].(string), []byte(packet), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	fixture.request["expected_launch_policy_digest"] = preflight.LaunchPolicyDigest
 	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -804,6 +851,7 @@ esac
 		"delegation_id": "delegation-session-preflight", "event_id": "launch-session-preflight", "workdir": workdir,
 		"packet_file": packetPath, "tmux_session": "Claude", "tmux_window": "thinker",
 		"claude_session_id": "550e8400-e29b-41d4-a716-446655440000", "repository": "zainfathoni/amux", "base": base,
+		"expected_launch_policy_digest": "bf1c109e7270e8d6a37a3a1a30198172bc23472be0cc29ca84cf6a3fef927445",
 	}
 	return launchFixture{
 		stateDir: stateDir, environment: environment, request: request, tmuxLog: tmuxLog,
@@ -824,13 +872,27 @@ func TestLaunchPlanAndExecutionKeepPacketOutOfReceiptAndDenyMutationTools(t *tes
 		t.Fatal(err)
 	}
 	packetPath := filepath.Join(t.TempDir(), "packet.json")
-	packet := "line one\nline 'two' \"$HOME\"; $(echo must-not-run)\nthird\tcolumn"
-	if err := os.WriteFile(packetPath, []byte(packet), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	logPath := filepath.Join(t.TempDir(), "tmux.log")
 	argvPath := filepath.Join(t.TempDir(), "claude.argv")
 	base := "0123456789abcdef0123456789abcdef01234567"
+	packetBinding := testBinding("../delegation-launch")
+	packetBinding["workdir"] = workdir
+	packetBinding["base"] = base
+	packetBinding["launch_policy_digest"] = "bf1c109e7270e8d6a37a3a1a30198172bc23472be0cc29ca84cf6a3fef927445"
+	packetEnvelope := testMessage(packetBinding, "self-contained-mcp-report", "thinker_report", map[string]any{})
+	delete(packetEnvelope, "created_at")
+	delete(packetEnvelope, "report")
+	packetBytes, err := json.Marshal(map[string]any{
+		"task":            "submit one correlated thinker report without follow-up input",
+		"report_envelope": packetEnvelope,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := string(packetBytes)
+	if err := os.WriteFile(packetPath, packetBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	writeExecutable(t, filepath.Join(binDir, "git"), `#!/bin/sh
 set -eu
 case "$*" in
@@ -876,6 +938,7 @@ esac
 		"delegation_id": "../delegation-launch", "event_id": "launch-1", "workdir": workdir, "packet_file": packetPath,
 		"tmux_session": "Claude", "tmux_window": "thinker", "claude_session_id": "550e8400-e29b-41d4-a716-446655440000",
 		"repository": "zainfathoni/amux", "base": base,
+		"expected_launch_policy_digest": "bf1c109e7270e8d6a37a3a1a30198172bc23472be0cc29ca84cf6a3fef927445",
 	}
 	stdout, stderr, err := runHelperEnv(t, stateDir, environment, request, "launch", "plan")
 	if err != nil {
@@ -927,6 +990,57 @@ esac
 	if got := string(encodedArgs[len(encodedArgs)-1]); got != packet {
 		t.Fatalf("multiline packet argv changed:\ngot:  %q\nwant: %q", got, packet)
 	}
+	var deliveredPacket struct {
+		ReportEnvelope map[string]any `json:"report_envelope"`
+	}
+	if err := json.Unmarshal(encodedArgs[len(encodedArgs)-1], &deliveredPacket); err != nil {
+		t.Fatalf("decode packet delivered to fake Claude: %v", err)
+	}
+	report := deliveredPacket.ReportEnvelope
+	report["created_at"] = "2026-07-18T23:30:00Z"
+	report["report"] = map[string]any{
+		"accepted_role": true, "accepted_exclusions": true, "status": "complete",
+		"verdict":   "The self-contained packet supplied immutable report correlation.",
+		"rationale": "The strict MCP route accepted the packet-derived envelope without follow-up input.",
+		"evidence":  []any{}, "assumptions": []any{}, "unsupported_claims": []any{}, "blockers": []any{},
+		"verification":      []any{"recovered the exact packet argument delivered to fake Claude"},
+		"changed_artifacts": []any{}, "references": []any{},
+	}
+	mcpConfigPath := exactArgValue(t, encodedArgs, "--mcp-config")
+	mcpConfigBytes, err := os.ReadFile(mcpConfigPath)
+	if err != nil {
+		t.Fatalf("read generated MCP config: %v", err)
+	}
+	var mcpConfig struct {
+		Servers map[string]struct {
+			Command string   `json:"command"`
+			Args    []string `json:"args"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(mcpConfigBytes, &mcpConfig); err != nil {
+		t.Fatalf("decode generated MCP config: %v", err)
+	}
+	mcpRoute, ok := mcpConfig.Servers["amux-claude-delegation"]
+	if !ok || mcpRoute.Command == "" || len(mcpRoute.Args) == 0 {
+		t.Fatalf("generated MCP config has no delegation route: %#v", mcpConfig.Servers)
+	}
+	wrong := cloneJSONMap(t, report)
+	wrong["message_id"] = "wrong-packet-policy-report"
+	wrong["launch_policy_digest"] = strings.Repeat("f", 64)
+	if response := callMCPReport(t, mcpRoute.Command, mcpRoute.Args, wrong); !strings.Contains(response, `"isError":true`) {
+		t.Fatalf("wrong packet policy digest MCP response = %s", response)
+	}
+	assertReceiptHasNoValidReport(t, stateDir, binding["delegation_id"].(string))
+	omitted := cloneJSONMap(t, report)
+	omitted["message_id"] = "omitted-packet-policy-report"
+	delete(omitted, "launch_policy_digest")
+	if response := callMCPReport(t, mcpRoute.Command, mcpRoute.Args, omitted); !strings.Contains(response, `"isError":true`) {
+		t.Fatalf("omitted packet policy digest MCP response = %s", response)
+	}
+	assertReceiptHasNoValidReport(t, stateDir, binding["delegation_id"].(string))
+	if response := callMCPReport(t, mcpRoute.Command, mcpRoute.Args, report); !strings.Contains(response, `"outcome":"recorded"`) || strings.Contains(response, `"isError":true`) {
+		t.Fatalf("correct packet-derived MCP report response = %s", response)
+	}
 	assertExactArgValue(t, encodedArgs, "--tools", "Read,Grep,Glob")
 	assertExactArgValue(t, encodedArgs, "--allowed-tools", "Read,Grep,Glob,mcp__amux-claude-delegation__submit_report,mcp__amux-claude-delegation__submit_input_request")
 	assertExactArgValue(t, encodedArgs, "--disallowed-tools", "Bash,Edit,Write,NotebookEdit,Agent,WebFetch,WebSearch,Skill")
@@ -959,17 +1073,72 @@ esac
 	}
 }
 
+func callMCPReport(t *testing.T, commandPath string, commandArgs []string, report map[string]any) string {
+	t.Helper()
+	messages := []map[string]any{
+		{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": map[string]any{"protocolVersion": "2025-06-18", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "test", "version": "1"}}},
+		{"jsonrpc": "2.0", "method": "notifications/initialized"},
+		{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": map[string]any{"name": "submit_report", "arguments": report}},
+	}
+	var input bytes.Buffer
+	for _, message := range messages {
+		data, err := json.Marshal(message)
+		if err != nil {
+			t.Fatal(err)
+		}
+		input.Write(data)
+		input.WriteByte('\n')
+	}
+	command := exec.Command(commandPath, commandArgs...)
+	command.Stdin = &input
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("MCP server failed: %v\n%s", err, output)
+	}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("MCP responses = %d, want 2\n%s", len(lines), output)
+	}
+	return lines[1]
+}
+
+func assertReceiptHasNoValidReport(t *testing.T, stateDir, delegationID string) {
+	t.Helper()
+	stdout, stderr, err := runHelper(t, stateDir, map[string]any{}, "receipt", "show", "--delegation-id", delegationID)
+	if err != nil {
+		t.Fatalf("show receipt after invalid MCP report: %v: %s", err, stderr)
+	}
+	var receipt struct {
+		Events []struct {
+			Kind string `json:"kind"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range receipt.Events {
+		if event.Kind == "valid_report" {
+			t.Fatal("invalid MCP report appended a valid_report event")
+		}
+	}
+}
+
 func assertExactArgValue(t *testing.T, arguments [][]byte, flag, want string) {
+	t.Helper()
+	if got := exactArgValue(t, arguments, flag); got != want {
+		t.Fatalf("%s value = %q, want %q", flag, got, want)
+	}
+}
+
+func exactArgValue(t *testing.T, arguments [][]byte, flag string) string {
 	t.Helper()
 	for index, argument := range arguments {
 		if string(argument) == flag && index+1 < len(arguments) {
-			if got := string(arguments[index+1]); got != want {
-				t.Fatalf("%s value = %q, want %q", flag, got, want)
-			}
-			return
+			return string(arguments[index+1])
 		}
 	}
 	t.Fatalf("exact argv is missing %s", flag)
+	return ""
 }
 
 func TestDiagnosticsClassifySupportedUnavailableAndUntestedCapabilities(t *testing.T) {
