@@ -305,6 +305,43 @@ func TestMutatingReceiptRejectsCaseVariantWorktreeLeaseWithoutChangingStore(t *t
 	}
 }
 
+func TestMissingUnresolvedWorktreeRemainsInspectableButBlocksNewLease(t *testing.T) {
+	missing := newMutatingGitFixture(t)
+	stateDir := t.TempDir()
+	first := mutatingBinding("delegation-missing-first", missing.worktree, missing.baseline, "delegate")
+	assertHelperOutcome(t, stateDir, "recorded", map[string]any{
+		"binding": first, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	before, err := os.ReadFile(filepath.Join(stateDir, "receipts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := missing.worktree + "-moved"
+	if err := os.Rename(missing.worktree, moved); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := runHelper(t, stateDir, map[string]any{}, "receipt", "show", "--delegation-id", "delegation-missing-first")
+	if err != nil || !strings.Contains(stdout, `"delegation_id":"delegation-missing-first"`) {
+		t.Fatalf("missing unresolved receipt was not inspectable: %v: %s%s", err, stdout, stderr)
+	}
+
+	available := newMutatingGitFixture(t)
+	second := mutatingBinding("delegation-missing-second", available.worktree, available.baseline, "delegate")
+	_, stderr, err = runHelper(t, stateDir, map[string]any{
+		"binding": second, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	if err == nil || !strings.Contains(stderr, "cannot safely compare mutating writer lease identities") {
+		t.Fatalf("missing unresolved lease comparison error = %v, stderr %q", err, stderr)
+	}
+	after, err := os.ReadFile(filepath.Join(stateDir, "receipts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("rejected missing-path lease changed store bytes:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
 func TestMutatingSubmissionAcceptsOnlyOneCleanCommitAndFreezesWriter(t *testing.T) {
 	fixture := newMutatingGitFixture(t)
 	stateDir := t.TempDir()

@@ -94,7 +94,6 @@ class ReceiptStore:
         if not isinstance(receipts, list):
             raise HelperError("invalid receipt store receipts")
         identities: set[str] = set()
-        writer_leases: list[str] = []
         for receipt in receipts:
             if not isinstance(receipt, dict):
                 raise HelperError("invalid receipt record")
@@ -110,11 +109,6 @@ class ReceiptStore:
                 if not isinstance(event_id, str) or not event_id or event_id in event_ids:
                     raise HelperError("invalid or duplicate receipt event identity")
                 event_ids.add(event_id)
-            lease = receipt_writer_lease(receipt)
-            if receipt.get("state") != "verified_parked" and lease is not None:
-                if any(writer_leases_match(lease, existing) for existing in writer_leases):
-                    raise HelperError("invalid duplicate unresolved mutating writer lease")
-                writer_leases.append(lease)
             identities.add(delegation_id)
         return store
 
@@ -678,8 +672,6 @@ def writer_leases_match(left: str, right: str) -> bool:
         return True
     try:
         return os.path.samefile(left, right)
-    except FileNotFoundError:
-        return False
     except OSError as error:
         raise HelperError("cannot safely compare mutating writer lease identities") from error
 
