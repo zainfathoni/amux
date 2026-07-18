@@ -126,7 +126,7 @@ func TestAggregateLaunchAcceptsNonGitRunnerAndWorker(t *testing.T) {
 
 func TestAggregateLaunchRunsRunnersFirstAndContinuesWorkersAfterRuntimeFailure(t *testing.T) {
 	dir := t.TempDir()
-	runnerDir := lockedTestWorktree(t)
+	runnerDir := t.TempDir()
 	workerDir := t.TempDir()
 	runnerWindow := config.RunnerWindow(runnerDir)
 	workerRow := config.Row{Workspace: "workers", Window: "worker", Workdir: workerDir, Thread: "T-worker"}
@@ -178,7 +178,7 @@ esac
 
 func TestAggregateLateWorkerPreflightAfterRunnerMutationIsRuntimeFailure(t *testing.T) {
 	dir := t.TempDir()
-	runnerDir := lockedTestWorktree(t)
+	runnerDir := t.TempDir()
 	workerDir := t.TempDir()
 	runnerWindow := config.RunnerWindow(runnerDir)
 	writeRunnerRegistry(t, dir, "alpha\t"+runnerDir+"\n")
@@ -219,7 +219,7 @@ esac
 
 func TestAggregateLaunchAttachIsGatedOnCompleteSuccess(t *testing.T) {
 	dir := t.TempDir()
-	runnerDir := lockedTestWorktree(t)
+	runnerDir := t.TempDir()
 	workerDir := t.TempDir()
 	runnerWindow := config.RunnerWindow(runnerDir)
 	workerRow := config.Row{Workspace: "alpha", Window: "worker", Workdir: workerDir, Thread: "T-worker"}
@@ -287,7 +287,7 @@ esac
 
 func TestAggregateSharedMutationsPlanEveryMixedWorkspaceResource(t *testing.T) {
 	dir := t.TempDir()
-	runnerDir := lockedTestWorktree(t)
+	runnerDir := t.TempDir()
 	workerDir := t.TempDir()
 	runnerWindow := config.RunnerWindow(runnerDir)
 	workerRow := config.Row{Workspace: "alpha", Window: "worker", Workdir: workerDir, Thread: "T-worker"}
@@ -322,7 +322,7 @@ esac
 
 func TestAggregateRestartStopsBeforeNextRunnerAfterReplacementFailure(t *testing.T) {
 	dir := t.TempDir()
-	workdirs := []string{lockedTestWorktree(t), lockedTestWorktree(t)}
+	workdirs := []string{t.TempDir(), t.TempDir()}
 	sort.Strings(workdirs)
 	firstDir, secondDir := workdirs[0], workdirs[1]
 	firstWindow, secondWindow := config.RunnerWindow(firstDir), config.RunnerWindow(secondDir)
@@ -425,7 +425,7 @@ func TestAggregateReconcilePlansWorkerAndMissingRunnerWithoutMutation(t *testing
 
 func TestAggregateDoctorDiagnosesBothModes(t *testing.T) {
 	dir := t.TempDir()
-	runnerDir := lockedTestWorktree(t)
+	runnerDir := t.TempDir()
 	workerDir := t.TempDir()
 	runnerWindow := config.RunnerWindow(runnerDir)
 	workerRow := config.Row{Workspace: "alpha", Window: "worker", Workdir: workerDir, Thread: "T-worker"}
@@ -559,7 +559,7 @@ esac
 
 func TestAggregateReadOnlyLateWorkerRejectionRemainsPreflight(t *testing.T) {
 	dir := t.TempDir()
-	runnerDir := lockedTestWorktree(t)
+	runnerDir := t.TempDir()
 	workerDir := t.TempDir()
 	writeRunnerRegistry(t, dir, "alpha\t"+runnerDir+"\n")
 	writeWorkerRegistry(t, dir, "beta\tworker\t"+workerDir+"\tT-worker\n")

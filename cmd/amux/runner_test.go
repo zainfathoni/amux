@@ -94,7 +94,7 @@ func TestRunnerPinRejectsMissingAndFileWorkdirsBeforeMutation(t *testing.T) {
 
 func TestRunnerPinCurrentDerivesWorkspaceAndWorkdirFromInvokingPane(t *testing.T) {
 	dir := t.TempDir()
-	workdir := lockedTestWorktree(t)
+	workdir := t.TempDir()
 	bin := t.TempDir()
 	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
 if [ "$1" = display-message ]; then
@@ -257,7 +257,7 @@ esac
 
 func TestRunnerLaunchVerifiesExactCreatedPaneAndSkipsAlreadyRunning(t *testing.T) {
 	dir := t.TempDir()
-	workdir := lockedTestWorktree(t)
+	workdir := t.TempDir()
 	window := config.RunnerWindow(workdir)
 	start := runnerStartCommand(workdir)
 	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
@@ -293,7 +293,7 @@ esac
 
 func TestRunnerLaunchVerifiesRetainedShellWithExactAmpChild(t *testing.T) {
 	dir := t.TempDir()
-	workdir := lockedTestWorktree(t)
+	workdir := t.TempDir()
 	window := config.RunnerWindow(workdir)
 	start := runnerStartCommand(workdir)
 	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
@@ -696,7 +696,7 @@ esac
 
 func TestRunnerLaunchRejectsAmpDescendantOfUnrelatedShellChild(t *testing.T) {
 	dir := t.TempDir()
-	workdir := lockedTestWorktree(t)
+	workdir := t.TempDir()
 	window := config.RunnerWindow(workdir)
 	start := runnerStartCommand(workdir)
 	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
@@ -814,7 +814,7 @@ esac
 
 func TestRunnerLaunchEarlyExitReportsBoundedPaneAndStalePIDDiagnostics(t *testing.T) {
 	dir := t.TempDir()
-	workdir := lockedTestWorktree(t)
+	workdir := t.TempDir()
 	window := config.RunnerWindow(workdir)
 	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
 	cache := t.TempDir()
@@ -899,7 +899,7 @@ func TestStaleAmpPIDDiagnosticReportsLiveAmbiguousOwnershipWithoutDeletion(t *te
 
 func TestRunnerLaunchRejectsAmpChildThatDoesNotSurviveVerificationWindow(t *testing.T) {
 	dir := t.TempDir()
-	workdir := lockedTestWorktree(t)
+	workdir := t.TempDir()
 	window := config.RunnerWindow(workdir)
 	start := runnerStartCommand(workdir)
 	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
@@ -942,7 +942,7 @@ esac
 
 func TestRunnerLegacyWindowIsManagedAndRestartMigratesRuntimeName(t *testing.T) {
 	dir := t.TempDir()
-	workdir := lockedTestWorktree(t)
+	workdir := t.TempDir()
 	derived := config.RunnerWindow(workdir)
 	writeRunnerRegistry(t, dir, "alpha\tlegacy-runner\t"+workdir+"\n")
 	bin := t.TempDir()
@@ -1007,7 +1007,7 @@ func TestProcessSignalMayBeAliveFailsClosedOnPermissionAndUnknownErrors(t *testi
 
 func TestRunnerLegacyRestartRejectsOccupiedCanonicalWindowBeforeStopping(t *testing.T) {
 	dir := t.TempDir()
-	workdir := lockedTestWorktree(t)
+	workdir := t.TempDir()
 	derived := config.RunnerWindow(workdir)
 	writeRunnerRegistry(t, dir, "alpha\tlegacy-runner\t"+workdir+"\n")
 	bin := t.TempDir()
@@ -1135,15 +1135,6 @@ func writeRunnerRegistry(t *testing.T, dir, rows string) {
 	if err := os.WriteFile(filepath.Join(dir, config.RunnersFile), []byte("# amux-schema: runners/v1\n"+rows), 0o600); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func lockedTestWorktree(t *testing.T) string {
-	t.Helper()
-	repo := primaryTestWorktree(t)
-	worktree := filepath.Join(t.TempDir(), "project")
-	runGit(t, repo, "worktree", "add", "-q", "--detach", worktree)
-	runGit(t, repo, "worktree", "lock", "--reason", "amux test", worktree)
-	return worktree
 }
 
 func primaryTestWorktree(t *testing.T) string {
