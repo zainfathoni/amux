@@ -570,6 +570,7 @@ func TestMutatingLaunchIsAnExplicitSeparateWriterPolicy(t *testing.T) {
 		t.Fatalf("capacity decision: %v: %s", err, stderr)
 	}
 	fixture.request["workflow"] = "mutating"
+	delete(fixture.request, "expected_launch_policy_digest")
 	fixture.request["baseline_branch"] = "delegate"
 	fixture.request["writer_owner"] = "claude_mutating_delegate"
 	fixture.request["integration_owner"] = "amp_coordinator"
@@ -638,6 +639,7 @@ func TestMutatingLaunchRevalidatesTheLeasedBaselineBeforeRecordingIntent(t *test
 		"acknowledged_unknown_capacity": false,
 	}
 	fixture.request["workflow"] = "mutating"
+	delete(fixture.request, "expected_launch_policy_digest")
 	fixture.request["baseline_branch"] = "delegate"
 	fixture.request["writer_owner"] = "claude_mutating_delegate"
 	fixture.request["integration_owner"] = "amp_coordinator"

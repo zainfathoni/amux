@@ -8,7 +8,7 @@ After an interrupted helper mutation, inspect the receipt and retry the identica
 
 ## Launch or acquisition mismatch
 
-Stop before launch when repository, base, clean linked-worktree status, private packet mode, policy digest, or required capability differs. If durable `launch_intent` lacks `launch_completed`, the outcome is indeterminate: do not retry launch, guess, or create another window. Inspect tmux and the receipt manually; acquire only one exact Claude session incarnation or leave the receipt recoverable.
+Stop before receipt creation when a read-only request omits `expected_launch_policy_digest` or the helper rejects it as malformed or different from the selected policy. Recompute neither value by hand and do not rewrite or inject content after planning. Stop before launch when repository, base, clean linked-worktree status, private packet mode, policy digest, or required capability differs. If durable `launch_intent` lacks `launch_completed`, the outcome is indeterminate: do not retry launch, guess, or create another window. Inspect tmux and the receipt manually; acquire only one exact Claude session incarnation or leave the receipt recoverable.
 
 ## Missing or invalid semantic message
 

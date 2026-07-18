@@ -6,11 +6,17 @@ Set `HELPER` to `experimental/claude-delegation/claude_delegation.py` within the
 
 ## 1. Preflight
 
-Run `python3 "$HELPER" diagnose` and show the bounded result. Require Darwin, the documented Claude flags, tmux, and an explicitly acknowledged capacity observation. `untested` remains untested; do not call it supported. Prepare one clean dedicated linked worktree at the exact base and one owner-only launch-packet file containing the complete initial task, allowed source roots, correlation fields, exclusions, and report schema.
+Run `python3 "$HELPER" diagnose` and show the bounded result. Require Darwin, the documented Claude flags, tmux, and an explicitly acknowledged capacity observation. `untested` remains untested; do not call it supported. Obtain the immutable read-only launch-policy digest before authoring the packet:
 
-Pass its path and the intended repository, base, tmux session/window, Claude session UUID, delegation ID, and one stable launch event ID to `launch plan`. Record only the returned SHA-256 digests. Stop on any unavailable required capability or mismatch; do not launch.
+```sh
+printf '%s\n' '{"workflow":"read_only"}' | python3 "$HELPER" launch policy-digest
+```
 
-Completion: diagnostics are disclosed, the worktree/packet are private and exact, and the dry-run digests are available without any local mutation.
+This pre-packet command reads no packet, worktree, receipt, or runtime evidence and creates no private state. Prepare one clean dedicated linked worktree at the exact base and one owner-only launch-packet file containing the complete initial task, allowed source roots, correlation fields, exclusions, report schema, and the returned `launch_policy_digest`. The packet must give the thinker every value required to submit its semantic envelope without follow-up input.
+
+Pass the final packet's path, the pre-packet digest as `expected_launch_policy_digest`, and the intended repository, base, tmux session/window, Claude session UUID, delegation ID, and one stable launch event ID to `launch plan`. Missing, malformed, or mismatched expected policy fails before launch preflight probes. Record only the returned SHA-256 digests. Require its `launch_policy_digest` to equal the pre-packet result, and bind the final packet, policy, and command digests to the receipt. Stop on any unavailable required capability or mismatch; do not create the receipt or launch. Never use a provisional packet, rewrite a packet after planning, or inject the digest through the Claude composer.
+
+Completion: diagnostics are disclosed, the worktree/packet are private and exact, the thinker has the policy digest in its self-contained packet, and the final dry-run digests are available without any local mutation.
 
 ## 2. Create the receipt
 
@@ -20,7 +26,7 @@ Completion: the owner-only receipt durably exists before tmux launch and `receip
 
 ## 3. Launch and acquire
 
-Submit the identical launch-plan request to `launch execute`. Do not type, paste, or inject anything afterward. Using the exact returned pane ID and chosen Claude session UUID, submit a fresh event to `session acquire`. Acquisition must match the receipt's canonical workdir and launch-command digest.
+Submit the identical launch-plan request, including `expected_launch_policy_digest`, to `launch execute`. It revalidates the expectation before inspecting the receipt. Do not type, paste, or inject anything afterward. Using the exact returned pane ID and chosen Claude session UUID, submit a fresh event to `session acquire`. Acquisition must match the receipt's canonical workdir and launch-command digest.
 
 Completion: the receipt contains one exact `session_acquired` incarnation; pane echo, idle state, and process existence do not establish semantic receipt.
 
