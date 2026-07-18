@@ -547,6 +547,171 @@ esac
 	}
 }
 
+func TestLaunchPlanRejectsMissingTargetSessionWithoutMutation(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("experimental Claude launch is macOS-first")
+	}
+	fixture := newLaunchFixture(t)
+	_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "plan")
+	if err == nil || !strings.Contains(stderr, "target tmux session does not exist") {
+		t.Fatalf("missing-session plan error = %v, stderr %q", err, stderr)
+	}
+	entries, err := os.ReadDir(fixture.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("missing-session plan mutated private state: %#v", entries)
+	}
+	if log, err := os.ReadFile(fixture.tmuxLog); err == nil && strings.Contains(string(log), "new-window") {
+		t.Fatalf("missing-session plan created a tmux window:\n%s", log)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
+func TestLaunchExecutionRejectsDisappearedTargetSessionBeforeIntent(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("experimental Claude launch is macOS-first")
+	}
+	fixture := newLaunchFixture(t)
+	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "plan")
+	if err != nil {
+		t.Fatalf("launch plan: %v: %s", err, stderr)
+	}
+	var plan struct {
+		PacketDigest        string `json:"packet_digest"`
+		LaunchPolicyDigest  string `json:"launch_policy_digest"`
+		LaunchCommandDigest string `json:"launch_command_digest"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &plan); err != nil {
+		t.Fatal(err)
+	}
+	binding := testBinding(fixture.request["delegation_id"].(string))
+	binding["workdir"] = fixture.request["workdir"]
+	binding["base"] = fixture.request["base"]
+	binding["packet_digest"] = plan.PacketDigest
+	binding["launch_policy_digest"] = plan.LaunchPolicyDigest
+	binding["launch_command_digest"] = plan.LaunchCommandDigest
+	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "recorded", map[string]any{
+		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	receiptPath := filepath.Join(fixture.stateDir, "receipts.json")
+	before, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.disappearAfterCheck, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute")
+	if err == nil || !strings.Contains(stderr, "target tmux session does not exist") {
+		t.Fatalf("disappeared-session execute error = %v, stderr %q", err, stderr)
+	}
+	after, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) || bytes.Contains(after, []byte(`"kind":"launch_intent"`)) {
+		t.Fatalf("disappeared-session execution changed the pre-launch receipt:\nbefore: %s\nafter:  %s", before, after)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.stateDir, "runtime")); !os.IsNotExist(err) {
+		t.Fatalf("disappeared-session execution created runtime state: %v", err)
+	}
+	if log, err := os.ReadFile(fixture.tmuxLog); err == nil && strings.Contains(string(log), "new-window") {
+		t.Fatalf("disappeared-session execution created a tmux window:\n%s", log)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
+type launchFixture struct {
+	stateDir            string
+	environment         []string
+	request             map[string]any
+	tmuxLog             string
+	session             string
+	disappearAfterCheck string
+}
+
+func newLaunchFixture(t *testing.T) launchFixture {
+	t.Helper()
+	stateDir := t.TempDir()
+	binDir := t.TempDir()
+	workdir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	packetPath := filepath.Join(t.TempDir(), "packet.json")
+	if err := os.WriteFile(packetPath, []byte("bounded launch packet"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
+	session := filepath.Join(t.TempDir(), "session-exists")
+	disappearAfterCheck := filepath.Join(t.TempDir(), "disappear-after-check")
+	base := "0123456789abcdef0123456789abcdef01234567"
+	writeExecutable(t, filepath.Join(binDir, "git"), `#!/bin/sh
+set -eu
+case "$*" in
+  *'rev-parse --show-toplevel'*) printf '%s\n' "$WORKDIR" ;;
+  *'rev-parse HEAD'*) printf '%s\n' "$BASE" ;;
+  *'rev-parse --git-dir'*) printf '%s\n' "$WORKDIR/.git/worktrees/fixture" ;;
+  *'rev-parse --git-common-dir'*) printf '%s\n' '/tmp/source/.git' ;;
+  *'status --porcelain'*) exit 0 ;;
+  *'remote get-url origin'*) printf '%s\n' 'git@github.com:zainfathoni/amux.git' ;;
+  *) exit 2 ;;
+esac
+`)
+	writeExecutable(t, filepath.Join(binDir, "tmux"), `#!/bin/sh
+set -eu
+if [ "$1" = "-V" ]; then
+  printf '%s\n' 'tmux 3.7b'
+  exit 0
+fi
+if [ "$1" = "has-session" ]; then
+  test "$2" = "-t"
+  test "$3" = "=Claude"
+  test -e "$TMUX_SESSION"
+  exit 0
+fi
+printf '%s\n' "$*" >> "$TMUX_LOG"
+if [ "$1" = "new-window" ]; then
+  test -e "$TMUX_SESSION"
+  printf '%s\n' 'Claude\tthinker\t@20\t%20'
+  exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(binDir, "claude"), `#!/bin/sh
+case "$1" in
+  --version) printf '%s\n' '2.1.212 (Claude Code)' ;;
+  --help)
+    printf '%s\n' '--allowed-tools --disable-slash-commands --disallowed-tools --mcp-config --no-chrome --permission-mode --prompt-suggestions --session-id --setting-sources --settings --strict-mcp-config --tools'
+    if [ -e "$DISAPPEAR_AFTER_CHECK" ]; then
+      rm "$DISAPPEAR_AFTER_CHECK" "$TMUX_SESSION"
+    fi
+    ;;
+  *) exit 0 ;;
+esac
+`)
+	environment := append(os.Environ(),
+		"PATH="+binDir+":"+os.Getenv("PATH"), "WORKDIR="+workdir, "BASE="+base,
+		"TMUX_LOG="+tmuxLog, "TMUX_SESSION="+session, "DISAPPEAR_AFTER_CHECK="+disappearAfterCheck,
+	)
+	request := map[string]any{
+		"delegation_id": "delegation-session-preflight", "event_id": "launch-session-preflight", "workdir": workdir,
+		"packet_file": packetPath, "tmux_session": "Claude", "tmux_window": "thinker",
+		"claude_session_id": "550e8400-e29b-41d4-a716-446655440000", "repository": "zainfathoni/amux", "base": base,
+	}
+	return launchFixture{
+		stateDir: stateDir, environment: environment, request: request, tmuxLog: tmuxLog,
+		session: session, disappearAfterCheck: disappearAfterCheck,
+	}
+}
+
 func TestLaunchPlanAndExecutionKeepPacketOutOfReceiptAndDenyMutationTools(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("experimental Claude launch is macOS-first")
@@ -582,6 +747,11 @@ esac
 set -eu
 if [ "$1" = "-V" ]; then
   printf '%s\n' 'tmux 3.7b'
+  exit 0
+fi
+if [ "$1" = "has-session" ]; then
+  test "$2" = "-t"
+  test "$3" = "=Claude"
   exit 0
 fi
 printf '%s\n' "$*" >> "$TMUX_LOG"
