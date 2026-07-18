@@ -87,7 +87,7 @@ exit 99
 
 func TestAggregateLaunchJointlyPreflightsBeforeEitherModeMutates(t *testing.T) {
 	dir := t.TempDir()
-	runnerDir := lockedTestWorktree(t)
+	runnerDir := t.TempDir()
 	missingWorker := filepath.Join(t.TempDir(), "missing")
 	writeRunnerRegistry(t, dir, "alpha\t"+runnerDir+"\n")
 	writeWorkerRegistry(t, dir, "alpha\tworker\t"+missingWorker+"\tT-worker\n")
@@ -104,6 +104,23 @@ func TestAggregateLaunchJointlyPreflightsBeforeEitherModeMutates(t *testing.T) {
 	data, _ := os.ReadFile(log)
 	if strings.Contains(string(data), "new-session") || strings.Contains(string(data), "new-window") {
 		t.Fatalf("aggregate preflight partially mutated tmux:\n%s", data)
+	}
+}
+
+func TestAggregateLaunchAcceptsNonGitRunnerAndWorker(t *testing.T) {
+	dir := t.TempDir()
+	runnerDir := t.TempDir()
+	workerDir := t.TempDir()
+	writeRunnerRegistry(t, dir, "alpha\t"+runnerDir+"\n")
+	writeWorkerRegistry(t, dir, "alpha\tworker\t"+workerDir+"\tT-worker\n")
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	got := executeAggregateJSON(t, "--json", "--dry-run", "--config-dir", dir, "launch", "--workspace", "alpha")
+	if keys := aggregateResourceKeys(got.Planned); strings.Join(keys, ",") != "runner:"+runnerDir+",worker:T-worker" {
+		t.Fatalf("aggregate non-Git launch plan = %v", keys)
 	}
 }
 

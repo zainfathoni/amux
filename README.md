@@ -77,14 +77,14 @@ amux worker launch --thread T-example
 
 Pin and unpin change configuration only. Park stops a verified local client but preserves configuration and remote state. Launch restores local execution without changing remote thread state.
 
-For a stable Git worktree runner:
+For a workdir-bound runner:
 
 ```sh
 amux runner pin --workspace amux --workdir ~/Code/amux-runner
 amux runner launch --workdir ~/Code/amux-runner
 ```
 
-amux accepts the repository's primary worktree as inherently stable. A linked worktree must already be locked; amux verifies that lock but never owns Git worktree lock/unlock.
+Runner workdirs may be Git worktrees or any other existing directory, such as a notes vault or tool configuration directory.
 
 ## Command model
 

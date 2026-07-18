@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -145,7 +144,7 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 	for _, row := range rows {
 		inspection := inspections[row.Workdir]
 		if in.Command.Name == "launch" || in.Command.Name == "restart" && inspection.state == runnerPaneExact {
-			if err := requireLockedWorktree(row.Workdir); err != nil {
+			if err := requireRunnerDirectory(row.Workdir); err != nil {
 				return &env, result.Preflight(err)
 			}
 		}
@@ -168,11 +167,11 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 			pidDiagnostic = staleAmpPIDDiagnostic(row.Workdir)
 		}
 		if in.Command.Name == "doctor" {
-			ownership, ownershipErr := runnerWorktreeOwnership(row.Workdir)
-			if ownershipErr != nil {
-				ownership = ownershipErr.Error()
+			workdirState, workdirErr := runnerDirectoryState(row.Workdir)
+			if workdirErr != nil {
+				workdirState = workdirErr.Error()
 			}
-			out.Message = fmt.Sprintf("local=%s worktree=%s%s", inspection.state, ownership, staleAmpPIDDiagnostic(row.Workdir))
+			out.Message = fmt.Sprintf("local=%s workdir=%s%s", inspection.state, workdirState, staleAmpPIDDiagnostic(row.Workdir))
 			out.Runner = &result.RunnerDetails{LocalState: string(inspection.state), ProcessStart: inspection.pane.StartTime}
 			if inspection.pane.StartTime > 0 {
 				out.Runner.ProcessAgeSeconds = time.Now().Unix() - inspection.pane.StartTime
@@ -214,7 +213,7 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 			continue
 		}
 		if in.Command.Name == "reconcile" {
-			valid := requireLockedWorktree(row.Workdir) == nil
+			valid := requireRunnerDirectory(row.Workdir) == nil
 			if valid {
 				if pidDiagnostic == "" {
 					out.Message = "already in desired state"
@@ -322,7 +321,7 @@ func (a app) runnerPinV1(in invocation, dir config.Directory, selected []config.
 	}
 	row := config.RunnerRow{Workspace: in.Selectors.Workspace, Workdir: in.Selectors.Workdir, Window: config.RunnerWindow(in.Selectors.Workdir)}
 	out := runnerOutcome(row, "pin", "")
-	if err := requireLockedWorktree(row.Workdir); err != nil {
+	if err := requireRunnerDirectory(row.Workdir); err != nil {
 		return env, result.Preflight(err)
 	}
 	all, err := config.LoadRunnersReadOnly(dir.RunnersPath())
@@ -392,51 +391,23 @@ func runnerOutcome(row config.RunnerRow, action, message string) result.Outcome 
 	return result.Outcome{Resource: id, Action: action, Message: message}
 }
 
-func requireLockedWorktree(workdir string) error {
-	_, err := runnerWorktreeOwnership(workdir)
+func requireRunnerDirectory(workdir string) error {
+	_, err := runnerDirectoryState(workdir)
 	return err
 }
 
-func runnerWorktreeOwnership(workdir string) (string, error) {
+func runnerDirectoryState(workdir string) (string, error) {
 	stat, err := os.Stat(workdir)
-	if err != nil || !stat.IsDir() {
+	if os.IsNotExist(err) {
 		return "", fmt.Errorf("runner workdir %s is missing", workdir)
 	}
-	top, err := exec.Command("git", "-C", workdir, "rev-parse", "--show-toplevel").Output()
 	if err != nil {
-		return "", fmt.Errorf("runner workdir %s is not a Git worktree", workdir)
+		return "", fmt.Errorf("inspect runner workdir %s: %w", workdir, err)
 	}
-	topInfo, topErr := os.Stat(strings.TrimSpace(string(top)))
-	if topErr != nil || !os.SameFile(stat, topInfo) {
-		return "", fmt.Errorf("runner workdir %s must be the Git worktree root", workdir)
+	if !stat.IsDir() {
+		return "", fmt.Errorf("runner workdir %s is not a directory", workdir)
 	}
-	out, err := exec.Command("git", "-C", workdir, "worktree", "list", "--porcelain").Output()
-	if err != nil {
-		return "", fmt.Errorf("inspect Git worktree lock for %s: %w", workdir, err)
-	}
-	for index, record := range strings.Split(strings.TrimSpace(string(out)), "\n\n") {
-		lines := strings.Split(record, "\n")
-		if len(lines) == 0 || !strings.HasPrefix(lines[0], "worktree ") {
-			continue
-		}
-		candidateInfo, candidateErr := os.Stat(strings.TrimPrefix(lines[0], "worktree "))
-		if candidateErr != nil || !os.SameFile(stat, candidateInfo) {
-			continue
-		}
-		// Git guarantees that the primary worktree is the first porcelain
-		// record. Unlike linked worktrees, it cannot carry a worktree lock and
-		// is stable because `git worktree prune` never removes it.
-		if index == 0 {
-			return "stable primary", nil
-		}
-		for _, line := range lines[1:] {
-			if line == "locked" || strings.HasPrefix(line, "locked ") {
-				return "locked", nil
-			}
-		}
-		return "", fmt.Errorf("runner worktree %s is not locked; lock it before pinning or launch", workdir)
-	}
-	return "", fmt.Errorf("runner workdir %s is not registered as a Git worktree", workdir)
+	return "directory", nil
 }
 
 func runnerStartCommand(workdir string) string {

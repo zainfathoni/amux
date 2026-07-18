@@ -12,7 +12,7 @@ _Avoid_: Worker, background worker
 
 **Runner identity** — The canonical workdir. A directory may belong to only one configured runner workspace on a machine.
 
-**Runner worktree** — A stable Git worktree owned by a runner. Linked worktrees must already be locked before runner intent is pinned and remain locked for the runner's lifetime; a repository's primary worktree is inherently stable because Git never prunes it and cannot represent the same lock. amux verifies this ownership but never owns locking or unlocking linked worktrees.
+**Runner workdir** — A canonical existing directory owned by a runner. It may be a Git repository or worktree, but does not need to be; amux validates directory existence separately from tmux and process ownership.
 
 **Runner window** — A tmux window whose name is derived deterministically from the runner workdir as `runner-<directory>-<path-hash>`. The canonical workdir, not the generated window name, is the runner's public identity.
 

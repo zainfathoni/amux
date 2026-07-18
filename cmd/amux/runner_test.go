@@ -29,29 +29,18 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func TestRunnerPinRequiresLockedWorktreeAndIsCanonicalIdempotent(t *testing.T) {
+func TestRunnerPinAcceptsExistingNonGitDirectoryAndIsCanonicalIdempotent(t *testing.T) {
 	dir := t.TempDir()
-	locked := lockedTestWorktree(t)
-	unlockedRepo := primaryTestWorktree(t)
-	unlocked := filepath.Join(t.TempDir(), "unlocked")
-	runGit(t, unlockedRepo, "worktree", "add", "-q", "--detach", unlocked)
+	workdir := t.TempDir()
 	bin := t.TempDir()
 	called := filepath.Join(bin, "called")
 	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\ntouch '"+called+"'\nexit 2\n")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
-	err := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", "pin", "--workspace", "alpha", "--workdir", unlocked)
-	if err == nil || !strings.Contains(err.Error(), "not locked") || result.ExitCode(err) != result.ExitRejected {
-		t.Fatalf("unlocked pin error = %v, exit=%d", err, result.ExitCode(err))
-	}
-	if _, statErr := os.Stat(filepath.Join(dir, config.RunnersFile)); !os.IsNotExist(statErr) {
-		t.Fatalf("failed preflight wrote runner config: %v", statErr)
-	}
-
-	args := []string{"--json", "--config-dir", dir, "runner", "pin", "--workspace", "alpha", "--workdir", filepath.Join(locked, ".")}
+	args := []string{"--json", "--config-dir", dir, "runner", "pin", "--workspace", "alpha", "--workdir", filepath.Join(workdir, ".")}
 	first := executeRunnerJSON(t, args...)
-	if len(first.Successful) != 1 || first.Successful[0].Resource.Workdir != locked {
+	if len(first.Successful) != 1 || first.Successful[0].Resource.Workdir != workdir {
 		t.Fatalf("first pin = %+v", first)
 	}
 	second := executeRunnerJSON(t, args...)
@@ -59,11 +48,47 @@ func TestRunnerPinRequiresLockedWorktreeAndIsCanonicalIdempotent(t *testing.T) {
 		t.Fatalf("second pin = %+v", second)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, config.RunnersFile))
-	if err != nil || !strings.Contains(string(data), "alpha\t"+locked+"\n") || strings.Contains(string(data), config.RunnerWindow(locked)+"\t") {
+	if err != nil || !strings.Contains(string(data), "alpha\t"+workdir+"\n") || strings.Contains(string(data), config.RunnerWindow(workdir)+"\t") {
 		t.Fatalf("runner registry = %q, err=%v", data, err)
 	}
 	if _, err := os.Stat(called); !os.IsNotExist(err) {
 		t.Fatalf("runner pin used unexpected tmux mutation: %v", err)
+	}
+}
+
+func TestRunnerPinRejectsMissingAndFileWorkdirsBeforeMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		workdir func(*testing.T) string
+	}{
+		{name: "missing", workdir: func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") }},
+		{name: "file", workdir: func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "file")
+			if err := os.WriteFile(path, []byte("not a directory"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			bin := t.TempDir()
+			mutated := filepath.Join(bin, "mutated")
+			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\ntouch '"+mutated+"'\nexit 2\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+			err := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", "pin", "--workspace", "alpha", "--workdir", tc.workdir(t))
+			if err == nil || result.ExitCode(err) != result.ExitRejected {
+				t.Fatalf("pin error = %v, exit=%d", err, result.ExitCode(err))
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, config.RunnersFile)); !os.IsNotExist(statErr) {
+				t.Fatalf("failed preflight wrote runner config: %v", statErr)
+			}
+			if _, statErr := os.Stat(mutated); !os.IsNotExist(statErr) {
+				t.Fatalf("failed preflight mutated tmux: %v", statErr)
+			}
+		})
 	}
 }
 
@@ -116,32 +141,45 @@ func TestRunnerListIsDeterministicLocalOnly(t *testing.T) {
 	}
 }
 
-func TestRunnerLaunchPreflightsEveryLockedWorktreeBeforeTmuxMutation(t *testing.T) {
-	dir := t.TempDir()
-	locked := lockedTestWorktree(t)
-	unlockedRepo := primaryTestWorktree(t)
-	unlocked := filepath.Join(t.TempDir(), "unlocked")
-	runGit(t, unlockedRepo, "worktree", "add", "-q", "--detach", unlocked)
-	writeRunnerRegistry(t, dir, "alpha\t"+locked+"\nbeta\t"+unlocked+"\n")
-	bin := t.TempDir()
-	log := filepath.Join(bin, "tmux.log")
-	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\necho \"$*\" >> '"+log+"'\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+func TestRunnerLaunchRejectsMissingAndFileWorkdirsBeforeTmuxMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		workdir func(*testing.T) string
+	}{
+		{name: "missing", workdir: func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") }},
+		{name: "file", workdir: func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "file")
+			if err := os.WriteFile(path, []byte("not a directory"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			valid := t.TempDir()
+			writeRunnerRegistry(t, dir, "alpha\t"+valid+"\nbeta\t"+tc.workdir(t)+"\n")
+			bin := t.TempDir()
+			log := filepath.Join(bin, "tmux.log")
+			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\necho \"$*\" >> '"+log+"'\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
-	err := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", "launch", "--all")
-	if err == nil || !strings.Contains(err.Error(), "not locked") || result.ExitCode(err) != result.ExitRejected {
-		t.Fatalf("bulk launch error = %v", err)
-	}
-	data, _ := os.ReadFile(log)
-	if strings.Contains(string(data), "new-session") || strings.Contains(string(data), "new-window") {
-		t.Fatalf("bulk preflight mutated tmux:\n%s", data)
+			err := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", "launch", "--all")
+			if err == nil || result.ExitCode(err) != result.ExitRejected {
+				t.Fatalf("bulk launch error = %v, exit=%d", err, result.ExitCode(err))
+			}
+			data, _ := os.ReadFile(log)
+			if strings.Contains(string(data), "new-session") || strings.Contains(string(data), "new-window") {
+				t.Fatalf("bulk preflight mutated tmux:\n%s", data)
+			}
+		})
 	}
 }
 
-func TestRunnerPrimaryWorktreeOwnershipAgreesAcrossRestartAndDoctor(t *testing.T) {
+func TestRunnerNonGitDirectoryAcceptedAcrossRestartAndDoctor(t *testing.T) {
 	dir := t.TempDir()
-	workdir := primaryTestWorktree(t)
+	workdir := t.TempDir()
 	window := config.RunnerWindow(workdir)
 	start := runnerStartCommand(workdir)
 	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
@@ -175,11 +213,11 @@ esac
 
 	restart := executeRunnerJSON(t, "--json", "--dry-run", "--config-dir", dir, "runner", "restart", "--workdir", workdir)
 	if len(restart.Planned) != 1 || len(restart.Failed) != 0 {
-		t.Fatalf("primary worktree restart = %+v", restart)
+		t.Fatalf("non-Git directory restart = %+v", restart)
 	}
 	doctor := executeRunnerJSON(t, "--json", "--config-dir", dir, "runner", "doctor", "--workdir", workdir)
-	if len(doctor.Successful) != 1 || len(doctor.Failed) != 0 || !strings.Contains(doctor.Successful[0].Message, "worktree=stable primary") {
-		t.Fatalf("primary worktree doctor = %+v", doctor)
+	if len(doctor.Successful) != 1 || len(doctor.Failed) != 0 || !strings.Contains(doctor.Successful[0].Message, "workdir=directory") {
+		t.Fatalf("non-Git directory doctor = %+v", doctor)
 	}
 	registryAfter, err := os.ReadFile(filepath.Join(dir, config.RunnersFile))
 	if err != nil || !bytes.Equal(registryAfter, registryBefore) {
@@ -191,7 +229,7 @@ esac
 	}
 }
 
-func TestRunnerRestartRejectsUnlockedLinkedWorktree(t *testing.T) {
+func TestRunnerRestartAcceptsUnlockedLinkedWorktree(t *testing.T) {
 	dir := t.TempDir()
 	repo := primaryTestWorktree(t)
 	workdir := filepath.Join(t.TempDir(), "linked")
@@ -209,9 +247,9 @@ esac
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
-	err := executeRunnerJSONError(t, "--json", "--dry-run", "--config-dir", dir, "runner", "restart", "--workdir", workdir)
-	if err == nil || !strings.Contains(err.Error(), "not locked") || result.ExitCode(err) != result.ExitRejected {
-		t.Fatalf("unlocked linked restart error = %v, exit=%d", err, result.ExitCode(err))
+	got := executeRunnerJSON(t, "--json", "--dry-run", "--config-dir", dir, "runner", "restart", "--workdir", workdir)
+	if len(got.Planned) != 1 || len(got.Failed) != 0 {
+		t.Fatalf("unlocked linked restart = %+v", got)
 	}
 }
 
