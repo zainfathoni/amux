@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -415,6 +416,9 @@ func TestMutatingReportRequiresCompletedAcquiredMutatingSession(t *testing.T) {
 }
 
 func TestMutatingLaunchIsAnExplicitSeparateWriterPolicy(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("experimental Claude launch is Darwin-only")
+	}
 	fixture := newLaunchFixture(t)
 	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
 		t.Fatal(err)
