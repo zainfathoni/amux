@@ -141,7 +141,7 @@ func TestRunnerListIsDeterministicLocalOnly(t *testing.T) {
 	}
 }
 
-func TestRunnerLaunchRejectsMissingAndFileWorkdirsBeforeTmuxMutation(t *testing.T) {
+func TestRunnerLaunchAndRestartRejectMissingAndFileWorkdirsBeforeTmuxMutation(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		workdir func(*testing.T) string
@@ -155,25 +155,27 @@ func TestRunnerLaunchRejectsMissingAndFileWorkdirsBeforeTmuxMutation(t *testing.
 			return path
 		}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			valid := t.TempDir()
-			writeRunnerRegistry(t, dir, "alpha\t"+valid+"\nbeta\t"+tc.workdir(t)+"\n")
-			bin := t.TempDir()
-			log := filepath.Join(bin, "tmux.log")
-			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\necho \"$*\" >> '"+log+"'\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
-			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+		for _, command := range []string{"launch", "restart"} {
+			t.Run(command+"/"+tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				valid := t.TempDir()
+				writeRunnerRegistry(t, dir, "alpha\t"+valid+"\nbeta\t"+tc.workdir(t)+"\n")
+				bin := t.TempDir()
+				log := filepath.Join(bin, "tmux.log")
+				writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\necho \"$*\" >> '"+log+"'\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
-			err := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", "launch", "--all")
-			if err == nil || result.ExitCode(err) != result.ExitRejected {
-				t.Fatalf("bulk launch error = %v, exit=%d", err, result.ExitCode(err))
-			}
-			data, _ := os.ReadFile(log)
-			if strings.Contains(string(data), "new-session") || strings.Contains(string(data), "new-window") {
-				t.Fatalf("bulk preflight mutated tmux:\n%s", data)
-			}
-		})
+				err := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", command, "--all")
+				if err == nil || result.ExitCode(err) != result.ExitRejected {
+					t.Fatalf("bulk %s error = %v, exit=%d", command, err, result.ExitCode(err))
+				}
+				data, _ := os.ReadFile(log)
+				if strings.Contains(string(data), "new-session") || strings.Contains(string(data), "new-window") {
+					t.Fatalf("bulk preflight mutated tmux:\n%s", data)
+				}
+			})
+		}
 	}
 }
 

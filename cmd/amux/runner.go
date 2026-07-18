@@ -143,7 +143,7 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 	}
 	for _, row := range rows {
 		inspection := inspections[row.Workdir]
-		if in.Command.Name == "launch" || in.Command.Name == "restart" && inspection.state == runnerPaneExact {
+		if in.Command.Name == "launch" || in.Command.Name == "restart" {
 			if err := requireRunnerDirectory(row.Workdir); err != nil {
 				return &env, result.Preflight(err)
 			}
