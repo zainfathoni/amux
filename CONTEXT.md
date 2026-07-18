@@ -41,7 +41,7 @@ _Avoid_: Session when referring to the configured lifecycle group
 
 **Finish** — A skill-only post-merge workflow for a sprawled worker. Finish refuses to delete a worktree that is unexpectedly owned by a runner and performs worker teardown only after Git and worktree cleanup succeeds.
 
-**Reconcile** — Explicitly repair drift between amux intent and external or runtime state. Worker reconciliation synchronizes shelf intent with remote archive state; runner reconciliation repairs stale worktree/configuration ownership without silently adopting ambiguous processes.
+**Reconcile** — Explicitly repair drift between amux intent and external or runtime state. Worker reconciliation synchronizes shelf intent with remote archive state; runner reconciliation removes stale configuration for missing workdirs without silently adopting ambiguous processes.
 
 **Restart** — Replace a running local client in place while preserving its configuration and remote thread.
 
