@@ -524,6 +524,46 @@ exit 2
 	}
 }
 
+func TestResolveSpawnReceivingThreadRechecksProvisionedThreadAfterSlowFreshThreadDiscovery(t *testing.T) {
+	bin := t.TempDir()
+	messagePath := filepath.Join(bin, "assignment")
+	visible := filepath.Join(bin, "visible")
+	exportCount := filepath.Join(bin, "export-count")
+	message := strings.Repeat("a", 2819)
+	if err := os.WriteFile(messagePath, []byte(message), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+if [ "$1 $2 $3" = "threads export T-provisioned" ]; then
+  count=0; if [ -f "`+exportCount+`" ]; then count=$(cat "`+exportCount+`"); fi
+  count=$((count + 1)); printf '%s\n' "$count" > "`+exportCount+`"
+  if [ -e "`+visible+`" ]; then printf '{"id":"T-provisioned","messages":[{"role":"user","content":"'; cat "`+messagePath+`"; printf '"},{"role":"assistant","content":"already executing"}]}\n'; else printf '%s\n' '{"id":"T-provisioned","messages":[]}'; fi
+  exit 0
+fi
+if [ "$1 $2" = "threads list" ]; then
+  touch "`+visible+`"
+  sleep 0.2
+  printf '%s\n' '[{"id":"T-provisioned"}]'
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	got, err := resolveSpawnReceivingThread("T-provisioned", message, t.TempDir(), map[string]bool{"T-provisioned": true}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "T-provisioned" {
+		t.Fatalf("receiving thread = %q, want T-provisioned", got)
+	}
+	count, err := os.ReadFile(exportCount)
+	if err != nil || strings.TrimSpace(string(count)) != "2" {
+		t.Fatalf("provisioned export count = %q, err=%v", count, err)
+	}
+}
+
 func TestWorkerSpawnRecoversVerifiedProvisionedThreadFromIndeterminateWithoutResubmitting(t *testing.T) {
 	dir := t.TempDir()
 	workdir := t.TempDir()
@@ -603,6 +643,73 @@ exit 2
 	for _, forbidden := range []string{"threads new", "threads list", "threads search", "send-keys", "paste-buffer"} {
 		if strings.Contains(string(log), forbidden) {
 			t.Fatalf("indeterminate recovery performed forbidden %q work:\n%s", forbidden, log)
+		}
+	}
+}
+
+func TestWorkerSpawnReconcilesIndeterminateOperationAfterExactManualAdoption(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	message := "assignment"
+	request := strings.Join([]string{"alpha", "worker", workdir, "", message}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Now().UTC()
+	record := config.OperationRecord{
+		Key:           "manual-adoption",
+		Kind:          "worker-spawn",
+		RequestHash:   hex.EncodeToString(sum[:]),
+		MessageSource: config.OperationMessageSourceStdin,
+		State:         config.OperationIndeterminate,
+		Phase:         config.OperationPhaseDeliveryStarted,
+		Resource:      config.OperationResource{Kind: "worker", Thread: "T-provisioned"},
+		Error:         "initial assignment was not found in provisioned thread T-provisioned or one unambiguous fresh receiving thread; recovery: inspect thread T-provisioned and do not resubmit",
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	if _, err := config.StoreOperation(filepath.Join(dir, config.OperationsFile), record); err != nil {
+		t.Fatal(err)
+	}
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-provisioned"}
+	writeWorkerRegistry(t, dir, row.String()+"\n")
+	start := teardownExpectedStartCommand(teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}, row)
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+echo "amp $*" >> "`+logPath+`"
+if [ "$1 $2 $3" = "threads export T-provisioned" ]; then printf '%s\n' '{"id":"T-provisioned","messages":[{"role":"user","content":"assignment"},{"role":"assistant","content":"already executing"}]}'; exit 0; fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "tmux $*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then exit 0; fi
+if [ "$1" = list-panes ]; then printf 'worker\t@1\t%s\n' `+shellSingleQuote(start)+`; exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	var stdout bytes.Buffer
+	if err := (app{stdin: strings.NewReader(message), stdout: &stdout}).execute([]string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message-stdin", "--idempotency-key", record.Key}); err != nil {
+		t.Fatalf("reconcile manually adopted worker: %v\nstdout: %s", err, stdout.String())
+	}
+	var got result.Envelope
+	if err := json.NewDecoder(&stdout).Decode(&got); err != nil {
+		t.Fatalf("decode reconciliation result: %v\nstdout: %s", err, stdout.String())
+	}
+	if len(got.Skipped) != 1 || got.Skipped[0].Resource.Thread != "T-provisioned" {
+		t.Fatalf("manual-adoption reconciliation result = %+v", got)
+	}
+	completed, found, err := config.LoadOperation(filepath.Join(dir, config.OperationsFile), record.Key)
+	if err != nil || !found || completed.State != config.OperationSucceeded || completed.Phase != config.OperationPhaseConfigured {
+		t.Fatalf("reconciled operation = %+v, found=%t, err=%v", completed, found, err)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"threads new", "threads list", "threads search", "send-keys", "paste-buffer", "new-session", "new-window", "respawn-pane"} {
+		if strings.Contains(string(log), forbidden) {
+			t.Fatalf("manual-adoption reconciliation performed forbidden %q work:\n%s", forbidden, log)
 		}
 	}
 }
@@ -1242,6 +1349,7 @@ func TestWorkerSpawnAlternateDeliveryFailsClosedWhenOwnershipIsAmbiguous(t *test
 		{name: "duplicate", wantErr: "multiple fresh receiving threads T-receiver, T-second"},
 		{name: "bound-duplicate", wantErr: "identity conflict between provisioned thread T-created and fresh receiving thread(s) T-receiver"},
 		{name: "delayed-bound-duplicate", wantErr: "identity conflict between provisioned thread T-created and fresh receiving thread(s) T-receiver"},
+		{name: "slow-discovery-bound-duplicate", wantErr: "identity conflict between provisioned thread T-created and fresh receiving thread(s) T-receiver"},
 		{name: "terminal-newline-normalized-alternate", wantErr: "initial assignment was not found in provisioned thread T-created"},
 		{name: "timeout", wantErr: "list fresh receiving threads after delivery"},
 		{name: "identity-conflict", wantErr: "receiving thread T-receiver is already configured as beta/existing"},
@@ -1255,6 +1363,7 @@ func TestWorkerSpawnAlternateDeliveryFailsClosedWhenOwnershipIsAmbiguous(t *test
 			running := filepath.Join(bin, "running")
 			delivered := filepath.Join(bin, "delivered")
 			listCount := filepath.Join(bin, "list-count")
+			provisionedVisible := filepath.Join(bin, "provisioned-visible")
 			row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-created"}
 			start := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "worker", Thread: row.Thread}, row)
 			if tt.name == "identity-conflict" {
@@ -1268,12 +1377,13 @@ if [ "$1 $2" = "threads list" ]; then
   if [ ! -e "`+delivered+`" ]; then printf '%s\n' '[{"id":"T-created"}]'; exit 0; fi
   if [ "`+tt.name+`" = timeout ]; then echo 'thread list timed out' >&2; exit 1; fi
   if [ "`+tt.name+`" = delayed-bound-duplicate ] && [ "$count" -lt 4 ]; then printf '%s\n' '[{"id":"T-created"}]'; exit 0; fi
+  if [ "`+tt.name+`" = slow-discovery-bound-duplicate ]; then touch "`+provisionedVisible+`"; sleep 0.2; fi
   if [ "`+tt.name+`" = archived ] && ! echo "$*" | grep -q -- --include-archived; then printf '%s\n' '[{"id":"T-created"}]'; exit 0; fi
   if [ "`+tt.name+`" = duplicate ]; then printf '%s\n' '[{"id":"T-created"},{"id":"T-receiver"},{"id":"T-second"}]'; else printf '%s\n' '[{"id":"T-created"},{"id":"T-receiver"}]'; fi
   exit 0
 fi
 if [ "$1 $2 $3" = "threads export T-created" ]; then
-  if { [ "`+tt.name+`" = bound-duplicate ] || [ "`+tt.name+`" = delayed-bound-duplicate ]; } && [ -e "`+delivered+`" ]; then printf '%s\n' '{"id":"T-created","messages":[{"role":"user","content":"hello"}]}'; else printf '%s\n' '{"id":"T-created","messages":[]}'; fi
+  if { [ "`+tt.name+`" = bound-duplicate ] || [ "`+tt.name+`" = delayed-bound-duplicate ]; } && [ -e "`+delivered+`" ] || [ -e "`+provisionedVisible+`" ]; then printf '%s\n' '{"id":"T-created","messages":[{"role":"user","content":"hello"}]}'; else printf '%s\n' '{"id":"T-created","messages":[]}'; fi
   exit 0
 fi
 if [ "$1 $2 $3" = "threads export T-receiver" ] || [ "$1 $2 $3" = "threads export T-second" ]; then

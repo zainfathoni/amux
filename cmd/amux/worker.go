@@ -954,6 +954,12 @@ func resolveSpawnReceivingThread(boundThread, message, workdir string, preDelive
 				fresh = append(fresh, candidate)
 			}
 		}
+		if !boundContainsMessage {
+			boundContainsMessage, _, err = ampThreadContainsExactAssignment(boundThread, message, workdir, false, allowTerminalLineEndingNormalization)
+			if err != nil {
+				return "", fmt.Errorf("recheck provisioned thread %s after fresh-thread discovery: %w; recovery: inspect thread %s and do not resubmit", boundThread, err, boundThread)
+			}
+		}
 		sort.Strings(fresh)
 		if boundContainsMessage && len(fresh) > 0 {
 			return "", fmt.Errorf("initial assignment has an identity conflict between provisioned thread %s and fresh receiving thread(s) %s; recovery: stop duplicate work and choose the authoritative thread manually", boundThread, strings.Join(fresh, ", "))
