@@ -660,6 +660,26 @@ func TestLaunchPlanRejectsMissingTargetSessionWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestLinuxLaunchDoesNotClaimMutatingDelegation(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux-specific capability boundary")
+	}
+	fixture := newLaunchFixture(t)
+	request := cloneJSONMap(t, fixture.request)
+	request["workflow"] = "mutating"
+	request["baseline_branch"] = "delegate"
+	request["writer_owner"] = "claude"
+	request["integration_owner"] = "amp"
+	request["coordinator_write_frozen"] = true
+	request["shared_writable"] = false
+	request["handoff"] = "one_clean_local_commit"
+	request["capacity_request"] = map[string]any{}
+	_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, request, "launch", "plan")
+	if err == nil || !strings.Contains(stderr, "mutating Claude launch remains available only on Darwin") {
+		t.Fatalf("Linux mutating launch error = %v, stderr %q", err, stderr)
+	}
+}
+
 func TestLaunchExecutionRejectsDisappearedTargetSessionBeforeIntent(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("experimental Claude launch requires an exact supported process identity")
