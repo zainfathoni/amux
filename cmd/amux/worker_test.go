@@ -244,7 +244,7 @@ exit 2
 	}
 }
 
-func TestWorkerSpawnInterruptedAdoptionReplayFailsClosedWithBothThreadIdentities(t *testing.T) {
+func TestWorkerSpawnInterruptedAdoptionReplayRequiresExplicitReconcileWithoutMutation(t *testing.T) {
 	dir := t.TempDir()
 	workdir := t.TempDir()
 	request := strings.Join([]string{"alpha", "worker", workdir, "", "hello"}, "\x00")
@@ -275,11 +275,11 @@ func TestWorkerSpawnInterruptedAdoptionReplayFailsClosedWithBothThreadIdentities
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
 	err := executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", "adoption-started")
-	if err == nil || !strings.Contains(err.Error(), "T-provisioned") || !strings.Contains(err.Error(), "T-receiving") || !strings.Contains(err.Error(), "do not resubmit") {
+	if err == nil || !strings.Contains(err.Error(), "requires explicit --reconcile") || !strings.Contains(err.Error(), "refusing external work") {
 		t.Fatalf("interrupted adoption replay error = %v", err)
 	}
 	updated, found, loadErr := config.LoadOperation(filepath.Join(dir, config.OperationsFile), record.Key)
-	if loadErr != nil || !found || updated.State != config.OperationIndeterminate || updated.ThreadAdoption == nil {
+	if loadErr != nil || !found || updated.State != config.OperationStarted || updated.ThreadAdoption == nil || updated.ThreadAdoption.ReceivingThread != "T-receiving" {
 		t.Fatalf("interrupted adoption operation = %+v found=%t err=%v", updated, found, loadErr)
 	}
 	if _, err := os.Stat(called); !os.IsNotExist(err) {
@@ -565,6 +565,25 @@ exit 2
 	}
 }
 
+func TestVerifyAlternateReceiverBeforeCleanupRejectsProvisionedContent(t *testing.T) {
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+echo "amp $*" >> "`+logPath+`"
+if [ "$1 $2 $3" = "threads export T-provisioned" ]; then printf '%s\n' '{"messages":[{"role":"user","content":"different"}]}'; exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	err := verifyAlternateReceiverBeforeCleanup("T-provisioned", "T-receiver", "assignment", t.TempDir(), map[string]bool{"T-provisioned": true}, false)
+	if err == nil || !strings.Contains(err.Error(), "provisioned residue T-provisioned is not empty") {
+		t.Fatalf("cleanup evidence error = %v", err)
+	}
+	log, readErr := os.ReadFile(logPath)
+	if readErr != nil || strings.Contains(string(log), "threads archive") {
+		t.Fatalf("conflicting cleanup evidence mutated threads: err=%v\n%s", readErr, log)
+	}
+}
+
 func TestResolveSpawnReceivingThreadRescansFreshCandidatesAfterProvisionedAssignmentAppears(t *testing.T) {
 	bin := t.TempDir()
 	workdir := t.TempDir()
@@ -832,6 +851,311 @@ exit 2
 		if strings.Contains(string(log), forbidden) {
 			t.Fatalf("manual-adoption reconciliation performed forbidden %q work:\n%s", forbidden, log)
 		}
+	}
+}
+
+func TestWorkerSpawnReconcileAdoptsOneFreshAlternateWithoutResubmitting(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	message := "assignment\n"
+	messagePath := filepath.Join(dir, "assignment.md")
+	if err := os.WriteFile(messagePath, []byte(message), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provisioned := "T-019f7519-01e8-7000-8000-000000000001"
+	receiver := "T-019f7519-05d0-7000-8000-000000000001"
+	window := "#104 worker"
+	request := strings.Join([]string{"alpha", window, workdir, "", message, "#104", "groups", "issue-104"}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	record := config.OperationRecord{
+		Key:           "reconcile-alternate",
+		Kind:          "worker-spawn",
+		RequestHash:   hex.EncodeToString(sum[:]),
+		MessageSource: config.OperationMessageSourceFile,
+		State:         config.OperationIndeterminate,
+		Phase:         config.OperationPhaseDeliveryStarted,
+		Resource:      config.OperationResource{Kind: "worker", Thread: provisioned},
+		Error:         "initial assignment was not found in provisioned thread " + provisioned + " or one unambiguous fresh receiving thread; recovery: inspect thread " + provisioned + " and do not resubmit",
+		CreatedAt:     now,
+		UpdatedAt:     now.Add(3 * time.Second),
+	}
+	operationPath := filepath.Join(dir, config.OperationsFile)
+	if _, err := config.StoreOperation(operationPath, record); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	running := filepath.Join(bin, "running")
+	row := config.Row{Workspace: "alpha", Window: window, Workdir: workdir, Thread: receiver}
+	start := teardownExpectedStartCommand(teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}, row)
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+echo "amp $*" >> "`+logPath+`"
+if [ "$1 $2" = "threads list" ]; then printf '%s\n' '[{"id":"`+provisioned+`"},{"id":"`+receiver+`"}]'; exit 0; fi
+if [ "$1 $2 $3" = "threads export `+provisioned+`" ]; then printf '%s\n' '{"id":"`+provisioned+`","messages":[]}'; exit 0; fi
+if [ "$1 $2 $3" = "threads export `+receiver+`" ]; then printf '%s\n' '{"id":"`+receiver+`","env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[{"role":"user","content":"assignment"}]}'; exit 0; fi
+if [ "$1 $2 $3" = "threads archive `+provisioned+`" ]; then exit 0; fi
+if [ "$1 $2 $3" = "threads rename `+receiver+`" ] && [ "$4" = "#104 worker" ]; then exit 0; fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "tmux $*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then test -e "`+running+`"; exit $?; fi
+if [ "$1" = new-session ]; then touch "`+running+`"; exit 0; fi
+if [ "$1 $2" = "list-panes -a" ]; then exit 0; fi
+if [ "$1" = list-panes ]; then printf '#104 worker\t@1\t%s\n' `+shellSingleQuote(start)+`; exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	groupCalls := installSupportedGroupAmp(t, func([]string) ([]byte, error) { return nil, nil })
+	args := []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--title-prefix", "#104", "--group", "issue-104", "--message-file", messagePath, "--idempotency-key", record.Key, "--reconcile"}
+
+	got := executeWorkerJSON(t, args...)
+	if len(got.Successful) != 2 || got.Successful[0].Resource.Thread != receiver || got.Successful[1].Resource.Thread != receiver {
+		t.Fatalf("alternate reconciliation result = %+v", got)
+	}
+	completed, found, err := config.LoadOperation(operationPath, record.Key)
+	if err != nil || !found || completed.State != config.OperationSucceeded || completed.Resource.Thread != receiver || completed.ThreadAdoption == nil || completed.ThreadAdoption.ProvisionedThread != provisioned {
+		t.Fatalf("alternate reconciled operation = %+v found=%t err=%v", completed, found, err)
+	}
+	rows, err := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
+	if err != nil || len(rows) != 1 || rows[0] != row {
+		t.Fatalf("alternate reconciled workers = %+v err=%v", rows, err)
+	}
+	memberships, err := config.LoadGroupsReadOnly(filepath.Join(dir, config.GroupsFile))
+	if err != nil || len(memberships) != 1 || memberships[0].Thread != receiver {
+		t.Fatalf("alternate reconciled groups = %+v err=%v", memberships, err)
+	}
+	for _, call := range *groupCalls {
+		if len(call.args) == 4 && call.args[0] == "threads" && call.args[1] == "label" && call.args[2] != receiver {
+			t.Fatalf("alternate reconciliation grouped wrong thread: %+v", call.args)
+		}
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"threads new", "threads search", "send-keys", "paste-buffer", "respawn-pane"} {
+		if strings.Contains(string(log), forbidden) {
+			t.Fatalf("alternate reconciliation performed forbidden %q work:\n%s", forbidden, log)
+		}
+	}
+	archiveAt := strings.Index(string(log), "amp threads archive "+provisioned)
+	launchAt := strings.Index(string(log), "tmux new-session")
+	if archiveAt < 0 || launchAt <= archiveAt {
+		t.Fatalf("alternate reconciliation archive/launch order = archive:%d launch:%d\n%s", archiveAt, launchAt, log)
+	}
+	beforeReplay := string(log)
+	replayArgs := append([]string(nil), args[:len(args)-1]...)
+	replayed := executeWorkerJSON(t, replayArgs...)
+	if len(replayed.Skipped) != 1 || replayed.Skipped[0].Resource.Thread != receiver {
+		t.Fatalf("alternate reconciliation replay = %+v", replayed)
+	}
+	afterReplay, err := os.ReadFile(logPath)
+	if err != nil || string(afterReplay) != beforeReplay {
+		t.Fatalf("alternate reconciliation replay performed external work: err=%v\nbefore=%s\nafter=%s", err, beforeReplay, afterReplay)
+	}
+}
+
+func TestWorkerSpawnReconcileRejectsAmbiguousAlternateWithoutMutation(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	const provisioned = "T-019f7519-01e8-7000-8000-000000000001"
+	const receiverOne = "T-019f7519-05d0-7000-8000-000000000001"
+	const receiverTwo = "T-019f7519-09b8-7000-8000-000000000001"
+	request := strings.Join([]string{"alpha", "worker", workdir, "", "assignment"}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	record := config.OperationRecord{
+		Key: "reconcile-ambiguous", Kind: "worker-spawn", RequestHash: hex.EncodeToString(sum[:]),
+		MessageSource: config.OperationMessageSourceMessage, State: config.OperationIndeterminate, Phase: config.OperationPhaseDeliveryStarted,
+		Resource:  config.OperationResource{Kind: "worker", Thread: provisioned},
+		Error:     "initial assignment was not found in provisioned thread " + provisioned + " or one unambiguous fresh receiving thread; recovery: inspect thread " + provisioned + " and do not resubmit",
+		CreatedAt: now, UpdatedAt: now.Add(3 * time.Second),
+	}
+	operationPath := filepath.Join(dir, config.OperationsFile)
+	if _, err := config.StoreOperation(operationPath, record); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(operationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+echo "amp $*" >> "`+logPath+`"
+if [ "$1 $2" = "threads list" ]; then printf '%s\n' '[{"id":"`+provisioned+`"},{"id":"`+receiverOne+`"},{"id":"`+receiverTwo+`"}]'; exit 0; fi
+if [ "$1 $2 $3" = "threads export `+provisioned+`" ]; then printf '%s\n' '{"messages":[]}'; exit 0; fi
+if [ "$1 $2 $3" = "threads export `+receiverOne+`" ] || [ "$1 $2 $3" = "threads export `+receiverTwo+`" ]; then
+  printf '%s\n' '{"env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[{"role":"user","content":"assignment"}]}'; exit 0
+fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "tmux $*" >> "`+logPath+`"
+exit 99
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	err = executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "assignment", "--idempotency-key", record.Key, "--reconcile")
+	if err == nil || !strings.Contains(err.Error(), "multiple exact fresh alternate receivers") {
+		t.Fatalf("ambiguous reconciliation error = %v", err)
+	}
+	after, readErr := os.ReadFile(operationPath)
+	if readErr != nil || !bytes.Equal(after, before) {
+		t.Fatalf("ambiguous reconciliation mutated operation: err=%v\nbefore=%s\nafter=%s", readErr, before, after)
+	}
+	log, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, forbidden := range []string{"threads new", "threads archive", "threads rename", "threads search", "send-keys", "paste-buffer", "tmux "} {
+		if strings.Contains(string(log), forbidden) {
+			t.Fatalf("ambiguous reconciliation performed forbidden %q work:\n%s", forbidden, log)
+		}
+	}
+}
+
+func TestWorkerSpawnReconcileRejectsOnlyMatchingReceiverAfterOriginalCutoffWithoutMutation(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	const provisioned = "T-019f7519-01e8-7000-8000-000000000001"
+	const lateReceiver = "T-019f7519-1190-7000-8000-000000000001"
+	request := strings.Join([]string{"alpha", "#104 worker", workdir, "", "assignment", "#104", "groups", "issue-104"}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	record := config.OperationRecord{
+		Key: "reconcile-late-only", Kind: "worker-spawn", RequestHash: hex.EncodeToString(sum[:]),
+		MessageSource: config.OperationMessageSourceMessage, State: config.OperationIndeterminate, Phase: config.OperationPhaseDeliveryStarted,
+		Resource:  config.OperationResource{Kind: "worker", Thread: provisioned},
+		Error:     "initial assignment was not found in provisioned thread " + provisioned + " or one unambiguous fresh receiving thread; recovery: inspect thread " + provisioned + " and do not resubmit",
+		CreatedAt: now, UpdatedAt: now.Add(3 * time.Second),
+	}
+	operationPath := filepath.Join(dir, config.OperationsFile)
+	if _, err := config.StoreOperation(operationPath, record); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(operationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+echo "amp $*" >> "`+logPath+`"
+if [ "$1 $2" = "threads list" ]; then printf '%s\n' '[{"id":"`+provisioned+`"},{"id":"`+lateReceiver+`"}]'; exit 0; fi
+if [ "$1 $2 $3" = "threads export `+provisioned+`" ]; then printf '%s\n' '{"messages":[]}'; exit 0; fi
+if [ "$1 $2 $3" = "threads export `+lateReceiver+`" ]; then printf '%s\n' '{"env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[{"role":"user","content":"assignment"}]}'; exit 0; fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "tmux $*" >> "`+logPath+`"
+exit 99
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	groupCalls := installSupportedGroupAmp(t, func([]string) ([]byte, error) { return nil, nil })
+
+	err = executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--title-prefix", "#104", "--group", "issue-104", "--message", "assignment", "--idempotency-key", record.Key, "--reconcile")
+	if err == nil || !strings.Contains(err.Error(), "no exact fresh alternate receiver") {
+		t.Fatalf("late-only reconciliation error = %v", err)
+	}
+	after, readErr := os.ReadFile(operationPath)
+	if readErr != nil || !bytes.Equal(after, before) {
+		t.Fatalf("late-only reconciliation mutated operation: err=%v\nbefore=%s\nafter=%s", readErr, before, after)
+	}
+	if rows, loadErr := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile)); loadErr != nil || len(rows) != 0 {
+		t.Fatalf("late-only reconciliation workers = %+v err=%v", rows, loadErr)
+	}
+	if memberships, loadErr := config.LoadGroupsReadOnly(filepath.Join(dir, config.GroupsFile)); loadErr != nil || len(memberships) != 0 {
+		t.Fatalf("late-only reconciliation groups = %+v err=%v", memberships, loadErr)
+	}
+	if len(*groupCalls) != 0 {
+		t.Fatalf("late-only reconciliation called group label API: %+v", *groupCalls)
+	}
+	log, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, forbidden := range []string{"threads new", "threads archive", "threads rename", "threads label", "threads search", "send-keys", "paste-buffer", "tmux "} {
+		if strings.Contains(string(log), forbidden) {
+			t.Fatalf("late-only reconciliation performed forbidden %q work:\n%s", forbidden, log)
+		}
+	}
+}
+
+func TestWorkerSpawnReconcileResumesPendingAlternateAdoptionWithoutResubmitting(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	const provisioned = "T-019f7519-01e8-7000-8000-000000000001"
+	const receiver = "T-019f7519-05d0-7000-8000-000000000001"
+	const laterMatch = "T-019f7519-1190-7000-8000-000000000001"
+	request := strings.Join([]string{"alpha", "worker", workdir, "", "assignment"}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	record := config.OperationRecord{
+		Key: "reconcile-pending-adoption", Kind: "worker-spawn", RequestHash: hex.EncodeToString(sum[:]),
+		MessageSource: config.OperationMessageSourceMessage, State: config.OperationIndeterminate, Phase: config.OperationPhaseDeliveryStarted,
+		Resource:  config.OperationResource{Kind: "worker", Thread: provisioned},
+		Error:     "initial assignment was not found in provisioned thread " + provisioned + " or one unambiguous fresh receiving thread; recovery: inspect thread " + provisioned + " and do not resubmit",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	operationPath := filepath.Join(dir, config.OperationsFile)
+	if _, err := config.StoreOperation(operationPath, record); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.BeginIndeterminateWorkerSpawnThreadAdoption(operationPath, record.Key, provisioned, receiver); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	running := filepath.Join(bin, "running")
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: receiver}
+	start := teardownExpectedStartCommand(teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}, row)
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+echo "amp $*" >> "`+logPath+`"
+if [ "$1 $2" = "threads list" ]; then
+  if echo "$*" | grep -q -- --include-archived; then printf '%s\n' '[{"id":"`+provisioned+`"},{"id":"`+receiver+`"},{"id":"`+laterMatch+`"}]'; else printf '%s\n' '[{"id":"`+receiver+`"},{"id":"`+laterMatch+`"}]'; fi
+  exit 0
+fi
+if [ "$1 $2 $3" = "threads export `+provisioned+`" ]; then printf '%s\n' '{"messages":[]}'; exit 0; fi
+if [ "$1 $2 $3" = "threads export `+receiver+`" ]; then printf '%s\n' '{"env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[{"role":"user","content":"assignment"}]}'; exit 0; fi
+if [ "$1 $2 $3" = "threads export `+laterMatch+`" ]; then printf '%s\n' '{"env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[{"role":"user","content":"assignment"}]}'; exit 0; fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "tmux $*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then test -e "`+running+`"; exit $?; fi
+if [ "$1 $2" = "list-panes -a" ]; then exit 0; fi
+if [ "$1" = new-session ]; then touch "`+running+`"; exit 0; fi
+if [ "$1" = list-panes ]; then printf 'worker\t@1\t%s\n' `+shellSingleQuote(start)+`; exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "assignment", "--idempotency-key", record.Key, "--reconcile")
+	if len(got.Successful) != 1 || got.Successful[0].Resource.Thread != receiver {
+		t.Fatalf("pending adoption reconciliation result = %+v", got)
+	}
+	completed, found, err := config.LoadOperation(operationPath, record.Key)
+	if err != nil || !found || completed.State != config.OperationSucceeded || completed.Resource.Thread != receiver || completed.Phase != config.OperationPhaseConfigured {
+		t.Fatalf("pending adoption operation = %+v found=%t err=%v", completed, found, err)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"threads new", "threads archive", "threads search", "send-keys", "paste-buffer", "respawn-pane"} {
+		if strings.Contains(string(log), forbidden) {
+			t.Fatalf("pending adoption reconciliation performed forbidden %q work:\n%s", forbidden, log)
+		}
+	}
+	if strings.Contains(string(log), "threads export "+laterMatch) {
+		t.Fatalf("pending adoption widened its receiver cutoff to inspect later match:\n%s", log)
 	}
 }
 
@@ -1239,8 +1563,8 @@ func TestProvisionedAssignmentMatchesOnlyOneRemovedTerminalLineEnding(t *testing
 		{name: "trailing spaces preserved", got: "assignment  ", want: "assignment  \n", ok: true},
 		{name: "leading spaces preserved", got: "  assignment", want: "  assignment\n", ok: true},
 		{name: "empty remains rejected", got: "", want: ""},
-		{name: "LF-only becomes empty", got: "", want: "\n", ok: true},
-		{name: "CRLF-only becomes empty", got: "", want: "\r\n", ok: true},
+		{name: "LF-only must not become empty evidence", got: "", want: "\n"},
+		{name: "CRLF-only must not become empty evidence", got: "", want: "\r\n"},
 		{name: "two LFs retain one", got: "\n", want: "\n\n", ok: true},
 		{name: "two CRLFs retain one", got: "\r\n", want: "\r\n\r\n", ok: true},
 		{name: "unrelated content", got: "different", want: "assignment\n"},
@@ -1252,6 +1576,101 @@ func TestProvisionedAssignmentMatchesOnlyOneRemovedTerminalLineEnding(t *testing
 			messages := []any{map[string]any{"role": "user", "content": test.got}}
 			if got := messagesContainProvisionedAssignment(messages, test.want, true); got != test.ok {
 				t.Fatalf("messagesContainProvisionedAssignment() = %t, want %t", got, test.ok)
+			}
+		})
+	}
+}
+
+func TestAssignmentWithAdditionalContentIsExternalWork(t *testing.T) {
+	messages := []any{map[string]any{
+		"role": "user",
+		"content": []any{
+			map[string]any{"type": "text", "text": "assignment"},
+			map[string]any{"type": "text", "text": "conflicting extra content"},
+		},
+	}}
+	if !messagesContainWorkBeyondAssignment(messages, "assignment", false) {
+		t.Fatal("exact assignment block with conflicting sibling content was treated as unstarted")
+	}
+}
+
+func TestAmpUUIDv7ThreadTimeProvidesStrictFreshnessBoundary(t *testing.T) {
+	provisioned, ok := ampUUIDv7ThreadTime("T-019f7519-01e8-7000-8000-000000000001")
+	if !ok || !provisioned.Equal(time.Date(2026, 7, 18, 12, 0, 1, 0, time.UTC)) {
+		t.Fatalf("provisioned UUIDv7 time = %s ok=%t", provisioned, ok)
+	}
+	stale, staleOK := ampUUIDv7ThreadTime("T-019f7518-fe00-7000-8000-000000000001")
+	fresh, freshOK := ampUUIDv7ThreadTime("T-019f7519-05d0-7000-8000-000000000001")
+	if !staleOK || !freshOK || !stale.Before(provisioned) || !fresh.After(provisioned) {
+		t.Fatalf("UUIDv7 ordering stale=%s provisioned=%s fresh=%s", stale, provisioned, fresh)
+	}
+	for _, invalid := range []string{"T-provisioned", "T-019f7519-01e8-6000-8000-000000000001", "T-019f7519-01e8-7000-0000-000000000001"} {
+		if _, ok := ampUUIDv7ThreadTime(invalid); ok {
+			t.Fatalf("accepted non-UUIDv7 freshness identity %q", invalid)
+		}
+	}
+}
+
+func TestFindIndeterminateSpawnReceiverRejectsCandidateAfterOriginalCutoff(t *testing.T) {
+	workdir := t.TempDir()
+	const provisioned = "T-019f7519-01e8-7000-8000-000000000001"
+	const lateReceiver = "T-019f7519-1190-7000-8000-000000000001"
+	operation := config.OperationRecord{
+		State: config.OperationIndeterminate, Phase: config.OperationPhaseDeliveryStarted,
+		Resource:  config.OperationResource{Kind: "worker", Thread: provisioned},
+		CreatedAt: time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 7, 18, 12, 0, 3, 0, time.UTC),
+	}
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+if [ "$1 $2" = "threads list" ]; then printf '%s\n' '[{"id":"`+provisioned+`"},{"id":"`+lateReceiver+`"}]'; exit 0; fi
+if [ "$1 $2 $3" = "threads export `+provisioned+`" ]; then printf '%s\n' '{"messages":[]}'; exit 0; fi
+if [ "$1 $2 $3" = "threads export `+lateReceiver+`" ]; then printf '%s\n' '{"env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[{"role":"user","content":"assignment"}]}'; exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := findIndeterminateSpawnReceiver(operation, "assignment", workdir, false)
+	if err == nil || !strings.Contains(err.Error(), "no exact fresh alternate receiver") {
+		t.Fatalf("late alternate receiver error = %v", err)
+	}
+}
+
+func TestFindIndeterminateSpawnReceiverRejectsInvalidDurableCutoffs(t *testing.T) {
+	const provisioned = "T-019f7519-01e8-7000-8000-000000000001"
+	for _, test := range []struct {
+		name     string
+		updated  time.Time
+		adoption *config.OperationThreadAdoption
+		want     string
+	}{
+		{
+			name:    "original cutoff before provisioned thread",
+			updated: time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC),
+			want:    "precedes provisioned thread",
+		},
+		{
+			name:     "pending receiver has no UUIDv7 boundary",
+			updated:  time.Date(2026, 7, 18, 12, 0, 3, 0, time.UTC),
+			adoption: &config.OperationThreadAdoption{ProvisionedThread: provisioned, ReceivingThread: "T-receiving"},
+			want:     "invalid or inconsistent UUIDv7 freshness evidence",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			operation := config.OperationRecord{
+				State: config.OperationIndeterminate, Phase: config.OperationPhaseDeliveryStarted,
+				Resource: config.OperationResource{Kind: "worker", Thread: provisioned}, ThreadAdoption: test.adoption,
+				CreatedAt: time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC), UpdatedAt: test.updated,
+			}
+			bin := t.TempDir()
+			writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+if [ "$1 $2 $3" = "threads export `+provisioned+`" ]; then printf '%s\n' '{"messages":[]}'; exit 0; fi
+exit 2
+`)
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			_, err := findIndeterminateSpawnReceiver(operation, "assignment", t.TempDir(), false)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("invalid cutoff error = %v, want %q", err, test.want)
 			}
 		})
 	}
@@ -1555,10 +1974,14 @@ func TestWorkerSpawnAdoptsSoleFreshActiveReceivingThread(t *testing.T) {
 	running := filepath.Join(bin, "running")
 	delivered := filepath.Join(bin, "delivered")
 	identity := filepath.Join(bin, "identity")
-	oldRow := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-created"}
-	newRow := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-receiver"}
-	oldStart := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "worker", Thread: oldRow.Thread}, oldRow)
-	newStart := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "worker", Thread: newRow.Thread}, newRow)
+	messagePath := filepath.Join(dir, "assignment.md")
+	if err := os.WriteFile(messagePath, []byte("hello\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldRow := config.Row{Workspace: "alpha", Window: "#104 worker", Workdir: workdir, Thread: "T-created"}
+	newRow := config.Row{Workspace: "alpha", Window: "#104 worker", Workdir: workdir, Thread: "T-receiver"}
+	oldStart := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "#104 worker", Thread: oldRow.Thread}, oldRow)
+	newStart := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "#104 worker", Thread: newRow.Thread}, newRow)
 	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
 echo "amp $*" >> "`+logPath+`"
 if [ "$1 $2" = "threads new" ]; then echo T-created; exit 0; fi
@@ -1570,6 +1993,7 @@ if [ "$1 $2 $3" = "threads export T-created" ]; then printf '%s\n' '{"id":"T-cre
 if [ "$1 $2 $3" = "threads export T-receiver" ]; then printf '%s\n' '{"id":"T-receiver","env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[{"role":"user","content":"hello"}]}'; exit 0; fi
 if [ "$1 $2" = "threads search" ]; then printf '%s\n' '[{"id":"T-receiver"}]'; exit 0; fi
 if [ "$1 $2 $3" = "threads archive T-created" ]; then exit 0; fi
+if [ "$1 $2 $3" = "threads rename T-receiver" ] && [ "$4" = "#104 worker" ]; then exit 0; fi
 exit 2
 `)
 	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
@@ -1577,11 +2001,13 @@ echo "tmux $*" >> "`+logPath+`"
 if [ "$1" = has-session ]; then test -e "`+running+`"; exit $?; fi
 if [ "$1" = new-session ]; then touch "`+running+`"; echo T-created > "`+identity+`"; exit 0; fi
 if [ "$1" = list-panes ]; then
-  if grep -q T-receiver "`+identity+`"; then printf 'worker\t@1\t%s\n' `+shellSingleQuote(newStart)+`; else printf 'worker\t@1\t%s\n' `+shellSingleQuote(oldStart)+`; fi
+  if grep -q T-receiver "`+identity+`"; then printf '#104 worker\t@1\t%s\n' `+shellSingleQuote(newStart)+`; else printf '#104 worker\t@1\t%s\n' `+shellSingleQuote(oldStart)+`; fi
   exit 0
 fi
 if [ "$1" = display-message ]; then echo %1; exit 0; fi
 if [ "$1" = capture-pane ]; then printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; exit 0; fi
+if [ "$1" = load-buffer ]; then cat >/dev/null; exit 0; fi
+if [ "$1" = paste-buffer ]; then exit 0; fi
 if [ "$1" = send-keys ]; then if [ "$4" = Enter ]; then touch "`+delivered+`"; fi; exit 0; fi
 if [ "$1" = respawn-pane ]; then echo T-receiver > "`+identity+`"; exit 0; fi
 if [ "$1" = kill-window ]; then rm -f "`+running+`"; exit 0; fi
@@ -1591,7 +2017,7 @@ exit 2
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
 	groupCalls := installSupportedGroupAmp(t, func([]string) ([]byte, error) { return nil, nil })
-	args := []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--group", "issue-132", "--message", "hello", "--idempotency-key", "adopt-1"}
+	args := []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--title-prefix", "#104", "--group", "issue-132", "--message-file", messagePath, "--idempotency-key", "adopt-1"}
 
 	first := executeWorkerJSON(t, args...)
 	if len(first.Successful) != 2 || first.Successful[0].Resource.Thread != "T-receiver" || first.Successful[1].Resource.Group != "issue-132" {
@@ -1618,10 +2044,16 @@ exit 2
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"tmux respawn-pane -k -t @1", "amp threads archive T-created"} {
+	for _, want := range []string{"tmux respawn-pane -k -t @1", "amp threads archive T-created", "amp threads rename T-receiver #104 worker"} {
 		if !strings.Contains(string(log), want) {
 			t.Fatalf("adoption log missing %q:\n%s", want, log)
 		}
+	}
+	respawnAt := strings.Index(string(log), "tmux respawn-pane -k -t @1")
+	archiveAt := strings.Index(string(log), "amp threads archive T-created")
+	renameAt := strings.Index(string(log), "amp threads rename T-receiver #104 worker")
+	if respawnAt < 0 || archiveAt <= respawnAt || renameAt <= archiveAt {
+		t.Fatalf("adoption cleanup order = respawn:%d archive:%d rename:%d\n%s", respawnAt, archiveAt, renameAt, log)
 	}
 	beforeReplay := string(log)
 	second := executeWorkerJSON(t, args...)
@@ -1631,6 +2063,9 @@ exit 2
 	afterReplay, err := os.ReadFile(logPath)
 	if err != nil || string(afterReplay) != beforeReplay {
 		t.Fatalf("adopted replay performed external work: err=%v\nbefore=%s\nafter=%s", err, beforeReplay, afterReplay)
+	}
+	if got := strings.Count(beforeReplay, "amp threads new"); got != 1 {
+		t.Fatalf("alternate adoption created %d threads:\n%s", got, beforeReplay)
 	}
 }
 
@@ -1644,7 +2079,7 @@ func TestWorkerSpawnAlternateDeliveryFailsClosedWhenOwnershipIsAmbiguous(t *test
 		{name: "bound-duplicate", wantErr: "identity conflict between provisioned thread T-created and fresh receiving thread(s) T-receiver"},
 		{name: "delayed-bound-duplicate", wantErr: "identity conflict between provisioned thread T-created and fresh receiving thread(s) T-receiver"},
 		{name: "slow-discovery-bound-duplicate", wantErr: "identity conflict between provisioned thread T-created and fresh receiving thread(s) T-receiver"},
-		{name: "terminal-newline-normalized-alternate", wantErr: "initial assignment was not found in provisioned thread T-created"},
+		{name: "started-receiver", wantErr: "fresh receiving thread T-receiver already started external work"},
 		{name: "timeout", wantErr: "list fresh receiving threads after delivery"},
 		{name: "identity-conflict", wantErr: "receiving thread T-receiver is already configured as beta/existing"},
 	}
@@ -1681,6 +2116,7 @@ if [ "$1 $2 $3" = "threads export T-created" ]; then
   exit 0
 fi
 if [ "$1 $2 $3" = "threads export T-receiver" ] || [ "$1 $2 $3" = "threads export T-second" ]; then
+  if [ "`+tt.name+`" = started-receiver ]; then printf '%s\n' '{"env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"working"}]}' ; exit 0; fi
   printf '%s\n' '{"env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[{"role":"user","content":"hello"}]}'
   exit 0
 fi
@@ -1709,13 +2145,6 @@ exit 2
 			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 			t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
 			args := []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", "ambiguous-1"}
-			if tt.name == "terminal-newline-normalized-alternate" {
-				messagePath := filepath.Join(dir, "assignment.md")
-				if err := os.WriteFile(messagePath, []byte("hello\n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-				args = []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message-file", messagePath, "--idempotency-key", "ambiguous-1"}
-			}
 
 			err := executeWorkerJSONError(t, args...)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) || !strings.Contains(err.Error(), "recovery:") {
@@ -1738,29 +2167,11 @@ exit 2
 				t.Fatalf("ambiguous spawn did not stop unconfigured window: err=%v\n%s", readErr, log)
 			}
 			beforeReplay := string(log)
-			replayWant := "terminal in state indeterminate"
-			if tt.name == "terminal-newline-normalized-alternate" {
-				replayWant = "not verified in exact provisioned thread T-created"
-			}
-			replayArgs := args
-			if tt.name == "terminal-newline-normalized-alternate" {
-				replayArgs = append(append([]string(nil), args...), "--reconcile")
-			}
-			if replayErr := executeWorkerJSONError(t, replayArgs...); replayErr == nil || !strings.Contains(replayErr.Error(), replayWant) {
+			if replayErr := executeWorkerJSONError(t, args...); replayErr == nil || !strings.Contains(replayErr.Error(), "terminal in state indeterminate") {
 				t.Fatalf("ambiguous replay error = %v", replayErr)
 			}
 			afterReplay, readErr := os.ReadFile(logPath)
-			if tt.name == "terminal-newline-normalized-alternate" {
-				if readErr != nil {
-					t.Fatal(readErr)
-				}
-				replayLog := strings.TrimPrefix(string(afterReplay), beforeReplay)
-				for _, forbidden := range []string{"threads new", "threads list", "send-keys", "paste-buffer", "new-session", "new-window"} {
-					if strings.Contains(replayLog, forbidden) {
-						t.Fatalf("alternate-only indeterminate replay performed forbidden %q work:\n%s", forbidden, replayLog)
-					}
-				}
-			} else if readErr != nil || string(afterReplay) != beforeReplay {
+			if readErr != nil || string(afterReplay) != beforeReplay {
 				t.Fatalf("ambiguous replay performed external work: err=%v\nbefore=%s\nafter=%s", readErr, beforeReplay, afterReplay)
 			}
 		})
