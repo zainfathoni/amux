@@ -39,7 +39,7 @@ Substitute another mode only when the user explicitly requested it. Never infer 
 
 ## Runner safety
 
-Runner pin requires stable Git worktree ownership: either the repository's primary worktree or an already-locked linked worktree. Missing-worktree repair belongs to `amux runner reconcile --workdir <path>`, not launch. Reconcile fails closed on ambiguous Amp-owned PID markers. Never delete marker files, unlock a runner worktree, or remove runner configuration as part of worker finish.
+Runner pin requires a canonical existing directory; Git repository, worktree, and lock state are irrelevant. Missing-directory repair belongs to `amux runner reconcile --workdir <path>`, not launch. Reconcile fails closed on ambiguous Amp-owned PID markers. Never delete marker files or remove runner configuration as part of worker finish.
 
 ## Mutation lock
 

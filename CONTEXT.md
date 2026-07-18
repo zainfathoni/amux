@@ -12,7 +12,7 @@ _Avoid_: Worker, background worker
 
 **Runner identity** — The canonical workdir. A directory may belong to only one configured runner workspace on a machine.
 
-**Runner worktree** — A stable Git worktree owned by a runner. Linked worktrees must already be locked before runner intent is pinned and remain locked for the runner's lifetime; a repository's primary worktree is inherently stable because Git never prunes it and cannot represent the same lock. amux verifies this ownership but never owns locking or unlocking linked worktrees.
+**Runner workdir** — A canonical existing directory owned by a runner. It may be a Git repository or worktree, but does not need to be; amux validates directory existence separately from tmux and process ownership.
 
 **Runner window** — A tmux window whose name is derived deterministically from the runner workdir as `runner-<directory>-<path-hash>`. The canonical workdir, not the generated window name, is the runner's public identity.
 
@@ -41,7 +41,7 @@ _Avoid_: Session when referring to the configured lifecycle group
 
 **Finish** — A skill-only post-merge workflow for a sprawled worker. Finish refuses to delete a worktree that is unexpectedly owned by a runner and performs worker teardown only after Git and worktree cleanup succeeds.
 
-**Reconcile** — Explicitly repair drift between amux intent and external or runtime state. Worker reconciliation synchronizes shelf intent with remote archive state; runner reconciliation repairs stale worktree/configuration ownership without silently adopting ambiguous processes.
+**Reconcile** — Explicitly repair drift between amux intent and external or runtime state. Worker reconciliation synchronizes shelf intent with remote archive state; runner reconciliation removes stale configuration for missing workdirs without silently adopting ambiguous processes.
 
 **Restart** — Replace a running local client in place while preserving its configuration and remote thread.
 

@@ -17,7 +17,7 @@ amux worker pin --workspace <name> --window <name> --workdir <path> --thread <id
 amux worker pin --current
 amux worker unpin --thread <id>
 amux worker unpin --current
-amux runner pin --workspace <name> --workdir <stable-worktree>
+amux runner pin --workspace <name> --workdir <existing-directory>
 amux runner pin --current
 amux runner unpin --workdir <path>
 amux runner unpin --current
@@ -80,7 +80,7 @@ Removed commands and positional forms fail with remediation. Do not use `store`,
 
 `remove` differs from `unpin`: remove stops the selected verified local client and deletes configuration, while unpin never stops it. Worker unpin removes the worker row and matching shelf intent; runner unpin removes only the runner row. Neither changes remote thread state. Worker `remove` never archives. `teardown` is worker-only remove plus verified remote archival.
 
-Runner pin requires stable Git worktree ownership. The repository's primary worktree is inherently stable; a linked worktree must already be locked. amux verifies linked-worktree locks but never locks or unlocks them. Runner reconcile may remove stale config for a missing worktree, but never adopts or deletes ambiguous Amp-owned processes.
+Runner pin requires a canonical existing directory. Git repository, worktree, and lock state are not runner requirements. Runner reconcile may remove stale config for a missing directory, but never adopts or deletes ambiguous Amp-owned processes.
 
 ## Work-group, report, and callback contract
 

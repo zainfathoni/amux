@@ -182,7 +182,7 @@ Use one literal send plus one Enter, wait at most 60 seconds by default, and acc
 
 ### Runner probe
 
-Never send text to a runner pane. Use `amux runner doctor --workdir <path>` plus tmux metadata to verify the canonical workdir, configured ownership, generated window, and exact live `amp --no-tui` process. Classify as `running`, `not-running`, `worktree-missing`, `unlocked`, `mismatched`, or `ambiguous`. Do not infer health from a tmux server process or similarly named window.
+Never send text to a runner pane. Use `amux runner doctor --workdir <path>` plus tmux metadata to verify the canonical workdir, configured ownership, generated window, and exact live `amp --no-tui` process. Classify as `running`, `not-running`, `directory-missing`, `not-a-directory`, `mismatched`, or `ambiguous`. Do not infer health from a tmux server process or similarly named window.
 
 Report one aggregate table with mode, workspace, canonical identity, local target, classification, and evidence. Health performs no archive, unpin, remove, park, kill, reconcile, launch, restart, or spawn. Ask for explicit authorization before a replacement or repair workflow.
 

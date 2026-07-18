@@ -1106,7 +1106,7 @@ func newMaintenanceLifecycleFixture(t *testing.T, owner string, runners int) *ma
 	rows := ""
 	for i := 0; i < runners; i++ {
 		ws := fmt.Sprintf("ws%d", i)
-		wd := lockedTestWorktree(t)
+		wd := t.TempDir()
 		f.workdirs[ws], f.windows[ws] = wd, config.RunnerWindow(wd)
 		rows += ws + "\t" + wd + "\n"
 	}

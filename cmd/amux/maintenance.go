@@ -811,7 +811,7 @@ func (a app) runMaintenance(in invocation, dir config.Directory, env *result.Env
 			out.Message = "stopped runner preserved"
 			env.Skipped = append(env.Skipped, out)
 		} else {
-			e = requireLockedWorktree(row.Workdir)
+			e = requireRunnerDirectory(row.Workdir)
 			stopped := pendingPhase[row.Workdir] == "pending_launch" || inspection.state == runnerPaneAbsent
 			if e == nil && !stopped {
 				ro.Status, ro.Phase = "failed", "restart_required"

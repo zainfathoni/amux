@@ -87,7 +87,7 @@ exit 99
 
 func TestAggregateLaunchJointlyPreflightsBeforeEitherModeMutates(t *testing.T) {
 	dir := t.TempDir()
-	runnerDir := lockedTestWorktree(t)
+	runnerDir := t.TempDir()
 	missingWorker := filepath.Join(t.TempDir(), "missing")
 	writeRunnerRegistry(t, dir, "alpha\t"+runnerDir+"\n")
 	writeWorkerRegistry(t, dir, "alpha\tworker\t"+missingWorker+"\tT-worker\n")
@@ -107,9 +107,26 @@ func TestAggregateLaunchJointlyPreflightsBeforeEitherModeMutates(t *testing.T) {
 	}
 }
 
+func TestAggregateLaunchAcceptsNonGitRunnerAndWorker(t *testing.T) {
+	dir := t.TempDir()
+	runnerDir := t.TempDir()
+	workerDir := t.TempDir()
+	writeRunnerRegistry(t, dir, "alpha\t"+runnerDir+"\n")
+	writeWorkerRegistry(t, dir, "alpha\tworker\t"+workerDir+"\tT-worker\n")
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	got := executeAggregateJSON(t, "--json", "--dry-run", "--config-dir", dir, "launch", "--workspace", "alpha")
+	if keys := aggregateResourceKeys(got.Planned); strings.Join(keys, ",") != "runner:"+runnerDir+",worker:T-worker" {
+		t.Fatalf("aggregate non-Git launch plan = %v", keys)
+	}
+}
+
 func TestAggregateLaunchRunsRunnersFirstAndContinuesWorkersAfterRuntimeFailure(t *testing.T) {
 	dir := t.TempDir()
-	runnerDir := lockedTestWorktree(t)
+	runnerDir := t.TempDir()
 	workerDir := t.TempDir()
 	runnerWindow := config.RunnerWindow(runnerDir)
 	workerRow := config.Row{Workspace: "workers", Window: "worker", Workdir: workerDir, Thread: "T-worker"}
@@ -161,7 +178,7 @@ esac
 
 func TestAggregateLateWorkerPreflightAfterRunnerMutationIsRuntimeFailure(t *testing.T) {
 	dir := t.TempDir()
-	runnerDir := lockedTestWorktree(t)
+	runnerDir := t.TempDir()
 	workerDir := t.TempDir()
 	runnerWindow := config.RunnerWindow(runnerDir)
 	writeRunnerRegistry(t, dir, "alpha\t"+runnerDir+"\n")
@@ -202,7 +219,7 @@ esac
 
 func TestAggregateLaunchAttachIsGatedOnCompleteSuccess(t *testing.T) {
 	dir := t.TempDir()
-	runnerDir := lockedTestWorktree(t)
+	runnerDir := t.TempDir()
 	workerDir := t.TempDir()
 	runnerWindow := config.RunnerWindow(runnerDir)
 	workerRow := config.Row{Workspace: "alpha", Window: "worker", Workdir: workerDir, Thread: "T-worker"}
@@ -270,7 +287,7 @@ esac
 
 func TestAggregateSharedMutationsPlanEveryMixedWorkspaceResource(t *testing.T) {
 	dir := t.TempDir()
-	runnerDir := lockedTestWorktree(t)
+	runnerDir := t.TempDir()
 	workerDir := t.TempDir()
 	runnerWindow := config.RunnerWindow(runnerDir)
 	workerRow := config.Row{Workspace: "alpha", Window: "worker", Workdir: workerDir, Thread: "T-worker"}
@@ -305,7 +322,7 @@ esac
 
 func TestAggregateRestartStopsBeforeNextRunnerAfterReplacementFailure(t *testing.T) {
 	dir := t.TempDir()
-	workdirs := []string{lockedTestWorktree(t), lockedTestWorktree(t)}
+	workdirs := []string{t.TempDir(), t.TempDir()}
 	sort.Strings(workdirs)
 	firstDir, secondDir := workdirs[0], workdirs[1]
 	firstWindow, secondWindow := config.RunnerWindow(firstDir), config.RunnerWindow(secondDir)
@@ -408,7 +425,7 @@ func TestAggregateReconcilePlansWorkerAndMissingRunnerWithoutMutation(t *testing
 
 func TestAggregateDoctorDiagnosesBothModes(t *testing.T) {
 	dir := t.TempDir()
-	runnerDir := lockedTestWorktree(t)
+	runnerDir := t.TempDir()
 	workerDir := t.TempDir()
 	runnerWindow := config.RunnerWindow(runnerDir)
 	workerRow := config.Row{Workspace: "alpha", Window: "worker", Workdir: workerDir, Thread: "T-worker"}
@@ -542,7 +559,7 @@ esac
 
 func TestAggregateReadOnlyLateWorkerRejectionRemainsPreflight(t *testing.T) {
 	dir := t.TempDir()
-	runnerDir := lockedTestWorktree(t)
+	runnerDir := t.TempDir()
 	workerDir := t.TempDir()
 	writeRunnerRegistry(t, dir, "alpha\t"+runnerDir+"\n")
 	writeWorkerRegistry(t, dir, "beta\tworker\t"+workerDir+"\tT-worker\n")
