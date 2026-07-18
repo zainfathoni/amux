@@ -413,11 +413,17 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	if found && existing.RequestHash != hash {
 		return env, result.Preflight(fmt.Errorf("idempotency key %q is already bound to a different request", s.IdempotencyKey))
 	}
+	if s.Reconcile && !found {
+		return env, result.Preflight(fmt.Errorf("spawn reconciliation requires an existing idempotency key bound to the identical request"))
+	}
 	if found && existing.State == config.OperationSucceeded {
 		r := config.Row{Workspace: workspace, Window: s.Window, Workdir: s.Workdir, Thread: existing.Resource.Thread}
 		out := workerOutcome(r, "spawn", "idempotency key already succeeded")
 		env.Skipped = append(env.Skipped, out)
 		return env, nil
+	}
+	if s.Reconcile && !reconcilableWorkerSpawn(existing) {
+		return env, result.Preflight(fmt.Errorf("idempotency key %q is not a recoverable exact provisioned-thread spawn timeout", s.IdempotencyKey))
 	}
 	if found && recoverableProvisionedVerificationFailure(existing) {
 		if in.Options.DryRun {
@@ -808,6 +814,21 @@ func recoverableProvisionedVerificationFailure(operation config.OperationRecord)
 		operation.Error == want
 }
 
+func reconcilableWorkerSpawn(operation config.OperationRecord) bool {
+	if recoverableProvisionedVerificationFailure(operation) {
+		return true
+	}
+	if operation.Kind != "worker-spawn" || operation.State != config.OperationStarted {
+		return false
+	}
+	switch operation.Phase {
+	case config.OperationPhaseMessageVerified, config.OperationPhaseConfigured, config.OperationPhaseGroupIntent, config.OperationPhaseGrouped:
+		return true
+	default:
+		return false
+	}
+}
+
 func messageSourceFromSelectors(selectors selectors) config.OperationMessageSource {
 	switch {
 	case selectors.MessageFile != "":
@@ -926,7 +947,7 @@ func prefixedSpawnName(titlePrefix, window string) string {
 }
 
 func resolveSpawnReceivingThread(boundThread, message, workdir string, preDeliveryThreads map[string]bool, allowTerminalLineEndingNormalization bool) (string, error) {
-	deadline := time.Now().Add(spawnSubmitTimeout())
+	deadline := time.Now().Add(spawnAssignmentVisibilityTimeout())
 	var authoritative string
 	for {
 		boundContainsMessage, _, err := ampThreadContainsExactAssignment(boundThread, message, workdir, false, allowTerminalLineEndingNormalization)
@@ -985,6 +1006,10 @@ func resolveSpawnReceivingThread(boundThread, message, workdir string, preDelive
 		return "", fmt.Errorf("initial assignment was not found in provisioned thread %s or one unambiguous fresh receiving thread; recovery: inspect thread %s and do not resubmit", boundThread, boundThread)
 	}
 	return authoritative, nil
+}
+
+func spawnAssignmentVisibilityTimeout() time.Duration {
+	return 3 * spawnSubmitTimeout()
 }
 
 func strictAmpThreadIDSet(includeArchived bool) (map[string]bool, error) {
