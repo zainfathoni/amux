@@ -14,7 +14,7 @@ import (
 	"testing"
 )
 
-func TestLinuxProcessStartTimeParsingHandlesComplexComm(t *testing.T) {
+func TestLinuxProcessIdentityRejectsAmbiguousSnapshots(t *testing.T) {
 	t.Parallel()
 	helper, err := filepath.Abs("claude_delegation.py")
 	if err != nil {
@@ -26,19 +26,47 @@ spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 fields = [b"S"] + [b"0"] * 18 + [b"424242"]
-print(module.linux_process_start_time(b"123 (claude ) name) " + b" ".join(fields)))
+assert module.linux_process_start_time(b"123 (claude ) name) " + b" ".join(fields)) == "424242"
 try:
     module.linux_process_start_time(b"123 malformed")
 except module.HelperError:
-    print("rejected")
-print(module.is_claude_process("node", ["/usr/bin/node", "/tmp/node_modules/@anthropic-ai/claude-code/cli.js", "--session-id", "session"], 2))
-print(module.is_claude_process("node", ["/usr/bin/node", "/tmp/unrelated/cli.js", "--session-id", "session"], 2))
+    pass
+else:
+    raise AssertionError("malformed stat accepted")
+
+def rejected(starts, executables, commands):
+    start_values = iter(starts)
+    executable_values = iter(executables)
+    command_values = iter(commands)
+    module.read_linux_process_start = lambda proc: next(start_values)
+    module.read_linux_process_executable = lambda proc: next(executable_values)
+    module.read_linux_process_command = lambda proc: next(command_values)
+    try:
+        module.read_linux_process_snapshot(123)
+    except module.HelperError:
+        return
+    raise AssertionError("ambiguous Linux process snapshot accepted")
+
+same_executable = ("/usr/bin/claude", 8, 42)
+rejected(["100", "101"], [same_executable, same_executable], [b"claude\0", b"claude\0"])
+rejected(["100", "100"], [same_executable, ("/usr/bin/claude", 8, 43)], [b"claude\0", b"claude\0"])
+rejected(["100", "100"], [same_executable, same_executable], [b"claude\0", b"other\0"])
+rejected(["100", "100"], [same_executable, same_executable], [b"", b""])
+rejected(["100", "100"], [same_executable, same_executable], [b"claude", b"claude"])
+
+package = "/tmp/node_modules/@anthropic-ai/claude-code/cli.js"
+assert module.is_claude_process("Darwin", "claude", ["/usr/bin/claude", "--session-id", "session"], 1)
+assert not module.is_claude_process("Darwin", "node", ["/usr/bin/node", package, "--session-id", "session"], 2)
+assert module.is_claude_process("Linux", "node", ["/usr/bin/node", package, "--session-id", "session"], 2)
+assert module.is_claude_process("Linux", "bun", ["/usr/bin/bun", package, "--session-id", "session"], 2)
+assert not module.is_claude_process("Linux", "node", ["/usr/bin/node", "/tmp/unrelated/cli.js", package, "--session-id", "session"], 3)
+print("ok")
 `
 	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
 	if err != nil {
 		t.Fatalf("Linux stat parser fixture: %v\n%s", err, output)
 	}
-	if string(output) != "424242\nrejected\nTrue\nFalse\n" {
+	if string(output) != "ok\n" {
 		t.Fatalf("Linux stat parser output = %q", output)
 	}
 }

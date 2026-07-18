@@ -953,29 +953,38 @@ def linux_process_start_time(raw: bytes) -> str:
     return os.fsdecode(fields[19])
 
 
+def read_linux_process_start(proc: pathlib.Path) -> str:
+    return linux_process_start_time((proc / "stat").read_bytes())
+
+
+def read_linux_process_executable(proc: pathlib.Path) -> tuple[str, int, int]:
+    target = os.readlink(proc / "exe")
+    info = (proc / "exe").stat()
+    return target, info.st_dev, info.st_ino
+
+
+def read_linux_process_command(proc: pathlib.Path) -> bytes:
+    return (proc / "cmdline").read_bytes()
+
+
 def read_linux_process_snapshot(pid: int) -> tuple[str, str, bytes, str]:
     proc = pathlib.Path("/proc") / str(pid)
     try:
-        stat_before = (proc / "stat").read_bytes()
-        start_before = linux_process_start_time(stat_before)
-        executable_before = os.readlink(proc / "exe")
-        executable_stat_before = (proc / "exe").stat()
-        command_before = (proc / "cmdline").read_bytes()
-        stat_after = (proc / "stat").read_bytes()
-        start_after = linux_process_start_time(stat_after)
-        executable_after = os.readlink(proc / "exe")
-        executable_stat_after = (proc / "exe").stat()
-        command_after = (proc / "cmdline").read_bytes()
+        start_before = read_linux_process_start(proc)
+        executable_before = read_linux_process_executable(proc)
+        command_before = read_linux_process_command(proc)
+        executable_after = read_linux_process_executable(proc)
+        command_after = read_linux_process_command(proc)
+        start_after = read_linux_process_start(proc)
     except (OSError, ValueError) as error:
         raise HelperError(f"read exact Linux process identity: {error}") from error
-    executable_identity_before = (executable_before, executable_stat_before.st_dev, executable_stat_before.st_ino)
-    executable_identity_after = (executable_after, executable_stat_after.st_dev, executable_stat_after.st_ino)
-    if start_before != start_after or executable_identity_before != executable_identity_after or command_before != command_after:
+    if start_before != start_after or executable_before != executable_after or command_before != command_after:
         raise HelperError("read exact Linux process identity: process changed during inspection")
     if not command_before or not command_before.endswith(b"\0"):
         raise HelperError("read exact Linux process arguments: cmdline is empty or truncated")
-    identity = f"linux:{start_before}:{executable_stat_before.st_dev}:{executable_stat_before.st_ino}:{hashlib.sha256(os.fsencode(executable_before)).hexdigest()}"
-    return pathlib.Path(executable_before).name, identity, command_before, executable_before
+    executable_target, executable_device, executable_inode = executable_before
+    identity = f"linux:{start_before}:{executable_device}:{executable_inode}:{hashlib.sha256(os.fsencode(executable_target)).hexdigest()}"
+    return pathlib.Path(executable_target).name, identity, command_before, executable_target
 
 
 def exact_process_identity(pid: int) -> tuple[str, str, list[str], str]:
@@ -1096,16 +1105,13 @@ def validate_amp_target(value: Any) -> dict[str, Any]:
     return copy.deepcopy(value)
 
 
-def is_claude_process(process_name: str, process_args: list[str], session_position: int) -> bool:
+def is_claude_process(system: str, process_name: str, process_args: list[str], session_position: int) -> bool:
     if pathlib.Path(process_args[0]).name == "claude":
         return True
-    if process_name not in {"node", "bun"}:
+    if system != "Linux" or process_name not in {"node", "bun"} or session_position <= 1:
         return False
-    for argument in process_args[1:session_position]:
-        path = pathlib.PurePath(argument)
-        if path.name == "cli.js" and "@anthropic-ai" in path.parts and "claude-code" in path.parts:
-            return True
-    return False
+    script = pathlib.PurePath(process_args[1])
+    return script.name == "cli.js" and "@anthropic-ai" in script.parts and "claude-code" in script.parts
 
 
 def inspect_claude_identity(pane_id: str, claude_session_id: str) -> dict[str, Any]:
@@ -1143,7 +1149,7 @@ def inspect_claude_identity(pane_id: str, claude_session_id: str) -> dict[str, A
         len(session_positions) != 1
         or session_positions[0] + 1 >= len(process_args)
         or process_args[session_positions[0] + 1] != claude_session_id
-        or not is_claude_process(process_name, process_args, session_positions[0])
+        or not is_claude_process(platform.system(), process_name, process_args, session_positions[0])
     ):
         raise HelperError("pane process is not the expected Claude session")
     return {
