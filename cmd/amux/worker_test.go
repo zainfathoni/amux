@@ -565,6 +565,37 @@ exit 2
 	}
 }
 
+func TestResolveSpawnReceivingThreadRescansFreshCandidatesAfterProvisionedAssignmentAppears(t *testing.T) {
+	bin := t.TempDir()
+	workdir := t.TempDir()
+	firstListComplete := filepath.Join(bin, "first-list-complete")
+	provisionedProven := filepath.Join(bin, "provisioned-proven")
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+if [ "$1 $2 $3" = "threads export T-provisioned" ]; then
+  if [ -e "`+firstListComplete+`" ]; then
+    touch "`+provisionedProven+`"
+    printf '%s\n' '{"id":"T-provisioned","messages":[{"role":"user","content":"assignment"}]}'
+  else
+    printf '%s\n' '{"id":"T-provisioned","messages":[]}'
+  fi
+  exit 0
+fi
+if [ "$1 $2 $3" = "threads export T-receiver" ]; then printf '%s\n' '{"id":"T-receiver","env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[{"role":"user","content":"assignment"}]}' ; exit 0; fi
+if [ "$1 $2" = "threads list" ]; then
+  if [ -e "`+provisionedProven+`" ]; then printf '%s\n' '[{"id":"T-provisioned"},{"id":"T-receiver"}]' ; else touch "`+firstListComplete+`"; printf '%s\n' '[{"id":"T-provisioned"}]' ; fi
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	_, err := resolveSpawnReceivingThread("T-provisioned", "assignment", workdir, map[string]bool{"T-provisioned": true}, false)
+	if err == nil || !strings.Contains(err.Error(), "identity conflict between provisioned thread T-provisioned and fresh receiving thread(s) T-receiver") {
+		t.Fatalf("final provisioned visibility ambiguity error = %v", err)
+	}
+}
+
 func TestResolveSpawnReceivingThreadWaitsForExactProvisionedAssignmentBeyondSubmitWindow(t *testing.T) {
 	bin := t.TempDir()
 	exportCount := filepath.Join(bin, "export-count")
@@ -776,8 +807,9 @@ exit 2
 	if err != nil || !found || completed.State != config.OperationSucceeded || completed.Phase != config.OperationPhaseConfigured {
 		t.Fatalf("reconciled operation = %+v, found=%t, err=%v", completed, found, err)
 	}
+	replayArgs := append([]string(nil), args[:len(args)-1]...)
 	var replayStdout bytes.Buffer
-	if err := (app{stdin: strings.NewReader(message), stdout: &replayStdout}).execute(args); err != nil {
+	if err := (app{stdin: strings.NewReader(message), stdout: &replayStdout}).execute(replayArgs); err != nil {
 		t.Fatalf("replay manually adopted reconciliation: %v\nstdout: %s", err, replayStdout.String())
 	}
 	var replayed result.Envelope
@@ -803,11 +835,111 @@ exit 2
 	}
 }
 
+func TestWorkerSpawnRejectsIndeterminateRecoveryWithoutExplicitReconcile(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	message := "assignment"
+	request := strings.Join([]string{"alpha", "worker", workdir, "", message}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Now().UTC()
+	record := config.OperationRecord{
+		Key:         "implicit-recovery-rejected",
+		Kind:        "worker-spawn",
+		RequestHash: hex.EncodeToString(sum[:]),
+		State:       config.OperationIndeterminate,
+		Phase:       config.OperationPhaseDeliveryStarted,
+		Resource:    config.OperationResource{Kind: "worker", Thread: "T-provisioned"},
+		Error:       "initial assignment was not found in provisioned thread T-provisioned or one unambiguous fresh receiving thread; recovery: inspect thread T-provisioned and do not resubmit",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	operationPath := filepath.Join(dir, config.OperationsFile)
+	if _, err := config.StoreOperation(operationPath, record); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(operationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	called := filepath.Join(bin, "external-call")
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	err = executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", message, "--idempotency-key", record.Key)
+	if err == nil || !strings.Contains(err.Error(), "requires explicit --reconcile") {
+		t.Fatalf("implicit reconciliation error = %v", err)
+	}
+	after, err := os.ReadFile(operationPath)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("implicit reconciliation mutated operation: err=%v\nbefore=%s\nafter=%s", err, before, after)
+	}
+	if _, err := os.Stat(called); !os.IsNotExist(err) {
+		t.Fatalf("implicit reconciliation performed external work: %v", err)
+	}
+}
+
+func TestWorkerSpawnReconcileRejectsOrdinaryPartialPhasesWithoutExternalWork(t *testing.T) {
+	for _, phase := range []config.OperationPhase{
+		config.OperationPhaseMessageVerified,
+		config.OperationPhaseConfigured,
+		config.OperationPhaseGroupIntent,
+		config.OperationPhaseGrouped,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			dir := t.TempDir()
+			workdir := t.TempDir()
+			message := "assignment"
+			request := strings.Join([]string{"alpha", "worker", workdir, "", message}, "\x00")
+			sum := sha256.Sum256([]byte(request))
+			now := time.Now().UTC()
+			record := config.OperationRecord{
+				Key:         "partial-phase-reconciliation",
+				Kind:        "worker-spawn",
+				RequestHash: hex.EncodeToString(sum[:]),
+				State:       config.OperationStarted,
+				Phase:       phase,
+				Resource:    config.OperationResource{Kind: "worker", Thread: "T-provisioned"},
+				CreatedAt:   now,
+				UpdatedAt:   now,
+			}
+			operationPath := filepath.Join(dir, config.OperationsFile)
+			if _, err := config.StoreOperation(operationPath, record); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(operationPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bin := t.TempDir()
+			called := filepath.Join(bin, "external-call")
+			writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+			err = executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", message, "--idempotency-key", record.Key, "--reconcile")
+			if err == nil || !strings.Contains(err.Error(), "recoverable exact provisioned-thread timeout state") {
+				t.Fatalf("partial-phase reconciliation error = %v", err)
+			}
+			after, err := os.ReadFile(operationPath)
+			if err != nil || !bytes.Equal(after, before) {
+				t.Fatalf("partial-phase reconciliation mutated operation: err=%v\nbefore=%s\nafter=%s", err, before, after)
+			}
+			if _, err := os.Stat(called); !os.IsNotExist(err) {
+				t.Fatalf("partial-phase reconciliation performed external work: %v", err)
+			}
+		})
+	}
+}
+
 func TestWorkerSpawnReconcileRequiresExistingIdenticalOperation(t *testing.T) {
 	dir := t.TempDir()
 	workdir := t.TempDir()
 	err := executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "assignment", "--idempotency-key", "missing-reconciliation", "--reconcile")
-	if err == nil || !strings.Contains(err.Error(), "requires an existing idempotency key bound to the identical request") {
+	if err == nil || !strings.Contains(err.Error(), "requires an existing identical operation in the recoverable exact provisioned-thread timeout state") {
 		t.Fatalf("missing reconciliation operation error = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, config.OperationsFile)); !os.IsNotExist(err) {
@@ -925,6 +1057,7 @@ exit 2
 				}
 				args = []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message-file", messagePath, "--idempotency-key", record.Key}
 			}
+			args = append(args, "--reconcile")
 
 			err := executeWorkerJSONError(t, args...)
 			if test.wantVerified {
@@ -982,7 +1115,7 @@ exit 2
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
-	err = executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", record.Key)
+	err = executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", record.Key, "--reconcile")
 	if err == nil || !strings.Contains(err.Error(), "configured for thread T-other") {
 		t.Fatalf("conflicting recovery error = %v", err)
 	}
@@ -1042,7 +1175,7 @@ exit 2
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
-	err = executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", record.Key)
+	err = executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", record.Key, "--reconcile")
 	if err == nil || !strings.Contains(err.Error(), "worker tmux identity is conflict") {
 		t.Fatalf("tmux-conflicting recovery error = %v", err)
 	}
@@ -1609,7 +1742,11 @@ exit 2
 			if tt.name == "terminal-newline-normalized-alternate" {
 				replayWant = "not verified in exact provisioned thread T-created"
 			}
-			if replayErr := executeWorkerJSONError(t, args...); replayErr == nil || !strings.Contains(replayErr.Error(), replayWant) {
+			replayArgs := args
+			if tt.name == "terminal-newline-normalized-alternate" {
+				replayArgs = append(append([]string(nil), args...), "--reconcile")
+			}
+			if replayErr := executeWorkerJSONError(t, replayArgs...); replayErr == nil || !strings.Contains(replayErr.Error(), replayWant) {
 				t.Fatalf("ambiguous replay error = %v", replayErr)
 			}
 			afterReplay, readErr := os.ReadFile(logPath)
