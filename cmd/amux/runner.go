@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -43,6 +42,11 @@ const (
 type runnerInspection struct {
 	state runnerPaneState
 	pane  tmux.WindowPane
+}
+
+type runnerPIDMarkerInspection struct {
+	diagnostic string
+	ambiguous  bool
 }
 
 func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelope, error) {
@@ -129,6 +133,8 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 		}
 	}
 	inspections := make(map[string]runnerInspection, len(rows))
+	reconcileMissing := make(map[string]bool, len(rows))
+	reconcilePIDDiagnostics := make(map[string]string, len(rows))
 	for _, row := range rows {
 		if !runnerCommandNeedsTmux(in.Command.Name) {
 			continue
@@ -144,13 +150,25 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 	}
 	for _, row := range rows {
 		inspection := inspections[row.Workdir]
-		if in.Command.Name == "launch" || in.Command.Name == "restart" && inspection.state == runnerPaneExact {
-			if err := requireLockedWorktree(row.Workdir); err != nil {
+		if in.Command.Name == "launch" || in.Command.Name == "restart" {
+			if err := requireRunnerDirectory(row.Workdir); err != nil {
 				return &env, result.Preflight(err)
 			}
 		}
 		if in.Command.Name == "reconcile" && inspection.state != runnerPaneAbsent {
 			return &env, result.Preflight(fmt.Errorf("runner %s still has %s runtime ownership; reconcile will not remove its configuration", row.Workdir, inspection.state))
+		}
+		if in.Command.Name == "reconcile" {
+			_, directoryErr := runnerDirectoryState(row.Workdir)
+			if directoryErr != nil && !errors.Is(directoryErr, os.ErrNotExist) {
+				return &env, result.Preflight(directoryErr)
+			}
+			pidInspection := inspectRunnerPIDMarker(row.Workdir)
+			if pidInspection.ambiguous {
+				return &env, result.Preflight(fmt.Errorf("runner %s%s", row.Workdir, pidInspection.diagnostic))
+			}
+			reconcileMissing[row.Workdir] = directoryErr != nil
+			reconcilePIDDiagnostics[row.Workdir] = pidInspection.diagnostic
 		}
 	}
 
@@ -165,14 +183,14 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 		inspection := inspections[row.Workdir]
 		pidDiagnostic := ""
 		if in.Command.Name == "reconcile" {
-			pidDiagnostic = staleAmpPIDDiagnostic(row.Workdir)
+			pidDiagnostic = reconcilePIDDiagnostics[row.Workdir]
 		}
 		if in.Command.Name == "doctor" {
-			ownership, ownershipErr := runnerWorktreeOwnership(row.Workdir)
-			if ownershipErr != nil {
-				ownership = ownershipErr.Error()
+			workdirState, workdirErr := runnerDirectoryState(row.Workdir)
+			if workdirErr != nil {
+				workdirState = workdirErr.Error()
 			}
-			out.Message = fmt.Sprintf("local=%s worktree=%s%s", inspection.state, ownership, staleAmpPIDDiagnostic(row.Workdir))
+			out.Message = fmt.Sprintf("local=%s workdir=%s%s", inspection.state, workdirState, staleAmpPIDDiagnostic(row.Workdir))
 			out.Runner = &result.RunnerDetails{LocalState: string(inspection.state), ProcessStart: inspection.pane.StartTime}
 			if inspection.pane.StartTime > 0 {
 				out.Runner.ProcessAgeSeconds = time.Now().Unix() - inspection.pane.StartTime
@@ -214,8 +232,7 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 			continue
 		}
 		if in.Command.Name == "reconcile" {
-			valid := requireLockedWorktree(row.Workdir) == nil
-			if valid {
+			if !reconcileMissing[row.Workdir] {
 				if pidDiagnostic == "" {
 					out.Message = "already in desired state"
 				} else {
@@ -322,7 +339,7 @@ func (a app) runnerPinV1(in invocation, dir config.Directory, selected []config.
 	}
 	row := config.RunnerRow{Workspace: in.Selectors.Workspace, Workdir: in.Selectors.Workdir, Window: config.RunnerWindow(in.Selectors.Workdir)}
 	out := runnerOutcome(row, "pin", "")
-	if err := requireLockedWorktree(row.Workdir); err != nil {
+	if err := requireRunnerDirectory(row.Workdir); err != nil {
 		return env, result.Preflight(err)
 	}
 	all, err := config.LoadRunnersReadOnly(dir.RunnersPath())
@@ -392,51 +409,23 @@ func runnerOutcome(row config.RunnerRow, action, message string) result.Outcome 
 	return result.Outcome{Resource: id, Action: action, Message: message}
 }
 
-func requireLockedWorktree(workdir string) error {
-	_, err := runnerWorktreeOwnership(workdir)
+func requireRunnerDirectory(workdir string) error {
+	_, err := runnerDirectoryState(workdir)
 	return err
 }
 
-func runnerWorktreeOwnership(workdir string) (string, error) {
+func runnerDirectoryState(workdir string) (string, error) {
 	stat, err := os.Stat(workdir)
-	if err != nil || !stat.IsDir() {
-		return "", fmt.Errorf("runner workdir %s is missing", workdir)
+	if os.IsNotExist(err) {
+		return "", fmt.Errorf("runner workdir %s is missing: %w", workdir, err)
 	}
-	top, err := exec.Command("git", "-C", workdir, "rev-parse", "--show-toplevel").Output()
 	if err != nil {
-		return "", fmt.Errorf("runner workdir %s is not a Git worktree", workdir)
+		return "", fmt.Errorf("inspect runner workdir %s: %w", workdir, err)
 	}
-	topInfo, topErr := os.Stat(strings.TrimSpace(string(top)))
-	if topErr != nil || !os.SameFile(stat, topInfo) {
-		return "", fmt.Errorf("runner workdir %s must be the Git worktree root", workdir)
+	if !stat.IsDir() {
+		return "", fmt.Errorf("runner workdir %s is not a directory", workdir)
 	}
-	out, err := exec.Command("git", "-C", workdir, "worktree", "list", "--porcelain").Output()
-	if err != nil {
-		return "", fmt.Errorf("inspect Git worktree lock for %s: %w", workdir, err)
-	}
-	for index, record := range strings.Split(strings.TrimSpace(string(out)), "\n\n") {
-		lines := strings.Split(record, "\n")
-		if len(lines) == 0 || !strings.HasPrefix(lines[0], "worktree ") {
-			continue
-		}
-		candidateInfo, candidateErr := os.Stat(strings.TrimPrefix(lines[0], "worktree "))
-		if candidateErr != nil || !os.SameFile(stat, candidateInfo) {
-			continue
-		}
-		// Git guarantees that the primary worktree is the first porcelain
-		// record. Unlike linked worktrees, it cannot carry a worktree lock and
-		// is stable because `git worktree prune` never removes it.
-		if index == 0 {
-			return "stable primary", nil
-		}
-		for _, line := range lines[1:] {
-			if line == "locked" || strings.HasPrefix(line, "locked ") {
-				return "locked", nil
-			}
-		}
-		return "", fmt.Errorf("runner worktree %s is not locked; lock it before pinning or launch", workdir)
-	}
-	return "", fmt.Errorf("runner workdir %s is not registered as a Git worktree", workdir)
+	return "directory", nil
 }
 
 func runnerStartCommand(workdir string) string {
@@ -729,34 +718,41 @@ func boundedDiagnostic(value string, limit int) string {
 	return value
 }
 
-func staleAmpPIDDiagnostic(workdir string) string {
+func inspectRunnerPIDMarker(workdir string) runnerPIDMarkerInspection {
 	cache, err := runnerCacheDir()
 	if err != nil {
-		return ""
+		return runnerPIDMarkerInspection{diagnostic: fmt.Sprintf("; Amp-owned PID marker location could not be resolved: %v", err), ambiguous: true}
 	}
 	canonical, err := config.CanonicalWorkdir(workdir)
 	if err != nil {
-		return ""
+		return runnerPIDMarkerInspection{diagnostic: fmt.Sprintf("; Amp-owned PID marker workdir could not be canonicalized: %v", err), ambiguous: true}
 	}
 	sum := sha256.Sum256([]byte(canonical))
 	marker := filepath.Join(cache, "amp", "pids", fmt.Sprintf("runner-%x.pid", sum[:8]))
 	data, readErr := os.ReadFile(marker)
 	if os.IsNotExist(readErr) {
-		return ""
+		return runnerPIDMarkerInspection{}
 	}
 	if readErr != nil {
-		return fmt.Sprintf("; Amp-owned PID marker %s could not be read: %v; left unchanged", marker, readErr)
+		return runnerPIDMarkerInspection{diagnostic: fmt.Sprintf("; Amp-owned PID marker %s could not be read: %v; left unchanged", marker, readErr), ambiguous: true}
 	}
 	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
 	if parseErr != nil || pid <= 0 {
-		return fmt.Sprintf("; Amp-owned PID marker %s has an invalid PID; left unchanged", marker)
+		return runnerPIDMarkerInspection{diagnostic: fmt.Sprintf("; Amp-owned PID marker %s has an invalid PID; left unchanged", marker)}
 	}
 	alive := runnerProcessAlive(pid)
 	state := "stale"
 	if alive {
 		state = "live but ownership is ambiguous"
 	}
-	return fmt.Sprintf("; Amp-owned PID marker %s for this workdir points to %s pid %d; left unchanged", marker, state, pid)
+	return runnerPIDMarkerInspection{
+		diagnostic: fmt.Sprintf("; Amp-owned PID marker %s for this workdir points to %s pid %d; left unchanged", marker, state, pid),
+		ambiguous:  alive,
+	}
+}
+
+func staleAmpPIDDiagnostic(workdir string) string {
+	return inspectRunnerPIDMarker(workdir).diagnostic
 }
 
 func processAlive(pid int) bool {

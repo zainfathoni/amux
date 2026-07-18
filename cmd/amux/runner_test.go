@@ -29,29 +29,18 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func TestRunnerPinRequiresLockedWorktreeAndIsCanonicalIdempotent(t *testing.T) {
+func TestRunnerPinAcceptsExistingNonGitDirectoryAndIsCanonicalIdempotent(t *testing.T) {
 	dir := t.TempDir()
-	locked := lockedTestWorktree(t)
-	unlockedRepo := primaryTestWorktree(t)
-	unlocked := filepath.Join(t.TempDir(), "unlocked")
-	runGit(t, unlockedRepo, "worktree", "add", "-q", "--detach", unlocked)
+	workdir := t.TempDir()
 	bin := t.TempDir()
 	called := filepath.Join(bin, "called")
 	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\ntouch '"+called+"'\nexit 2\n")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
-	err := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", "pin", "--workspace", "alpha", "--workdir", unlocked)
-	if err == nil || !strings.Contains(err.Error(), "not locked") || result.ExitCode(err) != result.ExitRejected {
-		t.Fatalf("unlocked pin error = %v, exit=%d", err, result.ExitCode(err))
-	}
-	if _, statErr := os.Stat(filepath.Join(dir, config.RunnersFile)); !os.IsNotExist(statErr) {
-		t.Fatalf("failed preflight wrote runner config: %v", statErr)
-	}
-
-	args := []string{"--json", "--config-dir", dir, "runner", "pin", "--workspace", "alpha", "--workdir", filepath.Join(locked, ".")}
+	args := []string{"--json", "--config-dir", dir, "runner", "pin", "--workspace", "alpha", "--workdir", filepath.Join(workdir, ".")}
 	first := executeRunnerJSON(t, args...)
-	if len(first.Successful) != 1 || first.Successful[0].Resource.Workdir != locked {
+	if len(first.Successful) != 1 || first.Successful[0].Resource.Workdir != workdir {
 		t.Fatalf("first pin = %+v", first)
 	}
 	second := executeRunnerJSON(t, args...)
@@ -59,7 +48,7 @@ func TestRunnerPinRequiresLockedWorktreeAndIsCanonicalIdempotent(t *testing.T) {
 		t.Fatalf("second pin = %+v", second)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, config.RunnersFile))
-	if err != nil || !strings.Contains(string(data), "alpha\t"+locked+"\n") || strings.Contains(string(data), config.RunnerWindow(locked)+"\t") {
+	if err != nil || !strings.Contains(string(data), "alpha\t"+workdir+"\n") || strings.Contains(string(data), config.RunnerWindow(workdir)+"\t") {
 		t.Fatalf("runner registry = %q, err=%v", data, err)
 	}
 	if _, err := os.Stat(called); !os.IsNotExist(err) {
@@ -67,9 +56,45 @@ func TestRunnerPinRequiresLockedWorktreeAndIsCanonicalIdempotent(t *testing.T) {
 	}
 }
 
+func TestRunnerPinRejectsMissingAndFileWorkdirsBeforeMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		workdir func(*testing.T) string
+	}{
+		{name: "missing", workdir: func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") }},
+		{name: "file", workdir: func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "file")
+			if err := os.WriteFile(path, []byte("not a directory"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			bin := t.TempDir()
+			mutated := filepath.Join(bin, "mutated")
+			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\ntouch '"+mutated+"'\nexit 2\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+			err := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", "pin", "--workspace", "alpha", "--workdir", tc.workdir(t))
+			if err == nil || result.ExitCode(err) != result.ExitRejected {
+				t.Fatalf("pin error = %v, exit=%d", err, result.ExitCode(err))
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, config.RunnersFile)); !os.IsNotExist(statErr) {
+				t.Fatalf("failed preflight wrote runner config: %v", statErr)
+			}
+			if _, statErr := os.Stat(mutated); !os.IsNotExist(statErr) {
+				t.Fatalf("failed preflight mutated tmux: %v", statErr)
+			}
+		})
+	}
+}
+
 func TestRunnerPinCurrentDerivesWorkspaceAndWorkdirFromInvokingPane(t *testing.T) {
 	dir := t.TempDir()
-	workdir := lockedTestWorktree(t)
+	workdir := t.TempDir()
 	bin := t.TempDir()
 	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
 if [ "$1" = display-message ]; then
@@ -116,32 +141,47 @@ func TestRunnerListIsDeterministicLocalOnly(t *testing.T) {
 	}
 }
 
-func TestRunnerLaunchPreflightsEveryLockedWorktreeBeforeTmuxMutation(t *testing.T) {
-	dir := t.TempDir()
-	locked := lockedTestWorktree(t)
-	unlockedRepo := primaryTestWorktree(t)
-	unlocked := filepath.Join(t.TempDir(), "unlocked")
-	runGit(t, unlockedRepo, "worktree", "add", "-q", "--detach", unlocked)
-	writeRunnerRegistry(t, dir, "alpha\t"+locked+"\nbeta\t"+unlocked+"\n")
-	bin := t.TempDir()
-	log := filepath.Join(bin, "tmux.log")
-	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\necho \"$*\" >> '"+log+"'\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+func TestRunnerLaunchAndRestartRejectMissingAndFileWorkdirsBeforeTmuxMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		workdir func(*testing.T) string
+	}{
+		{name: "missing", workdir: func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") }},
+		{name: "file", workdir: func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "file")
+			if err := os.WriteFile(path, []byte("not a directory"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+	} {
+		for _, command := range []string{"launch", "restart"} {
+			t.Run(command+"/"+tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				valid := t.TempDir()
+				writeRunnerRegistry(t, dir, "alpha\t"+valid+"\nbeta\t"+tc.workdir(t)+"\n")
+				bin := t.TempDir()
+				log := filepath.Join(bin, "tmux.log")
+				writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\necho \"$*\" >> '"+log+"'\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
-	err := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", "launch", "--all")
-	if err == nil || !strings.Contains(err.Error(), "not locked") || result.ExitCode(err) != result.ExitRejected {
-		t.Fatalf("bulk launch error = %v", err)
-	}
-	data, _ := os.ReadFile(log)
-	if strings.Contains(string(data), "new-session") || strings.Contains(string(data), "new-window") {
-		t.Fatalf("bulk preflight mutated tmux:\n%s", data)
+				err := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", command, "--all")
+				if err == nil || result.ExitCode(err) != result.ExitRejected {
+					t.Fatalf("bulk %s error = %v, exit=%d", command, err, result.ExitCode(err))
+				}
+				data, _ := os.ReadFile(log)
+				if strings.Contains(string(data), "new-session") || strings.Contains(string(data), "new-window") {
+					t.Fatalf("bulk preflight mutated tmux:\n%s", data)
+				}
+			})
+		}
 	}
 }
 
-func TestRunnerPrimaryWorktreeOwnershipAgreesAcrossRestartAndDoctor(t *testing.T) {
+func TestRunnerNonGitDirectoryAcceptedAcrossRestartAndDoctor(t *testing.T) {
 	dir := t.TempDir()
-	workdir := primaryTestWorktree(t)
+	workdir := t.TempDir()
 	window := config.RunnerWindow(workdir)
 	start := runnerStartCommand(workdir)
 	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
@@ -175,11 +215,11 @@ esac
 
 	restart := executeRunnerJSON(t, "--json", "--dry-run", "--config-dir", dir, "runner", "restart", "--workdir", workdir)
 	if len(restart.Planned) != 1 || len(restart.Failed) != 0 {
-		t.Fatalf("primary worktree restart = %+v", restart)
+		t.Fatalf("non-Git directory restart = %+v", restart)
 	}
 	doctor := executeRunnerJSON(t, "--json", "--config-dir", dir, "runner", "doctor", "--workdir", workdir)
-	if len(doctor.Successful) != 1 || len(doctor.Failed) != 0 || !strings.Contains(doctor.Successful[0].Message, "worktree=stable primary") {
-		t.Fatalf("primary worktree doctor = %+v", doctor)
+	if len(doctor.Successful) != 1 || len(doctor.Failed) != 0 || !strings.Contains(doctor.Successful[0].Message, "workdir=directory") {
+		t.Fatalf("non-Git directory doctor = %+v", doctor)
 	}
 	registryAfter, err := os.ReadFile(filepath.Join(dir, config.RunnersFile))
 	if err != nil || !bytes.Equal(registryAfter, registryBefore) {
@@ -191,7 +231,7 @@ esac
 	}
 }
 
-func TestRunnerRestartRejectsUnlockedLinkedWorktree(t *testing.T) {
+func TestRunnerRestartAcceptsUnlockedLinkedWorktree(t *testing.T) {
 	dir := t.TempDir()
 	repo := primaryTestWorktree(t)
 	workdir := filepath.Join(t.TempDir(), "linked")
@@ -209,15 +249,15 @@ esac
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
-	err := executeRunnerJSONError(t, "--json", "--dry-run", "--config-dir", dir, "runner", "restart", "--workdir", workdir)
-	if err == nil || !strings.Contains(err.Error(), "not locked") || result.ExitCode(err) != result.ExitRejected {
-		t.Fatalf("unlocked linked restart error = %v, exit=%d", err, result.ExitCode(err))
+	got := executeRunnerJSON(t, "--json", "--dry-run", "--config-dir", dir, "runner", "restart", "--workdir", workdir)
+	if len(got.Planned) != 1 || len(got.Failed) != 0 {
+		t.Fatalf("unlocked linked restart = %+v", got)
 	}
 }
 
 func TestRunnerLaunchVerifiesExactCreatedPaneAndSkipsAlreadyRunning(t *testing.T) {
 	dir := t.TempDir()
-	workdir := lockedTestWorktree(t)
+	workdir := t.TempDir()
 	window := config.RunnerWindow(workdir)
 	start := runnerStartCommand(workdir)
 	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
@@ -253,7 +293,7 @@ esac
 
 func TestRunnerLaunchVerifiesRetainedShellWithExactAmpChild(t *testing.T) {
 	dir := t.TempDir()
-	workdir := lockedTestWorktree(t)
+	workdir := t.TempDir()
 	window := config.RunnerWindow(workdir)
 	start := runnerStartCommand(workdir)
 	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
@@ -656,7 +696,7 @@ esac
 
 func TestRunnerLaunchRejectsAmpDescendantOfUnrelatedShellChild(t *testing.T) {
 	dir := t.TempDir()
-	workdir := lockedTestWorktree(t)
+	workdir := t.TempDir()
 	window := config.RunnerWindow(workdir)
 	start := runnerStartCommand(workdir)
 	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
@@ -774,7 +814,7 @@ esac
 
 func TestRunnerLaunchEarlyExitReportsBoundedPaneAndStalePIDDiagnostics(t *testing.T) {
 	dir := t.TempDir()
-	workdir := lockedTestWorktree(t)
+	workdir := t.TempDir()
 	window := config.RunnerWindow(workdir)
 	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
 	cache := t.TempDir()
@@ -859,7 +899,7 @@ func TestStaleAmpPIDDiagnosticReportsLiveAmbiguousOwnershipWithoutDeletion(t *te
 
 func TestRunnerLaunchRejectsAmpChildThatDoesNotSurviveVerificationWindow(t *testing.T) {
 	dir := t.TempDir()
-	workdir := lockedTestWorktree(t)
+	workdir := t.TempDir()
 	window := config.RunnerWindow(workdir)
 	start := runnerStartCommand(workdir)
 	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
@@ -902,7 +942,7 @@ esac
 
 func TestRunnerLegacyWindowIsManagedAndRestartMigratesRuntimeName(t *testing.T) {
 	dir := t.TempDir()
-	workdir := lockedTestWorktree(t)
+	workdir := t.TempDir()
 	derived := config.RunnerWindow(workdir)
 	writeRunnerRegistry(t, dir, "alpha\tlegacy-runner\t"+workdir+"\n")
 	bin := t.TempDir()
@@ -967,7 +1007,7 @@ func TestProcessSignalMayBeAliveFailsClosedOnPermissionAndUnknownErrors(t *testi
 
 func TestRunnerLegacyRestartRejectsOccupiedCanonicalWindowBeforeStopping(t *testing.T) {
 	dir := t.TempDir()
-	workdir := lockedTestWorktree(t)
+	workdir := t.TempDir()
 	derived := config.RunnerWindow(workdir)
 	writeRunnerRegistry(t, dir, "alpha\tlegacy-runner\t"+workdir+"\n")
 	bin := t.TempDir()
@@ -1019,10 +1059,80 @@ exit 2
 	}
 }
 
+func TestRunnerReconcileRejectsInvalidWorkdirsBeforeConfigOrTmuxMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		invalid func(*testing.T) string
+	}{
+		{name: "file", invalid: func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "file")
+			if err := os.WriteFile(path, []byte("not a directory"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+		{name: "stat-error", invalid: func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "loop")
+			if err := os.Symlink(filepath.Base(path), path); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+	} {
+		for _, bulk := range []bool{false, true} {
+			name := "single"
+			if bulk {
+				name = "bulk"
+			}
+			t.Run(tc.name+"/"+name, func(t *testing.T) {
+				dir := t.TempDir()
+				invalid := tc.invalid(t)
+				rows := "beta\t" + invalid + "\n"
+				if bulk {
+					rows = "alpha\t" + filepath.Join(t.TempDir(), "missing") + "\n" + rows
+				}
+				writeRunnerRegistry(t, dir, rows)
+				registryPath := filepath.Join(dir, config.RunnersFile)
+				before, err := os.ReadFile(registryPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				bin := t.TempDir()
+				log := filepath.Join(bin, "tmux.log")
+				writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\necho \"$*\" >> '"+log+"'\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+				args := []string{"--json", "--config-dir", dir, "runner", "reconcile", "--workdir", invalid}
+				if bulk {
+					args = []string{"--json", "--config-dir", dir, "runner", "reconcile", "--all"}
+				}
+				err = executeRunnerJSONError(t, args...)
+				if err == nil || result.ExitCode(err) != result.ExitRejected {
+					t.Fatalf("reconcile error = %v, exit=%d", err, result.ExitCode(err))
+				}
+				after, readErr := os.ReadFile(registryPath)
+				if readErr != nil || !bytes.Equal(after, before) {
+					t.Fatalf("reconcile changed registry: before=%q after=%q err=%v", before, after, readErr)
+				}
+				data, _ := os.ReadFile(log)
+				if strings.Contains(string(data), "new-session") || strings.Contains(string(data), "new-window") || strings.Contains(string(data), "kill-window") {
+					t.Fatalf("reconcile mutated tmux:\n%s", data)
+				}
+			})
+		}
+	}
+}
+
 func TestRunnerParkRemoveReconcileAndDryRunConverge(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(t.TempDir(), "gone")
 	writeRunnerRegistry(t, dir, "alpha\t"+missing+"\n")
+	registryPath := filepath.Join(dir, config.RunnersFile)
+	registryBefore, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cache := t.TempDir()
 	oldCacheDir := runnerCacheDir
 	runnerCacheDir = func() (string, error) { return cache, nil }
@@ -1043,24 +1153,71 @@ func TestRunnerParkRemoveReconcileAndDryRunConverge(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
-	dry := executeRunnerJSON(t, "--json", "--dry-run", "--config-dir", dir, "runner", "reconcile", "--workdir", missing)
-	if len(dry.Planned) != 1 || !strings.Contains(dry.Planned[0].Message, "ownership is ambiguous") {
-		t.Fatalf("dry reconcile = %+v", dry)
+	reconcileErr := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", "reconcile", "--workdir", missing)
+	if reconcileErr == nil || result.ExitCode(reconcileErr) != result.ExitRejected || !strings.Contains(reconcileErr.Error(), "ownership is ambiguous") {
+		t.Fatalf("ambiguous reconcile error = %v, exit=%d", reconcileErr, result.ExitCode(reconcileErr))
 	}
-	if rows, err := config.LoadRunnersReadOnly(filepath.Join(dir, config.RunnersFile)); err != nil || len(rows) != 1 {
-		t.Fatalf("dry reconcile mutated rows: %+v err=%v", rows, err)
+	registryAfter, err := os.ReadFile(registryPath)
+	if err != nil || !bytes.Equal(registryAfter, registryBefore) {
+		t.Fatalf("ambiguous reconcile changed registry: before=%q after=%q err=%v", registryBefore, registryAfter, err)
 	}
+	runnerProcessAlive = func(int) bool { return false }
 	reconciled := executeRunnerJSON(t, "--json", "--config-dir", dir, "runner", "reconcile", "--workdir", missing)
-	if len(reconciled.Successful) != 1 || !strings.Contains(reconciled.Successful[0].Message, "ownership is ambiguous") {
+	if len(reconciled.Successful) != 1 || !strings.Contains(reconciled.Successful[0].Message, "stale pid") {
 		t.Fatalf("reconcile = %+v", reconciled)
 	}
 	repeated := executeRunnerJSON(t, "--json", "--config-dir", dir, "runner", "reconcile", "--workdir", missing)
-	if len(repeated.Skipped) != 1 || !strings.Contains(repeated.Skipped[0].Message, "ownership is ambiguous") {
+	if len(repeated.Skipped) != 1 || !strings.Contains(repeated.Skipped[0].Message, "stale pid") {
 		t.Fatalf("repeated reconcile = %+v", repeated)
 	}
 	removed := executeRunnerJSON(t, "--json", "--config-dir", dir, "runner", "remove", "--workdir", missing)
 	if len(removed.Skipped) != 1 || removed.Skipped[0].Message != "already in desired state" {
 		t.Fatalf("idempotent remove = %+v", removed)
+	}
+}
+
+func TestRunnerBulkReconcileRejectsAmbiguousPIDOwnershipBeforeMutation(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(t.TempDir(), "first-missing")
+	ambiguous := filepath.Join(t.TempDir(), "second-missing")
+	writeRunnerRegistry(t, dir, "alpha\t"+first+"\nbeta\t"+ambiguous+"\n")
+	registryPath := filepath.Join(dir, config.RunnersFile)
+	before, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := t.TempDir()
+	oldCacheDir := runnerCacheDir
+	runnerCacheDir = func() (string, error) { return cache, nil }
+	t.Cleanup(func() { runnerCacheDir = oldCacheDir })
+	sum := sha256.Sum256([]byte(ambiguous))
+	marker := filepath.Join(cache, "amp", "pids", fmt.Sprintf("runner-%x.pid", sum[:8]))
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("12345\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldProbe := runnerProcessAlive
+	runnerProcessAlive = func(pid int) bool { return pid == 12345 }
+	t.Cleanup(func() { runnerProcessAlive = oldProbe })
+	bin := t.TempDir()
+	log := filepath.Join(bin, "tmux.log")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\necho \"$*\" >> '"+log+"'\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	reconcileErr := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", "reconcile", "--all")
+	if reconcileErr == nil || result.ExitCode(reconcileErr) != result.ExitRejected || !strings.Contains(reconcileErr.Error(), "ownership is ambiguous") {
+		t.Fatalf("bulk reconcile error = %v, exit=%d", reconcileErr, result.ExitCode(reconcileErr))
+	}
+	after, readErr := os.ReadFile(registryPath)
+	if readErr != nil || !bytes.Equal(after, before) {
+		t.Fatalf("bulk reconcile changed registry: before=%q after=%q err=%v", before, after, readErr)
+	}
+	data, _ := os.ReadFile(log)
+	if strings.Contains(string(data), "new-session") || strings.Contains(string(data), "new-window") || strings.Contains(string(data), "kill-window") {
+		t.Fatalf("bulk reconcile mutated tmux:\n%s", data)
 	}
 }
 
@@ -1095,15 +1252,6 @@ func writeRunnerRegistry(t *testing.T, dir, rows string) {
 	if err := os.WriteFile(filepath.Join(dir, config.RunnersFile), []byte("# amux-schema: runners/v1\n"+rows), 0o600); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func lockedTestWorktree(t *testing.T) string {
-	t.Helper()
-	repo := primaryTestWorktree(t)
-	worktree := filepath.Join(t.TempDir(), "project")
-	runGit(t, repo, "worktree", "add", "-q", "--detach", worktree)
-	runGit(t, repo, "worktree", "lock", "--reason", "amux test", worktree)
-	return worktree
 }
 
 func primaryTestWorktree(t *testing.T) string {

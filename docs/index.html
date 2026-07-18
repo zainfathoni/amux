@@ -897,8 +897,8 @@
                 <p>First-class maintenance for <code>amp --no-tui</code> runners, which never own remote agent threads.</p>
               </article>
               <article class="api-card">
-                <code>stable runner ownership</code>
-                <p>Primary Git worktrees are inherently stable. Linked worktrees must already be locked; amux verifies linked-worktree locks but never locks or unlocks worktrees.</p>
+                <code>workdir-bound runners</code>
+                <p>Runner workdirs may be Git worktrees or any other existing directory, while exact tmux and process ownership remains fail-closed.</p>
               </article>
             </div>
           </div>

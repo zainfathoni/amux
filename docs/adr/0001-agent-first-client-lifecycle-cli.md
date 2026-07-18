@@ -10,7 +10,7 @@ amux will model interactive thread-bound clients as workers and non-interactive 
 
 - A workspace is a lifecycle group represented by one same-named tmux session; the canonical API has no separate session selector.
 - A worker's machine-wide identity is its canonical Amp thread ID. A runner's machine-wide identity is its canonical workdir.
-- Runner pinning requires stable Git worktree ownership: the repository's primary worktree is inherently stable, while a linked worktree must already be locked. amux verifies this invariant but does not own Git worktree lock or unlock operations.
+- Runner pinning requires a canonical existing directory. Runner workdirs may be Git worktrees or non-Git directories; Git ownership and worktree lock state are not runner lifecycle requirements.
 - Runner window names are generated as `runner-<directory>-<canonical-path-hash>` and are not public identifiers.
 - `list`, `launch`, `park`, `restart`, `remove`, and `doctor` aggregate workers and runners at the top level; their mode-specific forms narrow scope.
 - `spawn`, `shelve`, `unshelve`, and `teardown` are worker-only and may have concise top-level forms. Teardown changes a worker's remote thread state and never applies to a runner or remote agent thread.
@@ -26,7 +26,7 @@ amux will model interactive thread-bound clients as workers and non-interactive 
 - Mutating commands and scheduled maintenance share one bounded machine-level operation lock held from preflight through persisted results; concurrent mutation fails with structured ownership metadata instead of racing configuration writes or side effects.
 - Canonical agent selectors use long flags. Human shorthands are fixed across commands: `-w` workspace, `-W` window, `-d` workdir, `-t` thread, `-m` mode, `-j` JSON, `-n` dry-run, and `-h` help.
 - Help is contextual at every command-tree level and is also addressable through `amux help ...`.
-- Missing ephemeral worktree runners are repaired explicitly through runner reconciliation; launch never silently mutates runner configuration.
+- Missing runner workdirs are repaired explicitly through runner reconciliation; launch never silently mutates runner configuration.
 - `shelves.tsv` explicitly records shelf intent by canonical worker thread ID. Local shelf intent controls launch eligibility, while Amp archive state remains separate synchronized remote state and drift is reported rather than inferred away.
 - Shelving records intent before archiving and parking; unshelving removes intent only after unarchiving. Partial synchronization remains visible and idempotently retryable instead of being rolled back.
 - `reconcile` is an aggregate lifecycle command with mode-specific worker and runner implementations. It accepts current, canonical resource, workspace, or explicit machine-wide scope; workspace reconciliation jointly preflights both modes.
