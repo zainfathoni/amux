@@ -1059,6 +1059,71 @@ exit 2
 	}
 }
 
+func TestRunnerReconcileRejectsInvalidWorkdirsBeforeConfigOrTmuxMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		invalid func(*testing.T) string
+	}{
+		{name: "file", invalid: func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "file")
+			if err := os.WriteFile(path, []byte("not a directory"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+		{name: "stat-error", invalid: func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "loop")
+			if err := os.Symlink(filepath.Base(path), path); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+	} {
+		for _, bulk := range []bool{false, true} {
+			name := "single"
+			if bulk {
+				name = "bulk"
+			}
+			t.Run(tc.name+"/"+name, func(t *testing.T) {
+				dir := t.TempDir()
+				invalid := tc.invalid(t)
+				rows := "beta\t" + invalid + "\n"
+				if bulk {
+					rows = "alpha\t" + filepath.Join(t.TempDir(), "missing") + "\n" + rows
+				}
+				writeRunnerRegistry(t, dir, rows)
+				registryPath := filepath.Join(dir, config.RunnersFile)
+				before, err := os.ReadFile(registryPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				bin := t.TempDir()
+				log := filepath.Join(bin, "tmux.log")
+				writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\necho \"$*\" >> '"+log+"'\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+				args := []string{"--json", "--config-dir", dir, "runner", "reconcile", "--workdir", invalid}
+				if bulk {
+					args = []string{"--json", "--config-dir", dir, "runner", "reconcile", "--all"}
+				}
+				err = executeRunnerJSONError(t, args...)
+				if err == nil || result.ExitCode(err) != result.ExitRejected {
+					t.Fatalf("reconcile error = %v, exit=%d", err, result.ExitCode(err))
+				}
+				after, readErr := os.ReadFile(registryPath)
+				if readErr != nil || !bytes.Equal(after, before) {
+					t.Fatalf("reconcile changed registry: before=%q after=%q err=%v", before, after, readErr)
+				}
+				data, _ := os.ReadFile(log)
+				if strings.Contains(string(data), "new-session") || strings.Contains(string(data), "new-window") || strings.Contains(string(data), "kill-window") {
+					t.Fatalf("reconcile mutated tmux:\n%s", data)
+				}
+			})
+		}
+	}
+}
+
 func TestRunnerParkRemoveReconcileAndDryRunConverge(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(t.TempDir(), "gone")

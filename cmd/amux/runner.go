@@ -151,6 +151,12 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 		if in.Command.Name == "reconcile" && inspection.state != runnerPaneAbsent {
 			return &env, result.Preflight(fmt.Errorf("runner %s still has %s runtime ownership; reconcile will not remove its configuration", row.Workdir, inspection.state))
 		}
+		if in.Command.Name == "reconcile" {
+			_, directoryErr := runnerDirectoryState(row.Workdir)
+			if directoryErr != nil && !errors.Is(directoryErr, os.ErrNotExist) {
+				return &env, result.Preflight(directoryErr)
+			}
+		}
 	}
 
 	restartFailed := false
@@ -399,7 +405,7 @@ func requireRunnerDirectory(workdir string) error {
 func runnerDirectoryState(workdir string) (string, error) {
 	stat, err := os.Stat(workdir)
 	if os.IsNotExist(err) {
-		return "", fmt.Errorf("runner workdir %s is missing", workdir)
+		return "", fmt.Errorf("runner workdir %s is missing: %w", workdir, err)
 	}
 	if err != nil {
 		return "", fmt.Errorf("inspect runner workdir %s: %w", workdir, err)
