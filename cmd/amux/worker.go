@@ -432,12 +432,121 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 			env.Planned = append(env.Planned, result.Outcome{Resource: resource, Action: "spawn", Message: "would verify the exact provisioned thread and recover without resubmitting"})
 			return env, nil
 		}
-		matches, _, verifyErr := ampThreadContainsExactAssignment(existing.Resource.Thread, message, s.Workdir, false, operationAllowsTerminalLineEndingNormalization(existing, messageSource))
+		allowLineEndingNormalization := operationAllowsTerminalLineEndingNormalization(existing, messageSource)
+		matches, _, verifyErr := ampThreadContainsExactAssignment(existing.Resource.Thread, message, s.Workdir, false, allowLineEndingNormalization)
 		if verifyErr != nil {
 			return env, result.Runtime(fmt.Errorf("verify indeterminate provisioned thread %s without resubmitting: %w", existing.Resource.Thread, verifyErr))
 		}
 		if !matches {
-			return env, result.Preflight(fmt.Errorf("indeterminate assignment is not verified in exact provisioned thread %s; refusing to resubmit or adopt another thread", existing.Resource.Thread))
+			var receiver string
+			receiver, verifyErr = findIndeterminateSpawnReceiver(existing, message, s.Workdir, allowLineEndingNormalization)
+			if verifyErr != nil {
+				return env, result.Preflight(verifyErr)
+			}
+			pendingAdoption := existing.ThreadAdoption != nil
+			if pendingAdoption && receiver != existing.ThreadAdoption.ReceivingThread {
+				return env, result.Preflight(fmt.Errorf("pending adoption is bound to receiver %s, but current evidence identifies %s; recovery: preserve both identities and do not guess ownership", existing.ThreadAdoption.ReceivingThread, receiver))
+			}
+			requestedReceiver := config.Row{Workspace: workspace, Window: s.Window, Workdir: s.Workdir, Thread: receiver}
+			rows, loadErr := config.LoadReadOnly(dir.WorkersPath())
+			if loadErr != nil {
+				return env, result.Preflight(loadErr)
+			}
+			for _, row := range rows {
+				if row.Workspace == workspace && row.Window == s.Window {
+					return env, result.Preflight(fmt.Errorf("indeterminate alternate receiver %s cannot be adopted because worker window %s/%s is configured for thread %s", receiver, workspace, s.Window, row.Thread))
+				}
+				if row.Thread == receiver {
+					return env, result.Preflight(fmt.Errorf("indeterminate alternate receiver %s is already configured as %s/%s", receiver, row.Workspace, row.Window))
+				}
+				if row.Thread == existing.Resource.Thread {
+					return env, result.Preflight(fmt.Errorf("indeterminate provisioned thread %s is already configured as %s/%s; refusing residue cleanup", existing.Resource.Thread, row.Workspace, row.Window))
+				}
+			}
+			receiverInspection, inspectErr := inspectWorker(requestedReceiver)
+			if inspectErr != nil {
+				return env, result.Preflight(inspectErr)
+			}
+			provisionedRow := requestedReceiver
+			provisionedRow.Thread = existing.Resource.Thread
+			provisionedInspection := workerInspection{state: workerPaneAbsent}
+			if receiverInspection.state == workerPaneConflict {
+				provisionedInspection, inspectErr = inspectWorker(provisionedRow)
+				if inspectErr != nil {
+					return env, result.Preflight(inspectErr)
+				}
+			}
+			if receiverInspection.state != workerPaneAbsent && receiverInspection.state != workerPaneExact && provisionedInspection.state != workerPaneExact {
+				return env, result.Preflight(fmt.Errorf("indeterminate alternate receiver %s cannot be adopted because worker tmux identity is %s", receiver, receiverInspection.state))
+			}
+			receiverPanes, paneErr := managedThreadPanes(receiver, s.Workdir)
+			if paneErr != nil {
+				return env, result.Preflight(fmt.Errorf("inspect existing tmux ownership for alternate receiver %s: %w", receiver, paneErr))
+			}
+			if len(receiverPanes) > 1 || len(receiverPanes) == 1 && (receiverInspection.state != workerPaneExact || receiverPanes[0].WindowID != receiverInspection.pane.WindowID) {
+				return env, result.Preflight(fmt.Errorf("alternate receiver %s already has authoritative tmux ownership outside the requested worker identity; refusing a duplicate window", receiver))
+			}
+			confirmedReceiver, confirmErr := findIndeterminateSpawnReceiver(existing, message, s.Workdir, allowLineEndingNormalization)
+			if confirmErr != nil {
+				return env, result.Preflight(fmt.Errorf("reconfirm alternate receiver %s before durable adoption: %w", receiver, confirmErr))
+			}
+			if confirmedReceiver != receiver {
+				return env, result.Preflight(fmt.Errorf("alternate receiver changed from %s to %s during reconciliation; recovery: preserve all identities and do not guess ownership", receiver, confirmedReceiver))
+			}
+			if !pendingAdoption {
+				existing, err = config.BeginIndeterminateWorkerSpawnThreadAdoption(dir.OperationsPath(), existing.Key, existing.Resource.Thread, receiver)
+				if err != nil {
+					return env, result.Runtime(err)
+				}
+			}
+			if provisionedInspection.state == workerPaneExact {
+				command := teardownExpectedStartCommand(teardownIdentity{Workspace: requestedReceiver.Workspace, Session: requestedReceiver.Workspace, Window: requestedReceiver.Window, Thread: receiver}, requestedReceiver)
+				if err = revalidateWorkerBeforeMutation(provisionedRow, provisionedInspection); err == nil {
+					err = (tmux.Runner{}).RespawnPane(provisionedInspection.pane.WindowID, command)
+				}
+				if err == nil {
+					receiverInspection, err = inspectWorker(requestedReceiver)
+					if err == nil && receiverInspection.state != workerPaneExact {
+						err = fmt.Errorf("adopted worker tmux identity is %s", receiverInspection.state)
+					}
+				}
+			}
+			provisioned := existing.ThreadAdoption.ProvisionedThread
+			if err == nil {
+				var stillEmpty bool
+				stillEmpty, err = ampThreadHasNoMessages(provisioned)
+				if err == nil && !stillEmpty {
+					err = fmt.Errorf("provisioned thread %s gained content before residue cleanup", provisioned)
+				}
+			}
+			if err == nil {
+				var receiverMatches, receiverStarted bool
+				receiverMatches, receiverStarted, err = ampThreadContainsExactAssignment(receiver, message, s.Workdir, true, allowLineEndingNormalization)
+				if err == nil && (!receiverMatches || receiverStarted) {
+					err = fmt.Errorf("alternate receiver %s changed before residue cleanup (exact=%t, external_work=%t)", receiver, receiverMatches, receiverStarted)
+				}
+			}
+			if err == nil {
+				var activeThreads map[string]bool
+				activeThreads, err = strictAmpThreadIDSet(false)
+				if err == nil && !activeThreads[receiver] {
+					err = fmt.Errorf("alternate receiver %s became inactive before residue cleanup", receiver)
+				}
+				if err == nil && activeThreads[provisioned] {
+					err = archiveAmpThread(provisioned)
+				}
+			}
+			if err == nil {
+				existing, err = config.CompleteOperationThreadAdoption(dir.OperationsPath(), existing.Key)
+			}
+			if err != nil {
+				return env, result.Runtime(fmt.Errorf("reconcile alternate receiving thread %s for provisioned thread %s: %w; recovery: preserve both identities and do not resubmit", receiver, provisioned, err))
+			}
+			existing.Phase = config.OperationPhaseMessageVerified
+			existing.UpdatedAt = time.Now().UTC()
+			if _, err = config.StoreOperation(dir.OperationsPath(), existing); err != nil {
+				return env, result.Runtime(err)
+			}
 		}
 		requested := config.Row{Workspace: workspace, Window: s.Window, Workdir: s.Workdir, Thread: existing.Resource.Thread}
 		rows, loadErr := config.LoadReadOnly(dir.WorkersPath())
@@ -462,9 +571,11 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		if inspection.state != workerPaneAbsent && inspection.state != workerPaneExact {
 			return env, result.Preflight(fmt.Errorf("indeterminate spawn cannot recover because worker tmux identity is %s", inspection.state))
 		}
-		existing, err = config.RecoverIndeterminateWorkerSpawn(dir.OperationsPath(), existing.Key, existing.Resource.Thread)
-		if err != nil {
-			return env, result.Runtime(err)
+		if matches {
+			existing, err = config.RecoverIndeterminateWorkerSpawn(dir.OperationsPath(), existing.Key, existing.Resource.Thread)
+			if err != nil {
+				return env, result.Runtime(err)
+			}
 		}
 	}
 	if found && existing.State != config.OperationStarted {
@@ -725,6 +836,9 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 					}
 				}
 				if err == nil {
+					err = verifyAlternateReceiverBeforeCleanup(provisioned, authoritative, message, workdir, preDeliveryThreads, operationAllowsTerminalLineEndingNormalization(record, messageSourceFromSelectors(in.Selectors)))
+				}
+				if err == nil {
 					err = archiveAmpThread(provisioned)
 				}
 				if err == nil {
@@ -808,11 +922,16 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 
 func recoverableProvisionedVerificationFailure(operation config.OperationRecord) bool {
 	want := fmt.Sprintf("initial assignment was not found in provisioned thread %s or one unambiguous fresh receiving thread; recovery: inspect thread %s and do not resubmit", operation.Resource.Thread, operation.Resource.Thread)
-	return operation.State == config.OperationIndeterminate &&
+	originalFailure := operation.State == config.OperationIndeterminate &&
 		operation.Phase == config.OperationPhaseDeliveryStarted &&
 		operation.Resource.Thread != "" &&
 		operation.ThreadAdoption == nil &&
 		operation.Error == want
+	pendingAdoption := operation.State == config.OperationStarted &&
+		operation.Phase == config.OperationPhaseDeliveryStarted &&
+		operation.ThreadAdoption != nil &&
+		operation.Resource.Thread == operation.ThreadAdoption.ProvisionedThread
+	return originalFailure || pendingAdoption
 }
 
 func messageSourceFromSelectors(selectors selectors) config.OperationMessageSource {
@@ -932,6 +1051,97 @@ func prefixedSpawnName(titlePrefix, window string) string {
 	return strings.TrimSpace(strings.TrimSpace(titlePrefix) + " " + window)
 }
 
+func findIndeterminateSpawnReceiver(operation config.OperationRecord, message, workdir string, allowTerminalLineEndingNormalization bool) (string, error) {
+	empty, err := ampThreadHasNoMessages(operation.Resource.Thread)
+	if err != nil {
+		return "", fmt.Errorf("verify provisioned thread %s is empty before alternate-receiver reconciliation: %w", operation.Resource.Thread, err)
+	}
+	if !empty {
+		return "", fmt.Errorf("indeterminate assignment is not verified in exact provisioned thread %s; provisioned thread has conflicting content, so preserve it and do not guess an alternate receiver", operation.Resource.Thread)
+	}
+	provisionedTime, ok := ampUUIDv7ThreadTime(operation.Resource.Thread)
+	if !ok || provisionedTime.Before(operation.CreatedAt) {
+		return "", fmt.Errorf("provisioned thread %s has no trustworthy post-operation UUIDv7 freshness boundary; recovery: preserve the indeterminate operation and do not guess an alternate receiver", operation.Resource.Thread)
+	}
+	allThreads, err := strictAmpThreadIDSet(true)
+	if err != nil {
+		return "", fmt.Errorf("list alternate receiver evidence for provisioned thread %s: %w", operation.Resource.Thread, err)
+	}
+	preDeliveryThreads := make(map[string]bool, len(allThreads))
+	for candidate := range allThreads {
+		candidateTime, candidateOK := ampUUIDv7ThreadTime(candidate)
+		if !candidateOK || !candidateTime.After(provisionedTime) {
+			preDeliveryThreads[candidate] = true
+		}
+	}
+	fresh, activeThreads, err := scanFreshSpawnReceivingThreads(operation.Resource.Thread, message, workdir, preDeliveryThreads, allowTerminalLineEndingNormalization)
+	if err != nil {
+		return "", err
+	}
+	sort.Strings(fresh)
+	if len(fresh) == 0 {
+		return "", fmt.Errorf("no exact fresh alternate receiver was proved after provisioned thread %s; recovery: preserve the indeterminate operation and do not resubmit", operation.Resource.Thread)
+	}
+	if len(fresh) > 1 {
+		return "", fmt.Errorf("multiple exact fresh alternate receivers %s were proved after provisioned thread %s; recovery: preserve all identities and do not guess ownership", strings.Join(fresh, ", "), operation.Resource.Thread)
+	}
+	if !activeThreads[fresh[0]] {
+		return "", fmt.Errorf("exact fresh alternate receiver %s is archived; recovery: preserve the indeterminate operation and do not mutate thread state", fresh[0])
+	}
+	return fresh[0], nil
+}
+
+func verifyAlternateReceiverBeforeCleanup(provisioned, receiver, message, workdir string, preDeliveryThreads map[string]bool, allowTerminalLineEndingNormalization bool) error {
+	empty, err := ampThreadHasNoMessages(provisioned)
+	if err != nil {
+		return fmt.Errorf("revalidate provisioned residue %s: %w", provisioned, err)
+	}
+	if !empty {
+		return fmt.Errorf("provisioned residue %s is not empty; refusing alternate adoption cleanup", provisioned)
+	}
+	fresh, activeThreads, err := scanFreshSpawnReceivingThreads(provisioned, message, workdir, preDeliveryThreads, allowTerminalLineEndingNormalization)
+	if err != nil {
+		return err
+	}
+	sort.Strings(fresh)
+	if len(fresh) != 1 || fresh[0] != receiver {
+		return fmt.Errorf("alternate receiver evidence changed before cleanup: expected only %s, found %s", receiver, strings.Join(fresh, ", "))
+	}
+	if !activeThreads[receiver] {
+		return fmt.Errorf("alternate receiver %s became inactive before cleanup", receiver)
+	}
+	return nil
+}
+
+func ampThreadHasNoMessages(thread string) (bool, error) {
+	out, err := exec.Command("amp", "threads", "export", thread).CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return false, fmt.Errorf("parse amp threads export for %s: %w", thread, err)
+	}
+	messages, ok := payload["messages"].([]any)
+	if !ok {
+		return false, fmt.Errorf("amp threads export for %s has no message list", thread)
+	}
+	return len(messages) == 0, nil
+}
+
+func ampUUIDv7ThreadTime(thread string) (time.Time, bool) {
+	if len(thread) != 38 || !strings.HasPrefix(thread, "T-") || thread[10] != '-' || thread[15] != '-' || thread[20] != '-' || thread[25] != '-' || thread[16] != '7' {
+		return time.Time{}, false
+	}
+	hexID := strings.ReplaceAll(thread[2:], "-", "")
+	decoded, err := hex.DecodeString(hexID)
+	if err != nil || len(decoded) != 16 || decoded[8]&0xc0 != 0x80 {
+		return time.Time{}, false
+	}
+	milliseconds := int64(decoded[0])<<40 | int64(decoded[1])<<32 | int64(decoded[2])<<24 | int64(decoded[3])<<16 | int64(decoded[4])<<8 | int64(decoded[5])
+	return time.UnixMilli(milliseconds).UTC(), true
+}
+
 func resolveSpawnReceivingThread(boundThread, message, workdir string, preDeliveryThreads map[string]bool, allowTerminalLineEndingNormalization bool) (string, error) {
 	deadline := time.Now().Add(spawnAssignmentVisibilityTimeout())
 	var authoritative string
@@ -940,7 +1150,7 @@ func resolveSpawnReceivingThread(boundThread, message, workdir string, preDelive
 		if err != nil {
 			return "", fmt.Errorf("verify provisioned thread %s: %w; recovery: inspect thread %s and do not resubmit", boundThread, err, boundThread)
 		}
-		fresh, activeThreads, err := scanFreshSpawnReceivingThreads(boundThread, message, workdir, preDeliveryThreads)
+		fresh, activeThreads, err := scanFreshSpawnReceivingThreads(boundThread, message, workdir, preDeliveryThreads, allowTerminalLineEndingNormalization)
 		if err != nil {
 			return "", err
 		}
@@ -950,7 +1160,7 @@ func resolveSpawnReceivingThread(boundThread, message, workdir string, preDelive
 				return "", fmt.Errorf("recheck provisioned thread %s after fresh-thread discovery: %w; recovery: inspect thread %s and do not resubmit", boundThread, err, boundThread)
 			}
 			if boundContainsMessage {
-				fresh, activeThreads, err = scanFreshSpawnReceivingThreads(boundThread, message, workdir, preDeliveryThreads)
+				fresh, activeThreads, err = scanFreshSpawnReceivingThreads(boundThread, message, workdir, preDeliveryThreads, allowTerminalLineEndingNormalization)
 				if err != nil {
 					return "", err
 				}
@@ -983,7 +1193,7 @@ func resolveSpawnReceivingThread(boundThread, message, workdir string, preDelive
 	return authoritative, nil
 }
 
-func scanFreshSpawnReceivingThreads(boundThread, message, workdir string, preDeliveryThreads map[string]bool) ([]string, map[string]bool, error) {
+func scanFreshSpawnReceivingThreads(boundThread, message, workdir string, preDeliveryThreads map[string]bool, allowTerminalLineEndingNormalization bool) ([]string, map[string]bool, error) {
 	allThreads, err := strictAmpThreadIDSet(true)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list fresh receiving threads after delivery: %w; recovery: inspect provisioned thread %s and do not resubmit", err, boundThread)
@@ -997,11 +1207,14 @@ func scanFreshSpawnReceivingThreads(boundThread, message, workdir string, preDel
 		if candidate == canonicalThreadID(boundThread) || preDeliveryThreads[candidate] {
 			continue
 		}
-		matches, _, exportErr := ampThreadContainsExactAssignment(candidate, message, workdir, true, false)
+		matches, started, exportErr := ampThreadContainsExactAssignment(candidate, message, workdir, true, allowTerminalLineEndingNormalization)
 		if exportErr != nil {
 			return nil, nil, fmt.Errorf("verify fresh receiving candidate %s: %w; recovery: inspect %s and provisioned thread %s before choosing an identity", candidate, exportErr, candidate, boundThread)
 		}
 		if matches {
+			if started {
+				return nil, nil, fmt.Errorf("fresh receiving thread %s already started external work; recovery: inspect %s and provisioned thread %s, and do not create a second authoritative worker", candidate, candidate, boundThread)
+			}
 			fresh = append(fresh, candidate)
 		}
 	}
@@ -1056,17 +1269,46 @@ func ampThreadContainsExactAssignment(thread, message, workdir string, requireWo
 	if err := json.Unmarshal(out, &payload); err != nil {
 		return false, false, fmt.Errorf("parse amp threads export for %s: %w", thread, err)
 	}
-	matches := messagesContainExactUserAssignment(payload["messages"], message)
-	if !requireWorkdir {
-		matches = messagesContainProvisionedAssignment(payload["messages"], message, allowTerminalLineEndingNormalization)
-	}
+	matches := messagesContainProvisionedAssignment(payload["messages"], message, allowTerminalLineEndingNormalization)
 	if !matches {
-		return false, true, nil
+		return false, false, nil
 	}
 	if requireWorkdir && !threadEnvironmentContainsWorkdir(payload["env"], workdir) {
-		return false, true, nil
+		return false, false, nil
 	}
-	return true, true, nil
+	return true, messagesContainWorkBeyondAssignment(payload["messages"], message, allowTerminalLineEndingNormalization), nil
+}
+
+func messagesContainWorkBeyondAssignment(value any, message string, allowTerminalLineEndingNormalization bool) bool {
+	messages, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	exactAssignments := 0
+	for _, item := range messages {
+		entry, ok := item.(map[string]any)
+		if ok && entry["role"] == "user" && messageContentIsOnlyProvisionedAssignment(entry["content"], message, allowTerminalLineEndingNormalization) {
+			exactAssignments++
+			continue
+		}
+		return true
+	}
+	return exactAssignments != 1
+}
+
+func messageContentIsOnlyProvisionedAssignment(value any, message string, allowTerminalLineEndingNormalization bool) bool {
+	switch value := value.(type) {
+	case string:
+		return provisionedAssignmentMatches(value, message, allowTerminalLineEndingNormalization)
+	case []any:
+		return len(value) == 1 && messageContentIsOnlyProvisionedAssignment(value[0], message, allowTerminalLineEndingNormalization)
+	case map[string]any:
+		text, ok := value["text"].(string)
+		kind, _ := value["type"].(string)
+		return ok && (kind == "" || kind == "text") && provisionedAssignmentMatches(text, message, allowTerminalLineEndingNormalization)
+	default:
+		return false
+	}
 }
 
 func messagesContainExactUserAssignment(value any, message string) bool {
@@ -1132,9 +1374,11 @@ func provisionedAssignmentMatches(got, want string, allowTerminalLineEndingNorma
 	}
 	switch {
 	case strings.HasSuffix(want, "\r\n"):
-		return got == strings.TrimSuffix(want, "\r\n")
+		trimmed := strings.TrimSuffix(want, "\r\n")
+		return trimmed != "" && got == trimmed
 	case strings.HasSuffix(want, "\n"):
-		return got == strings.TrimSuffix(want, "\n")
+		trimmed := strings.TrimSuffix(want, "\n")
+		return trimmed != "" && got == trimmed
 	default:
 		return false
 	}
@@ -1356,6 +1600,22 @@ func inspectWorker(row config.Row) (workerInspection, error) {
 		return workerInspection{state: workerPaneConflict, pane: panes[0]}, nil
 	}
 	return workerInspection{state: workerPaneExact, pane: panes[0]}, nil
+}
+
+func managedThreadPanes(thread, workdir string) ([]tmux.WindowPane, error) {
+	panes, err := (tmux.Runner{}).AllWindowPanes()
+	if err != nil {
+		return nil, err
+	}
+	var matches []tmux.WindowPane
+	for _, pane := range panes {
+		row := config.Row{Workspace: pane.Session, Window: pane.Window, Workdir: workdir, Thread: thread}
+		identity := teardownIdentity{Workspace: pane.Session, Session: pane.Session, Window: pane.Window, Thread: thread}
+		if explicitTeardownStartCommandMatches(identity, row, normalizedTmuxStartCommand(pane.StartCommand)) {
+			matches = append(matches, pane)
+		}
+	}
+	return matches, nil
 }
 
 func revalidateWorkerBeforeMutation(row config.Row, before workerInspection) error {

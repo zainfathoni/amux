@@ -580,11 +580,34 @@ func TestAdoptOperationThreadOnlyRebindsAwaitingSpawnDelivery(t *testing.T) {
 		t.Fatalf("second adoption error = %v", err)
 	}
 	adopted, err := CompleteOperationThreadAdoption(path, record.Key)
-	if err != nil || adopted.Resource.Thread != "T-receiving" {
+	if err != nil || adopted.Resource.Thread != "T-receiving" || adopted.Phase != OperationPhaseMessageVerified {
 		t.Fatalf("completed adoption = %+v err=%v", adopted, err)
 	}
 	stored, found, err := LoadOperation(path, record.Key)
 	if err != nil || !found || stored.Resource.Thread != "T-receiving" {
 		t.Fatalf("stored adopted operation = %+v found=%t err=%v", stored, found, err)
+	}
+}
+
+func TestBeginIndeterminateWorkerSpawnThreadAdoptionPersistsRecoveryEvidenceAtomically(t *testing.T) {
+	path := filepath.Join(t.TempDir(), OperationsFile)
+	now := time.Now().UTC()
+	record := OperationRecord{
+		Key: "recover-adopt", Kind: "worker-spawn", RequestHash: "request", State: OperationIndeterminate, Phase: OperationPhaseDeliveryStarted,
+		Resource:  OperationResource{Kind: "worker", Thread: "T-provisioned"},
+		Error:     "initial assignment was not found in provisioned thread T-provisioned or one unambiguous fresh receiving thread; recovery: inspect thread T-provisioned and do not resubmit",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if _, err := StoreOperation(path, record); err != nil {
+		t.Fatal(err)
+	}
+
+	pending, err := BeginIndeterminateWorkerSpawnThreadAdoption(path, record.Key, "T-provisioned", "T-receiving")
+	if err != nil || pending.State != OperationStarted || pending.Phase != OperationPhaseDeliveryStarted || pending.Resource.Thread != "T-provisioned" || pending.ThreadAdoption == nil || pending.ThreadAdoption.ReceivingThread != "T-receiving" || pending.Error != "" {
+		t.Fatalf("pending recovery adoption = %+v err=%v", pending, err)
+	}
+	stored, found, err := LoadOperation(path, record.Key)
+	if err != nil || !found || stored.ThreadAdoption == nil || stored.Resource.Thread != "T-provisioned" {
+		t.Fatalf("stored recovery adoption = %+v found=%t err=%v", stored, found, err)
 	}
 }
