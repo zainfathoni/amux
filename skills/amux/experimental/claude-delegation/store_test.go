@@ -631,6 +631,92 @@ func TestLaunchExecutionRejectsDisappearedTargetSessionBeforeIntent(t *testing.T
 	}
 }
 
+func TestLaunchPolicyDigestCanFinalizeSelfContainedPacketBeforePlan(t *testing.T) {
+	fixture := newLaunchFixture(t)
+	stdout, stderr, err := runHelper(t, fixture.stateDir, map[string]any{"workflow": "read_only"}, "launch", "policy-digest")
+	if err != nil {
+		t.Fatalf("launch policy digest preflight: %v: %s", err, stderr)
+	}
+	var preflight struct {
+		Workflow           string `json:"workflow"`
+		LaunchPolicyDigest string `json:"launch_policy_digest"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &preflight); err != nil {
+		t.Fatal(err)
+	}
+	if preflight.Workflow != "read_only" || len(preflight.LaunchPolicyDigest) != 64 {
+		t.Fatalf("launch policy digest preflight = %#v", preflight)
+	}
+	entries, err := os.ReadDir(fixture.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("launch policy digest preflight mutated private state: %#v", entries)
+	}
+	if log, err := os.ReadFile(fixture.tmuxLog); err == nil && len(log) != 0 {
+		t.Fatalf("launch policy digest preflight invoked tmux: %s", log)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "darwin" {
+		t.Skip("experimental Claude launch is macOS-first")
+	}
+
+	packet := fmt.Sprintf(`{"launch_policy_digest":%q,"task":"submit one correlated thinker report"}`, preflight.LaunchPolicyDigest)
+	if err := os.WriteFile(fixture.request["packet_file"].(string), []byte(packet), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "plan")
+	if err != nil {
+		t.Fatalf("launch plan for finalized packet: %v: %s", err, stderr)
+	}
+	var plan struct {
+		PacketDigest        string `json:"packet_digest"`
+		LaunchPolicyDigest  string `json:"launch_policy_digest"`
+		LaunchCommandDigest string `json:"launch_command_digest"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.LaunchPolicyDigest != preflight.LaunchPolicyDigest {
+		t.Fatalf("final launch policy digest = %q, preflight = %q", plan.LaunchPolicyDigest, preflight.LaunchPolicyDigest)
+	}
+
+	binding := testBinding(fixture.request["delegation_id"].(string))
+	binding["workdir"] = fixture.request["workdir"]
+	binding["base"] = fixture.request["base"]
+	binding["packet_digest"] = plan.PacketDigest
+	binding["launch_policy_digest"] = plan.LaunchPolicyDigest
+	binding["launch_command_digest"] = plan.LaunchCommandDigest
+	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "recorded", map[string]any{
+		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+
+	report := testMessage(binding, "self-contained-report", "thinker_report", map[string]any{
+		"accepted_role": true, "accepted_exclusions": true, "status": "complete",
+		"verdict": "The packet supplied every correlation value.", "rationale": "No post-launch input was required.",
+		"evidence": []any{}, "assumptions": []any{}, "unsupported_claims": []any{}, "blockers": []any{},
+		"verification": []any{}, "changed_artifacts": []any{}, "references": []any{},
+	})
+	wrong := cloneJSONMap(t, report)
+	wrong["message_id"] = "wrong-policy-report"
+	wrong["launch_policy_digest"] = strings.Repeat("f", 64)
+	if _, stderr, err := runHelper(t, fixture.stateDir, wrong, "report", "submit"); err == nil || !strings.Contains(stderr, "does not match immutable receipt binding") {
+		t.Fatalf("wrong policy digest error = %v, stderr %q", err, stderr)
+	}
+	omitted := cloneJSONMap(t, report)
+	omitted["message_id"] = "omitted-policy-report"
+	delete(omitted, "launch_policy_digest")
+	if _, stderr, err := runHelper(t, fixture.stateDir, omitted, "report", "submit"); err == nil || !strings.Contains(stderr, "launch_policy_digest must be a non-empty string") {
+		t.Fatalf("omitted policy digest error = %v, stderr %q", err, stderr)
+	}
+	assertHelperOutcome(t, fixture.stateDir, "recorded", report, "report", "submit")
+}
+
 type launchFixture struct {
 	stateDir            string
 	environment         []string
