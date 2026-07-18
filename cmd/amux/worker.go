@@ -1063,6 +1063,17 @@ func findIndeterminateSpawnReceiver(operation config.OperationRecord, message, w
 	if !ok || provisionedTime.Before(operation.CreatedAt) {
 		return "", fmt.Errorf("provisioned thread %s has no trustworthy post-operation UUIDv7 freshness boundary; recovery: preserve the indeterminate operation and do not guess an alternate receiver", operation.Resource.Thread)
 	}
+	cutoff := operation.UpdatedAt
+	if operation.ThreadAdoption != nil {
+		receivingTime, receivingOK := ampUUIDv7ThreadTime(operation.ThreadAdoption.ReceivingThread)
+		if !receivingOK || !receivingTime.After(provisionedTime) || operation.UpdatedAt.Before(receivingTime) {
+			return "", fmt.Errorf("pending alternate receiver %s has invalid or inconsistent UUIDv7 freshness evidence; recovery: preserve the recorded adoption and do not widen its boundary", operation.ThreadAdoption.ReceivingThread)
+		}
+		cutoff = receivingTime
+	}
+	if cutoff.Before(provisionedTime) {
+		return "", fmt.Errorf("operation freshness cutoff %s precedes provisioned thread %s; recovery: preserve the indeterminate operation and do not guess an alternate receiver", cutoff.Format(time.RFC3339Nano), operation.Resource.Thread)
+	}
 	allThreads, err := strictAmpThreadIDSet(true)
 	if err != nil {
 		return "", fmt.Errorf("list alternate receiver evidence for provisioned thread %s: %w", operation.Resource.Thread, err)
@@ -1070,7 +1081,7 @@ func findIndeterminateSpawnReceiver(operation config.OperationRecord, message, w
 	preDeliveryThreads := make(map[string]bool, len(allThreads))
 	for candidate := range allThreads {
 		candidateTime, candidateOK := ampUUIDv7ThreadTime(candidate)
-		if !candidateOK || !candidateTime.After(provisionedTime) {
+		if !candidateOK || !candidateTime.After(provisionedTime) || candidateTime.After(cutoff) {
 			preDeliveryThreads[candidate] = true
 		}
 	}

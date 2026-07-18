@@ -878,7 +878,7 @@ func TestWorkerSpawnReconcileAdoptsOneFreshAlternateWithoutResubmitting(t *testi
 		Resource:      config.OperationResource{Kind: "worker", Thread: provisioned},
 		Error:         "initial assignment was not found in provisioned thread " + provisioned + " or one unambiguous fresh receiving thread; recovery: inspect thread " + provisioned + " and do not resubmit",
 		CreatedAt:     now,
-		UpdatedAt:     now,
+		UpdatedAt:     now.Add(3 * time.Second),
 	}
 	operationPath := filepath.Join(dir, config.OperationsFile)
 	if _, err := config.StoreOperation(operationPath, record); err != nil {
@@ -972,7 +972,7 @@ func TestWorkerSpawnReconcileRejectsAmbiguousAlternateWithoutMutation(t *testing
 		MessageSource: config.OperationMessageSourceMessage, State: config.OperationIndeterminate, Phase: config.OperationPhaseDeliveryStarted,
 		Resource:  config.OperationResource{Kind: "worker", Thread: provisioned},
 		Error:     "initial assignment was not found in provisioned thread " + provisioned + " or one unambiguous fresh receiving thread; recovery: inspect thread " + provisioned + " and do not resubmit",
-		CreatedAt: now, UpdatedAt: now,
+		CreatedAt: now, UpdatedAt: now.Add(3 * time.Second),
 	}
 	operationPath := filepath.Join(dir, config.OperationsFile)
 	if _, err := config.StoreOperation(operationPath, record); err != nil {
@@ -1019,11 +1019,80 @@ exit 99
 	}
 }
 
+func TestWorkerSpawnReconcileRejectsOnlyMatchingReceiverAfterOriginalCutoffWithoutMutation(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	const provisioned = "T-019f7519-01e8-7000-8000-000000000001"
+	const lateReceiver = "T-019f7519-1190-7000-8000-000000000001"
+	request := strings.Join([]string{"alpha", "#104 worker", workdir, "", "assignment", "#104", "groups", "issue-104"}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	record := config.OperationRecord{
+		Key: "reconcile-late-only", Kind: "worker-spawn", RequestHash: hex.EncodeToString(sum[:]),
+		MessageSource: config.OperationMessageSourceMessage, State: config.OperationIndeterminate, Phase: config.OperationPhaseDeliveryStarted,
+		Resource:  config.OperationResource{Kind: "worker", Thread: provisioned},
+		Error:     "initial assignment was not found in provisioned thread " + provisioned + " or one unambiguous fresh receiving thread; recovery: inspect thread " + provisioned + " and do not resubmit",
+		CreatedAt: now, UpdatedAt: now.Add(3 * time.Second),
+	}
+	operationPath := filepath.Join(dir, config.OperationsFile)
+	if _, err := config.StoreOperation(operationPath, record); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(operationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+echo "amp $*" >> "`+logPath+`"
+if [ "$1 $2" = "threads list" ]; then printf '%s\n' '[{"id":"`+provisioned+`"},{"id":"`+lateReceiver+`"}]'; exit 0; fi
+if [ "$1 $2 $3" = "threads export `+provisioned+`" ]; then printf '%s\n' '{"messages":[]}'; exit 0; fi
+if [ "$1 $2 $3" = "threads export `+lateReceiver+`" ]; then printf '%s\n' '{"env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[{"role":"user","content":"assignment"}]}'; exit 0; fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "tmux $*" >> "`+logPath+`"
+exit 99
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	groupCalls := installSupportedGroupAmp(t, func([]string) ([]byte, error) { return nil, nil })
+
+	err = executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--title-prefix", "#104", "--group", "issue-104", "--message", "assignment", "--idempotency-key", record.Key, "--reconcile")
+	if err == nil || !strings.Contains(err.Error(), "no exact fresh alternate receiver") {
+		t.Fatalf("late-only reconciliation error = %v", err)
+	}
+	after, readErr := os.ReadFile(operationPath)
+	if readErr != nil || !bytes.Equal(after, before) {
+		t.Fatalf("late-only reconciliation mutated operation: err=%v\nbefore=%s\nafter=%s", readErr, before, after)
+	}
+	if rows, loadErr := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile)); loadErr != nil || len(rows) != 0 {
+		t.Fatalf("late-only reconciliation workers = %+v err=%v", rows, loadErr)
+	}
+	if memberships, loadErr := config.LoadGroupsReadOnly(filepath.Join(dir, config.GroupsFile)); loadErr != nil || len(memberships) != 0 {
+		t.Fatalf("late-only reconciliation groups = %+v err=%v", memberships, loadErr)
+	}
+	if len(*groupCalls) != 0 {
+		t.Fatalf("late-only reconciliation called group label API: %+v", *groupCalls)
+	}
+	log, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, forbidden := range []string{"threads new", "threads archive", "threads rename", "threads label", "threads search", "send-keys", "paste-buffer", "tmux "} {
+		if strings.Contains(string(log), forbidden) {
+			t.Fatalf("late-only reconciliation performed forbidden %q work:\n%s", forbidden, log)
+		}
+	}
+}
+
 func TestWorkerSpawnReconcileResumesPendingAlternateAdoptionWithoutResubmitting(t *testing.T) {
 	dir := t.TempDir()
 	workdir := t.TempDir()
 	const provisioned = "T-019f7519-01e8-7000-8000-000000000001"
 	const receiver = "T-019f7519-05d0-7000-8000-000000000001"
+	const laterMatch = "T-019f7519-1190-7000-8000-000000000001"
 	request := strings.Join([]string{"alpha", "worker", workdir, "", "assignment"}, "\x00")
 	sum := sha256.Sum256([]byte(request))
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
@@ -1049,11 +1118,12 @@ func TestWorkerSpawnReconcileResumesPendingAlternateAdoptionWithoutResubmitting(
 	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
 echo "amp $*" >> "`+logPath+`"
 if [ "$1 $2" = "threads list" ]; then
-  if echo "$*" | grep -q -- --include-archived; then printf '%s\n' '[{"id":"`+provisioned+`"},{"id":"`+receiver+`"}]'; else printf '%s\n' '[{"id":"`+receiver+`"}]'; fi
+  if echo "$*" | grep -q -- --include-archived; then printf '%s\n' '[{"id":"`+provisioned+`"},{"id":"`+receiver+`"},{"id":"`+laterMatch+`"}]'; else printf '%s\n' '[{"id":"`+receiver+`"},{"id":"`+laterMatch+`"}]'; fi
   exit 0
 fi
 if [ "$1 $2 $3" = "threads export `+provisioned+`" ]; then printf '%s\n' '{"messages":[]}'; exit 0; fi
 if [ "$1 $2 $3" = "threads export `+receiver+`" ]; then printf '%s\n' '{"env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[{"role":"user","content":"assignment"}]}'; exit 0; fi
+if [ "$1 $2 $3" = "threads export `+laterMatch+`" ]; then printf '%s\n' '{"env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[{"role":"user","content":"assignment"}]}'; exit 0; fi
 exit 2
 `)
 	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
@@ -1083,6 +1153,9 @@ exit 2
 		if strings.Contains(string(log), forbidden) {
 			t.Fatalf("pending adoption reconciliation performed forbidden %q work:\n%s", forbidden, log)
 		}
+	}
+	if strings.Contains(string(log), "threads export "+laterMatch) {
+		t.Fatalf("pending adoption widened its receiver cutoff to inspect later match:\n%s", log)
 	}
 }
 
@@ -1535,6 +1608,71 @@ func TestAmpUUIDv7ThreadTimeProvidesStrictFreshnessBoundary(t *testing.T) {
 		if _, ok := ampUUIDv7ThreadTime(invalid); ok {
 			t.Fatalf("accepted non-UUIDv7 freshness identity %q", invalid)
 		}
+	}
+}
+
+func TestFindIndeterminateSpawnReceiverRejectsCandidateAfterOriginalCutoff(t *testing.T) {
+	workdir := t.TempDir()
+	const provisioned = "T-019f7519-01e8-7000-8000-000000000001"
+	const lateReceiver = "T-019f7519-1190-7000-8000-000000000001"
+	operation := config.OperationRecord{
+		State: config.OperationIndeterminate, Phase: config.OperationPhaseDeliveryStarted,
+		Resource:  config.OperationResource{Kind: "worker", Thread: provisioned},
+		CreatedAt: time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 7, 18, 12, 0, 3, 0, time.UTC),
+	}
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+if [ "$1 $2" = "threads list" ]; then printf '%s\n' '[{"id":"`+provisioned+`"},{"id":"`+lateReceiver+`"}]'; exit 0; fi
+if [ "$1 $2 $3" = "threads export `+provisioned+`" ]; then printf '%s\n' '{"messages":[]}'; exit 0; fi
+if [ "$1 $2 $3" = "threads export `+lateReceiver+`" ]; then printf '%s\n' '{"env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[{"role":"user","content":"assignment"}]}'; exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := findIndeterminateSpawnReceiver(operation, "assignment", workdir, false)
+	if err == nil || !strings.Contains(err.Error(), "no exact fresh alternate receiver") {
+		t.Fatalf("late alternate receiver error = %v", err)
+	}
+}
+
+func TestFindIndeterminateSpawnReceiverRejectsInvalidDurableCutoffs(t *testing.T) {
+	const provisioned = "T-019f7519-01e8-7000-8000-000000000001"
+	for _, test := range []struct {
+		name     string
+		updated  time.Time
+		adoption *config.OperationThreadAdoption
+		want     string
+	}{
+		{
+			name:    "original cutoff before provisioned thread",
+			updated: time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC),
+			want:    "precedes provisioned thread",
+		},
+		{
+			name:     "pending receiver has no UUIDv7 boundary",
+			updated:  time.Date(2026, 7, 18, 12, 0, 3, 0, time.UTC),
+			adoption: &config.OperationThreadAdoption{ProvisionedThread: provisioned, ReceivingThread: "T-receiving"},
+			want:     "invalid or inconsistent UUIDv7 freshness evidence",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			operation := config.OperationRecord{
+				State: config.OperationIndeterminate, Phase: config.OperationPhaseDeliveryStarted,
+				Resource: config.OperationResource{Kind: "worker", Thread: provisioned}, ThreadAdoption: test.adoption,
+				CreatedAt: time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC), UpdatedAt: test.updated,
+			}
+			bin := t.TempDir()
+			writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+if [ "$1 $2 $3" = "threads export `+provisioned+`" ]; then printf '%s\n' '{"messages":[]}'; exit 0; fi
+exit 2
+`)
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			_, err := findIndeterminateSpawnReceiver(operation, "assignment", t.TempDir(), false)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("invalid cutoff error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 
