@@ -128,6 +128,7 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 		}
 	}
 	inspections := make(map[string]runnerInspection, len(rows))
+	reconcileMissing := make(map[string]bool, len(rows))
 	for _, row := range rows {
 		if !runnerCommandNeedsTmux(in.Command.Name) {
 			continue
@@ -156,6 +157,7 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 			if directoryErr != nil && !errors.Is(directoryErr, os.ErrNotExist) {
 				return &env, result.Preflight(directoryErr)
 			}
+			reconcileMissing[row.Workdir] = directoryErr != nil
 		}
 	}
 
@@ -219,8 +221,7 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 			continue
 		}
 		if in.Command.Name == "reconcile" {
-			valid := requireRunnerDirectory(row.Workdir) == nil
-			if valid {
+			if !reconcileMissing[row.Workdir] {
 				if pidDiagnostic == "" {
 					out.Message = "already in desired state"
 				} else {
