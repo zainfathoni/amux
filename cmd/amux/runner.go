@@ -44,6 +44,11 @@ type runnerInspection struct {
 	pane  tmux.WindowPane
 }
 
+type runnerPIDMarkerInspection struct {
+	diagnostic string
+	ambiguous  bool
+}
+
 func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelope, error) {
 	env := result.NewEnvelope(strings.Join(in.Path, " "), in.Options.DryRun)
 	if in.Selectors.Current {
@@ -129,6 +134,7 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 	}
 	inspections := make(map[string]runnerInspection, len(rows))
 	reconcileMissing := make(map[string]bool, len(rows))
+	reconcilePIDDiagnostics := make(map[string]string, len(rows))
 	for _, row := range rows {
 		if !runnerCommandNeedsTmux(in.Command.Name) {
 			continue
@@ -157,7 +163,12 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 			if directoryErr != nil && !errors.Is(directoryErr, os.ErrNotExist) {
 				return &env, result.Preflight(directoryErr)
 			}
+			pidInspection := inspectRunnerPIDMarker(row.Workdir)
+			if pidInspection.ambiguous {
+				return &env, result.Preflight(fmt.Errorf("runner %s%s", row.Workdir, pidInspection.diagnostic))
+			}
 			reconcileMissing[row.Workdir] = directoryErr != nil
+			reconcilePIDDiagnostics[row.Workdir] = pidInspection.diagnostic
 		}
 	}
 
@@ -172,7 +183,7 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 		inspection := inspections[row.Workdir]
 		pidDiagnostic := ""
 		if in.Command.Name == "reconcile" {
-			pidDiagnostic = staleAmpPIDDiagnostic(row.Workdir)
+			pidDiagnostic = reconcilePIDDiagnostics[row.Workdir]
 		}
 		if in.Command.Name == "doctor" {
 			workdirState, workdirErr := runnerDirectoryState(row.Workdir)
@@ -707,34 +718,41 @@ func boundedDiagnostic(value string, limit int) string {
 	return value
 }
 
-func staleAmpPIDDiagnostic(workdir string) string {
+func inspectRunnerPIDMarker(workdir string) runnerPIDMarkerInspection {
 	cache, err := runnerCacheDir()
 	if err != nil {
-		return ""
+		return runnerPIDMarkerInspection{diagnostic: fmt.Sprintf("; Amp-owned PID marker location could not be resolved: %v", err), ambiguous: true}
 	}
 	canonical, err := config.CanonicalWorkdir(workdir)
 	if err != nil {
-		return ""
+		return runnerPIDMarkerInspection{diagnostic: fmt.Sprintf("; Amp-owned PID marker workdir could not be canonicalized: %v", err), ambiguous: true}
 	}
 	sum := sha256.Sum256([]byte(canonical))
 	marker := filepath.Join(cache, "amp", "pids", fmt.Sprintf("runner-%x.pid", sum[:8]))
 	data, readErr := os.ReadFile(marker)
 	if os.IsNotExist(readErr) {
-		return ""
+		return runnerPIDMarkerInspection{}
 	}
 	if readErr != nil {
-		return fmt.Sprintf("; Amp-owned PID marker %s could not be read: %v; left unchanged", marker, readErr)
+		return runnerPIDMarkerInspection{diagnostic: fmt.Sprintf("; Amp-owned PID marker %s could not be read: %v; left unchanged", marker, readErr), ambiguous: true}
 	}
 	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
 	if parseErr != nil || pid <= 0 {
-		return fmt.Sprintf("; Amp-owned PID marker %s has an invalid PID; left unchanged", marker)
+		return runnerPIDMarkerInspection{diagnostic: fmt.Sprintf("; Amp-owned PID marker %s has an invalid PID; left unchanged", marker)}
 	}
 	alive := runnerProcessAlive(pid)
 	state := "stale"
 	if alive {
 		state = "live but ownership is ambiguous"
 	}
-	return fmt.Sprintf("; Amp-owned PID marker %s for this workdir points to %s pid %d; left unchanged", marker, state, pid)
+	return runnerPIDMarkerInspection{
+		diagnostic: fmt.Sprintf("; Amp-owned PID marker %s for this workdir points to %s pid %d; left unchanged", marker, state, pid),
+		ambiguous:  alive,
+	}
+}
+
+func staleAmpPIDDiagnostic(workdir string) string {
+	return inspectRunnerPIDMarker(workdir).diagnostic
 }
 
 func processAlive(pid int) bool {
