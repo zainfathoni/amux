@@ -413,13 +413,20 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	if found && existing.RequestHash != hash {
 		return env, result.Preflight(fmt.Errorf("idempotency key %q is already bound to a different request", s.IdempotencyKey))
 	}
+	recoverable := found && recoverableProvisionedVerificationFailure(existing)
+	if recoverable && !s.Reconcile {
+		return env, result.Preflight(fmt.Errorf("indeterminate provisioned-thread spawn recovery requires explicit --reconcile; refusing external work"))
+	}
+	if s.Reconcile && !recoverable {
+		return env, result.Preflight(fmt.Errorf("spawn reconciliation requires an existing identical operation in the recoverable exact provisioned-thread timeout state"))
+	}
 	if found && existing.State == config.OperationSucceeded {
 		r := config.Row{Workspace: workspace, Window: s.Window, Workdir: s.Workdir, Thread: existing.Resource.Thread}
 		out := workerOutcome(r, "spawn", "idempotency key already succeeded")
 		env.Skipped = append(env.Skipped, out)
 		return env, nil
 	}
-	if found && recoverableProvisionedVerificationFailure(existing) {
+	if recoverable {
 		if in.Options.DryRun {
 			resource, _ := result.WorkerResource(existing.Resource.Thread)
 			env.Planned = append(env.Planned, result.Outcome{Resource: resource, Action: "spawn", Message: "would verify the exact provisioned thread and recover without resubmitting"})
@@ -926,38 +933,27 @@ func prefixedSpawnName(titlePrefix, window string) string {
 }
 
 func resolveSpawnReceivingThread(boundThread, message, workdir string, preDeliveryThreads map[string]bool, allowTerminalLineEndingNormalization bool) (string, error) {
-	deadline := time.Now().Add(spawnSubmitTimeout())
+	deadline := time.Now().Add(spawnAssignmentVisibilityTimeout())
 	var authoritative string
 	for {
 		boundContainsMessage, _, err := ampThreadContainsExactAssignment(boundThread, message, workdir, false, allowTerminalLineEndingNormalization)
 		if err != nil {
 			return "", fmt.Errorf("verify provisioned thread %s: %w; recovery: inspect thread %s and do not resubmit", boundThread, err, boundThread)
 		}
-		allThreads, err := strictAmpThreadIDSet(true)
+		fresh, activeThreads, err := scanFreshSpawnReceivingThreads(boundThread, message, workdir, preDeliveryThreads)
 		if err != nil {
-			return "", fmt.Errorf("list fresh receiving threads after delivery: %w; recovery: inspect provisioned thread %s and do not resubmit", err, boundThread)
-		}
-		activeThreads, err := strictAmpThreadIDSet(false)
-		if err != nil {
-			return "", fmt.Errorf("confirm fresh receiving threads are active: %w; recovery: inspect provisioned thread %s and do not resubmit", err, boundThread)
-		}
-		var fresh []string
-		for candidate := range allThreads {
-			if candidate == canonicalThreadID(boundThread) || preDeliveryThreads[candidate] {
-				continue
-			}
-			matches, _, exportErr := ampThreadContainsExactAssignment(candidate, message, workdir, true, false)
-			if exportErr != nil {
-				return "", fmt.Errorf("verify fresh receiving candidate %s: %w; recovery: inspect %s and provisioned thread %s before choosing an identity", candidate, exportErr, candidate, boundThread)
-			}
-			if matches {
-				fresh = append(fresh, candidate)
-			}
+			return "", err
 		}
 		if !boundContainsMessage {
 			boundContainsMessage, _, err = ampThreadContainsExactAssignment(boundThread, message, workdir, false, allowTerminalLineEndingNormalization)
 			if err != nil {
 				return "", fmt.Errorf("recheck provisioned thread %s after fresh-thread discovery: %w; recovery: inspect thread %s and do not resubmit", boundThread, err, boundThread)
+			}
+			if boundContainsMessage {
+				fresh, activeThreads, err = scanFreshSpawnReceivingThreads(boundThread, message, workdir, preDeliveryThreads)
+				if err != nil {
+					return "", err
+				}
 			}
 		}
 		sort.Strings(fresh)
@@ -985,6 +981,35 @@ func resolveSpawnReceivingThread(boundThread, message, workdir string, preDelive
 		return "", fmt.Errorf("initial assignment was not found in provisioned thread %s or one unambiguous fresh receiving thread; recovery: inspect thread %s and do not resubmit", boundThread, boundThread)
 	}
 	return authoritative, nil
+}
+
+func scanFreshSpawnReceivingThreads(boundThread, message, workdir string, preDeliveryThreads map[string]bool) ([]string, map[string]bool, error) {
+	allThreads, err := strictAmpThreadIDSet(true)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list fresh receiving threads after delivery: %w; recovery: inspect provisioned thread %s and do not resubmit", err, boundThread)
+	}
+	activeThreads, err := strictAmpThreadIDSet(false)
+	if err != nil {
+		return nil, nil, fmt.Errorf("confirm fresh receiving threads are active: %w; recovery: inspect provisioned thread %s and do not resubmit", err, boundThread)
+	}
+	var fresh []string
+	for candidate := range allThreads {
+		if candidate == canonicalThreadID(boundThread) || preDeliveryThreads[candidate] {
+			continue
+		}
+		matches, _, exportErr := ampThreadContainsExactAssignment(candidate, message, workdir, true, false)
+		if exportErr != nil {
+			return nil, nil, fmt.Errorf("verify fresh receiving candidate %s: %w; recovery: inspect %s and provisioned thread %s before choosing an identity", candidate, exportErr, candidate, boundThread)
+		}
+		if matches {
+			fresh = append(fresh, candidate)
+		}
+	}
+	return fresh, activeThreads, nil
+}
+
+func spawnAssignmentVisibilityTimeout() time.Duration {
+	return 3 * spawnSubmitTimeout()
 }
 
 func strictAmpThreadIDSet(includeArchived bool) (map[string]bool, error) {

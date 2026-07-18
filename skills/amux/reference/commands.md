@@ -23,7 +23,7 @@ amux runner unpin --workdir <path>
 amux runner unpin --current
 
 # Worker-only concise routes
-amux spawn --workspace <name> --window <slug> --workdir <path> --mode medium --message <text> --idempotency-key <key>
+amux spawn --workspace <name> --window <slug> --workdir <path> --mode medium --message <text> --idempotency-key <key> [--reconcile]
 amux shelve|unshelve|teardown [--workspace <name>|--thread <id>|--current|--all]
 
 # Durable group intent, reports, and ephemeral callbacks

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -564,6 +565,108 @@ exit 2
 	}
 }
 
+func TestResolveSpawnReceivingThreadRescansFreshCandidatesAfterProvisionedAssignmentAppears(t *testing.T) {
+	bin := t.TempDir()
+	workdir := t.TempDir()
+	firstListComplete := filepath.Join(bin, "first-list-complete")
+	provisionedProven := filepath.Join(bin, "provisioned-proven")
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+if [ "$1 $2 $3" = "threads export T-provisioned" ]; then
+  if [ -e "`+firstListComplete+`" ]; then
+    touch "`+provisionedProven+`"
+    printf '%s\n' '{"id":"T-provisioned","messages":[{"role":"user","content":"assignment"}]}'
+  else
+    printf '%s\n' '{"id":"T-provisioned","messages":[]}'
+  fi
+  exit 0
+fi
+if [ "$1 $2 $3" = "threads export T-receiver" ]; then printf '%s\n' '{"id":"T-receiver","env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[{"role":"user","content":"assignment"}]}' ; exit 0; fi
+if [ "$1 $2" = "threads list" ]; then
+  if [ -e "`+provisionedProven+`" ]; then printf '%s\n' '[{"id":"T-provisioned"},{"id":"T-receiver"}]' ; else touch "`+firstListComplete+`"; printf '%s\n' '[{"id":"T-provisioned"}]' ; fi
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	_, err := resolveSpawnReceivingThread("T-provisioned", "assignment", workdir, map[string]bool{"T-provisioned": true}, false)
+	if err == nil || !strings.Contains(err.Error(), "identity conflict between provisioned thread T-provisioned and fresh receiving thread(s) T-receiver") {
+		t.Fatalf("final provisioned visibility ambiguity error = %v", err)
+	}
+}
+
+func TestResolveSpawnReceivingThreadWaitsForExactProvisionedAssignmentBeyondSubmitWindow(t *testing.T) {
+	bin := t.TempDir()
+	exportCount := filepath.Join(bin, "export-count")
+	visible := filepath.Join(bin, "visible")
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+if [ "$1 $2 $3" = "threads export T-provisioned" ]; then
+  count=0; if [ -f "`+exportCount+`" ]; then count=$(cat "`+exportCount+`"); fi
+  count=$((count + 1)); printf '%s\n' "$count" > "`+exportCount+`"
+  if [ -e "`+visible+`" ]; then printf '%s\n' '{"id":"T-provisioned","messages":[{"role":"user","content":"assignment"},{"role":"assistant","content":"already executing"}]}' ; else printf '%s\n' '{"id":"T-provisioned","messages":[]}' ; fi
+  exit 0
+fi
+if [ "$1 $2" = "threads list" ]; then printf '%s\n' '[{"id":"T-provisioned"}]'; exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "50ms")
+	workdir := t.TempDir()
+	visibleWritten := make(chan struct{})
+	go func() {
+		defer close(visibleWritten)
+		time.Sleep(750 * time.Millisecond)
+		_ = os.WriteFile(visible, nil, 0o600)
+	}()
+	defer func() { <-visibleWritten }()
+
+	got, err := resolveSpawnReceivingThread("T-provisioned", "assignment", workdir, map[string]bool{"T-provisioned": true}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "T-provisioned" {
+		t.Fatalf("receiving thread = %q, want T-provisioned", got)
+	}
+	count, err := os.ReadFile(exportCount)
+	parsedCount, parseErr := strconv.Atoi(strings.TrimSpace(string(count)))
+	if err != nil || parseErr != nil || parsedCount < 3 {
+		t.Fatalf("provisioned export count = %q, err=%v", count, err)
+	}
+}
+
+func TestResolveSpawnReceivingThreadKeepsAlternateAmbiguityFailClosedDuringExtendedVisibilityWait(t *testing.T) {
+	bin := t.TempDir()
+	visible := filepath.Join(bin, "visible")
+	workdir := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+if [ "$1 $2 $3" = "threads export T-provisioned" ]; then
+  if [ -e "`+visible+`" ]; then printf '%s\n' '{"id":"T-provisioned","messages":[{"role":"user","content":"assignment"}]}' ; else printf '%s\n' '{"id":"T-provisioned","messages":[]}' ; fi
+  exit 0
+fi
+if [ "$1 $2 $3" = "threads export T-receiver" ]; then printf '%s\n' '{"id":"T-receiver","env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[{"role":"user","content":"assignment"}]}' ; exit 0; fi
+if [ "$1 $2" = "threads list" ]; then
+  if [ -e "`+visible+`" ]; then printf '%s\n' '[{"id":"T-provisioned"},{"id":"T-receiver"}]' ; else printf '%s\n' '[{"id":"T-provisioned"}]' ; fi
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "50ms")
+	visibleWritten := make(chan struct{})
+	go func() {
+		defer close(visibleWritten)
+		time.Sleep(750 * time.Millisecond)
+		_ = os.WriteFile(visible, nil, 0o600)
+	}()
+	defer func() { <-visibleWritten }()
+
+	_, err := resolveSpawnReceivingThread("T-provisioned", "assignment", workdir, map[string]bool{"T-provisioned": true}, false)
+	if err == nil || !strings.Contains(err.Error(), "identity conflict between provisioned thread T-provisioned and fresh receiving thread(s) T-receiver") {
+		t.Fatalf("extended visibility ambiguity error = %v", err)
+	}
+}
+
 func TestWorkerSpawnRecoversVerifiedProvisionedThreadFromIndeterminateWithoutResubmitting(t *testing.T) {
 	dir := t.TempDir()
 	workdir := t.TempDir()
@@ -624,7 +727,7 @@ exit 2
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
-	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message-file", messagePath, "--idempotency-key", record.Key)
+	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message-file", messagePath, "--idempotency-key", record.Key, "--reconcile")
 	if len(got.Successful) != 1 || got.Successful[0].Resource.Thread != "T-provisioned" {
 		t.Fatalf("recovered spawn result = %+v", got)
 	}
@@ -647,7 +750,7 @@ exit 2
 	}
 }
 
-func TestWorkerSpawnReconcilesIndeterminateOperationAfterExactManualAdoption(t *testing.T) {
+func TestWorkerSpawnReconcileCompletesIndeterminateOperationAfterExactManualAdoption(t *testing.T) {
 	dir := t.TempDir()
 	workdir := t.TempDir()
 	message := "assignment"
@@ -689,7 +792,8 @@ exit 2
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
 	var stdout bytes.Buffer
-	if err := (app{stdin: strings.NewReader(message), stdout: &stdout}).execute([]string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message-stdin", "--idempotency-key", record.Key}); err != nil {
+	args := []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message-stdin", "--idempotency-key", record.Key, "--reconcile"}
+	if err := (app{stdin: strings.NewReader(message), stdout: &stdout}).execute(args); err != nil {
 		t.Fatalf("reconcile manually adopted worker: %v\nstdout: %s", err, stdout.String())
 	}
 	var got result.Envelope
@@ -703,6 +807,23 @@ exit 2
 	if err != nil || !found || completed.State != config.OperationSucceeded || completed.Phase != config.OperationPhaseConfigured {
 		t.Fatalf("reconciled operation = %+v, found=%t, err=%v", completed, found, err)
 	}
+	replayArgs := append([]string(nil), args[:len(args)-1]...)
+	var replayStdout bytes.Buffer
+	if err := (app{stdin: strings.NewReader(message), stdout: &replayStdout}).execute(replayArgs); err != nil {
+		t.Fatalf("replay manually adopted reconciliation: %v\nstdout: %s", err, replayStdout.String())
+	}
+	var replayed result.Envelope
+	if err := json.NewDecoder(&replayStdout).Decode(&replayed); err != nil {
+		t.Fatalf("decode manual-adoption replay: %v\nstdout: %s", err, replayStdout.String())
+	}
+	if len(replayed.Skipped) != 1 || replayed.Skipped[0].Resource.Thread != "T-provisioned" {
+		t.Fatalf("manual-adoption reconciliation replay = %+v", replayed)
+	}
+	var conflictingStdout bytes.Buffer
+	conflictingErr := (app{stdin: strings.NewReader("different"), stdout: &conflictingStdout}).execute(args)
+	if conflictingErr == nil || !strings.Contains(conflictingErr.Error(), "already bound to a different request") {
+		t.Fatalf("conflicting manual-adoption reconciliation error = %v", conflictingErr)
+	}
 	log, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
@@ -711,6 +832,178 @@ exit 2
 		if strings.Contains(string(log), forbidden) {
 			t.Fatalf("manual-adoption reconciliation performed forbidden %q work:\n%s", forbidden, log)
 		}
+	}
+}
+
+func TestWorkerSpawnRejectsIndeterminateRecoveryWithoutExplicitReconcile(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	message := "assignment"
+	request := strings.Join([]string{"alpha", "worker", workdir, "", message}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Now().UTC()
+	record := config.OperationRecord{
+		Key:         "implicit-recovery-rejected",
+		Kind:        "worker-spawn",
+		RequestHash: hex.EncodeToString(sum[:]),
+		State:       config.OperationIndeterminate,
+		Phase:       config.OperationPhaseDeliveryStarted,
+		Resource:    config.OperationResource{Kind: "worker", Thread: "T-provisioned"},
+		Error:       "initial assignment was not found in provisioned thread T-provisioned or one unambiguous fresh receiving thread; recovery: inspect thread T-provisioned and do not resubmit",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	operationPath := filepath.Join(dir, config.OperationsFile)
+	if _, err := config.StoreOperation(operationPath, record); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(operationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	called := filepath.Join(bin, "external-call")
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	err = executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", message, "--idempotency-key", record.Key)
+	if err == nil || !strings.Contains(err.Error(), "requires explicit --reconcile") {
+		t.Fatalf("implicit reconciliation error = %v", err)
+	}
+	after, err := os.ReadFile(operationPath)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("implicit reconciliation mutated operation: err=%v\nbefore=%s\nafter=%s", err, before, after)
+	}
+	if _, err := os.Stat(called); !os.IsNotExist(err) {
+		t.Fatalf("implicit reconciliation performed external work: %v", err)
+	}
+}
+
+func TestWorkerSpawnReconcileRejectsOrdinaryPartialPhasesWithoutExternalWork(t *testing.T) {
+	for _, phase := range []config.OperationPhase{
+		config.OperationPhaseMessageVerified,
+		config.OperationPhaseConfigured,
+		config.OperationPhaseGroupIntent,
+		config.OperationPhaseGrouped,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			dir := t.TempDir()
+			workdir := t.TempDir()
+			message := "assignment"
+			request := strings.Join([]string{"alpha", "worker", workdir, "", message}, "\x00")
+			sum := sha256.Sum256([]byte(request))
+			now := time.Now().UTC()
+			record := config.OperationRecord{
+				Key:         "partial-phase-reconciliation",
+				Kind:        "worker-spawn",
+				RequestHash: hex.EncodeToString(sum[:]),
+				State:       config.OperationStarted,
+				Phase:       phase,
+				Resource:    config.OperationResource{Kind: "worker", Thread: "T-provisioned"},
+				CreatedAt:   now,
+				UpdatedAt:   now,
+			}
+			operationPath := filepath.Join(dir, config.OperationsFile)
+			if _, err := config.StoreOperation(operationPath, record); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(operationPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bin := t.TempDir()
+			called := filepath.Join(bin, "external-call")
+			writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+			err = executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", message, "--idempotency-key", record.Key, "--reconcile")
+			if err == nil || !strings.Contains(err.Error(), "recoverable exact provisioned-thread timeout state") {
+				t.Fatalf("partial-phase reconciliation error = %v", err)
+			}
+			after, err := os.ReadFile(operationPath)
+			if err != nil || !bytes.Equal(after, before) {
+				t.Fatalf("partial-phase reconciliation mutated operation: err=%v\nbefore=%s\nafter=%s", err, before, after)
+			}
+			if _, err := os.Stat(called); !os.IsNotExist(err) {
+				t.Fatalf("partial-phase reconciliation performed external work: %v", err)
+			}
+		})
+	}
+}
+
+func TestWorkerSpawnReconcileRequiresExistingIdenticalOperation(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	err := executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "assignment", "--idempotency-key", "missing-reconciliation", "--reconcile")
+	if err == nil || !strings.Contains(err.Error(), "requires an existing identical operation in the recoverable exact provisioned-thread timeout state") {
+		t.Fatalf("missing reconciliation operation error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, config.OperationsFile)); !os.IsNotExist(err) {
+		t.Fatalf("missing reconciliation created operation state: %v", err)
+	}
+}
+
+func TestWorkerSpawnReconcileLaunchesMissingClientForExactManualPin(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	request := strings.Join([]string{"alpha", "worker", workdir, "", "assignment"}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Now().UTC()
+	record := config.OperationRecord{
+		Key:         "manual-adoption-needs-launch",
+		Kind:        "worker-spawn",
+		RequestHash: hex.EncodeToString(sum[:]),
+		State:       config.OperationIndeterminate,
+		Phase:       config.OperationPhaseDeliveryStarted,
+		Resource:    config.OperationResource{Kind: "worker", Thread: "T-provisioned"},
+		Error:       "initial assignment was not found in provisioned thread T-provisioned or one unambiguous fresh receiving thread; recovery: inspect thread T-provisioned and do not resubmit",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	operationPath := filepath.Join(dir, config.OperationsFile)
+	if _, err := config.StoreOperation(operationPath, record); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkerRegistry(t, dir, config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-provisioned"}.String()+"\n")
+	before, err := os.ReadFile(operationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	running := filepath.Join(bin, "running")
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-provisioned"}
+	start := teardownExpectedStartCommand(teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}, row)
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+if [ "$1 $2 $3" = "threads export T-provisioned" ]; then printf '%s\n' '{"id":"T-provisioned","messages":[{"role":"user","content":"assignment"}]}'; exit 0; fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then test -e "`+running+`"; exit $?; fi
+if [ "$1" = new-session ]; then touch "`+running+`"; exit 0; fi
+if [ "$1" = list-panes ]; then printf 'worker\t@1\t%s\n' `+shellSingleQuote(start)+`; exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "assignment", "--idempotency-key", record.Key, "--reconcile")
+	if len(got.Skipped) != 1 || got.Skipped[0].Resource.Thread != "T-provisioned" {
+		t.Fatalf("missing-client reconciliation result = %+v", got)
+	}
+	completed, found, err := config.LoadOperation(operationPath, record.Key)
+	if err != nil || !found || completed.State != config.OperationSucceeded || completed.Phase != config.OperationPhaseConfigured {
+		t.Fatalf("missing-client reconciled operation = %+v, found=%t, err=%v", completed, found, err)
+	}
+	if _, err := os.Stat(running); err != nil {
+		t.Fatalf("missing-client reconciliation did not launch local client: %v", err)
+	}
+	after, err := os.ReadFile(operationPath)
+	if err != nil || bytes.Equal(after, before) {
+		t.Fatalf("missing-client reconciliation did not transition operation: err=%v\nbefore=%s\nafter=%s", err, before, after)
 	}
 }
 
@@ -764,6 +1057,7 @@ exit 2
 				}
 				args = []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message-file", messagePath, "--idempotency-key", record.Key}
 			}
+			args = append(args, "--reconcile")
 
 			err := executeWorkerJSONError(t, args...)
 			if test.wantVerified {
@@ -821,7 +1115,7 @@ exit 2
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
-	err = executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", record.Key)
+	err = executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", record.Key, "--reconcile")
 	if err == nil || !strings.Contains(err.Error(), "configured for thread T-other") {
 		t.Fatalf("conflicting recovery error = %v", err)
 	}
@@ -881,7 +1175,7 @@ exit 2
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
-	err = executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", record.Key)
+	err = executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "hello", "--idempotency-key", record.Key, "--reconcile")
 	if err == nil || !strings.Contains(err.Error(), "worker tmux identity is conflict") {
 		t.Fatalf("tmux-conflicting recovery error = %v", err)
 	}
@@ -1448,7 +1742,11 @@ exit 2
 			if tt.name == "terminal-newline-normalized-alternate" {
 				replayWant = "not verified in exact provisioned thread T-created"
 			}
-			if replayErr := executeWorkerJSONError(t, args...); replayErr == nil || !strings.Contains(replayErr.Error(), replayWant) {
+			replayArgs := args
+			if tt.name == "terminal-newline-normalized-alternate" {
+				replayArgs = append(append([]string(nil), args...), "--reconcile")
+			}
+			if replayErr := executeWorkerJSONError(t, replayArgs...); replayErr == nil || !strings.Contains(replayErr.Error(), replayWant) {
 				t.Fatalf("ambiguous replay error = %v", replayErr)
 			}
 			afterReplay, readErr := os.ReadFile(logPath)

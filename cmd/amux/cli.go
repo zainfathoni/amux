@@ -51,6 +51,7 @@ type selectors struct {
 	Message        string
 	MessageFile    string
 	MessageStdin   bool
+	Reconcile      bool
 }
 
 type commandSpec struct {
@@ -94,7 +95,7 @@ var rootCommand = &commandSpec{
 		reportCommand(),
 		installCommand(),
 		lifecycleCommand("workspaces", "Exact alias for workspace list", false, "--mode, -m <worker|runner>"),
-		lifecycleCommand("spawn", "Spawn an interactive worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--group <id>  Repeat to attach the authoritative worker thread to multiple groups", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>"),
+		lifecycleCommand("spawn", "Spawn an interactive worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--group <id>  Repeat to attach the authoritative worker thread to multiple groups", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>", "--reconcile  Recover a verified exact provisioned-thread timeout without resubmitting"),
 		lifecycleCommand("shelve", "Shelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		lifecycleCommand("unshelve", "Unshelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		lifecycleCommand("teardown", "Teardown workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
@@ -142,7 +143,7 @@ func workerCommand() *commandSpec {
 		workerLeaf("park", "Park workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("restart", "Restart workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("remove", "Remove workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
-		workerLeaf("spawn", "Spawn a worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--group <id>  Repeat to attach the authoritative worker thread to multiple groups", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>"),
+		workerLeaf("spawn", "Spawn a worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--group <id>  Repeat to attach the authoritative worker thread to multiple groups", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>", "--reconcile  Recover a verified exact provisioned-thread timeout without resubmitting"),
 		workerLeaf("shelve", "Shelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("unshelve", "Unshelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("teardown", "Teardown workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
@@ -707,6 +708,14 @@ func parseSelectors(args []string) (selectors, []string, error) {
 				return parsed, nil, errors.New("--message-stdin may be specified only once")
 			}
 			parsed.MessageStdin = true
+		case "--reconcile":
+			if hasInline {
+				return parsed, nil, errors.New("--reconcile does not accept a value")
+			}
+			if parsed.Reconcile {
+				return parsed, nil, errors.New("--reconcile may be specified only once")
+			}
+			parsed.Reconcile = true
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return parsed, nil, fmt.Errorf("unknown option %s", arg)
@@ -849,6 +858,9 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 	if parsed.MessageStdin && !commandAcceptsFlag(command, "--message-stdin") {
 		return fmt.Errorf("%s does not accept --message-stdin; run `amux help %s`", command.UsageName(), command.UsageName())
 	}
+	if parsed.Reconcile && !commandAcceptsFlag(command, "--reconcile") {
+		return fmt.Errorf("%s does not accept --reconcile; run `amux help %s`", command.UsageName(), command.UsageName())
+	}
 	messageInputs := 0
 	if parsed.Message != "" {
 		messageInputs++
@@ -896,7 +908,7 @@ func compactStrings(values []string) []string {
 }
 
 func selectorsEmpty(parsed selectors) bool {
-	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin
+	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && !parsed.Reconcile
 }
 
 func isGroupPath(path []string) bool {
