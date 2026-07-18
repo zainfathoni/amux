@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unstable, skill-owned helper for experimental read-only Claude delegation."""
+"""Unstable, skill-owned helper for experimental Claude delegation."""
 
 from __future__ import annotations
 
@@ -156,25 +156,36 @@ class ReceiptStore:
                 if receipt["events"][0]["routing"] != routing:
                     raise HelperError("delegation ID create event conflicts with its original routing")
                 return "duplicate"
+            lease = mutating_writer_lease(binding)
+            if lease is not None:
+                for receipt in store["receipts"]:
+                    existing_lease = receipt_writer_lease(receipt)
+                    if (
+                        receipt.get("state") != "verified_parked"
+                        and existing_lease is not None
+                        and writer_leases_match(existing_lease, lease)
+                    ):
+                        raise HelperError("worktree already has an unresolved exclusive logical writer lease")
             created_at = utc_now()
-            store["receipts"].append(
-                {
-                    "binding": binding,
-                    "routing": routing,
-                    "state": "created",
-                    "report_message_id": "",
-                    "created_at": created_at,
-                    "updated_at": created_at,
-                    "events": [
-                        {
-                            "event_id": f"create:{binding['delegation_id']}",
-                            "kind": "created",
-                            "at": created_at,
-                            "routing": routing,
-                        }
-                    ],
-                }
-            )
+            receipt = {
+                "binding": binding,
+                "routing": routing,
+                "state": "created",
+                "report_message_id": "",
+                "created_at": created_at,
+                "updated_at": created_at,
+                "events": [
+                    {
+                        "event_id": f"create:{binding['delegation_id']}",
+                        "kind": "created",
+                        "at": created_at,
+                        "routing": routing,
+                    }
+                ],
+            }
+            if lease is not None:
+                receipt["writer_lease"] = lease
+            store["receipts"].append(receipt)
             self.commit(store)
             return "recorded"
 
@@ -199,26 +210,38 @@ class ReceiptStore:
             return "recorded"
 
     def submit_message(self, request: dict[str, Any], expected_kind: str) -> str:
-        envelope = validate_envelope(request, expected_kind)
         with self.mutation_lock():
             store = self.load_store()
-            receipt = self.find(store, envelope["delegation_id"])
+            delegation_id = protocol_id(request, "delegation_id")
+            receipt = self.find(store, delegation_id)
+            if expected_kind == "report":
+                expected_kind = "mutating_report" if receipt["binding"]["producer_role"] == "mutating_delegate" else "thinker_report"
+            envelope = validate_envelope(request, expected_kind)
             validate_envelope_binding(envelope, receipt["binding"])
             event_id = envelope["message_id"]
-            kind = "valid_report" if expected_kind == "thinker_report" else "input_request"
+            kind = "valid_report" if expected_kind in {"thinker_report", "mutating_report"} else "input_request"
             event = {"event_id": event_id, "kind": kind, "message": envelope}
             replay = find_event(receipt, event_id)
             if replay is not None:
                 if replay.get("kind") == kind and replay.get("message") == envelope:
                     return "duplicate"
                 raise HelperError("event ID is already bound to a conflicting event")
-            if expected_kind == "thinker_report" and receipt["report_message_id"]:
+            if expected_kind == "mutating_report" and receipt.get("submission_frozen"):
+                raise HelperError("submission freeze prohibits another mutating report")
+            if expected_kind in {"thinker_report", "mutating_report"} and receipt["report_message_id"]:
                 raise HelperError("receipt already contains a different valid report")
             if expected_kind == "input_request" and receipt["report_message_id"]:
                 raise HelperError("a valid report closes the input-request stream")
             timestamp = utc_now()
             event["at"] = timestamp
-            if expected_kind == "thinker_report":
+            if expected_kind in {"thinker_report", "mutating_report"}:
+                if expected_kind == "mutating_report":
+                    require_mutating_session(receipt)
+                    validation = validate_mutating_handoff(envelope, receipt["binding"])
+                    event["handoff_validation"] = validation
+                    receipt["submission_frozen"] = True
+                    receipt["writer_authority"] = "frozen"
+                    receipt["handoff_validation"] = validation
                 receipt["state"] = "valid_report"
                 receipt["report_message_id"] = event_id
                 if receipt.get("input_state") in {"pending", "seen"}:
@@ -259,6 +282,10 @@ class ReceiptStore:
             if source["kind"] == "valid_report":
                 if receipt["state"] != "valid_report" or receipt["report_message_id"] != message_id:
                     raise HelperError("report delivery requires the current valid report")
+                if source.get("message", {}).get("kind") == "mutating_report":
+                    validation = validate_mutating_handoff(source["message"], receipt["binding"])
+                    if validation != receipt.get("handoff_validation"):
+                        raise HelperError("current handoff differs from the frozen objective validation")
                 receipt["state"] = "delivered"
             else:
                 if receipt.get("input_message_id") != message_id or receipt.get("input_state") not in {"pending", "seen"}:
@@ -588,24 +615,71 @@ def validate_binding(value: Any) -> dict[str, Any]:
         "launch_policy_digest",
         "launch_command_digest",
     }
+    mutating_fields = {
+        "baseline_branch",
+        "writer_owner",
+        "integration_owner",
+        "handoff",
+        "capacity_decision_digest",
+    }
+    if value.get("producer_role") == "mutating_delegate":
+        allowed |= mutating_fields
     reject_unknown(value, allowed, "binding")
     if value.get("protocol_version") != PROTOCOL_VERSION:
         raise HelperError("unsupported protocol_version")
     for key in allowed - {"protocol_version"}:
         required_string(value, key, 2048 if key == "workdir" else 256)
     protocol_id(value, "delegation_id")
-    if value["producer_role"] != "thinker" or value["authority"] != "read_only":
-        raise HelperError("#148 permits only thinker/read_only authority")
+    if value["producer_role"] == "thinker":
+        if value["authority"] != "read_only":
+            raise HelperError("thinker authority must remain read_only")
+    elif value["producer_role"] == "mutating_delegate":
+        if value["authority"] != "exclusive_writer":
+            raise HelperError("mutating delegate authority must be exclusive_writer")
+        for key in mutating_fields:
+            required_string(value, key, 256)
+        if value["writer_owner"] != "claude_mutating_delegate" or value["integration_owner"] != "amp_coordinator":
+            raise HelperError("mutating binding has invalid exclusive writer or integration ownership")
+        if value["handoff"] != "one_clean_local_commit":
+            raise HelperError("mutating binding permits only one_clean_local_commit handoff")
+    else:
+        raise HelperError("producer_role must be thinker or mutating_delegate")
     for key in ("nonce", "packet_digest", "launch_policy_digest", "launch_command_digest"):
         if len(value[key]) != 64 or any(character not in "0123456789abcdef" for character in value[key]):
             raise HelperError(f"{key} must be a lowercase SHA-256 value")
+    if value["producer_role"] == "mutating_delegate":
+        digest = value["capacity_decision_digest"]
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise HelperError("capacity_decision_digest must be a lowercase SHA-256 value")
     return copy.deepcopy(value)
+
+
+def mutating_writer_lease(binding: dict[str, Any]) -> str | None:
+    if binding.get("producer_role") != "mutating_delegate":
+        return None
+    return str(pathlib.Path(binding["workdir"]).resolve())
+
+
+def receipt_writer_lease(receipt: dict[str, Any]) -> str | None:
+    lease = receipt.get("writer_lease")
+    if isinstance(lease, str):
+        return lease
+    return mutating_writer_lease(receipt["binding"])
+
+
+def writer_leases_match(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    try:
+        return os.path.samefile(left, right)
+    except OSError as error:
+        raise HelperError("cannot safely compare mutating writer lease identities") from error
 
 
 def validate_envelope(value: Any, expected_kind: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise HelperError("message must be an object")
-    payload_key = "report" if expected_kind == "thinker_report" else "input_request"
+    payload_key = "report" if expected_kind in {"thinker_report", "mutating_report"} else "input_request"
     common = {
         "protocol_version",
         "delegation_id",
@@ -638,6 +712,8 @@ def validate_envelope(value: Any, expected_kind: str) -> dict[str, Any]:
     result = copy.deepcopy(value)
     if expected_kind == "thinker_report":
         result[payload_key] = validate_report(value.get(payload_key))
+    elif expected_kind == "mutating_report":
+        result[payload_key] = validate_mutating_report(value.get(payload_key))
     else:
         result[payload_key] = validate_input_request(value.get(payload_key))
     return result
@@ -694,6 +770,112 @@ def validate_report(value: Any) -> dict[str, Any]:
         raise HelperError("read-only thinker reports cannot contain changed artifacts")
     reject_private_fields(value)
     return copy.deepcopy(value)
+
+
+def validate_mutating_report(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise HelperError("report must be an object")
+    fields = {
+        "accepted_role",
+        "accepted_exclusions",
+        "status",
+        "summary",
+        "blockers",
+        "changed_artifacts",
+        "verification",
+        "references",
+        "handoff_commit",
+        "authorship",
+        "non_claims",
+    }
+    reject_unknown(value, fields, "mutating report")
+    if value.get("accepted_role") is not True or value.get("accepted_exclusions") is not True:
+        raise HelperError("report must accept the mutating role and exclusions")
+    status = value.get("status")
+    if status not in {"complete", "blocked"}:
+        raise HelperError("mutating report status must be complete or blocked")
+    required_string(value, "summary", 8192)
+    for key in ("blockers", "changed_artifacts", "verification", "references"):
+        validate_string_list(value.get(key), key)
+    handoff_commit = value.get("handoff_commit")
+    if not isinstance(handoff_commit, str) or len(handoff_commit.encode()) > 256:
+        raise HelperError("handoff_commit must be a string of at most 256 bytes")
+    if status == "complete" and not handoff_commit:
+        raise HelperError("complete mutating report requires a handoff commit")
+    if status == "blocked" and (handoff_commit or value["changed_artifacts"]):
+        raise HelperError("blocked mutating report requires zero commit and no changed artifacts")
+    if value.get("authorship") != "claude_mutating_delegate":
+        raise HelperError("mutating report must declare Claude delegate authorship")
+    non_claims = value.get("non_claims")
+    required_non_claims = {"correct": False, "accepted": False, "merge_ready": False, "cleanup_authorized": False}
+    if non_claims != required_non_claims:
+        raise HelperError("report validity must disclaim correctness, acceptance, merge readiness, and cleanup authority")
+    reject_private_fields(value)
+    return copy.deepcopy(value)
+
+
+def validate_mutating_handoff(envelope: dict[str, Any], binding: dict[str, Any]) -> dict[str, Any]:
+    if binding.get("producer_role") != "mutating_delegate" or binding.get("authority") != "exclusive_writer":
+        raise HelperError("mutating report requires an immutable mutating delegation binding")
+    workdir = str(pathlib.Path(binding["workdir"]).resolve(strict=True))
+    git = ["git", "--no-optional-locks", "-C", workdir]
+    if run_command(git + ["rev-parse", "--show-toplevel"]) != workdir:
+        raise HelperError("handoff workdir is not the bound Git worktree")
+    branch = run_command(git + ["symbolic-ref", "--short", "HEAD"])
+    if branch != binding["baseline_branch"]:
+        raise HelperError("handoff branch differs from the immutable baseline branch")
+    if run_command(git + ["status", "--porcelain"]):
+        raise HelperError("handoff requires a clean worktree")
+    head = run_command(git + ["rev-parse", "HEAD"])
+    count_text = run_command(git + ["rev-list", "--count", f"{binding['base']}..{head}"])
+    try:
+        commit_count = int(count_text)
+    except ValueError as error:
+        raise HelperError("handoff commit count is invalid") from error
+    report = envelope["report"]
+    if report["status"] == "complete":
+        if commit_count != 1:
+            raise HelperError("successful handoff requires exactly one commit beyond the immutable baseline")
+        parents = run_command(git + ["rev-list", "--parents", "-n", "1", head]).split()
+        if parents != [head, binding["base"]]:
+            raise HelperError("handoff commit must be one direct child of the immutable baseline")
+        if report["handoff_commit"] != head:
+            raise HelperError("reported handoff commit does not match worktree HEAD")
+        outcome = "complete"
+    else:
+        if commit_count != 0 or head != binding["base"]:
+            raise HelperError("blocked handoff requires zero commits beyond the immutable baseline")
+        outcome = "blocked"
+    return {
+        "outcome": outcome,
+        "baseline_commit": binding["base"],
+        "baseline_branch": binding["baseline_branch"],
+        "handoff_commit": head if outcome == "complete" else "",
+        "commit_count": commit_count,
+        "clean": True,
+        "validation_scope": "objective_handoff_only",
+        "correct": False,
+        "accepted": False,
+        "merge_ready": False,
+        "cleanup_authorized": False,
+    }
+
+
+def require_mutating_session(receipt: dict[str, Any]) -> None:
+    intents = [event for event in receipt["events"] if event.get("kind") == "launch_intent"]
+    completed = [event for event in receipt["events"] if event.get("kind") == "launch_completed"]
+    acquired = [event for event in receipt["events"] if event.get("kind") == "session_acquired"]
+    identity = receipt.get("session_identity")
+    if (
+        len(intents) != 1
+        or intents[0].get("workflow") != "mutating"
+        or len(completed) != 1
+        or completed[0].get("operation_event_id") != intents[0].get("event_id")
+        or len(acquired) != 1
+        or not isinstance(identity, dict)
+        or acquired[0].get("identity") != identity
+    ):
+        raise HelperError("mutating report requires one completed and acquired mutating Claude session")
 
 
 def validate_input_request(value: Any) -> dict[str, Any]:
@@ -932,7 +1114,7 @@ def inspect_claude_identity(pane_id: str, claude_session_id: str) -> dict[str, A
     }
 
 
-def validate_launch_request(value: Any) -> dict[str, str]:
+def validate_launch_request(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise HelperError("launch request must be an object")
     fields = {
@@ -945,11 +1127,36 @@ def validate_launch_request(value: Any) -> dict[str, str]:
         "claude_session_id",
         "repository",
         "base",
+        "workflow",
     }
+    mutating_fields = {
+        "baseline_branch",
+        "writer_owner",
+        "integration_owner",
+        "coordinator_write_frozen",
+        "shared_writable",
+        "handoff",
+        "capacity_request",
+    }
+    if value.get("workflow") == "mutating":
+        fields |= mutating_fields
     reject_unknown(value, fields, "launch request")
-    result: dict[str, str] = {}
-    for key in fields:
+    result: dict[str, Any] = {}
+    for key in fields - mutating_fields - {"workflow"}:
         result[key] = required_string(value, key, 2048 if key in {"workdir", "packet_file"} else 256)
+    if value.get("workflow", "read_only") not in {"read_only", "mutating"}:
+        raise HelperError("launch workflow must be read_only or mutating")
+    result["workflow"] = value.get("workflow", "read_only")
+    if result["workflow"] == "mutating":
+        for key in ("baseline_branch", "writer_owner", "integration_owner", "handoff"):
+            result[key] = required_string(value, key, 256)
+        for key in ("coordinator_write_frozen", "shared_writable"):
+            if not isinstance(value.get(key), bool):
+                raise HelperError(f"{key} must be boolean")
+            result[key] = value[key]
+        if not isinstance(value.get("capacity_request"), dict):
+            raise HelperError("capacity_request must be an object")
+        result["capacity_request"] = copy.deepcopy(value["capacity_request"])
     protocol_id(result, "delegation_id")
     protocol_id(result, "event_id")
     protocol_id(result, "claude_session_id")
@@ -1006,7 +1213,29 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         raise HelperError("experimental Claude launch is available only on Darwin")
     run_command(["tmux", "-V"])
     require_tmux_session(request["tmux_session"])
-    workdir = preflight_worktree(request)
+    workflow = request["workflow"]
+    decision_digest_value = ""
+    if workflow == "mutating":
+        prepared = prepare_mutation(
+            {
+                "workdir": request["workdir"],
+                "repository": request["repository"],
+                "writer_owner": request["writer_owner"],
+                "integration_owner": request["integration_owner"],
+                "coordinator_write_frozen": request["coordinator_write_frozen"],
+                "shared_writable": request["shared_writable"],
+                "handoff": request["handoff"],
+            }
+        )
+        if prepared["baseline_commit"] != request["base"] or prepared["baseline_branch"] != request["baseline_branch"]:
+            raise HelperError("mutating launch differs from the prepared immutable baseline")
+        capacity_decision = decide_mutating_capacity(request["capacity_request"])
+        decision_digest_value = capacity_decision["decision_digest"]
+        if capacity_decision.get("may_proceed") is not True or capacity_decision.get("decision") not in {"autonomous_allowed", "explicit_acknowledgement"}:
+            raise HelperError("mutating launch capacity decision does not permit proceeding")
+        workdir = prepared["workdir"]
+    else:
+        workdir = preflight_worktree(request)
     packet_path = pathlib.Path(request["packet_file"]).resolve(strict=True)
     mode = packet_path.stat().st_mode & 0o777
     if mode & 0o077:
@@ -1032,17 +1261,29 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         raise HelperError("Claude Code is missing required flags: " + ", ".join(missing_flags))
     mcp_path, settings_path = private_runtime_paths(store, request["delegation_id"])
     mcp_tool_prefix = "mcp__amux-claude-delegation__"
+    mutating = workflow == "mutating"
+    built_in_tools = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"] if mutating else ["Read", "Grep", "Glob"]
+    mutating_denied = [
+        "Agent", "WebFetch", "WebSearch", "Skill",
+        "Bash(git push:*)", "Bash(gh:*)", "Bash(git stash:*)", "Bash(git reset:*)",
+        "Bash(git clean:*)", "Bash(git worktree:*)", "Bash(git merge:*)", "Bash(git tag:*)",
+        "Bash(git branch -d:*)", "Bash(git branch -D:*)",
+    ]
+    denied_tools = mutating_denied if mutating else ["Bash", "Edit", "Write", "NotebookEdit", "Agent", "WebFetch", "WebSearch", "Skill"]
     policy = {
         "interactive": True,
         "permission_mode": "dontAsk",
         "setting_sources": [],
         "strict_mcp": True,
-        "built_in_tools": ["Read", "Grep", "Glob"],
+        "built_in_tools": built_in_tools,
         "allowed_mcp_tools": [mcp_tool_prefix + "submit_report", mcp_tool_prefix + "submit_input_request"],
-        "denied_tools": ["Bash", "Edit", "Write", "NotebookEdit", "Agent", "WebFetch", "WebSearch", "Skill"],
+        "denied_tools": denied_tools,
         "additional_directories": [],
         "automatic_interactive_input": False,
     }
+    if mutating:
+        policy["workflow"] = "mutating"
+        policy["removed_credential_environment"] = ["GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN"]
     argv = [
         claude,
         "--session-id",
@@ -1057,9 +1298,9 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         "--mcp-config",
         str(mcp_path),
         "--tools",
-        "Read,Grep,Glob",
+        ",".join(built_in_tools),
         "--allowed-tools",
-        ",".join(["Read", "Grep", "Glob"] + policy["allowed_mcp_tools"]),
+        ",".join(built_in_tools + policy["allowed_mcp_tools"]),
         "--disallowed-tools",
         ",".join(policy["denied_tools"]),
         "--disable-slash-commands",
@@ -1068,7 +1309,8 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         "false",
         packet_text,
     ]
-    start_command = f"cd {shlex.quote(workdir)} && exec {shlex.join(argv)}"
+    process_argv = ["env", "-u", "GH_TOKEN", "-u", "GITHUB_TOKEN", "-u", "GITLAB_TOKEN", *argv] if mutating else argv
+    start_command = f"cd {shlex.quote(workdir)} && exec {shlex.join(process_argv)}"
     mcp_config = {
         "mcpServers": {
             "amux-claude-delegation": {
@@ -1090,6 +1332,9 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         "settings_path": settings_path,
         "mcp_config": mcp_config,
         "settings": settings,
+        "workflow": workflow,
+        "capacity_decision_digest": decision_digest_value,
+        "capacity_decision": capacity_decision if mutating else None,
     }
 
 
@@ -1119,7 +1364,7 @@ def write_private_json(path: pathlib.Path, value: Any) -> None:
 
 def plan_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
     components = launch_components(store, request)
-    return {
+    result = {
         "packet_digest": components["packet_digest"],
         "launch_policy_digest": components["launch_policy_digest"],
         "launch_command_digest": components["launch_command_digest"],
@@ -1132,10 +1377,16 @@ def plan_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
             "read_confinement_runtime": "untested",
         },
     }
+    if components["workflow"] == "mutating":
+        result["workflow"] = "mutating"
+        result["capacity_decision"] = components["capacity_decision"]
+        result["capabilities"].update({"writer_authority": "exclusive", "handoff": "one_clean_local_commit"})
+    return result
 
 
 def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
     request_data = validate_launch_request(request)
+    request_digest = hashlib.sha256(json.dumps(request_data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     delegation_id = request_data["delegation_id"]
     event_id = request_data["event_id"]
     result_id = internal_event_id("launch-result", event_id)
@@ -1145,6 +1396,9 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
         if replay is not None:
             if (
                 replay.get("kind") != "launch_intent"
+                or replay.get("workflow", "read_only") != request_data["workflow"]
+                or (replay.get("request_digest") is not None and replay.get("request_digest") != request_digest)
+                or (request_data["workflow"] == "mutating" and replay.get("request_digest") is None)
                 or replay.get("claude_session_id") != request_data["claude_session_id"]
                 or replay.get("tmux_session") != request_data["tmux_session"]
                 or replay.get("tmux_window") != request_data["tmux_window"]
@@ -1163,6 +1417,8 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
     intent = {
         "event_id": event_id,
         "kind": "launch_intent",
+        "workflow": request_data["workflow"],
+        "request_digest": request_digest,
         "claude_session_id": request_data["claude_session_id"],
         "tmux_session": request_data["tmux_session"],
         "tmux_window": request_data["tmux_window"],
@@ -1176,6 +1432,11 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
         for key in ("packet_digest", "launch_policy_digest", "launch_command_digest"):
             if receipt["binding"][key] != components[key]:
                 raise HelperError(f"launch {key} does not match immutable receipt binding")
+        expected_role = "mutating_delegate" if components["workflow"] == "mutating" else "thinker"
+        if receipt["binding"]["producer_role"] != expected_role:
+            raise HelperError("launch workflow does not match immutable receipt authority")
+        if components["workflow"] == "mutating" and receipt["binding"].get("capacity_decision_digest") != components["capacity_decision_digest"]:
+            raise HelperError("launch capacity decision does not match immutable receipt binding")
         replay = find_event(receipt, event_id)
         if replay is not None:
             raise HelperError("launch event appeared concurrently; retry the exact request")
@@ -1183,6 +1444,8 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
             raise HelperError("receipt acquired a different launch operation concurrently")
 
         require_tmux_session(request_data["tmux_session"])
+        if components["workflow"] == "mutating":
+            revalidate_mutating_launch_lease(receipt_store, receipt, request_data)
         intent["at"] = utc_now()
         receipt["events"].append(intent)
         receipt["updated_at"] = intent["at"]
@@ -1251,7 +1514,7 @@ def diagnostics() -> dict[str, Any]:
                 windows.append({"name": name, "used_percent": window.get("usedPercent"), "window_minutes": window.get("windowMinutes"), "resets_at": window.get("resetsAt")})
         for index, window in enumerate(usage.get("extraRateWindows", [])):
             if isinstance(window, dict):
-                windows.append({"name": f"extra_{index}", "used_percent": window.get("usedPercent"), "window_minutes": window.get("windowMinutes"), "resets_at": window.get("resetsAt")})
+                windows.append({"name": f"extra_{index}", "used_percent": window.get("usedPercent"), "window_minutes": window.get("windowMinutes"), "resets_at": window.get("resetsAt"), "model_specific": True})
         source = provider.get("source", "unknown")
         capacity = {"status": "supported", "source": source, "confidence": "reported" if source in {"web", "api", "oauth"} else "unknown", "windows": windows}
     except (HelperError, json.JSONDecodeError, KeyError, TypeError) as error:
@@ -1259,7 +1522,267 @@ def diagnostics() -> dict[str, Any]:
     return {"experimental": True, "capabilities": capabilities, "capacity": capacity}
 
 
-def mcp_tools() -> list[dict[str, Any]]:
+def percentage(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 or value > 100:
+        raise HelperError(f"{label} must be a number from 0 to 100")
+    return float(value)
+
+
+def capacity_decision_digest(value: Any) -> str:
+    def normalize(item: Any) -> Any:
+        if isinstance(item, dict):
+            return {key: normalize(nested) for key, nested in item.items()}
+        if isinstance(item, list):
+            return [normalize(nested) for nested in item]
+        if isinstance(item, (int, float)) and not isinstance(item, bool):
+            return float(item)
+        return item
+
+    canonical = json.dumps(normalize(value), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def unknown_capacity_decision(
+    acknowledged: bool,
+    acknowledgement_of: str,
+    reason: str,
+    request_digest: str,
+    source: str,
+    confidence: str,
+) -> dict[str, Any]:
+    required = {
+        "decision": "acknowledgement_required",
+        "autonomous_selection": False,
+        "may_proceed": False,
+        "governing_window": "unknown",
+        "reason": reason,
+        "capacity_request_digest": request_digest,
+        "capacity_source": source,
+        "capacity_confidence": confidence,
+    }
+    required["decision_digest"] = capacity_decision_digest(required)
+    if not acknowledged:
+        if acknowledgement_of:
+            raise HelperError("acknowledgement_of requires explicit acknowledgement")
+        return required
+    if acknowledgement_of != required["decision_digest"]:
+        raise HelperError("explicit acknowledgement must reference the prior acknowledgement-required decision")
+    decision = {
+        "decision": "explicit_acknowledgement",
+        "autonomous_selection": False,
+        "may_proceed": True,
+        "governing_window": "unknown",
+        "reason": reason,
+        "acknowledgement_of": acknowledgement_of,
+    }
+    decision["decision_digest"] = capacity_decision_digest(decision)
+    return decision
+
+
+def decide_mutating_capacity(request: Any) -> dict[str, Any]:
+    if not isinstance(request, dict):
+        raise HelperError("capacity decision request must be an object")
+    reject_unknown(request, {"capacity", "reserve_floors", "acknowledged_unknown_capacity", "acknowledgement_of"}, "capacity decision")
+    acknowledged = request.get("acknowledged_unknown_capacity")
+    if not isinstance(acknowledged, bool):
+        raise HelperError("acknowledged_unknown_capacity must be boolean")
+    acknowledgement_of = request.get("acknowledgement_of", "")
+    if not isinstance(acknowledgement_of, str) or len(acknowledgement_of.encode()) > 256:
+        raise HelperError("acknowledgement_of must be a string of at most 256 bytes")
+    capacity = request.get("capacity")
+    floors = request.get("reserve_floors")
+    if not isinstance(capacity, dict) or not isinstance(floors, dict):
+        raise HelperError("capacity and reserve_floors must be objects")
+    capacity_source = capacity.get("source", "unknown")
+    capacity_confidence = capacity.get("confidence", "unknown")
+    if not isinstance(capacity_source, str) or not isinstance(capacity_confidence, str):
+        raise HelperError("capacity source and confidence must be strings")
+    digest_request = copy.deepcopy(request)
+    digest_request["acknowledged_unknown_capacity"] = False
+    digest_request.pop("acknowledgement_of", None)
+    request_digest = capacity_decision_digest(digest_request)
+    reject_unknown(floors, {"five_hour", "weekly", "model_specific"}, "reserve floors")
+    five_hour_floor = percentage(floors.get("five_hour"), "five_hour reserve floor")
+    weekly_floor = percentage(floors.get("weekly"), "weekly reserve floor")
+    model_floors = floors.get("model_specific")
+    if not isinstance(model_floors, dict):
+        raise HelperError("model_specific reserve floors must be an object")
+    for name, floor in model_floors.items():
+        if not isinstance(name, str) or not name:
+            raise HelperError("model-specific reserve floor names must be non-empty strings")
+        percentage(floor, f"{name} reserve floor")
+
+    reliable = capacity.get("status") == "supported" and capacity.get("confidence") == "reported"
+    windows = capacity.get("windows")
+    if not isinstance(windows, list) or not windows:
+        return unknown_capacity_decision(acknowledged, acknowledgement_of, "capacity has no available windows; reserve impact is unknown", request_digest, capacity_source, capacity_confidence)
+    evaluated = []
+    present_window_classes = {"five_hour": False, "weekly": False}
+    missing_capacity = not reliable
+    for raw in windows:
+        if not isinstance(raw, dict):
+            missing_capacity = True
+            continue
+        name = required_string(raw, "name", 256)
+        if raw.get("model_specific") is True:
+            if name not in model_floors:
+                raise HelperError("reserve floor is required for every available model-specific window")
+            floor = percentage(model_floors[name], f"{name} reserve floor")
+            window_class = "model_specific"
+        elif raw.get("window_minutes") == 300:
+            floor = five_hour_floor
+            window_class = "five_hour"
+            present_window_classes[window_class] = True
+        elif raw.get("window_minutes") == 10080:
+            floor = weekly_floor
+            window_class = "weekly"
+            present_window_classes[window_class] = True
+        else:
+            raise HelperError("reserve floor is required for every available capacity window")
+        if isinstance(raw.get("used_percent"), bool) or not isinstance(raw.get("used_percent"), (int, float)):
+            missing_capacity = True
+            continue
+        used = percentage(raw["used_percent"], f"{name} used_percent")
+        remaining = 100.0 - used
+        evaluated.append(
+            {
+                "name": name,
+                "class": window_class,
+                "remaining_percent": remaining,
+                "reserve_floor_percent": floor,
+                "margin_percent": remaining - floor,
+            }
+        )
+    governing = min(evaluated, key=lambda window: (window["margin_percent"], window["name"])) if evaluated else None
+    if governing is not None and governing["margin_percent"] < 0:
+        raise HelperError(f"capacity is below the hard reserve floor for governing window {governing['name']}")
+    if missing_capacity or not all(present_window_classes.values()):
+        reason = "capacity is low-confidence; reserve impact is unknown" if not reliable else "one or more required capacity windows are missing; reserve impact is unknown"
+        return unknown_capacity_decision(acknowledged, acknowledgement_of, reason, request_digest, capacity_source, capacity_confidence)
+    if governing is None:
+        return unknown_capacity_decision(acknowledged, acknowledgement_of, "capacity has no evaluable windows; reserve impact is unknown", request_digest, capacity_source, capacity_confidence)
+    if acknowledged or acknowledgement_of:
+        raise HelperError("reliable capacity does not accept unknown-capacity acknowledgement fields")
+    decision = {
+        "decision": "autonomous_allowed",
+        "autonomous_selection": True,
+        "may_proceed": True,
+        "capacity_source": capacity_source,
+        "capacity_confidence": capacity_confidence,
+        "governing_window": governing["name"],
+        "remaining_percent": governing["remaining_percent"],
+        "reserve_floor_percent": governing["reserve_floor_percent"],
+        "margin_percent": governing["margin_percent"],
+        "windows": evaluated,
+    }
+    decision["decision_digest"] = capacity_decision_digest(decision)
+    return decision
+
+
+def prepare_mutation(request: Any) -> dict[str, Any]:
+    if not isinstance(request, dict):
+        raise HelperError("mutation preparation request must be an object")
+    fields = {
+        "workdir",
+        "repository",
+        "writer_owner",
+        "integration_owner",
+        "coordinator_write_frozen",
+        "shared_writable",
+        "handoff",
+    }
+    reject_unknown(request, fields, "mutation preparation")
+    for key in ("workdir", "repository", "writer_owner", "integration_owner", "handoff"):
+        required_string(request, key, 2048 if key == "workdir" else 256)
+    if request.get("shared_writable") is not False:
+        raise HelperError("shared writable workdirs are prohibited")
+    if (
+        request.get("coordinator_write_frozen") is not True
+        or request["writer_owner"] != "claude_mutating_delegate"
+        or request["integration_owner"] != "amp_coordinator"
+    ):
+        raise HelperError("mutation requires unambiguous exclusive writer ownership")
+    if request["handoff"] != "one_clean_local_commit":
+        raise HelperError("mutation permits only one_clean_local_commit handoff")
+    workdir = str(pathlib.Path(request["workdir"]).resolve(strict=True))
+    git = ["git", "--no-optional-locks", "-C", workdir]
+    if run_command(git + ["rev-parse", "--show-toplevel"]) != workdir:
+        raise HelperError("mutation workdir is not the canonical Git worktree root")
+    if run_command(git + ["rev-parse", "--git-dir"]) == run_command(git + ["rev-parse", "--git-common-dir"]):
+        raise HelperError("mutation requires a dedicated linked worktree")
+    if run_command(git + ["status", "--porcelain"]):
+        raise HelperError("mutation requires a clean immutable baseline")
+    branch = run_command(git + ["symbolic-ref", "--short", "HEAD"])
+    if not branch:
+        raise HelperError("mutation requires an unambiguous checked-out branch")
+    remote = run_command(git + ["remote", "get-url", "origin"])
+    if repository_from_remote(remote) != request["repository"]:
+        raise HelperError("mutation repository does not match the declared repository")
+    return {
+        "workdir": workdir,
+        "repository": request["repository"],
+        "baseline_commit": run_command(git + ["rev-parse", "HEAD"]),
+        "baseline_branch": branch,
+        "writer_owner": request["writer_owner"],
+        "integration_owner": request["integration_owner"],
+        "coordinator_write_frozen": True,
+        "shared_writable": False,
+        "handoff": request["handoff"],
+    }
+
+
+def revalidate_mutating_launch_lease(
+    receipt_store: dict[str, Any], receipt: dict[str, Any], request: dict[str, Any]
+) -> None:
+    binding = receipt["binding"]
+    prepared = prepare_mutation(
+        {
+            "workdir": request["workdir"],
+            "repository": request["repository"],
+            "writer_owner": request["writer_owner"],
+            "integration_owner": request["integration_owner"],
+            "coordinator_write_frozen": request["coordinator_write_frozen"],
+            "shared_writable": request["shared_writable"],
+            "handoff": request["handoff"],
+        }
+    )
+    if (
+        prepared["workdir"] != receipt_writer_lease(receipt)
+        or prepared["repository"] != binding["repository"]
+        or prepared["baseline_branch"] != binding["baseline_branch"]
+        or prepared["baseline_commit"] != binding["base"]
+    ):
+        raise HelperError("mutating launch no longer matches the immutable leased baseline")
+    owners = [
+        candidate
+        for candidate in receipt_store["receipts"]
+        if candidate.get("state") != "verified_parked"
+        and receipt_writer_lease(candidate) is not None
+        and writer_leases_match(receipt_writer_lease(candidate), prepared["workdir"])
+    ]
+    if len(owners) != 1 or owners[0]["binding"]["delegation_id"] != binding["delegation_id"]:
+        raise HelperError("mutating launch receipt does not exclusively own the logical writer lease")
+
+
+def validate_frozen_handoff(store: ReceiptStore, request: Any) -> dict[str, Any]:
+    if not isinstance(request, dict):
+        raise HelperError("handoff validation request must be an object")
+    reject_unknown(request, {"delegation_id"}, "handoff validation")
+    delegation_id = protocol_id(request, "delegation_id")
+    with store.mutation_lock():
+        receipt = store.find(store.load_store(), delegation_id)
+        if not receipt.get("submission_frozen") or receipt.get("writer_authority") != "frozen":
+            raise HelperError("handoff validation requires a frozen mutating submission")
+        source = find_event(receipt, receipt.get("report_message_id", ""))
+        if source is None or source.get("kind") != "valid_report" or source.get("message", {}).get("kind") != "mutating_report":
+            raise HelperError("handoff validation requires the frozen mutating report")
+        validation = validate_mutating_handoff(source["message"], receipt["binding"])
+        if validation != receipt.get("handoff_validation"):
+            raise HelperError("current handoff differs from the frozen objective validation")
+        return validation
+
+
+def mcp_tools(mutating: bool = False) -> list[dict[str, Any]]:
     common_properties = {
         "protocol_version": {"type": "integer", "const": PROTOCOL_VERSION},
         "delegation_id": {"type": "string", "maxLength": 256},
@@ -1271,49 +1794,68 @@ def mcp_tools() -> list[dict[str, Any]]:
         "repository": {"type": "string", "maxLength": 256},
         "base": {"type": "string", "maxLength": 256},
         "workdir": {"type": "string", "maxLength": 2048},
-        "producer_role": {"type": "string", "const": "thinker"},
-        "authority": {"type": "string", "const": "read_only"},
+        "producer_role": {"type": "string", "const": "mutating_delegate" if mutating else "thinker"},
+        "authority": {"type": "string", "const": "exclusive_writer" if mutating else "read_only"},
         "launch_policy_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "created_at": {"type": "string", "maxLength": 256},
     }
     common_required = list(common_properties)
     string_list = {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 2048}}
     report_properties = dict(common_properties)
+    if mutating:
+        report_payload = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "accepted_role": {"type": "boolean", "const": True},
+                "accepted_exclusions": {"type": "boolean", "const": True},
+                "status": {"type": "string", "enum": ["complete", "blocked"]},
+                "summary": {"type": "string", "maxLength": 8192},
+                "blockers": string_list,
+                "changed_artifacts": string_list,
+                "verification": string_list,
+                "references": string_list,
+                "handoff_commit": {"type": "string", "maxLength": 256},
+                "authorship": {"type": "string", "const": "claude_mutating_delegate"},
+                "non_claims": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {name: {"type": "boolean", "const": False} for name in ("correct", "accepted", "merge_ready", "cleanup_authorized")},
+                    "required": ["correct", "accepted", "merge_ready", "cleanup_authorized"],
+                },
+            },
+            "required": [
+                "accepted_role", "accepted_exclusions", "status", "summary", "blockers", "changed_artifacts",
+                "verification", "references", "handoff_commit", "authorship", "non_claims",
+            ],
+        }
+    else:
+        report_payload = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "accepted_role": {"type": "boolean", "const": True},
+                "accepted_exclusions": {"type": "boolean", "const": True},
+                "status": {"type": "string", "enum": ["complete", "blocked"]},
+                "verdict": {"type": "string", "maxLength": 4096},
+                "rationale": {"type": "string", "maxLength": 8192},
+                "evidence": string_list,
+                "assumptions": string_list,
+                "unsupported_claims": string_list,
+                "blockers": string_list,
+                "verification": string_list,
+                "changed_artifacts": {"type": "array", "maxItems": 0},
+                "references": string_list,
+            },
+            "required": [
+                "accepted_role", "accepted_exclusions", "status", "verdict", "rationale", "evidence", "assumptions",
+                "unsupported_claims", "blockers", "verification", "changed_artifacts", "references",
+            ],
+        }
     report_properties.update(
         {
-            "kind": {"type": "string", "const": "thinker_report"},
-            "report": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "accepted_role": {"type": "boolean", "const": True},
-                    "accepted_exclusions": {"type": "boolean", "const": True},
-                    "status": {"type": "string", "enum": ["complete", "blocked"]},
-                    "verdict": {"type": "string", "maxLength": 4096},
-                    "rationale": {"type": "string", "maxLength": 8192},
-                    "evidence": string_list,
-                    "assumptions": string_list,
-                    "unsupported_claims": string_list,
-                    "blockers": string_list,
-                    "verification": string_list,
-                    "changed_artifacts": {"type": "array", "maxItems": 0},
-                    "references": string_list,
-                },
-                "required": [
-                    "accepted_role",
-                    "accepted_exclusions",
-                    "status",
-                    "verdict",
-                    "rationale",
-                    "evidence",
-                    "assumptions",
-                    "unsupported_claims",
-                    "blockers",
-                    "verification",
-                    "changed_artifacts",
-                    "references",
-                ],
-            },
+            "kind": {"type": "string", "const": "mutating_report" if mutating else "thinker_report"},
+            "report": report_payload,
         }
     )
     input_properties = dict(common_properties)
@@ -1335,7 +1877,7 @@ def mcp_tools() -> list[dict[str, Any]]:
     return [
         {
             "name": "submit_report",
-            "description": "Submit the complete bounded semantic thinker report. Pane output is not authoritative.",
+            "description": "Submit the bounded semantic report and freeze mutating authority." if mutating else "Submit the complete bounded semantic thinker report. Pane output is not authoritative.",
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": False,
@@ -1404,7 +1946,9 @@ def serve_mcp(store: ReceiptStore, delegation_id: str) -> int:
         if method == "ping":
             mcp_response(identifier, result={})
         elif method == "tools/list":
-            mcp_response(identifier, result={"tools": mcp_tools()})
+            receipt = store.show(delegation_id)
+            mutating = receipt["binding"].get("producer_role") == "mutating_delegate"
+            mcp_response(identifier, result={"tools": mcp_tools(mutating)})
         elif method == "tools/call":
             params = request.get("params")
             if not isinstance(params, dict) or params.get("name") not in {"submit_report", "submit_input_request"} or not isinstance(params.get("arguments"), dict):
@@ -1416,7 +1960,7 @@ def serve_mcp(store: ReceiptStore, delegation_id: str) -> int:
                 continue
             try:
                 if params["name"] == "submit_report":
-                    outcome = store.submit_message(arguments, "thinker_report")
+                    outcome = store.submit_message(arguments, "report")
                 else:
                     outcome = store.submit_message(arguments, "input_request")
             except HelperError as error:
@@ -1515,6 +2059,13 @@ def parser() -> argparse.ArgumentParser:
     launch_commands = launch.add_subparsers(dest="command", required=True)
     launch_commands.add_parser("plan")
     launch_commands.add_parser("execute")
+    capacity = commands.add_parser("capacity")
+    capacity_commands = capacity.add_subparsers(dest="command", required=True)
+    capacity_commands.add_parser("decide-mutating")
+    mutation = commands.add_parser("mutation")
+    mutation_commands = mutation.add_subparsers(dest="command", required=True)
+    mutation_commands.add_parser("prepare")
+    mutation_commands.add_parser("validate-handoff")
     commands.add_parser("diagnose")
     return root
 
@@ -1533,7 +2084,13 @@ def main() -> int:
         output = store.show(arguments.delegation_id)
     else:
         request = read_input()
-        if arguments.area == "launch" and arguments.command == "plan":
+        if arguments.area == "capacity" and arguments.command == "decide-mutating":
+            output = decide_mutating_capacity(request)
+        elif arguments.area == "mutation" and arguments.command == "prepare":
+            output = prepare_mutation(request)
+        elif arguments.area == "mutation" and arguments.command == "validate-handoff":
+            output = validate_frozen_handoff(store, request)
+        elif arguments.area == "launch" and arguments.command == "plan":
             output = plan_launch(store, request)
         elif arguments.area == "launch" and arguments.command == "execute":
             output = execute_launch(store, request)
@@ -1542,7 +2099,7 @@ def main() -> int:
         elif arguments.area == "receipt" and arguments.command == "route":
             output = {"outcome": store.route(request)}
         elif arguments.area == "report" and arguments.command == "submit":
-            output = {"outcome": store.submit_message(request, "thinker_report")}
+            output = {"outcome": store.submit_message(request, "report")}
         elif arguments.area == "report" and arguments.command == "acknowledge":
             output = {"outcome": store.acknowledge(request)}
         elif arguments.area == "inbox" and arguments.command == "consume":

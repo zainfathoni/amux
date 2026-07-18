@@ -30,8 +30,8 @@ func TestTriggerChecklistMatchesSkillActivationAndRouting(t *testing.T) {
 
 	triggerPattern := regexp.MustCompile(`(?m)^\| \x60([^\x60]+)\x60 \|`)
 	matches := triggerPattern.FindAllStringSubmatch(checklist, -1)
-	if len(matches) != 19 {
-		t.Fatalf("trigger checklist has %d routes, want 19", len(matches))
+	if len(matches) != 20 {
+		t.Fatalf("trigger checklist has %d routes, want 20", len(matches))
 	}
 	for _, match := range matches {
 		trigger := match[1]
@@ -51,6 +51,7 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 		"troubleshooting.md",
 		"trigger-phrases.md",
 		"claude-read-only-delegation.md",
+		"claude-mutating-delegation.md",
 		"claude-delegation-contract.md",
 		"claude-delegation-recovery.md",
 	} {
@@ -67,6 +68,7 @@ func TestExperimentalClaudeDelegationReferencesStayNarrowAndConsistent(t *testin
 	t.Parallel()
 	root := repoRoot(t)
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-read-only-delegation.md"))
+	mutating := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-mutating-delegation.md"))
 	contract := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-delegation-contract.md"))
 	recovery := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-delegation-recovery.md"))
 
@@ -87,6 +89,19 @@ func TestExperimentalClaudeDelegationReferencesStayNarrowAndConsistent(t *testin
 	for _, required := range []string{"same event ID", "leave the receipt recoverable", "Do not infer", "Do not automatically"} {
 		if !strings.Contains(recovery, required) {
 			t.Errorf("experimental Claude recovery is missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		"exclusive logical write ownership",
+		"one clean local commit",
+		"zero commits",
+		"submission freeze",
+		"mutation validate-handoff",
+		"never proves correctness, acceptance, merge readiness, or cleanup authority",
+		"Never park automatically",
+	} {
+		if !strings.Contains(mutating, required) {
+			t.Errorf("experimental mutating Claude contract is missing %q", required)
 		}
 	}
 }
