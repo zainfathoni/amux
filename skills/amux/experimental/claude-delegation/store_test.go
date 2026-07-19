@@ -73,6 +73,169 @@ print("ok")
 	}
 }
 
+func TestLinuxNodeDescriptorIdentityRejectsSameInodeContentSubstitution(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux node and bun launchers use proc descriptor identity")
+	}
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import hashlib, importlib.util, os, pathlib, sys, tempfile
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+directory = pathlib.Path(tempfile.mkdtemp())
+launcher = directory / "cli.js"
+launcher.write_bytes(b"original descriptor launcher")
+launcher.chmod(0o755)
+descriptor, _, expected_launcher, expected_object = module.open_verified_executable(launcher)
+session_id = "550e8400-e29b-41d4-a716-446655440000"
+arguments = ["/usr/bin/node", f"/proc/self/fd/{descriptor}", "--session-id", session_id, "--strict-mcp-config"]
+expected_argv = module.normalized_argv_digest(arguments[2:])
+commands = []
+module.run_command = lambda command, environment=None: commands.append(command) or f"Claude\tthinker\t@20\t%20\t{os.getpid()}\t{directory}\tnode\tcommand"
+module.exact_process_identity = lambda pid: ("node", "linux:stable", arguments, hashlib.sha256(b"node").hexdigest())
+module.process_executable_identity = lambda pid: "file:node:stable"
+identity = module.inspect_claude_identity("%20", session_id, expected_argv, expected_launcher, expected_object)
+write_descriptor = os.open(launcher, os.O_WRONLY)
+before = os.fstat(descriptor)
+launcher.unlink()
+assert not launcher.exists(), "fixture backing pathname still exists"
+os.ftruncate(write_descriptor, 0)
+os.write(write_descriptor, b"substituted descriptor launcher")
+os.fchmod(write_descriptor, 0o755)
+after = os.fstat(descriptor)
+assert (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino), "fixture did not preserve inode"
+try:
+    module.inspect_claude_identity("%20", session_id, expected_argv, expected_launcher, expected_object)
+except module.HelperError as error:
+    assert "launcher content does not match immutable launch intent" in str(error), error
+else:
+    raise AssertionError("same-inode launcher substitution was accepted")
+assert identity["pane_id"] == "%20"
+assert all(command[:2] == ["tmux", "display-message"] for command in commands), commands
+os.close(write_descriptor)
+os.close(descriptor)
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil {
+		t.Fatalf("Linux descriptor content fixture: %v\n%s", err, output)
+	}
+	if string(output) != "ok\n" {
+		t.Fatalf("Linux descriptor content output = %q", output)
+	}
+}
+
+func TestDarwinTransportRejectsCopiedExecutableReplacementBeforeExec(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin materializes a verified executable inside the delegation container")
+	}
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import hashlib, importlib.util, json, os, pathlib, sys, tempfile
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+state = pathlib.Path(tempfile.mkdtemp())
+state.chmod(0o700)
+store = module.ReceiptStore(state)
+delegation_id = "darwin-copy-replacement"
+source = state / "source-claude"
+source.write_bytes(b"#!/bin/sh\nexit 0\n")
+source.chmod(0o755)
+source_descriptor, source_path, launcher_identity, object_identity = module.open_verified_executable(source)
+os.close(source_descriptor)
+packet = state / "packet"
+packet.write_bytes(b"packet")
+packet.chmod(0o600)
+packet_bytes, packet_identity = module.read_owner_private_regular_file(packet, module.MAX_PACKET_BYTES, "launch packet")
+workdir = state / "workdir"
+workdir.mkdir(mode=0o700)
+work_descriptor, resolved_workdir, workdir_identity = module.open_verified_directory(workdir)
+os.close(work_descriptor)
+argv = [source_path, "--session-id", "550e8400-e29b-41d4-a716-446655440000"]
+transport = {
+    "argv": argv,
+    "environment": {"PATH": "/usr/bin:/bin"},
+    "expected_argv_digest": module.normalized_argv_digest(argv[1:]),
+    "expected_launcher_identity": launcher_identity,
+    "expected_executable_object_identity": object_identity,
+    "remove_environment": [],
+    "workdir": resolved_workdir,
+    "workdir_identity": workdir_identity,
+    "packet_identity": packet_identity,
+    "packet_path": str(packet),
+    "packet_digest": hashlib.sha256(packet_bytes).hexdigest(),
+}
+transport_path = module.private_launch_transport_path(store, delegation_id)
+darwin_executable = transport_path.with_name("verified-claude")
+transport["darwin_executable_path"] = str(darwin_executable)
+raw = module.encode_private_json(transport)
+module.write_private_bytes(transport_path, raw)
+source_descriptor, _, _, _ = module.open_verified_executable(source)
+module.materialize_executable(source_descriptor, darwin_executable.parent, darwin_executable)
+os.close(source_descriptor)
+symlink = transport_path.with_name("symlink-launcher")
+symlink.symlink_to(source)
+try:
+    module.open_exact_verified_executable(symlink)
+except OSError:
+    pass
+else:
+    raise AssertionError("Darwin exact executable opener followed a symlink")
+replacement = transport_path.with_name("replacement-launcher")
+replacement.write_bytes(b"#!/bin/sh\nprintf wrong > wrong-process\n")
+replacement.chmod(0o500)
+os.replace(replacement, darwin_executable)
+container_descriptor = os.open(darwin_executable.parent, os.O_RDONLY)
+executable_descriptor, _, _, _ = module.open_exact_verified_executable(darwin_executable)
+module.seal_darwin_launch_container(container_descriptor, executable_descriptor)
+replacement_performed = True
+try:
+    os.rename(darwin_executable.parent, str(darwin_executable.parent) + ".replacement")
+except OSError:
+    container_replacement_blocked = True
+else:
+    container_replacement_blocked = False
+executed = False
+def reject_exec(path, argv, environment):
+    global executed
+    executed = True
+    raise AssertionError("wrong copied executable reached execve")
+module.os.execve = reject_exec
+try:
+    try:
+        module.execute_launch_transport(store, delegation_id, hashlib.sha256(raw).hexdigest(), "0" * 64)
+    except module.HelperError as error:
+        assert "verified Claude executable copy changed before execution" in str(error), error
+    else:
+        raise AssertionError("replaced copied executable was accepted")
+finally:
+    module.restore_darwin_launch_container(container_descriptor, executable_descriptor)
+    os.close(executable_descriptor)
+    os.close(container_descriptor)
+assert replacement_performed
+assert container_replacement_blocked
+assert not executed
+assert transport_path.parent.stat().st_mode & 0o777 == 0o700
+assert state.stat().st_mode & 0o777 == 0o700
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil {
+		t.Fatalf("Darwin copied executable fixture: %v\n%s", err, output)
+	}
+	if string(output) != "ok\n" {
+		t.Fatalf("Darwin copied executable output = %q", output)
+	}
+}
+
 func TestPrivateReaderRejectsWrongEffectiveOwner(t *testing.T) {
 	t.Parallel()
 	helper, err := filepath.Abs("claude_delegation.py")
@@ -717,6 +880,112 @@ esac
 	stdout, stderr, err := runHelperEnv(t, stateDir, environment, map[string]any{}, "receipt", "show", "--delegation-id", binding["delegation_id"].(string))
 	if err != nil || !strings.Contains(stdout, `"state":"verified_parked"`) || !strings.Contains(stdout, sessionID) || !strings.Contains(stdout, `"cleanup_eligible_at"`) || !strings.Contains(stdout, `"recovered_absence":true`) {
 		t.Fatalf("parked receipt does not preserve session/eligibility: %v: %s%s", err, stdout, stderr)
+	}
+}
+
+func TestLinuxNodeDescriptorSubstitutionBlocksAcquisitionAndParkingKill(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux node and bun process forms use proc descriptor identity")
+	}
+	for _, lifecycle := range []string{"acquisition", "parking"} {
+		t.Run(lifecycle, func(t *testing.T) {
+			stateDir := t.TempDir()
+			binDir := t.TempDir()
+			logPath := filepath.Join(t.TempDir(), "tmux.log")
+			sessionID := "750e8400-e29b-41d4-a716-446655440000"
+			expectedArguments := []string{"--session-id", sessionID, "--strict-mcp-config"}
+			panePID, nodeExecutable, launcherPath, launcherFile := startNodeDescriptorProcessFixture(t, expectedArguments...)
+			expectedLauncherIdentity := testExecutableIdentity(t, launcherPath)
+			expectedLauncherObjectIdentity := testExecutableObjectIdentity(t, launcherPath)
+			startCommand := "exec node /proc/self/fd/3 --session-id " + sessionID + " --strict-mcp-config"
+			writeExecutable(t, filepath.Join(binDir, "tmux"), `#!/bin/sh
+set -eu
+case "$1" in
+  display-message) printf 'Claude\tthinker\t@30\t%%30\t%s\t%s\tnode\t%s\n' "$PANE_PID" "$TARGET_WORKDIR" "$START_COMMAND" ;;
+  kill-pane) printf '%s\n' "$*" >> "$TMUX_LOG" ;;
+  list-panes) exit 0 ;;
+  *) exit 2 ;;
+esac
+`)
+			environment := append(os.Environ(),
+				"PATH="+binDir+":"+os.Getenv("PATH"), "TMUX_LOG="+logPath,
+				"TARGET_WORKDIR="+stateDir, "START_COMMAND="+startCommand,
+				fmt.Sprintf("PANE_PID=%d", panePID),
+			)
+			binding := testBinding("delegation-node-descriptor-" + lifecycle)
+			binding["workdir"] = stateDir
+			binding["launch_command_digest"] = fmt.Sprintf("%x", sha256.Sum256([]byte(startCommand)))
+			assertHelperOutcomeEnv(t, stateDir, environment, "recorded", map[string]any{
+				"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+			}, "receipt", "create")
+			recordTestLaunch(t, stateDir, binding["delegation_id"].(string), map[string]any{
+				"session": "Claude", "window": "thinker", "window_id": "@30", "pane_id": "%30",
+				"process_executable_identity": testExecutableIdentity(t, nodeExecutable),
+			}, nulDigest(expectedArguments), expectedLauncherIdentity, expectedLauncherObjectIdentity)
+			acquire := map[string]any{
+				"delegation_id": binding["delegation_id"], "event_id": "acquire-node-descriptor",
+				"pane_id": "%30", "claude_session_id": sessionID,
+			}
+			if lifecycle == "parking" {
+				assertHelperOutcomeEnv(t, stateDir, environment, "recorded", acquire, "session", "acquire")
+				report := testMessage(binding, "report-node-descriptor", "thinker_report", map[string]any{
+					"accepted_role": true, "accepted_exclusions": true, "status": "complete",
+					"verdict": "Synthetic node descriptor fixture.", "rationale": "Full live launcher object identity is required.",
+					"evidence": []any{}, "assumptions": []any{}, "unsupported_claims": []any{}, "blockers": []any{},
+					"verification": []any{"synthetic exact identity"}, "changed_artifacts": []any{}, "references": []any{},
+				})
+				assertHelperOutcomeEnv(t, stateDir, environment, "recorded", report, "report", "submit")
+				assertHelperOutcomeEnv(t, stateDir, environment, "recorded", map[string]any{
+					"delegation_id": binding["delegation_id"], "event_id": "deliver-node-descriptor", "message_id": "report-node-descriptor",
+				}, "inbox", "consume")
+				assertHelperOutcomeEnv(t, stateDir, environment, "recorded", map[string]any{
+					"delegation_id": binding["delegation_id"], "event_id": "ack-node-descriptor", "message_id": "report-node-descriptor",
+				}, "report", "acknowledge")
+			}
+			before, err := launcherFile.Stat()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(launcherPath); err != nil {
+				t.Fatal(err)
+			}
+			if err := launcherFile.Truncate(0); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := launcherFile.Seek(0, 0); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := launcherFile.WriteString("substituted same-inode launcher"); err != nil {
+				t.Fatal(err)
+			}
+			after, err := launcherFile.Stat()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before.Sys().(*syscall.Stat_t).Ino != after.Sys().(*syscall.Stat_t).Ino {
+				t.Fatal("same-inode lifecycle fixture changed inode")
+			}
+			if lifecycle == "acquisition" {
+				_, stderr, err := runHelperEnv(t, stateDir, environment, acquire, "session", "acquire")
+				if err == nil || !strings.Contains(stderr, "launcher content does not match immutable launch intent") {
+					t.Fatalf("same-inode acquisition error = %v, stderr %q", err, stderr)
+				}
+				stdout, stderr, err := runHelperEnv(t, stateDir, environment, map[string]any{}, "receipt", "show", "--delegation-id", binding["delegation_id"].(string))
+				if err != nil || strings.Contains(stdout, `"session_identity"`) {
+					t.Fatalf("rejected acquisition changed durable identity: %v: %s%s", err, stdout, stderr)
+				}
+			} else {
+				_, stderr, err := runHelperEnv(t, stateDir, environment, map[string]any{
+					"delegation_id": binding["delegation_id"], "event_id": "park-node-descriptor",
+				}, "session", "park")
+				if err == nil || !strings.Contains(stderr, "launcher content does not match immutable launch intent") {
+					t.Fatalf("same-inode parking error = %v, stderr %q", err, stderr)
+				}
+			}
+			if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+				t.Fatalf("substituted node process was killed: %v", err)
+			}
+		})
 	}
 }
 
@@ -1458,9 +1727,12 @@ func TestLaunchStartupFailureRemainsIndeterminateWithoutFalseCompletion(t *testi
 	for _, test := range []struct {
 		name        string
 		environment string
+		expected    string
 	}{
-		{name: "transport exits before Claude startup", environment: "STARTUP_EXIT=1"},
-		{name: "same session drops policy argv", environment: "SUBSTITUTE_ARGV=1"},
+		{name: "transport exits before Claude startup", environment: "STARTUP_EXIT=1", expected: "Claude startup was not verified before timeout"},
+		{name: "same session drops policy argv", environment: "SUBSTITUTE_ARGV=1", expected: "Claude startup was not verified before timeout"},
+		{name: "tmux returns malformed identity after starting transport", environment: "MALFORMED_NEW_WINDOW=1", expected: "tmux launch did not return one exact session/window/pane identity"},
+		{name: "tmux returns failure after starting transport", environment: "FAILED_NEW_WINDOW=1", expected: "run tmux"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newLaunchFixture(t)
@@ -1486,7 +1758,7 @@ func TestLaunchStartupFailureRemainsIndeterminateWithoutFalseCompletion(t *testi
 				"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
 			}, "receipt", "create")
 			_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute")
-			if err == nil || !strings.Contains(stderr, "Claude startup was not verified before timeout") {
+			if err == nil || !strings.Contains(stderr, test.expected) {
 				environment, _ := os.ReadFile(environmentLog)
 				t.Fatalf("startup failure error = %v, stderr %q, environment %q", err, stderr, environment)
 			}
@@ -1494,21 +1766,49 @@ func TestLaunchStartupFailureRemainsIndeterminateWithoutFalseCompletion(t *testi
 				runtimeRoot := filepath.Join(fixture.stateDir, "runtime")
 				runtimeEntries, err := os.ReadDir(runtimeRoot)
 				if err != nil || len(runtimeEntries) != 1 {
-					t.Fatalf("inspect sealed runtime: entries=%v error=%v", runtimeEntries, err)
+					t.Fatalf("inspect isolated runtime: entries=%v error=%v", runtimeEntries, err)
 				}
-				sealedRuntime := filepath.Join(runtimeRoot, runtimeEntries[0].Name())
-				if err := os.Rename(sealedRuntime, sealedRuntime+".replacement"); err == nil {
-					t.Fatal("indeterminate Darwin launch allowed sealed executable directory replacement")
+				for _, path := range []string{
+					fixture.stateDir,
+					runtimeRoot,
+					filepath.Join(runtimeRoot, runtimeEntries[0].Name()),
+				} {
+					info, err := os.Stat(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if info.Mode().Perm() != 0o700 {
+						t.Fatalf("failed Darwin startup left %s mode %o, want 700", filepath.Base(path), info.Mode().Perm())
+					}
 				}
-				if err := os.Rename(runtimeRoot, runtimeRoot+".replacement"); err == nil {
-					t.Fatal("indeterminate Darwin launch allowed sealed runtime-root replacement")
+				if firstPIDBytes, readErr := os.ReadFile(environmentValue(t, fixture.environment, "PANE_PID_FILE")); readErr == nil {
+					if firstPID, parseErr := strconv.Atoi(string(firstPIDBytes)); parseErr == nil {
+						t.Cleanup(func() { _ = syscall.Kill(firstPID, syscall.SIGKILL) })
+					}
+				}
+
+				second := fixture
+				second.request = cloneJSONMap(t, fixture.request)
+				second.request["delegation_id"] = "delegation-after-indeterminate-startup"
+				second.request["event_id"] = "launch-after-indeterminate-startup"
+				second.request["claude_session_id"] = "650e8400-e29b-41d4-a716-446655440001"
+				second.environment = nil
+				for _, value := range fixture.environment {
+					if value != "STARTUP_EXIT=1" && value != "SUBSTITUTE_ARGV=1" && value != "MALFORMED_NEW_WINDOW=1" && value != "FAILED_NEW_WINDOW=1" {
+						second.environment = append(second.environment, value)
+					}
+				}
+				createPlannedLaunchReceipt(t, second)
+				stdout, stderr, err := runHelperEnv(t, second.stateDir, second.environment, second.request, "launch", "execute")
+				if err != nil || !strings.Contains(stdout, `"outcome":"launched"`) {
+					t.Fatalf("distinct delegation after indeterminate Darwin startup = %v: %s%s", err, stdout, stderr)
 				}
 			}
 			receiptBytes, err := os.ReadFile(filepath.Join(fixture.stateDir, "receipts.json"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !bytes.Contains(receiptBytes, []byte(`"kind":"launch_intent"`)) || bytes.Contains(receiptBytes, []byte(`"kind":"launch_completed"`)) {
+			if !bytes.Contains(receiptBytes, []byte(`"event_id":"launch-session-preflight"`)) || bytes.Contains(receiptBytes, []byte(`"operation_event_id":"launch-session-preflight"`)) {
 				t.Fatalf("startup failure did not remain indeterminate: %s", receiptBytes)
 			}
 			_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute")
@@ -2316,6 +2616,41 @@ func startProcessFixture(t *testing.T, name string, arguments ...string) (int, s
 	return process.Process.Pid, binary
 }
 
+func startNodeDescriptorProcessFixture(t *testing.T, arguments ...string) (int, string, string, *os.File) {
+	t.Helper()
+	dir := t.TempDir()
+	source := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(source, []byte("package main\nimport \"time\"\nfunc main() { time.Sleep(time.Minute) }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(dir, "node")
+	build := exec.Command("go", "build", "-o", binary, source)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build node process fixture: %v\n%s", err, output)
+	}
+	launcherPath := filepath.Join(dir, "cli.js")
+	if err := os.WriteFile(launcherPath, []byte("original descriptor launcher"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	launcherFile, err := os.OpenFile(launcherPath, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processArguments := append([]string{"/proc/self/fd/3"}, arguments...)
+	process := exec.Command(binary, processArguments...)
+	process.ExtraFiles = []*os.File{launcherFile}
+	if err := process.Start(); err != nil {
+		_ = launcherFile.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = process.Process.Kill()
+		_ = process.Wait()
+		_ = launcherFile.Close()
+	})
+	return process.Process.Pid, binary, launcherPath, launcherFile
+}
+
 func recordTestLaunch(t *testing.T, stateDir, delegationID string, identity map[string]any, expectedArgvDigest, expectedLauncherIdentity, expectedExecutableObjectIdentity string) {
 	t.Helper()
 	path := filepath.Join(stateDir, "receipts.json")
@@ -2562,13 +2897,15 @@ case "$1" in
     if [ "$replaced" = 1 ]; then printf succeeded >"$REPLACEMENT_SUCCEEDED"; fi
     /bin/sh -c "$start_command" </dev/null >"$PANE_OUTPUT" 2>&1 &
     printf '%s' "$!" > "$PANE_PID_FILE"
+    if [ -n "${MALFORMED_NEW_WINDOW:-}" ]; then printf 'malformed\n'; exit 0; fi
+    if [ -n "${FAILED_NEW_WINDOW:-}" ]; then exit 2; fi
     printf 'Claude\tthinker\t@20\t%%20\n'
     ;;
   display-message)
     test -s "$PANE_PID_FILE"
     pane_pid=$(cat "$PANE_PID_FILE")
     kill -0 "$pane_pid"
-    start_command=$(sed -n '1s/^.* -c [^ ]* //p' "$TMUX_LOG")
+    start_command=$(tail -n 1 "$TMUX_LOG" | sed -n 's/^.* -c [^ ]* //p')
     printf 'Claude\tthinker\t@20\t%%20\t%s\t%s\tclaude\t%s\n' "$pane_pid" "$WORKDIR" "$start_command"
     ;;
   kill-pane) pane_pid=$(cat "$PANE_PID_FILE"); kill "$pane_pid"; printf '%s\n' "$*" >> "$TMUX_LOG" ;;

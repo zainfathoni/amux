@@ -943,6 +943,8 @@ def run_command(
     options: dict[str, Any] = {}
     temporary_executable: pathlib.Path | None = None
     temporary_directory: pathlib.Path | None = None
+    temporary_executable_descriptor: int | None = None
+    temporary_directory_descriptor: int | None = None
     if environment is not None:
         options["env"] = environment
     if executable_fd is not None:
@@ -950,7 +952,16 @@ def run_command(
             temporary_directory = pathlib.Path(tempfile.mkdtemp(prefix="amux-claude-probe."))
             os.chmod(temporary_directory, 0o700)
             temporary_executable = materialize_executable(executable_fd, temporary_directory)
-            os.chmod(temporary_directory, 0o500)
+            temporary_executable_descriptor, _, _, _ = open_exact_verified_executable(
+                temporary_executable
+            )
+            temporary_directory_descriptor = os.open(
+                temporary_directory,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+            seal_darwin_launch_container(
+                temporary_directory_descriptor, temporary_executable_descriptor
+            )
             options["executable"] = str(temporary_executable)
         else:
             options["executable"] = descriptor_path(executable_fd)
@@ -962,9 +973,15 @@ def run_command(
     except (OSError, subprocess.TimeoutExpired) as error:
         raise HelperError(f"run {arguments[0]}: {error}") from error
     finally:
+        if temporary_directory_descriptor is not None and temporary_executable_descriptor is not None:
+            try:
+                restore_darwin_launch_container(
+                    temporary_directory_descriptor, temporary_executable_descriptor
+                )
+            finally:
+                os.close(temporary_executable_descriptor)
+                os.close(temporary_directory_descriptor)
         if temporary_executable is not None:
-            if temporary_directory is not None:
-                os.chmod(temporary_directory, 0o700)
             temporary_executable.unlink(missing_ok=True)
         if temporary_directory is not None:
             temporary_directory.rmdir()
@@ -1100,6 +1117,13 @@ def executable_file_identity(path: str | pathlib.Path) -> str:
     return f"file:{info.st_dev}:{info.st_ino}"
 
 
+def executable_content_identity(object_identity: str) -> str:
+    fields = object_identity.split(":")
+    if len(fields) != 5 or fields[0] != "object":
+        raise HelperError("Claude executable object identity is invalid")
+    return f"content:{fields[3]}:{fields[4]}"
+
+
 def descriptor_path(descriptor: int) -> str:
     if platform.system() == "Linux":
         return f"/proc/self/fd/{descriptor}"
@@ -1108,10 +1132,17 @@ def descriptor_path(descriptor: int) -> str:
     raise HelperError("descriptor execution is unavailable on this platform")
 
 
-def materialize_executable(descriptor: int, directory: pathlib.Path) -> pathlib.Path:
-    output_descriptor, output_path = tempfile.mkstemp(prefix="launcher.", dir=directory)
+def materialize_executable(
+    descriptor: int, directory: pathlib.Path, destination: pathlib.Path | None = None
+) -> pathlib.Path:
+    if destination is None:
+        output_descriptor, output_path = tempfile.mkstemp(prefix="launcher.", dir=directory)
+    else:
+        output_path = str(destination)
+        output_descriptor = os.open(
+            output_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600
+        )
     try:
-        os.fchmod(output_descriptor, 0o500)
         os.lseek(descriptor, 0, os.SEEK_SET)
         while True:
             chunk = os.read(descriptor, 1024 * 1024)
@@ -1124,16 +1155,14 @@ def materialize_executable(descriptor: int, directory: pathlib.Path) -> pathlib.
                     raise HelperError("write verified Claude executable copy failed")
                 remaining = remaining[written:]
         os.fsync(output_descriptor)
+        os.fchmod(output_descriptor, 0o500)
     finally:
         os.close(output_descriptor)
         os.lseek(descriptor, 0, os.SEEK_SET)
     return pathlib.Path(output_path)
 
 
-def open_verified_executable(path: str | pathlib.Path) -> tuple[int, str, str, str]:
-    resolved = str(pathlib.Path(path).resolve(strict=True))
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(resolved, flags)
+def verified_executable_descriptor(descriptor: int, display_path: str) -> tuple[int, str, str, str]:
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o111 == 0:
@@ -1160,10 +1189,65 @@ def open_verified_executable(path: str | pathlib.Path) -> tuple[int, str, str, s
         os.set_inheritable(descriptor, True)
         practical_identity = f"file:{info.st_dev}:{info.st_ino}"
         object_identity = f"object:{info.st_dev}:{info.st_ino}:{info.st_size}:{digest.hexdigest()}"
-        return descriptor, resolved, practical_identity, object_identity
+        return descriptor, display_path, practical_identity, object_identity
     except BaseException:
         os.close(descriptor)
         raise
+
+
+def open_verified_executable(path: str | pathlib.Path) -> tuple[int, str, str, str]:
+    resolved = str(pathlib.Path(path).resolve(strict=True))
+    descriptor = os.open(resolved, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    return verified_executable_descriptor(descriptor, resolved)
+
+
+def open_exact_verified_executable(
+    path: str | pathlib.Path, *, follow_kernel_link: bool = False
+) -> tuple[int, str, str, str]:
+    exact = os.fspath(path)
+    flags = os.O_RDONLY
+    if not follow_kernel_link:
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(exact, flags)
+    return verified_executable_descriptor(descriptor, exact)
+
+
+def darwin_fchflags(descriptor: int, flags: int) -> None:
+    libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+    if libc.fchflags(descriptor, flags) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def seal_darwin_launch_container(container_descriptor: int, executable_descriptor: int) -> None:
+    immutable = getattr(stat, "UF_IMMUTABLE", 0x00000002)
+    os.fchmod(container_descriptor, 0o500)
+    try:
+        darwin_fchflags(executable_descriptor, immutable)
+        darwin_fchflags(container_descriptor, immutable)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            darwin_fchflags(container_descriptor, 0)
+        with contextlib.suppress(OSError):
+            darwin_fchflags(executable_descriptor, 0)
+        with contextlib.suppress(OSError):
+            os.fchmod(container_descriptor, 0o700)
+        raise
+
+
+def restore_darwin_launch_container(container_descriptor: int, executable_descriptor: int) -> None:
+    errors: list[OSError] = []
+    for descriptor in (container_descriptor, executable_descriptor):
+        try:
+            darwin_fchflags(descriptor, 0)
+        except OSError as error:
+            errors.append(error)
+    try:
+        os.fchmod(container_descriptor, 0o700)
+    except OSError as error:
+        errors.append(error)
+    if errors:
+        raise errors[0]
 
 
 def directory_identity(info: os.stat_result) -> str:
@@ -1352,13 +1436,19 @@ def inspect_claude_identity(
         raise HelperError("Claude process argv does not match immutable launch intent")
     if executable_form == "direct":
         try:
-            live_descriptor, _, _, live_object_identity = open_verified_executable(
-                process_executable_path(pane_pid)
+            live_descriptor, _, _, live_object_identity = open_exact_verified_executable(
+                process_executable_path(pane_pid), follow_kernel_link=platform.system() == "Linux"
             )
         except OSError as error:
             raise HelperError("Claude process executable content is unavailable") from error
         os.close(live_descriptor)
-        if live_object_identity.rsplit(":", 1)[-1] != expected_executable_object_identity.rsplit(":", 1)[-1]:
+        if (
+            platform.system() == "Linux" and live_object_identity != expected_executable_object_identity
+        ) or (
+            platform.system() == "Darwin"
+            and executable_content_identity(live_object_identity)
+            != executable_content_identity(expected_executable_object_identity)
+        ):
             raise HelperError("Claude process executable content does not match immutable launch intent")
         launcher_identity = expected_launcher_identity
     else:
@@ -1368,9 +1458,14 @@ def inspect_claude_identity(
                 launcher_path: str | pathlib.Path = pathlib.Path("/proc") / str(pane_pid) / "fd" / script.name
             else:
                 launcher_path = process_args[1]
-            launcher_identity = executable_file_identity(launcher_path)
+            live_descriptor, _, launcher_identity, live_object_identity = open_exact_verified_executable(
+                launcher_path, follow_kernel_link=platform.system() == "Linux"
+            )
+            os.close(live_descriptor)
         except (OSError, RuntimeError) as error:
             raise HelperError("Claude launcher identity is unavailable") from error
+        if live_object_identity != expected_executable_object_identity:
+            raise HelperError("Claude launcher content does not match immutable launch intent")
     if launcher_identity != expected_launcher_identity:
         raise HelperError("Claude process launcher does not match immutable launch intent")
     if expected_process_executable_identity is not None and executable_identity != expected_process_executable_identity:
@@ -1836,6 +1931,8 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         "packet_path": request["packet_file"],
         "packet_digest": hashlib.sha256(packet).hexdigest(),
     }
+    if system == "Darwin":
+        transport["darwin_executable_path"] = str(transport_path.with_name("verified-claude"))
     transport_bytes = encode_private_json(transport)
     if len(transport_bytes) > MAX_LAUNCH_TRANSPORT_BYTES:
         raise HelperError("launch packet cannot be encoded within the deterministic transport limit")
@@ -1954,7 +2051,7 @@ def execute_launch_transport(
         {
             "argv", "environment", "expected_argv_digest", "expected_launcher_identity",
             "expected_executable_object_identity", "remove_environment", "workdir", "workdir_identity",
-            "packet_identity", "packet_path", "packet_digest",
+            "packet_identity", "packet_path", "packet_digest", "darwin_executable_path",
         },
         "private launch transport",
     )
@@ -2018,22 +2115,50 @@ def execute_launch_transport(
     except OSError as error:
         os.close(executable_descriptor)
         raise HelperError("private launch transport workdir is unavailable") from error
-    sealed_directories: list[pathlib.Path] = []
+    sealed_executable_descriptor: int | None = None
     try:
         if platform.system() == "Darwin":
-            sealed_executable = materialize_executable(executable_descriptor, path.parent)
-            sealed_directories = [path.parent, path.parent.parent, store.state_dir]
-            for directory in sealed_directories:
-                os.chmod(directory, 0o500)
+            sealed_executable_value = transport.get("darwin_executable_path")
+            sealed_executable = path.with_name("verified-claude")
+            if sealed_executable_value != str(sealed_executable):
+                raise HelperError("private launch transport Darwin executable route is invalid")
+            sealed_executable_descriptor, _, _, sealed_object_identity = open_exact_verified_executable(
+                sealed_executable
+            )
+            if (
+                executable_content_identity(sealed_object_identity)
+                != executable_content_identity(executable_object_identity)
+            ):
+                raise HelperError("verified Claude executable copy changed before execution")
+            immutable = getattr(stat, "UF_IMMUTABLE", 0x00000002)
+            container_descriptor = os.open(
+                path.parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                if (
+                    os.fstat(sealed_executable_descriptor).st_flags & immutable == 0
+                    or os.fstat(container_descriptor).st_flags & immutable == 0
+                ):
+                    raise HelperError("verified Claude executable container is not immutable")
+            finally:
+                os.close(container_descriptor)
+            os.set_inheritable(sealed_executable_descriptor, False)
+            os.close(executable_descriptor)
+            executable_descriptor = -1
             execution_path = str(sealed_executable)
         else:
+            if transport.get("darwin_executable_path") is not None:
+                raise HelperError("private launch transport Darwin executable route is invalid")
             execution_path = descriptor_path(executable_descriptor)
         os.execve(execution_path, argv, environment)
     except OSError as error:
-        for directory in reversed(sealed_directories):
-            os.chmod(directory, 0o700)
-        os.close(executable_descriptor)
         raise HelperError("private launch transport could not execute Claude") from error
+    finally:
+        if sealed_executable_descriptor is not None:
+            os.close(sealed_executable_descriptor)
+        if executable_descriptor >= 0:
+            os.close(executable_descriptor)
 
 
 def plan_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
@@ -2170,6 +2295,8 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
             platform.system(),
             components["tmux_environment_digest"],
         )
+        if platform.system() == "Darwin" and os.path.lexists(components["transport_path"].parent):
+            raise HelperError("private delegation runtime already exists before launch intent")
         intent["at"] = utc_now()
         receipt["events"].append(intent)
         receipt["updated_at"] = intent["at"]
@@ -2181,25 +2308,63 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
         write_private_json(components["mcp_path"], components["mcp_config"])
         write_private_json(components["settings_path"], components["settings"])
         write_private_bytes(components["transport_path"], components["transport_bytes"])
-        output = run_command(
-            [
-                "tmux", "new-window", "-d", "-P", "-F",
-                "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}",
-                "-t", "=" + request_data["tmux_session"] + ":",
-                "-n", request_data["tmux_window"], "-c", components["workdir"], components["start_command"],
-            ]
-        )
-        fields = output.split("\t")
-        if len(fields) != 4 or fields[0] != request_data["tmux_session"] or fields[1] != request_data["tmux_window"] or not fields[2].startswith("@") or not fields[3].startswith("%"):
-            raise HelperError("tmux launch did not return one exact session/window/pane identity")
-        tmux_identity = {"session": fields[0], "window": fields[1], "window_id": fields[2], "pane_id": fields[3]}
-        identity = wait_for_claude_startup(
-            fields[3],
-            request_data["claude_session_id"],
-            components["expected_argv_digest"],
-            components["expected_launcher_identity"],
-            components["expected_executable_object_identity"],
-        )
+        darwin_container_descriptor: int | None = None
+        darwin_executable_descriptor: int | None = None
+        if platform.system() == "Darwin":
+            darwin_executable = pathlib.Path(components["transport"]["darwin_executable_path"])
+            materialize_executable(
+                held_executable_descriptor, darwin_executable.parent, darwin_executable
+            )
+            darwin_executable_descriptor, _, _, copied_object_identity = open_exact_verified_executable(
+                darwin_executable
+            )
+            if (
+                executable_content_identity(copied_object_identity)
+                != executable_content_identity(components["expected_executable_object_identity"])
+            ):
+                os.close(darwin_executable_descriptor)
+                raise HelperError("verified Claude executable copy changed before launch")
+            darwin_container_descriptor = os.open(
+                darwin_executable.parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                seal_darwin_launch_container(
+                    darwin_container_descriptor, darwin_executable_descriptor
+                )
+            except BaseException:
+                os.close(darwin_executable_descriptor)
+                os.close(darwin_container_descriptor)
+                raise
+        try:
+            output = run_command(
+                [
+                    "tmux", "new-window", "-d", "-P", "-F",
+                    "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}",
+                    "-t", "=" + request_data["tmux_session"] + ":",
+                    "-n", request_data["tmux_window"], "-c", components["workdir"], components["start_command"],
+                ]
+            )
+            fields = output.split("\t")
+            if len(fields) != 4 or fields[0] != request_data["tmux_session"] or fields[1] != request_data["tmux_window"] or not fields[2].startswith("@") or not fields[3].startswith("%"):
+                raise HelperError("tmux launch did not return one exact session/window/pane identity")
+            tmux_identity = {"session": fields[0], "window": fields[1], "window_id": fields[2], "pane_id": fields[3]}
+            identity = wait_for_claude_startup(
+                fields[3],
+                request_data["claude_session_id"],
+                components["expected_argv_digest"],
+                components["expected_launcher_identity"],
+                components["expected_executable_object_identity"],
+            )
+        finally:
+            if darwin_container_descriptor is not None and darwin_executable_descriptor is not None:
+                try:
+                    restore_darwin_launch_container(
+                        darwin_container_descriptor, darwin_executable_descriptor
+                    )
+                finally:
+                    os.close(darwin_executable_descriptor)
+                    os.close(darwin_container_descriptor)
         for key, value in tmux_identity.items():
             if identity[key] != value:
                 raise HelperError("verified Claude startup does not match created tmux identity")
@@ -2207,11 +2372,6 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
             raise HelperError("verified Claude startup workdir does not match launch plan")
         if identity["launch_command_digest"] != components["launch_command_digest"]:
             raise HelperError("verified Claude startup command does not match launch plan")
-        if platform.system() == "Darwin":
-            for directory in reversed(
-                [components["transport_path"].parent, components["transport_path"].parent.parent, store.state_dir]
-            ):
-                os.chmod(directory, 0o700)
         result = {
             "event_id": result_id,
             "kind": "launch_completed",
