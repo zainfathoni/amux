@@ -14,6 +14,63 @@ import (
 	"testing"
 )
 
+func TestLinuxProcessIdentityRejectsAmbiguousSnapshots(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import importlib.util, pathlib, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+fields = [b"S"] + [b"0"] * 18 + [b"424242"]
+assert module.linux_process_start_time(b"123 (claude ) name) " + b" ".join(fields)) == "424242"
+try:
+    module.linux_process_start_time(b"123 malformed")
+except module.HelperError:
+    pass
+else:
+    raise AssertionError("malformed stat accepted")
+
+def rejected(starts, executables, commands):
+    start_values = iter(starts)
+    executable_values = iter(executables)
+    command_values = iter(commands)
+    module.read_linux_process_start = lambda proc: next(start_values)
+    module.read_linux_process_executable = lambda proc: next(executable_values)
+    module.read_linux_process_command = lambda proc: next(command_values)
+    try:
+        module.read_linux_process_snapshot(123)
+    except module.HelperError:
+        return
+    raise AssertionError("ambiguous Linux process snapshot accepted")
+
+same_executable = ("/usr/bin/claude", 8, 42)
+rejected(["100", "101"], [same_executable, same_executable], [b"claude\0", b"claude\0"])
+rejected(["100", "100"], [same_executable, ("/usr/bin/claude", 8, 43)], [b"claude\0", b"claude\0"])
+rejected(["100", "100"], [same_executable, same_executable], [b"claude\0", b"other\0"])
+rejected(["100", "100"], [same_executable, same_executable], [b"", b""])
+rejected(["100", "100"], [same_executable, same_executable], [b"claude", b"claude"])
+
+package = "/tmp/node_modules/@anthropic-ai/claude-code/cli.js"
+assert module.is_claude_process("Darwin", "claude", ["/usr/bin/claude", "--session-id", "session"], 1)
+assert not module.is_claude_process("Darwin", "node", ["/usr/bin/node", package, "--session-id", "session"], 2)
+assert module.is_claude_process("Linux", "node", ["/usr/bin/node", package, "--session-id", "session"], 2)
+assert module.is_claude_process("Linux", "bun", ["/usr/bin/bun", package, "--session-id", "session"], 2)
+assert not module.is_claude_process("Linux", "node", ["/usr/bin/node", "/tmp/unrelated/cli.js", package, "--session-id", "session"], 3)
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil {
+		t.Fatalf("Linux stat parser fixture: %v\n%s", err, output)
+	}
+	if string(output) != "ok\n" {
+		t.Fatalf("Linux stat parser output = %q", output)
+	}
+}
+
 func TestReceiptBindingIsImmutableWhileRoutingCanChange(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
@@ -428,14 +485,14 @@ func TestParkingReverifiesExactClaudeIncarnationAfterAcknowledgement(t *testing.
 	logPath := filepath.Join(t.TempDir(), "tmux.log")
 	identityUnavailable := filepath.Join(t.TempDir(), "identity-unavailable")
 	sessionID := "550e8400-e29b-41d4-a716-446655440000"
-	panePID := startProcessFixture(t, "claude", "--session-id", sessionID)
+	panePID := startProcessFixture(t, "claude", "--session-id", sessionID, "argument with spaces", "literal'quote")
 	startCommand := "exec claude --session-id " + sessionID
 	writeExecutable(t, filepath.Join(binDir, "tmux"), `#!/bin/sh
 set -eu
 case "$1" in
   display-message)
     test ! -e "$IDENTITY_UNAVAILABLE"
-    printf 'Claude\tthinker\t@10\t%s\t%s\t%s\t2.1.212\t"%s"\n' "$CLAUDE_PANE_ID" "$PANE_PID" "$TARGET_WORKDIR" "$START_COMMAND"
+    printf 'Claude\tthinker\t%s\t%s\t%s\t%s\t2.1.212\t"%s"\n' "$CLAUDE_WINDOW_ID" "$CLAUDE_PANE_ID" "$PANE_PID" "$TARGET_WORKDIR" "$START_COMMAND"
     ;;
   list-panes) exit 0 ;;
   kill-pane) printf '%s\n' "$*" >> "$TMUX_LOG" ;;
@@ -459,6 +516,7 @@ esac
 		"CLAUDE_SESSION_ID="+sessionID,
 		"IDENTITY_UNAVAILABLE="+identityUnavailable,
 		fmt.Sprintf("PANE_PID=%d", panePID),
+		"CLAUDE_WINDOW_ID=@10",
 		"CLAUDE_PANE_ID=%10",
 	)
 	binding := testBinding("delegation-park")
@@ -483,6 +541,28 @@ esac
 		"delegation_id": binding["delegation_id"], "event_id": "acquire-1", "pane_id": "%10", "claude_session_id": sessionID,
 	}
 	assertHelperOutcomeEnv(t, stateDir, environment, "recorded", acquire, "session", "acquire")
+	if runtime.GOOS == "linux" {
+		stdout, stderr, err := runHelperEnv(t, stateDir, environment, map[string]any{}, "receipt", "show", "--delegation-id", binding["delegation_id"].(string))
+		if err != nil {
+			t.Fatalf("show Linux acquisition: %v: %s", err, stderr)
+		}
+		var acquired map[string]any
+		if err := json.Unmarshal([]byte(stdout), &acquired); err != nil {
+			t.Fatal(err)
+		}
+		identity := acquired["session_identity"].(map[string]any)
+		if !strings.HasPrefix(identity["process_identity"].(string), "linux:") {
+			t.Fatalf("Linux process identity = %q, want kernel start/executable identity", identity["process_identity"])
+		}
+		cmdline, err := os.ReadFile(filepath.Join("/proc", fmt.Sprint(panePID), "cmdline"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantDigest := fmt.Sprintf("%x", sha256.Sum256(cmdline[:len(cmdline)-1]))
+		if identity["process_command_digest"] != wantDigest {
+			t.Fatalf("Linux argv digest = %q, want NUL-delimited /proc digest %q", identity["process_command_digest"], wantDigest)
+		}
+	}
 	if err := os.WriteFile(identityUnavailable, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -511,6 +591,44 @@ esac
 	}, "report", "acknowledge")
 	acknowledgedStore, err := os.ReadFile(filepath.Join(stateDir, "receipts.json"))
 	if err != nil {
+		t.Fatal(err)
+	}
+	recycledEnvironment := replaceEnvironment(environment, "CLAUDE_WINDOW_ID", "@99")
+	_, stderr, err = runHelperEnv(t, stateDir, recycledEnvironment, map[string]any{
+		"delegation_id": binding["delegation_id"], "event_id": "park-recycled-pane",
+	}, "session", "park")
+	if err == nil || !strings.Contains(stderr, "identity changed") {
+		t.Fatalf("recycled pane parking error = %v, stderr %q", err, stderr)
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("recycled pane was killed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "receipts.json"), acknowledgedStore, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var changedStart map[string]any
+	if err := json.Unmarshal(acknowledgedStore, &changedStart); err != nil {
+		t.Fatal(err)
+	}
+	changedReceipt := changedStart["receipts"].([]any)[0].(map[string]any)
+	changedReceipt["session_identity"].(map[string]any)["process_identity"] = "linux:start-time-reused"
+	changedStartBytes, err := json.Marshal(changedStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "receipts.json"), changedStartBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{
+		"delegation_id": binding["delegation_id"], "event_id": "park-reused-pid",
+	}, "session", "park")
+	if err == nil || !strings.Contains(stderr, "identity changed") {
+		t.Fatalf("reused PID parking error = %v, stderr %q", err, stderr)
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("changed process incarnation was killed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "receipts.json"), acknowledgedStore, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	assertHelperOutcomeEnv(t, stateDir, environment, "recorded", map[string]any{
@@ -548,8 +666,8 @@ esac
 }
 
 func TestLaunchPlanRejectsMissingTargetSessionWithoutMutation(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("experimental Claude launch is macOS-first")
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("experimental Claude launch requires an exact supported process identity")
 	}
 	fixture := newLaunchFixture(t)
 	_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "plan")
@@ -570,9 +688,30 @@ func TestLaunchPlanRejectsMissingTargetSessionWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestLinuxLaunchDoesNotClaimMutatingDelegation(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux-specific capability boundary")
+	}
+	fixture := newLaunchFixture(t)
+	request := cloneJSONMap(t, fixture.request)
+	request["workflow"] = "mutating"
+	delete(request, "expected_launch_policy_digest")
+	request["baseline_branch"] = "delegate"
+	request["writer_owner"] = "claude"
+	request["integration_owner"] = "amp"
+	request["coordinator_write_frozen"] = true
+	request["shared_writable"] = false
+	request["handoff"] = "one_clean_local_commit"
+	request["capacity_request"] = map[string]any{}
+	_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, request, "launch", "plan")
+	if err == nil || !strings.Contains(stderr, "mutating Claude launch remains available only on Darwin") {
+		t.Fatalf("Linux mutating launch error = %v, stderr %q", err, stderr)
+	}
+}
+
 func TestLaunchExecutionRejectsDisappearedTargetSessionBeforeIntent(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("experimental Claude launch is macOS-first")
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("experimental Claude launch requires an exact supported process identity")
 	}
 	fixture := newLaunchFixture(t)
 	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
@@ -861,8 +1000,8 @@ esac
 }
 
 func TestLaunchPlanAndExecutionKeepPacketOutOfReceiptAndDenyMutationTools(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("experimental Claude launch is macOS-first")
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("experimental Claude launch requires an exact supported process identity")
 	}
 	stateDir := t.TempDir()
 	binDir := t.TempDir()
@@ -1215,7 +1354,7 @@ func testMessage(binding map[string]any, messageID, kind string, payload map[str
 
 func startProcessFixture(t *testing.T, name string, arguments ...string) int {
 	t.Helper()
-	if runtime.GOOS != "darwin" {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		return 5252
 	}
 	dir := t.TempDir()

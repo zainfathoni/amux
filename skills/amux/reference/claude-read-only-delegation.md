@@ -1,12 +1,14 @@
 # Delegate read-only analysis to Claude experimentally
 
-Load [`claude-delegation-contract.md`](claude-delegation-contract.md) before taking any action. This macOS-first workflow is explicit-only and unstable. It orchestrates a local helper beside the skill; do not invent `amux claude` commands, Amp identities, groups, autonomous selection, or stable API promises.
+Load [`claude-delegation-contract.md`](claude-delegation-contract.md) before taking any action. This capability-gated Darwin/Linux workflow is explicit-only and unstable. It orchestrates a local helper beside the skill; do not invent `amux claude` commands, Amp identities, groups, autonomous selection, mutating Linux support, or stable API promises.
 
 Set `HELPER` to `experimental/claude-delegation/claude_delegation.py` within the installed skill and optionally pass `--state-dir <private-directory>` before the helper subcommands below. Each mutating request is one JSON object on stdin. Generate event IDs and the 32-byte nonce once, persist them outside the repository, and reuse the same values only for exact retries.
 
 ## 1. Preflight
 
-Run `python3 "$HELPER" diagnose` and show the bounded result. Require Darwin, the documented Claude flags, tmux, and an explicitly acknowledged capacity observation. `untested` remains untested; do not call it supported. Obtain the immutable read-only launch-policy digest before authoring the packet:
+Run `python3 "$HELPER" diagnose` and show the bounded result. Require a supported Darwin or Linux exact-process-identity capability, the documented Claude flags, and tmux. On Linux, support requires readable `/proc/<pid>/stat`, NUL-delimited `cmdline`, and `exe`; a missing, denied, unstable, or ambiguous source blocks launch. `untested` remains untested; do not call it supported.
+
+Capacity is independent. When trustworthy provider-reported capacity is unavailable, autonomous delegation is unavailable. A user-requested read-only pilot may proceed only when the user visibly acknowledges the unavailable capacity in the authorizing conversation; restate that acknowledgement and the unavailable diagnostic before planning. This does not create quota evidence, bypass a configured reserve floor, or authorize mutating delegation. Otherwise stop. Obtain the immutable read-only launch-policy digest before authoring the packet:
 
 ```sh
 printf '%s\n' '{"workflow":"read_only"}' | python3 "$HELPER" launch policy-digest

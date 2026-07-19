@@ -942,16 +942,61 @@ class DarwinBSDInfo(ctypes.Structure):
     ]
 
 
+def linux_process_start_time(raw: bytes) -> str:
+    open_paren = raw.find(b"(")
+    close = raw.rfind(b")")
+    if open_paren <= 0 or close <= open_paren or not raw[:open_paren].strip().isdigit():
+        raise HelperError("read exact Linux process identity: invalid stat")
+    fields = raw[close + 1 :].split()
+    if len(fields) < 20 or not fields[19].isdigit() or int(fields[19]) <= 0:
+        raise HelperError("read exact Linux process identity: invalid start time")
+    return os.fsdecode(fields[19])
+
+
+def read_linux_process_start(proc: pathlib.Path) -> str:
+    return linux_process_start_time((proc / "stat").read_bytes())
+
+
+def read_linux_process_executable(proc: pathlib.Path) -> tuple[str, int, int]:
+    target = os.readlink(proc / "exe")
+    info = (proc / "exe").stat()
+    return target, info.st_dev, info.st_ino
+
+
+def read_linux_process_command(proc: pathlib.Path) -> bytes:
+    return (proc / "cmdline").read_bytes()
+
+
+def read_linux_process_snapshot(pid: int) -> tuple[str, str, bytes, str]:
+    proc = pathlib.Path("/proc") / str(pid)
+    try:
+        start_before = read_linux_process_start(proc)
+        executable_before = read_linux_process_executable(proc)
+        command_before = read_linux_process_command(proc)
+        executable_after = read_linux_process_executable(proc)
+        command_after = read_linux_process_command(proc)
+        start_after = read_linux_process_start(proc)
+    except (OSError, ValueError) as error:
+        raise HelperError(f"read exact Linux process identity: {error}") from error
+    if start_before != start_after or executable_before != executable_after or command_before != command_after:
+        raise HelperError("read exact Linux process identity: process changed during inspection")
+    if not command_before or not command_before.endswith(b"\0"):
+        raise HelperError("read exact Linux process arguments: cmdline is empty or truncated")
+    executable_target, executable_device, executable_inode = executable_before
+    identity = f"linux:{start_before}:{executable_device}:{executable_inode}:{hashlib.sha256(os.fsencode(executable_target)).hexdigest()}"
+    return pathlib.Path(executable_target).name, identity, command_before, executable_target
+
+
 def exact_process_identity(pid: int) -> tuple[str, str, list[str], str]:
-    if platform.system() != "Darwin":
-        name = pathlib.Path(run_command(["ps", "-p", str(pid), "-o", "comm="]).strip()).name
-        command = run_command(["ps", "-p", str(pid), "-o", "command="]).strip()
-        try:
-            arguments = shlex.split(command)
-        except ValueError as error:
-            raise HelperError("process command could not be parsed") from error
-        started = run_command(["ps", "-p", str(pid), "-o", "lstart="]).strip()
-        return name, started, arguments, hashlib.sha256(command.encode()).hexdigest()
+    system = platform.system()
+    if system == "Linux":
+        name, identity, command, _ = read_linux_process_snapshot(pid)
+        arguments = [os.fsdecode(argument) for argument in command[:-1].split(b"\0")]
+        if not arguments or not arguments[0]:
+            raise HelperError("read exact Linux process arguments: argv[0] is empty")
+        return name, identity, arguments, hashlib.sha256(command[:-1]).hexdigest()
+    if system != "Darwin":
+        raise HelperError(f"exact process identity is unavailable on {system}")
 
     libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
     mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2, pid
@@ -1060,6 +1105,15 @@ def validate_amp_target(value: Any) -> dict[str, Any]:
     return copy.deepcopy(value)
 
 
+def is_claude_process(system: str, process_name: str, process_args: list[str], session_position: int) -> bool:
+    if pathlib.Path(process_args[0]).name == "claude":
+        return True
+    if system != "Linux" or process_name not in {"node", "bun"} or session_position <= 1:
+        return False
+    script = pathlib.PurePath(process_args[1])
+    return script.name == "cli.js" and "@anthropic-ai" in script.parts and "claude-code" in script.parts
+
+
 def inspect_claude_identity(pane_id: str, claude_session_id: str) -> dict[str, Any]:
     if not pane_id.startswith("%") or len(pane_id) < 2:
         raise HelperError("Claude identity requires an exact tmux pane ID")
@@ -1092,10 +1146,10 @@ def inspect_claude_identity(pane_id: str, claude_session_id: str) -> dict[str, A
     process_name, process_identity, process_args, process_command_digest = exact_process_identity(pane_pid)
     session_positions = [index for index, argument in enumerate(process_args) if argument == "--session-id"]
     if (
-        pathlib.Path(process_args[0]).name != "claude"
-        or len(session_positions) != 1
+        len(session_positions) != 1
         or session_positions[0] + 1 >= len(process_args)
         or process_args[session_positions[0] + 1] != claude_session_id
+        or not is_claude_process(platform.system(), process_name, process_args, session_positions[0])
     ):
         raise HelperError("pane process is not the expected Claude session")
     return {
@@ -1274,8 +1328,13 @@ def expected_launch_policy(request: dict[str, Any]) -> dict[str, Any]:
 def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]:
     request = validate_launch_request(request_value)
     policy = expected_launch_policy(request)
-    if platform.system() != "Darwin":
-        raise HelperError("experimental Claude launch is available only on Darwin")
+    system = platform.system()
+    if system not in {"Darwin", "Linux"}:
+        raise HelperError(f"experimental Claude launch is unavailable on {system}")
+    if request["workflow"] == "mutating" and system != "Darwin":
+        raise HelperError("experimental mutating Claude launch remains available only on Darwin")
+    if system == "Linux":
+        exact_process_identity(os.getpid())
     run_command(["tmux", "-V"])
     require_tmux_session(request["tmux_session"])
     workflow = request["workflow"]
@@ -1534,7 +1593,22 @@ def diagnostics() -> dict[str, Any]:
         "managed_policy_runtime": {"status": "untested", "reason": "managed settings and hooks have higher precedence than session settings"},
         "session_hook": {"status": "unavailable", "reason": "helper uses explicit session ID and process identity; no hook contract is assumed"},
     }
-    capabilities["platform"] = {"status": "supported" if platform.system() == "Darwin" else "unavailable", "value": platform.system()}
+    system = platform.system()
+    if system == "Darwin":
+        capabilities["platform"] = {"status": "supported", "value": system, "identity_source": "Darwin kernel process APIs"}
+    elif system == "Linux":
+        try:
+            exact_process_identity(os.getpid())
+            capabilities["platform"] = {"status": "supported", "value": system, "identity_source": "/proc stat, cmdline, and exe"}
+        except HelperError as error:
+            capabilities["platform"] = {"status": "unavailable", "value": system, "reason": str(error)[:512]}
+    else:
+        capabilities["platform"] = {"status": "unavailable", "value": system, "reason": "no exact process identity implementation"}
+    capabilities["mutating_delegation"] = {"status": "supported" if system == "Darwin" else "unavailable"}
+    if system == "Linux":
+        capabilities["mutating_delegation"]["reason"] = "Linux support is limited to read-only delegation"
+    elif system != "Darwin":
+        capabilities["mutating_delegation"]["reason"] = "not proven on this platform"
     try:
         version = run_command(["claude", "--version"])
         help_text = run_command(["claude", "--help"])
