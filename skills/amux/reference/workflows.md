@@ -6,6 +6,15 @@ These are skill workflows. Only commands beginning with literal `amux` are CLI c
 
 Preflight, then create one interactive worker. Prefer a message file for structured assignments.
 
+For an automatically selected mode, resolve the loaded skill directory and run its promoted gate before any dry-run or spawn command:
+
+```sh
+POLICY=<loaded-amux-skill-directory>/scripts/resolve-amp-invocation-policy
+printf '%s\n' '{"version":1,"action":"amux_spawn","mode":"medium","automatic":true}' | "$POLICY"
+```
+
+Exit `2` stops before `amux spawn`; never rewrite the rejected mode. This automatic preflight does not manufacture approval for a different mode. When the user explicitly requested another built-in or plugin mode, preserve that exact request under the separate instruction rule instead of claiming `automatic:true`.
+
 ```sh
 amux --dry-run spawn --workspace <workspace> --window <semantic-slug> --workdir <path> --mode medium --message-file <prompt> --idempotency-key <stable-key>
 amux spawn --workspace <workspace> --window <semantic-slug> --workdir <path> --mode medium --message-file <prompt> --idempotency-key <stable-key>
@@ -73,7 +82,7 @@ This is the proven coordinator protocol layered on the implemented group, spawn,
 3. Create every branch/worktree from the freshly fetched `origin/main`. Use an issue-bearing branch/worktree but an issue-unprefixed semantic window. Pass explicit `--mode medium` unless the user chose another mode.
 4. Serialize mutations. Wait for each group/callback/spawn/pane/row/worktree mutation to finish and verify its outcome before starting the next operation that needs the machine lock.
 
-Repository policy may additionally require an add-only issue label, exactly one focused Oracle diff review, squash merge, named CI jobs, or Pages. Keep those in the assignment/project workflow; they are not generic amux CLI promises. Do not read Amp thread history by default. Only after naming a concrete unresolved discrepancy may coordinator or reviewer ask one narrow question of the exact related thread; if it does not resolve the discrepancy, report blocked rather than widening the search.
+Repository policy may additionally require an add-only issue label, exactly one focused Oracle diff review, squash merge, named CI jobs, or Pages. Keep those in the assignment/project workflow; they are not generic amux CLI promises. Do not read Amp thread history by default. Only an authorized `/amux` lifecycle or coordination operation may, after naming a concrete discrepancy, exhausting deterministic evidence, and establishing the exact relationship with durable/local/GitHub evidence, ask one narrow query of that exact related thread. If it does not resolve the discrepancy, block rather than widening or chaining reads.
 
 ### 2. Declare the group and register the verified coordinator lease
 

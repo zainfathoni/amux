@@ -16,6 +16,7 @@ Do not edit `workers.tsv`, `runners.tsv`, or `shelves.tsv` directly when the CLI
 - Bare `amux` launches workers only. `amux launch` launches both modes. Launch is the no-selector bulk exception; other machine-wide mutations require explicit `--all`.
 - `spawn`, `shelve`, `unshelve`, and `teardown` are worker-only. `pin` and `unpin` require `worker` or `runner` namespace.
 - Every skill-driven worker spawn MUST pass `--mode medium` unless the user explicitly requests another mode. An explicitly requested mode always wins. Do not infer `high` or `ultra` from task complexity, size, urgency, or expected duration.
+- Before automatically selecting a spawn mode, creating a native Amp child, reading another Amp thread, or sending a native child message, load [`reference/amp-invocation-policy.md`](reference/amp-invocation-policy.md). Run its resolver only for the supported automatic-spawn preflight. Never bypass a binding `ask` or `reject`; advisory `would_ask` and `would_reject` do not block.
 - `/amux health`, `/amux sprawl`, and `/amux finish` are skill-only workflows. Never invoke or document `amux health`, `amux sprawl`, or `amux finish` as CLI commands.
 - Prefer `--dry-run`; prefer `--json` for parsing. Treat exit `2` as request/preflight rejection and exit `1` as runtime failure. Never retry an indeterminate spawn blindly.
 - Work-group membership and reports are durable local intent; callback leases and wake-ups are ephemeral. A `ready` report, notification, acknowledgement, stale/overdue diagnostic, or late callback never authorizes finish.
@@ -47,6 +48,7 @@ Do not edit `workers.tsv`, `runners.tsv`, or `shelves.tsv` directly when the CLI
 - Spawn, health, sprawl, teardown, callback, and finish procedures: [`reference/workflows.md`](reference/workflows.md).
 - Partial failures, stuck clients, and safe replacement: [`reference/troubleshooting.md`](reference/troubleshooting.md).
 - Complete activation/routing checklist: [`reference/trigger-phrases.md`](reference/trigger-phrases.md).
+- Experimental Amp invocation actions, supported probes, advisory outcomes, and non-bypass rules: [`reference/amp-invocation-policy.md`](reference/amp-invocation-policy.md).
 - Experimental read-only Claude definitions and protocol: [`reference/claude-delegation-contract.md`](reference/claude-delegation-contract.md); load its recovery branches only when needed from [`reference/claude-delegation-recovery.md`](reference/claude-delegation-recovery.md).
 - Experimental isolated mutating Claude workflow and authority contract: [`reference/claude-mutating-delegation.md`](reference/claude-mutating-delegation.md). Keep this separate from thinker authority.
 

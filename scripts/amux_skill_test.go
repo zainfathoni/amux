@@ -17,6 +17,7 @@ var publicSkillFiles = []string{
 	filepath.Join("skills", "amux", "reference", "trigger-phrases.md"),
 	filepath.Join("skills", "amux", "reference", "workflows.md"),
 	filepath.Join("skills", "amux", "reference", "troubleshooting.md"),
+	filepath.Join("skills", "amux", "reference", "amp-invocation-policy.md"),
 	filepath.Join("docs", "index.html"),
 	filepath.Join("docs", "skill", "index.html"),
 	filepath.Join("docs", "og-image.svg"),
@@ -54,12 +55,82 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 		"claude-mutating-delegation.md",
 		"claude-delegation-contract.md",
 		"claude-delegation-recovery.md",
+		"amp-invocation-policy.md",
 	} {
 		if !strings.Contains(skill, "reference/"+name) {
 			t.Errorf("SKILL.md does not link reference/%s", name)
 		}
 		if _, err := os.Stat(filepath.Join(root, "skills", "amux", "reference", name)); err != nil {
 			t.Errorf("reference/%s is missing: %v", name, err)
+		}
+	}
+}
+
+func TestInvocationPolicyIsProgressivelyDisclosedWithoutChangingClaudeRoutes(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
+	policy := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "amp-invocation-policy.md"))
+	claude := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-read-only-delegation.md"))
+
+	for _, required := range []string{
+		"load [`reference/amp-invocation-policy.md`]",
+		"Never bypass a binding `ask` or `reject`",
+	} {
+		if !strings.Contains(skill, required) {
+			t.Errorf("SKILL.md is missing invocation-policy routing %q", required)
+		}
+	}
+	for _, required := range []string{
+		"observed",
+		"instruction-only",
+		"one narrow query",
+		"Raw delegated arguments are never logged",
+		"Amp-native `runner(id)`",
+		"unknown charge route",
+		"public-safe",
+		"#147",
+		"#176",
+	} {
+		if !strings.Contains(policy, required) {
+			t.Errorf("invocation policy is missing %q", required)
+		}
+	}
+	if strings.Contains(claude, "amp-invocation-policy") {
+		t.Error("independent Claude route unexpectedly loads invocation policy")
+	}
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	for _, required := range []string{
+		"resolve-amp-invocation-policy",
+		`{"version":1,"action":"amux_spawn","mode":"medium","automatic":true}`,
+		"Exit `2` stops before `amux spawn`",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("automatic spawn workflow is missing resolver preflight %q", required)
+		}
+	}
+}
+
+func TestReadThreadDiscrepancyRecoveryContractStaysAligned(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	for _, relativePath := range []string{
+		filepath.Join("skills", "amux", "reference", "amp-invocation-policy.md"),
+		filepath.Join("skills", "amux", "reference", "workflows.md"),
+		filepath.Join("skills", "amux", "reference", "troubleshooting.md"),
+	} {
+		contents := readSkillFile(t, root, relativePath)
+		for _, required := range []string{
+			"authorized `/amux` lifecycle or coordination operation",
+			"concrete discrepancy",
+			"deterministic evidence",
+			"durable/local/GitHub evidence",
+			"one narrow query",
+			"block rather than widening or chaining",
+		} {
+			if !strings.Contains(contents, required) {
+				t.Errorf("%s is missing discrepancy-recovery contract %q", relativePath, required)
+			}
 		}
 	}
 }

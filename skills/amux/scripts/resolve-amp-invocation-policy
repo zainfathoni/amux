@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""Pure experimental resolver and observed Amp permission adapter."""
+
+import json
+import math
+import sys
+
+
+BASE_KEYS = {"version", "action"}
+ACTION_KEYS = {
+    "amux_spawn": BASE_KEYS | {"mode", "automatic"},
+    "native_create": BASE_KEYS | {"mode", "executor"},
+    "read_thread": BASE_KEYS
+    | {
+        "purpose",
+        "exact_approval",
+        "target_count",
+        "url_provenance",
+        "concrete_discrepancy",
+        "deterministic_evidence_exhausted",
+        "relationship_evidenced",
+        "prior_queries",
+    },
+    "oracle": BASE_KEYS | {"capacity"},
+    "search": BASE_KEYS | {"capacity"},
+    "review": BASE_KEYS | {"capacity"},
+    "librarian": BASE_KEYS | {"capacity"},
+    "task": BASE_KEYS | {"capacity"},
+}
+CAPACITY_KEYS = {
+    "schema_version",
+    "provider",
+    "provider_version",
+    "pool",
+    "window_minutes",
+    "unit",
+    "observed_amount",
+    "freshness",
+    "confidence",
+    "charge_route",
+    "reservation",
+    "reserve_status",
+}
+
+
+def result(action, decision, enforcement, reason, capability):
+    outward = decision
+    if enforcement == "observed" and decision in ("ask", "reject"):
+        outward = "would_" + decision
+    return {
+        "version": 1,
+        "action": action,
+        "decision": decision,
+        "result": outward,
+        "enforcement": enforcement,
+        "reason": reason,
+        "capability": capability,
+        "sources": ["public"],
+    }
+
+
+def invalid(action="invalid", enforcement="deterministic"):
+    return result(action, "reject", enforcement, "invalid_input", "resolver_schema_v1")
+
+
+def exact_integer(value, expected):
+    return type(value) is int and value == expected
+
+
+def resolve(request):
+    if not isinstance(request, dict):
+        return invalid()
+    action = request.get("action")
+    if not isinstance(action, str) or action not in ACTION_KEYS:
+        return invalid()
+    action_enforcement = "deterministic" if action == "amux_spawn" else "observed"
+    if not exact_integer(request.get("version"), 1):
+        return invalid(action, action_enforcement)
+    allowed = ACTION_KEYS[action]
+    if set(request) - allowed:
+        return invalid(action, action_enforcement)
+
+    if action == "amux_spawn":
+        if set(request) != ACTION_KEYS[action] or request.get("automatic") is not True:
+            return invalid()
+        if request["mode"] == "medium":
+            return result(action, "allow", "deterministic", "automatic_medium", "skill_preflight_v1")
+        if not isinstance(request["mode"], str) or not request["mode"]:
+            return invalid()
+        return result(action, "reject", "deterministic", "automatic_mode_not_medium", "skill_preflight_v1")
+
+    if action == "native_create":
+        if not isinstance(request.get("mode"), str) or not request["mode"]:
+            return invalid(action, "observed")
+        if "executor" not in request:
+            return result(action, "reject", "observed", "explicit_executor_required", "native_create_unproven")
+        executor = request["executor"]
+        if executor not in ("local", "orb") and not (
+            isinstance(executor, dict)
+            and set(executor) == {"type", "id"}
+            and executor.get("type") == "runner"
+            and isinstance(executor.get("id"), str)
+            and executor["id"]
+        ):
+            return invalid(action, "observed")
+        decision = "allow" if request["mode"] == "medium" else "ask"
+        reason = "explicit_medium_executor" if decision == "allow" else "mode_approval_required"
+        return result(action, decision, "observed", reason, "native_create_unproven")
+
+    if action == "read_thread":
+        purpose = request.get("purpose")
+        if not exact_integer(request.get("target_count"), 1):
+            if "target_count" in request:
+                return invalid(action, "observed")
+            return result(action, "reject", "observed", "exact_one_target_required", "read_thread_unproven")
+        if purpose == "task_context":
+            allowed_keys = BASE_KEYS | {"purpose", "exact_approval", "target_count", "url_provenance"}
+            if set(request) - allowed_keys or not isinstance(request.get("exact_approval"), bool):
+                return invalid(action, "observed")
+            if request["exact_approval"]:
+                return result(action, "allow", "observed", "exact_task_read_approved", "read_thread_unproven")
+            return result(action, "ask", "observed", "exact_approval_required", "read_thread_unproven")
+        if purpose == "discrepancy_recovery":
+            required = BASE_KEYS | {
+                "purpose",
+                "target_count",
+                "concrete_discrepancy",
+                "deterministic_evidence_exhausted",
+                "relationship_evidenced",
+                "prior_queries",
+            }
+            if set(request) != required:
+                return invalid(action, "observed")
+            if type(request["prior_queries"]) is not int or request["prior_queries"] < 0:
+                return invalid(action, "observed")
+            if request["prior_queries"] != 0:
+                return result(action, "reject", "observed", "discrepancy_query_exhausted", "read_thread_unproven")
+            if all(
+                request.get(field) is True
+                for field in ("concrete_discrepancy", "deterministic_evidence_exhausted", "relationship_evidenced")
+            ):
+                return result(action, "allow", "observed", "bounded_discrepancy_query", "read_thread_unproven")
+            return result(action, "reject", "observed", "discrepancy_evidence_incomplete", "read_thread_unproven")
+        return invalid(action, "observed")
+
+    capacity = request.get("capacity")
+    if not isinstance(capacity, dict):
+        return result(action, "ask", "observed", "capacity_missing", "capacity_unproven")
+    if set(capacity) - CAPACITY_KEYS or not exact_integer(capacity.get("schema_version"), 1):
+        return result(action, "ask", "observed", "capacity_schema_unsupported", "capacity_unproven")
+    if set(capacity) != CAPACITY_KEYS:
+        return result(action, "ask", "observed", "capacity_fields_unknown", "capacity_unproven")
+    string_fields = (
+        "provider",
+        "provider_version",
+        "pool",
+        "unit",
+        "freshness",
+        "confidence",
+        "charge_route",
+        "reservation",
+        "reserve_status",
+    )
+    if (
+        any(not isinstance(capacity[field], str) or not capacity[field] for field in string_fields)
+        or type(capacity["window_minutes"]) is not int
+        or capacity["window_minutes"] <= 0
+        or type(capacity["observed_amount"]) not in (int, float)
+        or not math.isfinite(capacity["observed_amount"])
+        or capacity["observed_amount"] < 0
+    ):
+        return result(action, "ask", "observed", "capacity_fields_unknown", "capacity_unproven")
+    if capacity["freshness"] != "fresh" or capacity["confidence"] not in ("reported", "verified"):
+        return result(action, "ask", "observed", "capacity_evidence_insufficient", "capacity_unproven")
+    if capacity["charge_route"] == "unknown":
+        return result(action, "ask", "observed", "capacity_charge_route_unknown", "capacity_unproven")
+    if capacity["reservation"] != "held":
+        return result(action, "ask", "observed", "capacity_reservation_missing", "capacity_unproven")
+    if capacity["reserve_status"] != "above":
+        return result(action, "ask", "observed", "capacity_reserve_unknown", "capacity_unproven")
+    return result(action, "ask", "observed", "capacity_unproven", "capacity_unproven")
+
+
+def emit(document, diagnostic=False):
+    print(json.dumps(document, sort_keys=True, separators=(",", ":")))
+    if diagnostic:
+        print(
+            "amux-invocation-policy "
+            f"action={document['action']} result={document['result']} "
+            f"reason={document['reason']} capability={document['capability']}",
+            file=sys.stderr,
+        )
+
+
+def main():
+    permission = sys.argv[1:] == ["permission"]
+    if sys.argv[1:] not in ([], ["permission"]):
+        emit(invalid(), True)
+        return 2
+    if permission:
+        # No Amp-native tool tuple passed all probes for this client. Never
+        # parse or log delegated arguments, and keep every tool call non-binding.
+        document = result(
+            "unsupported",
+            "allow",
+            "observed",
+            "permission_tool_unproven",
+            "permission_tool_unproven",
+        )
+        emit(document, True)
+        return 0
+    try:
+        request = json.load(sys.stdin)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        emit(invalid(), True)
+        return 2
+
+    document = resolve(request)
+    emit(document, document["reason"] == "invalid_input")
+    if document["enforcement"] != "deterministic":
+        return 0
+    return {"allow": 0, "ask": 1, "reject": 2}[document["decision"]]
+
+
+if __name__ == "__main__":
+    sys.exit(main())
