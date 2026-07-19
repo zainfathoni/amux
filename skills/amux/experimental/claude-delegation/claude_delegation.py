@@ -1381,6 +1381,13 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         raise HelperError("launch packet must be UTF-8") from error
     if "\x00" in packet_text:
         raise HelperError("launch packet must not contain NUL bytes")
+    if system == "Linux":
+        try:
+            max_argument_bytes = os.sysconf("SC_PAGE_SIZE") * 32
+        except (OSError, ValueError) as error:
+            raise HelperError(f"determine Linux process argument limit: {error}") from error
+        if len(packet) + 1 > max_argument_bytes:
+            raise HelperError("launch packet exceeds the Linux process argument limit")
     helper = pathlib.Path(__file__).resolve()
     python = pathlib.Path(sys.executable).resolve()
     claude_candidate = shutil.which("claude")

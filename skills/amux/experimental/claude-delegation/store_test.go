@@ -1255,6 +1255,24 @@ esac
 		"expected_launch_policy_digest": "bf1c109e7270e8d6a37a3a1a30198172bc23472be0cc29ca84cf6a3fef927445",
 	}
 	stdout, stderr, err := runHelperEnv(t, stateDir, environment, request, "launch", "plan")
+	if runtime.GOOS == "linux" {
+		if err == nil || !strings.Contains(stderr, "launch packet exceeds the Linux process argument limit") {
+			t.Fatalf("near-maximum Linux packet plan error = %v, stderr %q", err, stderr)
+		}
+		entries, readErr := os.ReadDir(stateDir)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("rejected near-maximum Linux packet mutated private state: %#v", entries)
+		}
+		if log, readErr := os.ReadFile(logPath); readErr == nil && strings.Contains(string(log), "new-window") {
+			t.Fatalf("rejected near-maximum Linux packet created a tmux window:\n%s", log)
+		} else if readErr != nil && !os.IsNotExist(readErr) {
+			t.Fatal(readErr)
+		}
+		return
+	}
 	if err != nil {
 		t.Fatalf("launch plan: %v: %s", err, stderr)
 	}
