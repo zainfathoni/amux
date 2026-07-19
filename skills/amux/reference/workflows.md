@@ -6,9 +6,20 @@ These are skill workflows. Only commands beginning with literal `amux` are CLI c
 
 Preflight, then create one interactive worker. Prefer a message file for structured assignments.
 
+For an automatically selected mode, resolve the loaded skill directory and run its promoted gate before any dry-run or spawn command. Every automatic `amux spawn` command in this reference, including sprawl and durable coordination, inherits this shared preflight and must run it in the same shell operation as its spawn commands:
+
 ```sh
-amux --dry-run spawn --workspace <workspace> --window <semantic-slug> --workdir <path> --mode medium --message-file <prompt> --idempotency-key <stable-key>
-amux spawn --workspace <workspace> --window <semantic-slug> --workdir <path> --mode medium --message-file <prompt> --idempotency-key <stable-key>
+POLICY=<loaded-amux-skill-directory>/scripts/resolve-amp-invocation-policy
+MODE=medium
+POLICY_RESULT=$(printf '{"version":1,"action":"amux_spawn","mode":"%s","automatic":true}\n' "$MODE" | "$POLICY") || exit $?
+[ "$POLICY_RESULT" = '{"action":"amux_spawn","capability":"skill_preflight_v1","reason":"automatic_medium","result":"allow","sources":["public"]}' ] || exit 2
+```
+
+Continue only after exit `0` and that exact deterministic `allow` document. Exit nonzero stops before `amux spawn`; never rewrite the rejected mode. Bind the same `MODE` value to resolver input and every subsequent spawn command. This automatic preflight does not manufacture approval for a different mode. When the user explicitly requested another built-in or plugin mode, preserve that exact request under the separate instruction rule instead of claiming `automatic:true`.
+
+```sh
+amux --dry-run spawn --workspace <workspace> --window <semantic-slug> --workdir <path> --mode "$MODE" --message-file <prompt> --idempotency-key <stable-key>
+amux spawn --workspace <workspace> --window <semantic-slug> --workdir <path> --mode "$MODE" --message-file <prompt> --idempotency-key <stable-key>
 amux worker list --thread <thread-id>
 ```
 
@@ -33,8 +44,13 @@ Apply the `amux-agent-first` label to accepted issue work. This label operation 
 ```sh
 git fetch origin main
 git worktree add -b <type>/issue-<issue>-<slug> <dedicated-worktree> origin/main
-amux --dry-run spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode medium --title-prefix '#<issue>' --group <group> --message-file <prompt> --idempotency-key issue-<issue>
-amux spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode medium --title-prefix '#<issue>' --group <group> --message-file <prompt> --idempotency-key issue-<issue>
+```
+
+Run the shared automatic-spawn preflight above before this block.
+
+```sh
+amux --dry-run spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode "$MODE" --title-prefix '#<issue>' --group <group> --message-file <prompt> --idempotency-key issue-<issue>
+amux spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode "$MODE" --title-prefix '#<issue>' --group <group> --message-file <prompt> --idempotency-key issue-<issue>
 ```
 
 Use explicit `--mode medium` unless the user requested another mode. The worker prompt must include:
@@ -73,7 +89,7 @@ This is the proven coordinator protocol layered on the implemented group, spawn,
 3. Create every branch/worktree from the freshly fetched `origin/main`. Use an issue-bearing branch/worktree but an issue-unprefixed semantic window. Pass explicit `--mode medium` unless the user chose another mode.
 4. Serialize mutations. Wait for each group/callback/spawn/pane/row/worktree mutation to finish and verify its outcome before starting the next operation that needs the machine lock.
 
-Repository policy may additionally require an add-only issue label, exactly one focused Oracle diff review, squash merge, named CI jobs, or Pages. Keep those in the assignment/project workflow; they are not generic amux CLI promises. Do not read Amp thread history by default. Only after naming a concrete unresolved discrepancy may coordinator or reviewer ask one narrow question of the exact related thread; if it does not resolve the discrepancy, report blocked rather than widening the search.
+Repository policy may additionally require an add-only issue label, exactly one focused Oracle diff review, squash merge, named CI jobs, or Pages. Keep those in the assignment/project workflow; they are not generic amux CLI promises. Do not read Amp thread history by default. Only an authorized `/amux` lifecycle or coordination operation may, after naming a concrete local/GitHub discrepancy, exhausting deterministic evidence, and separately establishing the exact relationship with durable/local/GitHub evidence, ask one narrow query of that exact related thread. If it does not resolve the discrepancy, block rather than widening or chaining reads.
 
 ### 2. Declare the group and register the verified coordinator lease
 
@@ -89,8 +105,13 @@ Before registration, independently verify the pane belongs to the configured coo
 ```sh
 git fetch origin main
 git worktree add -b <type>/issue-<issue>-<slug> <dedicated-worktree> origin/main
-amux --dry-run spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode medium --title-prefix '#<issue>' --group <group> --message-file <assignment> --idempotency-key issue-<issue>
-amux --json spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode medium --title-prefix '#<issue>' --group <group> --message-file <assignment> --idempotency-key issue-<issue>
+```
+
+Run the shared automatic-spawn preflight above before this block.
+
+```sh
+amux --dry-run spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode "$MODE" --title-prefix '#<issue>' --group <group> --message-file <assignment> --idempotency-key issue-<issue>
+amux --json spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode "$MODE" --title-prefix '#<issue>' --group <group> --message-file <assignment> --idempotency-key issue-<issue>
 ```
 
 Spawn resolves #104 alternate-thread delivery before persisting group intent. Verify the worker and membership outcomes name only the final receiving thread; never add the abandoned provisioned identity. If label ensure fails after creation, the worker and local membership remain, exit is `1`, and retry with the identical idempotency key resumes grouping without recreating or resubmitting.
