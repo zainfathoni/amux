@@ -1192,15 +1192,27 @@ def validate_launch_request(value: Any) -> dict[str, Any]:
         "handoff",
         "capacity_request",
     }
-    if value.get("workflow") == "mutating":
+    workflow = value.get("workflow", "read_only")
+    if workflow == "mutating":
         fields |= mutating_fields
+    else:
+        fields.add("expected_launch_policy_digest")
     reject_unknown(value, fields, "launch request")
     result: dict[str, Any] = {}
-    for key in fields - mutating_fields - {"workflow"}:
+    for key in fields - mutating_fields - {"workflow", "expected_launch_policy_digest"}:
         result[key] = required_string(value, key, 2048 if key in {"workdir", "packet_file"} else 256)
-    if value.get("workflow", "read_only") not in {"read_only", "mutating"}:
+    if workflow not in {"read_only", "mutating"}:
         raise HelperError("launch workflow must be read_only or mutating")
-    result["workflow"] = value.get("workflow", "read_only")
+    result["workflow"] = workflow
+    if workflow == "read_only":
+        expected_policy_digest = value.get("expected_launch_policy_digest")
+        if (
+            not isinstance(expected_policy_digest, str)
+            or len(expected_policy_digest) != 64
+            or any(character not in "0123456789abcdef" for character in expected_policy_digest)
+        ):
+            raise HelperError("expected_launch_policy_digest must be a lowercase SHA-256 value")
+        result["expected_launch_policy_digest"] = expected_policy_digest
     if result["workflow"] == "mutating":
         for key in ("baseline_branch", "writer_owner", "integration_owner", "handoff"):
             result[key] = required_string(value, key, 256)
@@ -1261,8 +1273,61 @@ def require_tmux_session(session: str) -> None:
         raise HelperError("target tmux session does not exist or cannot be verified") from error
 
 
+def launch_policy(workflow: str) -> dict[str, Any]:
+    if workflow not in {"read_only", "mutating"}:
+        raise HelperError("launch workflow must be read_only or mutating")
+    mcp_tool_prefix = "mcp__amux-claude-delegation__"
+    mutating = workflow == "mutating"
+    built_in_tools = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"] if mutating else ["Read", "Grep", "Glob"]
+    mutating_denied = [
+        "Agent", "WebFetch", "WebSearch", "Skill",
+        "Bash(git push:*)", "Bash(gh:*)", "Bash(git stash:*)", "Bash(git reset:*)",
+        "Bash(git clean:*)", "Bash(git worktree:*)", "Bash(git merge:*)", "Bash(git tag:*)",
+        "Bash(git branch -d:*)", "Bash(git branch -D:*)",
+    ]
+    denied_tools = mutating_denied if mutating else ["Bash", "Edit", "Write", "NotebookEdit", "Agent", "WebFetch", "WebSearch", "Skill"]
+    policy = {
+        "interactive": True,
+        "permission_mode": "dontAsk",
+        "setting_sources": [],
+        "strict_mcp": True,
+        "built_in_tools": built_in_tools,
+        "allowed_mcp_tools": [mcp_tool_prefix + "submit_report", mcp_tool_prefix + "submit_input_request"],
+        "denied_tools": denied_tools,
+        "additional_directories": [],
+        "automatic_interactive_input": False,
+    }
+    if mutating:
+        policy["workflow"] = "mutating"
+        policy["removed_credential_environment"] = ["GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN"]
+    return policy
+
+
+def plan_launch_policy_digest(request: Any) -> dict[str, str]:
+    if not isinstance(request, dict):
+        raise HelperError("launch policy digest request must be an object")
+    reject_unknown(request, {"workflow"}, "launch policy digest request")
+    workflow = required_string(request, "workflow", 32)
+    if workflow != "read_only":
+        raise HelperError("launch policy digest preflight supports only read_only")
+    policy = launch_policy(workflow)
+    return {
+        "workflow": workflow,
+        "launch_policy_digest": hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+    }
+
+
+def expected_launch_policy(request: dict[str, Any]) -> dict[str, Any]:
+    policy = launch_policy(request["workflow"])
+    digest = hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if request["workflow"] == "read_only" and request["expected_launch_policy_digest"] != digest:
+        raise HelperError("expected launch policy digest does not match selected workflow")
+    return policy
+
+
 def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]:
     request = validate_launch_request(request_value)
+    policy = expected_launch_policy(request)
     system = platform.system()
     if system not in {"Darwin", "Linux"}:
         raise HelperError(f"experimental Claude launch is unavailable on {system}")
@@ -1319,30 +1384,8 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
     if missing_flags:
         raise HelperError("Claude Code is missing required flags: " + ", ".join(missing_flags))
     mcp_path, settings_path = private_runtime_paths(store, request["delegation_id"])
-    mcp_tool_prefix = "mcp__amux-claude-delegation__"
     mutating = workflow == "mutating"
-    built_in_tools = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"] if mutating else ["Read", "Grep", "Glob"]
-    mutating_denied = [
-        "Agent", "WebFetch", "WebSearch", "Skill",
-        "Bash(git push:*)", "Bash(gh:*)", "Bash(git stash:*)", "Bash(git reset:*)",
-        "Bash(git clean:*)", "Bash(git worktree:*)", "Bash(git merge:*)", "Bash(git tag:*)",
-        "Bash(git branch -d:*)", "Bash(git branch -D:*)",
-    ]
-    denied_tools = mutating_denied if mutating else ["Bash", "Edit", "Write", "NotebookEdit", "Agent", "WebFetch", "WebSearch", "Skill"]
-    policy = {
-        "interactive": True,
-        "permission_mode": "dontAsk",
-        "setting_sources": [],
-        "strict_mcp": True,
-        "built_in_tools": built_in_tools,
-        "allowed_mcp_tools": [mcp_tool_prefix + "submit_report", mcp_tool_prefix + "submit_input_request"],
-        "denied_tools": denied_tools,
-        "additional_directories": [],
-        "automatic_interactive_input": False,
-    }
-    if mutating:
-        policy["workflow"] = "mutating"
-        policy["removed_credential_environment"] = ["GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN"]
+    built_in_tools = policy["built_in_tools"]
     argv = [
         claude,
         "--session-id",
@@ -1445,6 +1488,7 @@ def plan_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
 
 def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
     request_data = validate_launch_request(request)
+    expected_launch_policy(request_data)
     request_digest = hashlib.sha256(json.dumps(request_data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     delegation_id = request_data["delegation_id"]
     event_id = request_data["event_id"]
@@ -2131,6 +2175,7 @@ def parser() -> argparse.ArgumentParser:
     notify_commands.add_parser("amp-pane")
     launch = commands.add_parser("launch")
     launch_commands = launch.add_subparsers(dest="command", required=True)
+    launch_commands.add_parser("policy-digest")
     launch_commands.add_parser("plan")
     launch_commands.add_parser("execute")
     capacity = commands.add_parser("capacity")
@@ -2164,6 +2209,8 @@ def main() -> int:
             output = prepare_mutation(request)
         elif arguments.area == "mutation" and arguments.command == "validate-handoff":
             output = validate_frozen_handoff(store, request)
+        elif arguments.area == "launch" and arguments.command == "policy-digest":
+            output = plan_launch_policy_digest(request)
         elif arguments.area == "launch" and arguments.command == "plan":
             output = plan_launch(store, request)
         elif arguments.area == "launch" and arguments.command == "execute":
