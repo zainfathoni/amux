@@ -32,7 +32,8 @@ MAX_PACKET_BYTES = 256 * 1024
 MAX_LAUNCH_TRANSPORT_BYTES = 2 * 1024 * 1024
 MAX_TMUX_COMMAND_BYTES = 8 * 1024
 EXEC_BUDGET_MARGIN_BYTES = 32 * 1024
-STARTUP_TIMEOUT_SECONDS = 2.0
+STARTUP_TIMEOUT_SECONDS = 4.0
+STARTUP_STABILITY_SECONDS = 1.5
 STARTUP_POLL_SECONDS = 0.05
 INTERNAL_EVENT_PREFIX = "amux:"
 REQUIRED_CLAUDE_FLAGS = [
@@ -398,6 +399,7 @@ class ReceiptStore:
                 identity["claude_session_id"],
                 launch_intent["expected_argv_digest"],
                 launch_intent["expected_launcher_identity"],
+                launch_intent["expected_executable_object_identity"],
                 identity["process_executable_identity"],
             )
             if current != identity:
@@ -480,6 +482,7 @@ class ReceiptStore:
             claude_session_id,
             launch_intent["expected_argv_digest"],
             launch_intent["expected_launcher_identity"],
+            launch_intent["expected_executable_object_identity"],
             launch_identity["process_executable_identity"],
         )
         with self.mutation_lock():
@@ -934,11 +937,37 @@ def reject_private_fields(value: Any) -> None:
             reject_private_fields(nested)
 
 
-def run_command(arguments: list[str]) -> str:
+def run_command(
+    arguments: list[str], environment: dict[str, str] | None = None, executable_fd: int | None = None
+) -> str:
+    options: dict[str, Any] = {}
+    temporary_executable: pathlib.Path | None = None
+    temporary_directory: pathlib.Path | None = None
+    if environment is not None:
+        options["env"] = environment
+    if executable_fd is not None:
+        if platform.system() == "Darwin":
+            temporary_directory = pathlib.Path(tempfile.mkdtemp(prefix="amux-claude-probe."))
+            os.chmod(temporary_directory, 0o700)
+            temporary_executable = materialize_executable(executable_fd, temporary_directory)
+            os.chmod(temporary_directory, 0o500)
+            options["executable"] = str(temporary_executable)
+        else:
+            options["executable"] = descriptor_path(executable_fd)
+            options["pass_fds"] = (executable_fd,)
     try:
-        completed = subprocess.run(arguments, capture_output=True, text=True, timeout=5, check=False)
+        completed = subprocess.run(
+            arguments, capture_output=True, text=True, timeout=5, check=False, **options
+        )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise HelperError(f"run {arguments[0]}: {error}") from error
+    finally:
+        if temporary_executable is not None:
+            if temporary_directory is not None:
+                os.chmod(temporary_directory, 0o700)
+            temporary_executable.unlink(missing_ok=True)
+        if temporary_directory is not None:
+            temporary_directory.rmdir()
     if completed.returncode != 0:
         detail = completed.stderr.strip() or f"exit {completed.returncode}"
         raise HelperError(f"run {arguments[0]}: {detail}")
@@ -974,6 +1003,8 @@ def linux_process_start_time(raw: bytes) -> str:
     fields = raw[close + 1 :].split()
     if len(fields) < 20 or not fields[19].isdigit() or int(fields[19]) <= 0:
         raise HelperError("read exact Linux process identity: invalid start time")
+    if fields[0] == b"Z":
+        raise HelperError("read exact Linux process identity: process is a zombie")
     return os.fsdecode(fields[19])
 
 
@@ -1053,6 +1084,8 @@ def exact_process_identity(pid: int) -> tuple[str, str, list[str], str]:
     written = libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))
     if written != ctypes.sizeof(info):
         raise HelperError("read exact Darwin process identity: proc_pidinfo failed")
+    if info.status == 5:
+        raise HelperError("read exact Darwin process identity: process is a zombie")
     raw_name = bytes(info.name).split(b"\0", 1)[0] or bytes(info.comm).split(b"\0", 1)[0]
     name = os.fsdecode(raw_name)
     started = f"{info.start_seconds}.{info.start_microseconds:06d}"
@@ -1061,20 +1094,110 @@ def exact_process_identity(pid: int) -> tuple[str, str, list[str], str]:
 
 
 def executable_file_identity(path: str | pathlib.Path) -> str:
-    resolved = pathlib.Path(path).resolve(strict=True)
-    info = resolved.stat()
+    info = os.stat(path)
     if not stat.S_ISREG(info.st_mode):
         raise HelperError("Claude executable is not a regular file")
-    return f"file:{info.st_dev}:{info.st_ino}:{hashlib.sha256(os.fsencode(str(resolved))).hexdigest()}"
+    return f"file:{info.st_dev}:{info.st_ino}"
+
+
+def descriptor_path(descriptor: int) -> str:
+    if platform.system() == "Linux":
+        return f"/proc/self/fd/{descriptor}"
+    if platform.system() == "Darwin":
+        return f"/dev/fd/{descriptor}"
+    raise HelperError("descriptor execution is unavailable on this platform")
+
+
+def materialize_executable(descriptor: int, directory: pathlib.Path) -> pathlib.Path:
+    output_descriptor, output_path = tempfile.mkstemp(prefix="launcher.", dir=directory)
+    try:
+        os.fchmod(output_descriptor, 0o500)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            remaining = memoryview(chunk)
+            while remaining:
+                written = os.write(output_descriptor, remaining)
+                if written <= 0:
+                    raise HelperError("write verified Claude executable copy failed")
+                remaining = remaining[written:]
+        os.fsync(output_descriptor)
+    finally:
+        os.close(output_descriptor)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+    return pathlib.Path(output_path)
+
+
+def open_verified_executable(path: str | pathlib.Path) -> tuple[int, str, str, str]:
+    resolved = str(pathlib.Path(path).resolve(strict=True))
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(resolved, flags)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o111 == 0:
+            raise HelperError("Claude executable is not one executable regular file")
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 256 * 1024 * 1024:
+                raise HelperError("Claude executable exceeds the verification size limit")
+            digest.update(chunk)
+        final_info = os.fstat(descriptor)
+        if (
+            final_info.st_dev, final_info.st_ino, final_info.st_size,
+            final_info.st_mtime_ns, final_info.st_ctime_ns,
+        ) != (
+            info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+        ):
+            raise HelperError("Claude executable changed during verification")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.set_inheritable(descriptor, True)
+        practical_identity = f"file:{info.st_dev}:{info.st_ino}"
+        object_identity = f"object:{info.st_dev}:{info.st_ino}:{info.st_size}:{digest.hexdigest()}"
+        return descriptor, resolved, practical_identity, object_identity
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def directory_identity(info: os.stat_result) -> str:
+    return f"directory:{info.st_dev}:{info.st_ino}"
+
+
+def open_verified_directory(path: str | pathlib.Path, expected_identity: str | None = None) -> tuple[int, str, str]:
+    resolved = str(pathlib.Path(path).resolve(strict=True))
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(resolved, flags)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode):
+            raise HelperError("launch workdir is not one directory object")
+        identity = directory_identity(info)
+        if expected_identity is not None and identity != expected_identity:
+            raise HelperError("launch workdir object changed before transport")
+        return descriptor, resolved, identity
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def process_executable_identity(pid: int) -> str:
+    try:
+        return executable_file_identity(process_executable_path(pid))
+    except (OSError, RuntimeError) as error:
+        raise HelperError("read exact process executable identity") from error
+
+
+def process_executable_path(pid: int) -> pathlib.Path:
     system = platform.system()
     if system == "Linux":
-        try:
-            return executable_file_identity(pathlib.Path("/proc") / str(pid) / "exe")
-        except (OSError, RuntimeError) as error:
-            raise HelperError("read exact Linux process executable identity") from error
+        return pathlib.Path("/proc") / str(pid) / "exe"
     if system != "Darwin":
         raise HelperError(f"process executable identity is unavailable on {system}")
     libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
@@ -1082,10 +1205,7 @@ def process_executable_identity(pid: int) -> str:
     written = libproc.proc_pidpath(pid, buffer, len(buffer))
     if written <= 0:
         raise HelperError("read exact Darwin process executable identity: proc_pidpath failed")
-    try:
-        return executable_file_identity(os.fsdecode(buffer.raw[:written]))
-    except (OSError, RuntimeError) as error:
-        raise HelperError("read exact Darwin process executable identity") from error
+    return pathlib.Path(os.fsdecode(buffer.raw[:written]))
 
 
 def normalized_argv_digest(arguments: list[str]) -> str:
@@ -1097,7 +1217,10 @@ def normalized_claude_arguments(system: str, process_name: str, process_args: li
         return "direct", process_args[1:]
     if system == "Linux" and process_name in {"node", "bun"} and len(process_args) > 2:
         script = pathlib.PurePath(process_args[1])
-        if script.name == "cli.js" and "@anthropic-ai" in script.parts and "claude-code" in script.parts:
+        descriptor_script = len(script.parts) >= 3 and script.parts[-2] == "fd" and script.name.isdigit()
+        if descriptor_script or (
+            script.name == "cli.js" and "@anthropic-ai" in script.parts and "claude-code" in script.parts
+        ):
             return "node", process_args[2:]
     raise HelperError("pane process is not a supported Claude executable form")
 
@@ -1184,6 +1307,7 @@ def inspect_claude_identity(
     claude_session_id: str,
     expected_argv_digest: str,
     expected_launcher_identity: str,
+    expected_executable_object_identity: str,
     expected_process_executable_identity: str | None = None,
 ) -> dict[str, Any]:
     if not pane_id.startswith("%") or len(pane_id) < 2:
@@ -1227,10 +1351,24 @@ def inspect_claude_identity(
     if normalized_argv_digest(normalized_arguments) != expected_argv_digest:
         raise HelperError("Claude process argv does not match immutable launch intent")
     if executable_form == "direct":
-        launcher_identity = executable_identity
+        try:
+            live_descriptor, _, _, live_object_identity = open_verified_executable(
+                process_executable_path(pane_pid)
+            )
+        except OSError as error:
+            raise HelperError("Claude process executable content is unavailable") from error
+        os.close(live_descriptor)
+        if live_object_identity.rsplit(":", 1)[-1] != expected_executable_object_identity.rsplit(":", 1)[-1]:
+            raise HelperError("Claude process executable content does not match immutable launch intent")
+        launcher_identity = expected_launcher_identity
     else:
         try:
-            launcher_identity = executable_file_identity(process_args[1])
+            script = pathlib.PurePath(process_args[1])
+            if platform.system() == "Linux" and len(script.parts) >= 3 and script.parts[-2] == "fd" and script.name.isdigit():
+                launcher_path: str | pathlib.Path = pathlib.Path("/proc") / str(pane_pid) / "fd" / script.name
+            else:
+                launcher_path = process_args[1]
+            launcher_identity = executable_file_identity(launcher_path)
         except (OSError, RuntimeError) as error:
             raise HelperError("Claude launcher identity is unavailable") from error
     if launcher_identity != expected_launcher_identity:
@@ -1260,20 +1398,32 @@ def wait_for_claude_startup(
     claude_session_id: str,
     expected_argv_digest: str,
     expected_launcher_identity: str,
+    expected_executable_object_identity: str,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
     last_error = "startup identity unavailable"
+    candidate: dict[str, Any] | None = None
+    candidate_since = 0.0
     while time.monotonic() < deadline:
         try:
-            return inspect_claude_identity(
+            current = inspect_claude_identity(
                 pane_id,
                 claude_session_id,
                 expected_argv_digest,
                 expected_launcher_identity,
+                expected_executable_object_identity,
             )
+            if current == candidate:
+                if time.monotonic() - candidate_since >= STARTUP_STABILITY_SECONDS:
+                    return current
+            else:
+                candidate = current
+                candidate_since = time.monotonic()
         except HelperError as error:
             last_error = str(error)
-            time.sleep(STARTUP_POLL_SECONDS)
+            candidate = None
+            candidate_since = 0.0
+        time.sleep(STARTUP_POLL_SECONDS)
     raise HelperError(f"Claude startup was not verified before timeout: {last_error}")
 
 
@@ -1349,23 +1499,33 @@ def repository_from_remote(remote: str) -> str:
     return value.strip("/")
 
 
-def preflight_worktree(request: dict[str, str]) -> str:
-    workdir = str(pathlib.Path(request["workdir"]).resolve(strict=True))
-    git = ["git", "--no-optional-locks", "-C", workdir]
-    if run_command(git + ["rev-parse", "--show-toplevel"]) != workdir:
-        raise HelperError("launch workdir is not the canonical Git worktree root")
-    if run_command(git + ["rev-parse", "HEAD"]) != request["base"]:
-        raise HelperError("launch worktree HEAD does not match the immutable base")
-    git_dir = run_command(git + ["rev-parse", "--git-dir"])
-    common_dir = run_command(git + ["rev-parse", "--git-common-dir"])
-    if git_dir == common_dir:
-        raise HelperError("read-only thinker requires a fresh dedicated linked worktree")
-    if run_command(git + ["status", "--porcelain"]):
-        raise HelperError("read-only thinker worktree must be clean before launch")
-    remote = run_command(git + ["remote", "get-url", "origin"])
-    if repository_from_remote(remote) != request["repository"]:
-        raise HelperError("launch repository does not match the immutable repository")
-    return workdir
+def preflight_worktree(request: dict[str, str], retain_descriptor: bool = False) -> tuple[str, str, int | None]:
+    descriptor, workdir, identity = open_verified_directory(request["workdir"])
+    previous = os.open(".", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fchdir(descriptor)
+        git = ["git", "--no-optional-locks", "-C", "."]
+        if run_command(git + ["rev-parse", "--show-toplevel"]) != workdir:
+            raise HelperError("launch workdir is not the canonical Git worktree root")
+        if run_command(git + ["rev-parse", "HEAD"]) != request["base"]:
+            raise HelperError("launch worktree HEAD does not match the immutable base")
+        git_dir = run_command(git + ["rev-parse", "--git-dir"])
+        common_dir = run_command(git + ["rev-parse", "--git-common-dir"])
+        if git_dir == common_dir:
+            raise HelperError("read-only thinker requires a fresh dedicated linked worktree")
+        if run_command(git + ["status", "--porcelain"]):
+            raise HelperError("read-only thinker worktree must be clean before launch")
+        remote = run_command(git + ["remote", "get-url", "origin"])
+        if repository_from_remote(remote) != request["repository"]:
+            raise HelperError("launch repository does not match the immutable repository")
+        if directory_identity(os.fstat(descriptor)) != identity:
+            raise HelperError("launch workdir object changed during validation")
+        return workdir, identity, descriptor if retain_descriptor else None
+    finally:
+        os.fchdir(previous)
+        os.close(previous)
+        if not retain_descriptor:
+            os.close(descriptor)
 
 
 def private_runtime_paths(store: ReceiptStore, delegation_id: str) -> tuple[pathlib.Path, pathlib.Path]:
@@ -1439,25 +1599,47 @@ def expected_launch_policy(request: dict[str, Any]) -> dict[str, Any]:
     return policy
 
 
-def read_owner_private_regular_file(path: pathlib.Path, limit: int, label: str) -> bytes:
+def open_owner_private_regular_file(path: pathlib.Path, limit: int, label: str) -> tuple[int, bytes, str]:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as error:
         raise HelperError(f"{label} is unavailable or unsafe") from error
-    with os.fdopen(descriptor, "rb") as input_file:
-        try:
-            info = os.fstat(input_file.fileno())
-            if (
-                not stat.S_ISREG(info.st_mode)
-                or stat.S_IMODE(info.st_mode) != 0o600
-                or info.st_uid != os.geteuid()
-            ):
-                raise HelperError(f"{label} must be one owner-only regular file")
-            raw = input_file.read(limit + 1)
-        except OSError as error:
-            raise HelperError(f"{label} could not be read safely") from error
-    return raw
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_uid != os.geteuid()
+        ):
+            raise HelperError(f"{label} must be one owner-only regular file")
+        chunks = []
+        remaining = limit + 1
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        final_info = os.fstat(descriptor)
+        if (
+            final_info.st_dev, final_info.st_ino, final_info.st_size,
+            final_info.st_mtime_ns, final_info.st_ctime_ns,
+        ) != (
+            info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+        ):
+            raise HelperError(f"{label} changed during descriptor read")
+        return descriptor, raw, f"file:{info.st_dev}:{info.st_ino}"
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def read_owner_private_regular_file(path: pathlib.Path, limit: int, label: str) -> tuple[bytes, str]:
+    descriptor, raw, identity = open_owner_private_regular_file(path, limit, label)
+    os.close(descriptor)
+    return raw, identity
 
 
 def exact_launch_environment(removed_environment: list[str]) -> dict[str, str]:
@@ -1554,6 +1736,9 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
     run_command(["tmux", "-V"])
     require_tmux_session(request["tmux_session"])
     workflow = request["workflow"]
+    mutating = workflow == "mutating"
+    removed_environment = ["GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN"] if mutating else []
+    environment = exact_launch_environment(removed_environment)
     decision_digest_value = ""
     if workflow == "mutating":
         prepared = prepare_mutation(
@@ -1574,9 +1759,13 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         if capacity_decision.get("may_proceed") is not True or capacity_decision.get("decision") not in {"autonomous_allowed", "explicit_acknowledgement"}:
             raise HelperError("mutating launch capacity decision does not permit proceeding")
         workdir = prepared["workdir"]
+        workdir_descriptor, workdir, workdir_identity = open_verified_directory(workdir)
+        os.close(workdir_descriptor)
     else:
-        workdir = preflight_worktree(request)
-    packet = read_owner_private_regular_file(pathlib.Path(request["packet_file"]), MAX_PACKET_BYTES, "launch packet")
+        workdir, workdir_identity, _ = preflight_worktree(request)
+    packet, packet_identity = read_owner_private_regular_file(
+        pathlib.Path(request["packet_file"]), MAX_PACKET_BYTES, "launch packet"
+    )
     if not packet or len(packet) > MAX_PACKET_BYTES:
         raise HelperError("launch packet must contain 1 to 262144 bytes")
     try:
@@ -1587,21 +1776,24 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         raise HelperError("launch packet must not contain NUL bytes")
     helper = pathlib.Path(__file__).resolve()
     python = pathlib.Path(sys.executable).resolve()
-    claude_candidate = shutil.which("claude")
+    claude_candidate = shutil.which("claude", path=environment.get("PATH"))
     if not claude_candidate:
         raise HelperError("Claude Code is unavailable")
     try:
-        claude = os.path.abspath(claude_candidate)
-        launcher_identity = executable_file_identity(claude)
+        claude_descriptor, claude, launcher_identity, executable_object_identity = open_verified_executable(
+            claude_candidate
+        )
     except OSError as error:
         raise HelperError(f"resolve Claude Code executable: {error}") from error
-    run_command([claude, "--version"])
-    help_text = run_command([claude, "--help"])
+    try:
+        run_command([claude, "--version"], environment, claude_descriptor)
+        help_text = run_command([claude, "--help"], environment, claude_descriptor)
+    finally:
+        os.close(claude_descriptor)
     missing_flags = [flag for flag in REQUIRED_CLAUDE_FLAGS if flag not in help_text]
     if missing_flags:
         raise HelperError("Claude Code is missing required flags: " + ", ".join(missing_flags))
     mcp_path, settings_path = private_runtime_paths(store, request["delegation_id"])
-    mutating = workflow == "mutating"
     built_in_tools = policy["built_in_tools"]
     argv = [
         claude,
@@ -1628,8 +1820,6 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         "false",
         packet_text,
     ]
-    removed_environment = ["GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN"] if mutating else []
-    environment = exact_launch_environment(removed_environment)
     validate_exec_budget(argv, environment, system)
     expected_argv_digest = normalized_argv_digest(argv[1:])
     transport_path = private_launch_transport_path(store, request["delegation_id"])
@@ -1638,8 +1828,13 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         "environment": environment,
         "expected_argv_digest": expected_argv_digest,
         "expected_launcher_identity": launcher_identity,
+        "expected_executable_object_identity": executable_object_identity,
         "remove_environment": removed_environment,
         "workdir": workdir,
+        "workdir_identity": workdir_identity,
+        "packet_identity": packet_identity,
+        "packet_path": request["packet_file"],
+        "packet_digest": hashlib.sha256(packet).hexdigest(),
     }
     transport_bytes = encode_private_json(transport)
     if len(transport_bytes) > MAX_LAUNCH_TRANSPORT_BYTES:
@@ -1679,6 +1874,7 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         "request": request,
         "workdir": workdir,
         "packet_digest": hashlib.sha256(packet).hexdigest(),
+        "packet_identity": packet_identity,
         "launch_policy_digest": hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
         "launch_command_digest": hashlib.sha256(start_command.encode()).hexdigest(),
         "start_command": start_command,
@@ -1691,6 +1887,8 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         "transport_bytes": transport_bytes,
         "expected_argv_digest": expected_argv_digest,
         "expected_launcher_identity": launcher_identity,
+        "expected_executable_object_identity": executable_object_identity,
+        "workdir_identity": workdir_identity,
         "tmux_environment_digest": tmux_environment_digest,
         "workflow": workflow,
         "capacity_decision_digest": decision_digest_value,
@@ -1740,7 +1938,7 @@ def execute_launch_transport(
         if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
             raise HelperError(f"{label} must be a lowercase SHA-256 value")
     path = private_launch_transport_path(store, delegation_id)
-    raw = read_owner_private_regular_file(path, MAX_LAUNCH_TRANSPORT_BYTES, "private launch transport")
+    raw, _ = read_owner_private_regular_file(path, MAX_LAUNCH_TRANSPORT_BYTES, "private launch transport")
     if not raw or len(raw) > MAX_LAUNCH_TRANSPORT_BYTES:
         raise HelperError("private launch transport has an invalid size")
     if hashlib.sha256(raw).hexdigest() != expected_digest:
@@ -1753,7 +1951,11 @@ def execute_launch_transport(
         raise HelperError("private launch transport must be an object")
     reject_unknown(
         transport,
-        {"argv", "environment", "expected_argv_digest", "expected_launcher_identity", "remove_environment", "workdir"},
+        {
+            "argv", "environment", "expected_argv_digest", "expected_launcher_identity",
+            "expected_executable_object_identity", "remove_environment", "workdir", "workdir_identity",
+            "packet_identity", "packet_path", "packet_digest",
+        },
         "private launch transport",
     )
     argv = transport.get("argv")
@@ -1778,23 +1980,59 @@ def execute_launch_transport(
     expected_argv_digest = transport.get("expected_argv_digest")
     if expected_argv_digest != normalized_argv_digest(argv[1:]):
         raise HelperError("private launch transport argv digest is invalid")
+    packet_path = transport.get("packet_path")
+    packet_identity = transport.get("packet_identity")
+    packet_digest = transport.get("packet_digest")
+    if not isinstance(packet_path, str) or not isinstance(packet_identity, str) or not isinstance(packet_digest, str):
+        raise HelperError("private launch transport packet identity is invalid")
+    transported_packet, transported_packet_identity = read_owner_private_regular_file(
+        pathlib.Path(packet_path), MAX_PACKET_BYTES, "launch packet"
+    )
+    if (
+        transported_packet_identity != packet_identity
+        or hashlib.sha256(transported_packet).hexdigest() != packet_digest
+    ):
+        raise HelperError("launch packet object changed before transport")
     try:
-        if transport.get("expected_launcher_identity") != executable_file_identity(argv[0]):
-            raise HelperError("private launch transport executable identity is invalid")
+        executable_descriptor, _, launcher_identity, executable_object_identity = (
+            open_verified_executable(argv[0])
+        )
     except OSError as error:
         raise HelperError("private launch transport executable identity is unavailable") from error
+    if (
+        transport.get("expected_launcher_identity") != launcher_identity
+        or transport.get("expected_executable_object_identity") != executable_object_identity
+    ):
+        os.close(executable_descriptor)
+        raise HelperError("private launch transport executable object changed")
     validate_exec_budget(argv, environment, platform.system())
     workdir_value = transport.get("workdir")
-    if not isinstance(workdir_value, str) or not workdir_value:
+    workdir_identity = transport.get("workdir_identity")
+    if not isinstance(workdir_value, str) or not workdir_value or not isinstance(workdir_identity, str):
+        os.close(executable_descriptor)
         raise HelperError("private launch transport workdir is invalid")
     try:
-        workdir = pathlib.Path(workdir_value).resolve(strict=True)
-        os.chdir(workdir)
+        workdir_descriptor, _, _ = open_verified_directory(workdir_value, workdir_identity)
+        os.fchdir(workdir_descriptor)
+        os.close(workdir_descriptor)
     except OSError as error:
+        os.close(executable_descriptor)
         raise HelperError("private launch transport workdir is unavailable") from error
+    sealed_directories: list[pathlib.Path] = []
     try:
-        os.execve(argv[0], argv, environment)
+        if platform.system() == "Darwin":
+            sealed_executable = materialize_executable(executable_descriptor, path.parent)
+            sealed_directories = [path.parent, path.parent.parent, store.state_dir]
+            for directory in sealed_directories:
+                os.chmod(directory, 0o500)
+            execution_path = str(sealed_executable)
+        else:
+            execution_path = descriptor_path(executable_descriptor)
+        os.execve(execution_path, argv, environment)
     except OSError as error:
+        for directory in reversed(sealed_directories):
+            os.chmod(directory, 0o700)
+        os.close(executable_descriptor)
         raise HelperError("private launch transport could not execute Claude") from error
 
 
@@ -1866,6 +2104,9 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
         "launch_command_digest": components["launch_command_digest"],
         "expected_argv_digest": components["expected_argv_digest"],
         "expected_launcher_identity": components["expected_launcher_identity"],
+        "expected_executable_object_identity": components["expected_executable_object_identity"],
+        "packet_identity": components["packet_identity"],
+        "workdir_identity": components["workdir_identity"],
     }
     with store.mutation_lock():
         receipt_store = store.load_store()
@@ -1884,19 +2125,42 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
         if any(event.get("kind") == "launch_intent" for event in receipt["events"]):
             raise HelperError("receipt acquired a different launch operation concurrently")
 
+        held_descriptors: list[int] = []
         require_tmux_session(request_data["tmux_session"])
         if components["workflow"] == "mutating":
             revalidate_mutating_launch_lease(receipt_store, receipt, request_data)
+            held_workdir_descriptor, final_workdir, final_workdir_identity = open_verified_directory(
+                request_data["workdir"]
+            )
+            held_descriptors.append(held_workdir_descriptor)
+            if final_workdir != components["workdir"] or final_workdir_identity != components["workdir_identity"]:
+                raise HelperError("mutating launch workdir object changed before intent")
         else:
-            if preflight_worktree(request_data) != components["workdir"]:
+            final_workdir, final_workdir_identity, held_workdir_descriptor = preflight_worktree(
+                request_data, retain_descriptor=True
+            )
+            assert held_workdir_descriptor is not None
+            held_descriptors.append(held_workdir_descriptor)
+            if final_workdir != components["workdir"] or final_workdir_identity != components["workdir_identity"]:
                 raise HelperError("read-only launch worktree changed before intent")
-        final_packet = read_owner_private_regular_file(
+        held_packet_descriptor, final_packet, final_packet_identity = open_owner_private_regular_file(
             pathlib.Path(request_data["packet_file"]), MAX_PACKET_BYTES, "launch packet"
         )
-        if hashlib.sha256(final_packet).hexdigest() != components["packet_digest"]:
-            raise HelperError("launch packet changed before intent")
-        if executable_file_identity(components["transport"]["argv"][0]) != components["expected_launcher_identity"]:
-            raise HelperError("Claude executable changed before intent")
+        held_descriptors.append(held_packet_descriptor)
+        if (
+            hashlib.sha256(final_packet).hexdigest() != components["packet_digest"]
+            or final_packet_identity != components["packet_identity"]
+        ):
+            raise HelperError("launch packet object changed before intent")
+        held_executable_descriptor, _, final_launcher_identity, final_executable_object_identity = (
+            open_verified_executable(components["transport"]["argv"][0])
+        )
+        held_descriptors.append(held_executable_descriptor)
+        if (
+            final_launcher_identity != components["expected_launcher_identity"]
+            or final_executable_object_identity != components["expected_executable_object_identity"]
+        ):
+            raise HelperError("Claude executable object changed before intent")
         validate_exec_budget(
             components["transport"]["argv"], components["transport"]["environment"], platform.system()
         )
@@ -1934,6 +2198,7 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
             request_data["claude_session_id"],
             components["expected_argv_digest"],
             components["expected_launcher_identity"],
+            components["expected_executable_object_identity"],
         )
         for key, value in tmux_identity.items():
             if identity[key] != value:
@@ -1942,6 +2207,11 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
             raise HelperError("verified Claude startup workdir does not match launch plan")
         if identity["launch_command_digest"] != components["launch_command_digest"]:
             raise HelperError("verified Claude startup command does not match launch plan")
+        if platform.system() == "Darwin":
+            for directory in reversed(
+                [components["transport_path"].parent, components["transport_path"].parent.parent, store.state_dir]
+            ):
+                os.chmod(directory, 0o700)
         result = {
             "event_id": result_id,
             "kind": "launch_completed",
@@ -1952,6 +2222,8 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
         receipt["events"].append(result)
         receipt["updated_at"] = result["at"]
         store.commit(receipt_store)
+        for descriptor in held_descriptors:
+            os.close(descriptor)
         return {"outcome": "launched", **tmux_launch_identity(identity)}
 
 
@@ -1981,8 +2253,9 @@ def diagnostics() -> dict[str, Any]:
     elif system != "Darwin":
         capabilities["mutating_delegation"]["reason"] = "not proven on this platform"
     try:
-        version = run_command(["claude", "--version"])
-        help_text = run_command(["claude", "--help"])
+        probe_environment = exact_launch_environment(["GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN"])
+        version = run_command(["claude", "--version"], probe_environment)
+        help_text = run_command(["claude", "--help"], probe_environment)
         missing = [flag for flag in REQUIRED_CLAUDE_FLAGS if flag not in help_text]
         capabilities["claude_code"] = {"status": "supported" if not missing else "unavailable", "version": version[:128], "missing_flags": missing}
     except HelperError as error:
@@ -1993,7 +2266,13 @@ def diagnostics() -> dict[str, Any]:
         capabilities["tmux"] = {"status": "unavailable", "reason": str(error)[:512]}
     capacity: dict[str, Any] = {"status": "unavailable", "windows": []}
     try:
-        raw = json.loads(run_command(["codexbar", "usage", "--provider", "claude", "--format", "json"]))
+        diagnostic_environment = exact_launch_environment(["GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN"])
+        raw = json.loads(
+            run_command(
+                ["codexbar", "usage", "--provider", "claude", "--format", "json"],
+                diagnostic_environment,
+            )
+        )
         provider = raw[0] if isinstance(raw, list) and raw and isinstance(raw[0], dict) else {}
         usage = provider.get("usage", {}) if isinstance(provider.get("usage"), dict) else {}
         windows = []
@@ -2508,7 +2787,9 @@ def receipt_launch_intent(receipt: dict[str, Any]) -> dict[str, Any]:
     if len(intents) != 1:
         raise HelperError("session identity requires one immutable launch intent")
     intent = intents[0]
-    for key in ("expected_argv_digest", "expected_launcher_identity"):
+    for key in (
+        "expected_argv_digest", "expected_launcher_identity", "expected_executable_object_identity"
+    ):
         value = intent.get(key)
         if not isinstance(value, str) or not value:
             raise HelperError("launch intent lacks expected process identity")

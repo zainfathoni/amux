@@ -572,7 +572,7 @@ esac
 	recordTestLaunch(t, stateDir, binding["delegation_id"].(string), map[string]any{
 		"session": "Claude", "window": "thinker", "window_id": "@10", "pane_id": "%10",
 		"process_executable_identity": expectedLauncherIdentity,
-	}, expectedArgvDigest, expectedLauncherIdentity)
+	}, expectedArgvDigest, expectedLauncherIdentity, testExecutableObjectIdentity(t, paneExecutable))
 	wrongEnvironment := replaceEnvironment(environment, "CLAUDE_PANE_ID", "%11")
 	wrongAcquire := map[string]any{
 		"delegation_id": binding["delegation_id"], "event_id": "acquire-wrong-pane", "pane_id": "%11", "claude_session_id": sessionID,
@@ -1080,6 +1080,238 @@ func TestLaunchExecutionRejectsOverBudgetTmuxEnvironmentWithoutMutation(t *testi
 	}
 }
 
+func TestLaunchExecutionRejectsSameContentPacketReplacementBeforeIntent(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("descriptor identity requires a supported launch platform")
+	}
+	fixture := newLaunchFixture(t)
+	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receiptPath := createPlannedLaunchReceipt(t, fixture)
+	before, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packetPath := fixture.request["packet_file"].(string)
+	packet, err := os.ReadFile(packetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(t.TempDir(), "replacement-packet")
+	if err := os.WriteFile(replacement, packet, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, packetPath); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute")
+	if err == nil || !strings.Contains(stderr, "launch_command_digest does not match immutable receipt binding") {
+		t.Fatalf("same-content packet replacement error = %v, stderr %q", err, stderr)
+	}
+	after, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("same-content packet replacement changed durable state:\nbefore: %s\nafter:  %s", before, after)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.stateDir, "runtime")); !os.IsNotExist(err) {
+		t.Fatalf("same-content packet replacement created runtime state: %v", err)
+	}
+	if log, err := os.ReadFile(fixture.tmuxLog); err == nil && strings.Contains(string(log), "new-window") {
+		t.Fatalf("same-content packet replacement created a tmux window: %s", log)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
+func TestDiagnosticsSanitizeClaudeProbeEnvironment(t *testing.T) {
+	fixture := newLaunchFixture(t)
+	probeLog := filepath.Join(t.TempDir(), "diagnostic-probes.env")
+	fixture.environment = append(fixture.environment,
+		"GH_TOKEN=must-be-removed", "GITHUB_TOKEN=must-be-removed", "GITLAB_TOKEN=must-be-removed",
+		"BENIGN_SENTINEL=must-survive", "PROBE_ENV_LOG="+probeLog,
+	)
+	enableAsyncClaudeLaunch(t, fixture.binDir, &fixture.environment)
+	_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, map[string]any{}, "diagnose")
+	if err != nil {
+		t.Fatalf("diagnose: %v: %s", err, stderr)
+	}
+	probes, err := os.ReadFile(probeLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(probes)
+	probeCount := strings.Count(result, "probe=")
+	if probeCount < 2 {
+		t.Fatalf("diagnostics did not run expected Claude probes: %s", result)
+	}
+	for _, removed := range []string{"GH_TOKEN=false:", "GITHUB_TOKEN=false:", "GITLAB_TOKEN=false:"} {
+		if strings.Count(result, removed) != probeCount {
+			t.Errorf("diagnostic Claude probes exposed credential: %s", result)
+		}
+	}
+	if strings.Count(result, "BENIGN_SENTINEL=true:must-survive") != probeCount {
+		t.Errorf("diagnostic Claude probes dropped benign sentinel: %s", result)
+	}
+}
+
+func TestLaunchExecutionRejectsObjectReplacementDuringExecutePreflight(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("descriptor identity requires a supported launch platform")
+	}
+	for _, kind := range []string{"packet", "workdir", "executable"} {
+		t.Run(kind, func(t *testing.T) {
+			fixture := newLaunchFixture(t)
+			if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			enableAsyncClaudeLaunch(t, fixture.binDir, &fixture.environment)
+			marker := filepath.Join(t.TempDir(), "replace-after-preflight")
+			var target, replacement string
+			switch kind {
+			case "packet":
+				target = fixture.request["packet_file"].(string)
+				data, err := os.ReadFile(target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				replacement = filepath.Join(t.TempDir(), "packet")
+				if err := os.WriteFile(replacement, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "workdir":
+				target = fixture.request["workdir"].(string)
+				replacement = t.TempDir()
+			case "executable":
+				target = filepath.Join(fixture.binDir, "claude")
+				replacement = filepath.Join(t.TempDir(), "claude")
+				writeExecutable(t, replacement, "#!/bin/sh\nexit 99\n")
+			}
+			fixture.environment = append(fixture.environment,
+				"REPLACE_AFTER_PREFLIGHT="+marker,
+				"REPLACE_KIND="+kind,
+				"REPLACE_TARGET="+target,
+				"REPLACE_WITH="+replacement,
+			)
+			receiptPath := createPlannedLaunchReceipt(t, fixture)
+			before, err := os.ReadFile(receiptPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(marker, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute")
+			if err == nil || !strings.Contains(stderr, "changed before intent") {
+				t.Fatalf("execute-preflight %s replacement error = %v, stderr %q", kind, err, stderr)
+			}
+			after, err := os.ReadFile(receiptPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatalf("execute-preflight %s replacement changed durable state:\nbefore: %s\nafter:  %s", kind, before, after)
+			}
+			if _, err := os.Stat(filepath.Join(fixture.stateDir, "runtime")); !os.IsNotExist(err) {
+				t.Fatalf("execute-preflight %s replacement created runtime state: %v", kind, err)
+			}
+			if log, err := os.ReadFile(fixture.tmuxLog); err == nil && strings.Contains(string(log), "new-window") {
+				t.Fatalf("execute-preflight %s replacement created a tmux window: %s", kind, log)
+			} else if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestLaunchTransportRejectsExecutableAndWorkdirReplacementAfterIntent(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("descriptor transport requires a supported launch platform")
+	}
+	for _, test := range []struct {
+		name    string
+		prepare func(t *testing.T, fixture launchFixture) []string
+	}{
+		{name: "executable", prepare: func(t *testing.T, fixture launchFixture) []string {
+			wrongProcessLog := filepath.Join(t.TempDir(), "wrong-process")
+			replacement := filepath.Join(t.TempDir(), "replacement-claude")
+			writeExecutable(t, replacement, "#!/bin/sh\nprintf wrong >\"$WRONG_PROCESS_LOG\"\nsleep 10\n")
+			return []string{
+				"REPLACE_EXECUTABLE_WITH=" + replacement,
+				"CLAUDE_PATH=" + filepath.Join(fixture.binDir, "claude"),
+				"WRONG_PROCESS_LOG=" + wrongProcessLog,
+				"NO_PROCESS_LOG=" + wrongProcessLog,
+			}
+		}},
+		{name: "workdir", prepare: func(t *testing.T, fixture launchFixture) []string {
+			replacement := t.TempDir()
+			argvLog := filepath.Join(t.TempDir(), "wrong-workdir-process")
+			return []string{"REPLACE_WORKDIR_WITH=" + replacement, "ARGV_LOG=" + argvLog, "NO_PROCESS_LOG=" + argvLog}
+		}},
+		{name: "packet", prepare: func(t *testing.T, fixture launchFixture) []string {
+			packetPath := fixture.request["packet_file"].(string)
+			data, err := os.ReadFile(packetPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replacement := filepath.Join(t.TempDir(), "replacement-packet")
+			if err := os.WriteFile(replacement, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			argvLog := filepath.Join(t.TempDir(), "wrong-packet-process")
+			return []string{"REPLACE_PACKET_WITH=" + replacement, "PACKET_PATH=" + packetPath, "ARGV_LOG=" + argvLog, "NO_PROCESS_LOG=" + argvLog}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newLaunchFixture(t)
+			permitSealedRuntimeTempCleanup(t, fixture.stateDir)
+			if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			enableAsyncClaudeLaunch(t, fixture.binDir, &fixture.environment)
+			fixture.environment = append(fixture.environment, test.prepare(t, fixture)...)
+			replacementMarker := filepath.Join(t.TempDir(), "replacement-succeeded")
+			fixture.environment = append(fixture.environment, "REPLACEMENT_SUCCEEDED="+replacementMarker)
+			receiptPath := createPlannedLaunchReceipt(t, fixture)
+			_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute")
+			if err == nil || !strings.Contains(stderr, "startup was not verified") {
+				t.Fatalf("post-intent %s replacement error = %v, stderr %q", test.name, err, stderr)
+			}
+			if _, err := os.Stat(replacementMarker); err != nil {
+				t.Fatalf("post-intent %s replacement was not performed: %v", test.name, err)
+			}
+			paneOutput, err := os.ReadFile(environmentValue(t, fixture.environment, "PANE_OUTPUT"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			expectedTransportError := map[string]string{
+				"executable": "executable object changed",
+				"workdir":    "workdir object changed",
+				"packet":     "packet object changed",
+			}[test.name]
+			if !bytes.Contains(paneOutput, []byte(expectedTransportError)) {
+				t.Fatalf("post-intent %s replacement did not reach transport identity rejection: %s", test.name, paneOutput)
+			}
+			receipt, err := os.ReadFile(receiptPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(receipt, []byte(`"kind":"launch_intent"`)) || bytes.Contains(receipt, []byte(`"kind":"launch_completed"`)) {
+				t.Fatalf("post-intent replacement did not remain indeterminate: %s", receipt)
+			}
+			noProcessLog := environmentValue(t, fixture.environment, "NO_PROCESS_LOG")
+			if _, err := os.Stat(noProcessLog); !os.IsNotExist(err) {
+				t.Fatalf("post-intent replacement launched a wrong process: %v", err)
+			}
+			if log, err := os.ReadFile(fixture.tmuxLog); err == nil && strings.Contains(string(log), "kill-pane") {
+				t.Fatalf("post-intent replacement killed a process: %s", log)
+			}
+		})
+	}
+}
+
 func TestLaunchExecutionRejectsUnsafePacketFilesWithoutMutationOrPathLeakage(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("private descriptor validation requires a supported launch platform")
@@ -1117,6 +1349,7 @@ func TestLaunchExecutionRejectsUnsafePacketFilesWithoutMutationOrPathLeakage(t *
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newLaunchFixture(t)
+			permitSealedRuntimeTempCleanup(t, fixture.stateDir)
 			if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -1231,10 +1464,12 @@ func TestLaunchStartupFailureRemainsIndeterminateWithoutFalseCompletion(t *testi
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newLaunchFixture(t)
+			permitSealedRuntimeTempCleanup(t, fixture.stateDir)
 			if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			fixture.environment = append(fixture.environment, test.environment)
+			environmentLog := filepath.Join(t.TempDir(), "startup.env")
+			fixture.environment = append(fixture.environment, test.environment, "ENV_LOG="+environmentLog)
 			enableAsyncClaudeLaunch(t, fixture.binDir, &fixture.environment)
 			stdout, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "plan")
 			if err != nil {
@@ -1252,7 +1487,22 @@ func TestLaunchStartupFailureRemainsIndeterminateWithoutFalseCompletion(t *testi
 			}, "receipt", "create")
 			_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute")
 			if err == nil || !strings.Contains(stderr, "Claude startup was not verified before timeout") {
-				t.Fatalf("startup failure error = %v, stderr %q", err, stderr)
+				environment, _ := os.ReadFile(environmentLog)
+				t.Fatalf("startup failure error = %v, stderr %q, environment %q", err, stderr, environment)
+			}
+			if runtime.GOOS == "darwin" {
+				runtimeRoot := filepath.Join(fixture.stateDir, "runtime")
+				runtimeEntries, err := os.ReadDir(runtimeRoot)
+				if err != nil || len(runtimeEntries) != 1 {
+					t.Fatalf("inspect sealed runtime: entries=%v error=%v", runtimeEntries, err)
+				}
+				sealedRuntime := filepath.Join(runtimeRoot, runtimeEntries[0].Name())
+				if err := os.Rename(sealedRuntime, sealedRuntime+".replacement"); err == nil {
+					t.Fatal("indeterminate Darwin launch allowed sealed executable directory replacement")
+				}
+				if err := os.Rename(runtimeRoot, runtimeRoot+".replacement"); err == nil {
+					t.Fatal("indeterminate Darwin launch allowed sealed runtime-root replacement")
+				}
 			}
 			receiptBytes, err := os.ReadFile(filepath.Join(fixture.stateDir, "receipts.json"))
 			if err != nil {
@@ -1478,6 +1728,50 @@ type launchFixture struct {
 	dirtyAfterPreflight string
 	dirtyState          string
 	oversizedTmuxEnv    string
+}
+
+func createPlannedLaunchReceipt(t *testing.T, fixture launchFixture) string {
+	t.Helper()
+	stdout, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "plan")
+	if err != nil {
+		t.Fatalf("launch plan: %v: %s", err, stderr)
+	}
+	plan := decodeJSONMap(t, stdout)
+	binding := testBinding(fixture.request["delegation_id"].(string))
+	binding["workdir"] = fixture.request["workdir"]
+	binding["base"] = fixture.request["base"]
+	binding["packet_digest"] = plan["packet_digest"]
+	binding["launch_policy_digest"] = plan["launch_policy_digest"]
+	binding["launch_command_digest"] = plan["launch_command_digest"]
+	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "recorded", map[string]any{
+		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	return filepath.Join(fixture.stateDir, "receipts.json")
+}
+
+func environmentValue(t *testing.T, environment []string, name string) string {
+	t.Helper()
+	prefix := name + "="
+	for index := len(environment) - 1; index >= 0; index-- {
+		if strings.HasPrefix(environment[index], prefix) {
+			return strings.TrimPrefix(environment[index], prefix)
+		}
+	}
+	t.Fatalf("environment does not contain %s", name)
+	return ""
+}
+
+func permitSealedRuntimeTempCleanup(t *testing.T, stateDir string) {
+	t.Helper()
+	t.Cleanup(func() {
+		_ = os.Chmod(stateDir, 0o700)
+		_ = filepath.WalkDir(filepath.Join(stateDir, "runtime"), func(path string, entry os.DirEntry, err error) error {
+			if err == nil && entry.IsDir() {
+				_ = os.Chmod(path, 0o700)
+			}
+			return nil
+		})
+	})
 }
 
 func newLaunchFixture(t *testing.T) launchFixture {
@@ -2022,7 +2316,7 @@ func startProcessFixture(t *testing.T, name string, arguments ...string) (int, s
 	return process.Process.Pid, binary
 }
 
-func recordTestLaunch(t *testing.T, stateDir, delegationID string, identity map[string]any, expectedArgvDigest, expectedLauncherIdentity string) {
+func recordTestLaunch(t *testing.T, stateDir, delegationID string, identity map[string]any, expectedArgvDigest, expectedLauncherIdentity, expectedExecutableObjectIdentity string) {
 	t.Helper()
 	path := filepath.Join(stateDir, "receipts.json")
 	data, err := os.ReadFile(path)
@@ -2041,6 +2335,7 @@ func recordTestLaunch(t *testing.T, stateDir, delegationID string, identity map[
 		map[string]any{
 			"event_id": "launch-fixture", "kind": "launch_intent", "at": "2026-07-17T12:00:00Z",
 			"expected_argv_digest": expectedArgvDigest, "expected_launcher_identity": expectedLauncherIdentity,
+			"expected_executable_object_identity": expectedExecutableObjectIdentity,
 		},
 		map[string]any{"event_id": "amux:test-launch-result", "kind": "launch_completed", "operation_event_id": "launch-fixture", "identity": identity, "at": "2026-07-17T12:00:01Z"},
 	)
@@ -2059,15 +2354,24 @@ func nulDigest(arguments []string) string {
 
 func testExecutableIdentity(t *testing.T, path string) string {
 	t.Helper()
-	resolved, err := filepath.EvalSymlinks(path)
+	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(resolved)
+	return fmt.Sprintf("file:%d:%d", info.Sys().(*syscall.Stat_t).Dev, info.Sys().(*syscall.Stat_t).Ino)
+}
+
+func testExecutableObjectIdentity(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return fmt.Sprintf("file:%d:%d:%x", info.Sys().(*syscall.Stat_t).Dev, info.Sys().(*syscall.Stat_t).Ino, sha256.Sum256([]byte(resolved)))
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("object:%d:%d:%d:%x", info.Sys().(*syscall.Stat_t).Dev, info.Sys().(*syscall.Stat_t).Ino, info.Size(), sha256.Sum256(data))
 }
 
 func replaceEnvironment(environment []string, key, value string) []string {
@@ -2175,12 +2479,39 @@ import (
   "time"
 )
 func main() {
+  if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "--help") {
+    if path := os.Getenv("PROBE_ENV_LOG"); path != "" {
+      output, _ := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+      _, _ = fmt.Fprintf(output, "probe=%s\n", os.Args[1])
+      for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN", "BENIGN_SENTINEL"} {
+        value, present := os.LookupEnv(name)
+        _, _ = fmt.Fprintf(output, "%s=%t:%s\n", name, present, value)
+      }
+      _ = output.Close()
+    }
+  }
   if len(os.Args) > 1 && os.Args[1] == "--version" { fmt.Println("2.1.212 (Claude Code)"); return }
   if len(os.Args) > 1 && os.Args[1] == "--help" {
     fmt.Println("--allowed-tools --disable-slash-commands --disallowed-tools --mcp-config --no-chrome --permission-mode --prompt-suggestions --session-id --setting-sources --settings --strict-mcp-config --tools")
     if path := os.Getenv("DISAPPEAR_AFTER_CHECK"); path != "" { if _, err := os.Stat(path); err == nil { _ = os.Remove(path); _ = os.Remove(os.Getenv("TMUX_SESSION")) } }
     if path := os.Getenv("DIRTY_AFTER_PREFLIGHT"); path != "" { if _, err := os.Stat(path); err == nil { _ = os.Remove(path); _ = os.WriteFile(os.Getenv("DIRTY_STATE"), nil, 0600) } }
+    if path := os.Getenv("REPLACE_AFTER_PREFLIGHT"); path != "" { if _, err := os.Stat(path); err == nil {
+      _ = os.Remove(path)
+      kind := os.Getenv("REPLACE_KIND")
+      target := os.Getenv("REPLACE_TARGET")
+      replacement := os.Getenv("REPLACE_WITH")
+      if kind == "workdir" { _ = os.Rename(target, target + ".replaced") }
+      _ = os.Rename(replacement, target)
+    } }
     return
+  }
+  if path := os.Getenv("ENV_LOG"); path != "" {
+    output, _ := os.Create(path)
+    for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN", "BENIGN_SENTINEL", "STARTUP_EXIT", "SUBSTITUTE_ARGV"} {
+      value, present := os.LookupEnv(name)
+      _, _ = fmt.Fprintf(output, "%s=%t:%s\n", name, present, value)
+    }
+    _ = output.Close()
   }
   if os.Getenv("STARTUP_EXIT") == "1" { return }
   if os.Getenv("SUBSTITUTE_ARGV") == "1" && os.Getenv("SUBSTITUTE_REEXECED") == "" {
@@ -2196,14 +2527,6 @@ func main() {
   if path := os.Getenv("ARGV_LOG"); path != "" {
     output, _ := os.Create(path)
     for _, argument := range os.Args[1:] { _, _ = output.Write(append([]byte(argument), 0)) }
-    _ = output.Close()
-  }
-  if path := os.Getenv("ENV_LOG"); path != "" {
-    output, _ := os.Create(path)
-    for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN", "BENIGN_SENTINEL"} {
-      value, present := os.LookupEnv(name)
-      _, _ = fmt.Fprintf(output, "%s=%t:%s\n", name, present, value)
-    }
     _ = output.Close()
   }
   for { time.Sleep(time.Second) }
@@ -2228,6 +2551,15 @@ case "$1" in
   new-window)
     printf '%s\n' "$*" >> "$TMUX_LOG"
     for argument do start_command=$argument; done
+    replaced=0
+    if [ -n "${REPLACE_EXECUTABLE_WITH:-}" ]; then mv "$REPLACE_EXECUTABLE_WITH" "$CLAUDE_PATH"; replaced=1; fi
+    if [ -n "${REPLACE_PACKET_WITH:-}" ]; then mv "$REPLACE_PACKET_WITH" "$PACKET_PATH"; replaced=1; fi
+    if [ -n "${REPLACE_WORKDIR_WITH:-}" ]; then
+      mv "$WORKDIR" "$WORKDIR.replaced"
+      mv "$REPLACE_WORKDIR_WITH" "$WORKDIR"
+      replaced=1
+    fi
+    if [ "$replaced" = 1 ]; then printf succeeded >"$REPLACEMENT_SUCCEEDED"; fi
     /bin/sh -c "$start_command" </dev/null >"$PANE_OUTPUT" 2>&1 &
     printf '%s' "$!" > "$PANE_PID_FILE"
     printf 'Claude\tthinker\t@20\t%%20\n'

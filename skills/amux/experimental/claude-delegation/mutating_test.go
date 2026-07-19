@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMutatingCapacityDecisionUsesEveryReserveAndTightestWindow(t *testing.T) {
@@ -557,9 +558,10 @@ func TestMutatingLaunchIsAnExplicitSeparateWriterPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	environmentLog := filepath.Join(t.TempDir(), "claude.env")
+	probeEnvironmentLog := filepath.Join(t.TempDir(), "claude-probes.env")
 	fixture.environment = append(fixture.environment,
 		"GH_TOKEN=must-be-removed", "GITHUB_TOKEN=must-be-removed", "GITLAB_TOKEN=must-be-removed",
-		"BENIGN_SENTINEL=must-survive", "ENV_LOG="+environmentLog,
+		"BENIGN_SENTINEL=must-survive", "ENV_LOG="+environmentLog, "PROBE_ENV_LOG="+probeEnvironmentLog,
 	)
 	enableAsyncClaudeLaunch(t, fixture.binDir, &fixture.environment)
 	capacityRequest := map[string]any{
@@ -610,7 +612,13 @@ func TestMutatingLaunchIsAnExplicitSeparateWriterPolicy(t *testing.T) {
 		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
 	}, "receipt", "create")
 	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "launched", fixture.request, "launch", "execute")
-	environmentBytes, err := os.ReadFile(environmentLog)
+	var environmentBytes []byte
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		environmentBytes, err = os.ReadFile(environmentLog)
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,6 +630,22 @@ func TestMutatingLaunchIsAnExplicitSeparateWriterPolicy(t *testing.T) {
 	}
 	if !strings.Contains(environmentResult, "BENIGN_SENTINEL=true:must-survive") {
 		t.Errorf("mutating Claude environment dropped benign sentinel: %s", environmentResult)
+	}
+	probeEnvironmentBytes, err := os.ReadFile(probeEnvironmentLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeEnvironmentResult := string(probeEnvironmentBytes)
+	if strings.Count(probeEnvironmentResult, "probe=--version") < 2 || strings.Count(probeEnvironmentResult, "probe=--help") < 2 {
+		t.Errorf("mutating launch did not inspect both sanitized probe environments: %s", probeEnvironmentResult)
+	}
+	for _, removed := range []string{"GH_TOKEN=false:", "GITHUB_TOKEN=false:", "GITLAB_TOKEN=false:"} {
+		if strings.Count(probeEnvironmentResult, removed) < 4 {
+			t.Errorf("mutating Claude probe environment exposed credential: %s", probeEnvironmentResult)
+		}
+	}
+	if strings.Count(probeEnvironmentResult, "BENIGN_SENTINEL=true:must-survive") < 4 {
+		t.Errorf("mutating Claude probe environment dropped benign sentinel: %s", probeEnvironmentResult)
 	}
 	conflictingReplay := cloneJSONMap(t, fixture.request)
 	conflictingReplay["capacity_request"].(map[string]any)["capacity"].(map[string]any)["windows"].([]any)[0].(map[string]any)["used_percent"] = float64(21)
