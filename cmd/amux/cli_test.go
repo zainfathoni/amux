@@ -123,6 +123,76 @@ func TestParseSelectorsSupportsFixedShorthandsAndExplicitScopes(t *testing.T) {
 	}
 }
 
+func TestParseInvocationConsumesGlobalFlagTokensAsOptionValues(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantJSON   bool
+		wantDryRun bool
+		want       func(selectors) string
+		wantValue  string
+	}{
+		{
+			name:       "reported message value",
+			args:       []string{"--dry-run", "worker", "spawn", "--workspace", "demo", "--window", "test", "--workdir", "/tmp", "--message", "--json", "--idempotency-key", "demo-key"},
+			wantDryRun: true,
+			want:       func(got selectors) string { return got.Message },
+			wantValue:  "--json",
+		},
+		{
+			name:      "selector value before true trailing global",
+			args:      []string{"worker", "list", "--workspace", "--dry-run", "--json"},
+			wantJSON:  true,
+			want:      func(got selectors) string { return got.Workspace },
+			wantValue: "--dry-run",
+		},
+		{
+			name:      "inline value before true trailing global",
+			args:      []string{"worker", "list", "--workspace=--dry-run", "--json"},
+			wantJSON:  true,
+			want:      func(got selectors) string { return got.Workspace },
+			wantValue: "--dry-run",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := parseInvocation(test.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Options.JSON != test.wantJSON || got.Options.DryRun != test.wantDryRun {
+				t.Fatalf("global options = %+v, want JSON=%t DryRun=%t", got.Options, test.wantJSON, test.wantDryRun)
+			}
+			if value := test.want(got.Selectors); value != test.wantValue {
+				t.Fatalf("option value = %q, want %q", value, test.wantValue)
+			}
+		})
+	}
+}
+
+func TestParseCLIOptionsPreservesGlobalTokensForEveryCommandOptionValue(t *testing.T) {
+	for _, option := range []string{
+		"--workspace", "-w", "--window", "-W", "--workdir", "-d", "--thread", "-t",
+		"--group", "--mode", "-m", "--title-prefix", "--shelf", "--idempotency-key",
+		"--report-id", "--pane", "--status", "--issue", "--reference", "--pr", "--summary",
+		"--message", "--message-file", "--update-owner",
+	} {
+		t.Run(option, func(t *testing.T) {
+			opts, words, err := parseCLIOptions([]string{option, "--json", "--dry-run"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if opts.JSON || !opts.DryRun {
+				t.Fatalf("global options = %+v, want JSON=false DryRun=true", opts)
+			}
+			if got, want := strings.Join(words, " "), option+" --json"; got != want {
+				t.Fatalf("remaining words = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestParseInvocationRejectsContextualFlagsImplicitBulkAndPositionals(t *testing.T) {
 	for _, test := range []struct {
 		args []string
@@ -257,6 +327,38 @@ func TestExecuteJSONRejectionStillWritesExactlyOneDocument(t *testing.T) {
 	if envelope.Command != "unknown-command" {
 		t.Fatalf("JSON rejection command = %q, want %q", envelope.Command, "unknown-command")
 	}
+}
+
+func TestExecuteErrorOutputDistinguishesJSONFlagsFromOptionValues(t *testing.T) {
+	t.Run("true trailing global emits JSON", func(t *testing.T) {
+		var stdout bytes.Buffer
+		err := (app{stdout: &stdout}).execute([]string{"worker", "list", "--attach", "--no-attach", "--json"})
+		if err == nil || result.ExitCode(err) != result.ExitRejected {
+			t.Fatalf("error = %v, exit=%d", err, result.ExitCode(err))
+		}
+		var envelope result.Envelope
+		decoder := json.NewDecoder(&stdout)
+		if err := decoder.Decode(&envelope); err != nil {
+			t.Fatal(err)
+		}
+		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			t.Fatalf("JSON stdout contains more than one document: %v", err)
+		}
+		if len(envelope.Failed) != 1 || envelope.Failed[0].Error.Kind != result.ErrorRequest {
+			t.Fatalf("JSON rejection envelope = %+v", envelope)
+		}
+	})
+
+	t.Run("message value does not emit JSON", func(t *testing.T) {
+		var stdout bytes.Buffer
+		err := (app{stdout: &stdout}).execute([]string{"worker", "spawn", "--message", "--json", "--attach", "--no-attach"})
+		if err == nil || result.ExitCode(err) != result.ExitRejected {
+			t.Fatalf("error = %v, exit=%d", err, result.ExitCode(err))
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("non-global --json produced output %q", stdout.String())
+		}
+	})
 }
 
 func TestExecuteMutationLockRejectsConcurrentMigrationWithOwner(t *testing.T) {
