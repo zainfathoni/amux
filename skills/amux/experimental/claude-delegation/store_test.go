@@ -770,6 +770,171 @@ func TestLaunchExecutionRejectsDisappearedTargetSessionBeforeIntent(t *testing.T
 	}
 }
 
+func TestLaunchExecutionRejectsUntransportablePacketWithoutChangingDurableState(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("experimental Claude launch requires an exact supported process identity")
+	}
+	fixture := newLaunchFixture(t)
+	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "plan")
+	if err != nil {
+		t.Fatalf("launch plan: %v: %s", err, stderr)
+	}
+	var plan struct {
+		PacketDigest        string `json:"packet_digest"`
+		LaunchPolicyDigest  string `json:"launch_policy_digest"`
+		LaunchCommandDigest string `json:"launch_command_digest"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &plan); err != nil {
+		t.Fatal(err)
+	}
+	binding := testBinding(fixture.request["delegation_id"].(string))
+	binding["workdir"] = fixture.request["workdir"]
+	binding["base"] = fixture.request["base"]
+	binding["packet_digest"] = plan.PacketDigest
+	binding["launch_policy_digest"] = plan.LaunchPolicyDigest
+	binding["launch_command_digest"] = plan.LaunchCommandDigest
+	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "recorded", map[string]any{
+		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	receiptPath := filepath.Join(fixture.stateDir, "receipts.json")
+	before, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.request["packet_file"].(string), bytes.Repeat([]byte("x"), 262145), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute")
+	if err == nil || !strings.Contains(stderr, "launch packet must contain 1 to 262144 bytes") {
+		t.Fatalf("oversized packet execute error = %v, stderr %q", err, stderr)
+	}
+	after, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("deterministic packet rejection changed durable receipt bytes:\nbefore: %s\nafter:  %s", before, after)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.stateDir, "runtime")); !os.IsNotExist(err) {
+		t.Fatalf("deterministic packet rejection created runtime state: %v", err)
+	}
+	if log, err := os.ReadFile(fixture.tmuxLog); err == nil && strings.Contains(string(log), "new-window") {
+		t.Fatalf("deterministic packet rejection created a tmux window:\n%s", log)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
+func TestLaunchExecutionRejectsPlanIdentityMismatchBeforeIntent(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("experimental Claude launch requires an exact supported process identity")
+	}
+	fixture := newLaunchFixture(t)
+	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "plan")
+	if err != nil {
+		t.Fatalf("launch plan: %v: %s", err, stderr)
+	}
+	plan := decodeJSONMap(t, stdout)
+	binding := testBinding(fixture.request["delegation_id"].(string))
+	binding["workdir"] = fixture.request["workdir"]
+	binding["base"] = fixture.request["base"]
+	binding["packet_digest"] = plan["packet_digest"]
+	binding["launch_policy_digest"] = plan["launch_policy_digest"]
+	binding["launch_command_digest"] = plan["launch_command_digest"]
+	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "recorded", map[string]any{
+		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	receiptPath := filepath.Join(fixture.stateDir, "receipts.json")
+	before, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mismatched := cloneJSONMap(t, fixture.request)
+	mismatched["claude_session_id"] = "b65f3784-f8e7-4634-b1cb-32ce61dd3555"
+	_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, mismatched, "launch", "execute")
+	if err == nil || !strings.Contains(stderr, "launch launch_command_digest does not match immutable receipt binding") {
+		t.Fatalf("plan identity mismatch error = %v, stderr %q", err, stderr)
+	}
+	after, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("plan identity mismatch changed durable receipt bytes:\nbefore: %s\nafter:  %s", before, after)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.stateDir, "runtime")); !os.IsNotExist(err) {
+		t.Fatalf("plan identity mismatch created runtime state: %v", err)
+	}
+	if log, err := os.ReadFile(fixture.tmuxLog); err == nil && strings.Contains(string(log), "new-window") {
+		t.Fatalf("plan identity mismatch created a tmux window:\n%s", log)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
+func TestLaunchCanonicalizesRelativeClaudePathBeforeAcceptingPlan(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("experimental Claude launch requires an exact supported process identity")
+	}
+	fixture := newLaunchFixture(t)
+	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	currentDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := len(fixture.environment) - 1; index >= 0; index-- {
+		entry := fixture.environment[index]
+		if !strings.HasPrefix(entry, "PATH=") {
+			continue
+		}
+		pathEntries := strings.Split(strings.TrimPrefix(entry, "PATH="), string(os.PathListSeparator))
+		relativeBin, err := filepath.Rel(currentDir, pathEntries[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		pathEntries[0] = relativeBin
+		fixture.environment[index] = "PATH=" + strings.Join(pathEntries, string(os.PathListSeparator))
+		break
+	}
+	stdout, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "plan")
+	if err != nil {
+		t.Fatalf("launch plan with relative PATH: %v: %s", err, stderr)
+	}
+	plan := decodeJSONMap(t, stdout)
+	binding := testBinding(fixture.request["delegation_id"].(string))
+	binding["workdir"] = fixture.request["workdir"]
+	binding["base"] = fixture.request["base"]
+	binding["packet_digest"] = plan["packet_digest"]
+	binding["launch_policy_digest"] = plan["launch_policy_digest"]
+	binding["launch_command_digest"] = plan["launch_command_digest"]
+	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "recorded", map[string]any{
+		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "launched", fixture.request, "launch", "execute")
+	runtimeKey := fmt.Sprintf("%x", sha256.Sum256([]byte(fixture.request["delegation_id"].(string))))
+	transportBytes, err := os.ReadFile(filepath.Join(fixture.stateDir, "runtime", runtimeKey, "launch.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var transport struct {
+		Argv []string `json:"argv"`
+	}
+	if err := json.Unmarshal(transportBytes, &transport); err != nil {
+		t.Fatal(err)
+	}
+	if len(transport.Argv) == 0 || !filepath.IsAbs(transport.Argv[0]) {
+		t.Fatalf("transported Claude executable is not absolute: %#v", transport.Argv)
+	}
+}
+
 func TestLaunchRequestsRejectMissingOrWrongExpectedPolicyDigestBeforeProbes(t *testing.T) {
 	fixture := newLaunchFixture(t)
 	for _, test := range []struct {
@@ -1021,12 +1186,22 @@ func TestLaunchPlanAndExecutionKeepPacketOutOfReceiptAndDenyMutationTools(t *tes
 	packetEnvelope := testMessage(packetBinding, "self-contained-mcp-report", "thinker_report", map[string]any{})
 	delete(packetEnvelope, "created_at")
 	delete(packetEnvelope, "report")
-	packetBytes, err := json.Marshal(map[string]any{
+	packetValue := map[string]any{
 		"task":            "submit one correlated thinker report without follow-up input",
 		"report_envelope": packetEnvelope,
-	})
+		"padding":         "",
+	}
+	packetBytes, err := json.Marshal(packetValue)
 	if err != nil {
 		t.Fatal(err)
+	}
+	packetValue["padding"] = strings.Repeat("x", 262144-len(packetBytes))
+	packetBytes, err = json.Marshal(packetValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packetBytes) != 262144 {
+		t.Fatalf("near-maximum packet size = %d, want 262144", len(packetBytes))
 	}
 	packet := string(packetBytes)
 	if err := os.WriteFile(packetPath, packetBytes, 0o600); err != nil {
@@ -1109,10 +1284,16 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"new-window", "--permission-mode dontAsk", "--strict-mcp-config", "--tools Read,Grep,Glob", "--disallowed-tools Bash,Edit,Write,NotebookEdit,Agent,WebFetch,WebSearch,Skill", "--setting-sources ''"} {
+	for _, required := range []string{"new-window", "launch transport", "--delegation-id ../delegation-launch"} {
 		if !strings.Contains(string(log), required) {
 			t.Errorf("launch command missing %q:\n%s", required, log)
 		}
+	}
+	if bytes.Contains(log, packetBytes) || strings.Contains(string(log), packetPath) {
+		t.Fatalf("tmux command metadata leaked packet content or source path")
+	}
+	if len(log) > 16*1024 {
+		t.Fatalf("tmux command metadata is not bounded: %d bytes", len(log))
 	}
 	if strings.Count(string(log), "new-window") != 1 {
 		t.Fatalf("exact launch replay created another window:\n%s", log)
@@ -1128,6 +1309,36 @@ esac
 	encodedArgs = encodedArgs[:len(encodedArgs)-1]
 	if got := string(encodedArgs[len(encodedArgs)-1]); got != packet {
 		t.Fatalf("multiline packet argv changed:\ngot:  %q\nwant: %q", got, packet)
+	}
+	runtimeKey := fmt.Sprintf("%x", sha256.Sum256([]byte("../delegation-launch")))
+	transportPath := filepath.Join(stateDir, "runtime", runtimeKey, "launch.json")
+	transportBytes, err := os.ReadFile(transportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transportDigest := fmt.Sprintf("%x", sha256.Sum256(transportBytes))
+	var tamperedTransport map[string]any
+	if err := json.Unmarshal(transportBytes, &tamperedTransport); err != nil {
+		t.Fatal(err)
+	}
+	tamperedArgv := tamperedTransport["argv"].([]any)
+	tamperedArgv[len(tamperedArgv)-1] = "substituted packet"
+	tamperedBytes, err := json.Marshal(tamperedTransport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transportPath, tamperedBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(argvPath); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{}, "launch", "transport", "--delegation-id", "../delegation-launch", "--transport-sha256", transportDigest)
+	if err == nil || !strings.Contains(stderr, "private launch transport digest does not match launch command") {
+		t.Fatalf("tampered transport error = %v, stderr %q", err, stderr)
+	}
+	if _, err := os.Stat(argvPath); !os.IsNotExist(err) {
+		t.Fatalf("tampered transport executed fake Claude: %v", err)
 	}
 	var deliveredPacket struct {
 		ReportEnvelope map[string]any `json:"report_envelope"`
@@ -1191,7 +1402,6 @@ esac
 	if bytes.Contains(stored, []byte(packet)) {
 		t.Fatal("receipt persisted complete launch packet content")
 	}
-	runtimeKey := fmt.Sprintf("%x", sha256.Sum256([]byte("../delegation-launch")))
 	runtimeRoot := filepath.Join(stateDir, "runtime")
 	runtimeInfo, err := os.Stat(runtimeRoot)
 	if err != nil {
@@ -1200,7 +1410,7 @@ esac
 	if runtimeInfo.Mode().Perm() != 0o700 {
 		t.Errorf("runtime parent mode = %o, want 700", runtimeInfo.Mode().Perm())
 	}
-	for _, name := range []string{"mcp.json", "settings.json"} {
+	for _, name := range []string{"mcp.json", "settings.json", "launch.json"} {
 		path := filepath.Join(stateDir, "runtime", runtimeKey, name)
 		info, err := os.Stat(path)
 		if err != nil {

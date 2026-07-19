@@ -16,6 +16,7 @@ import pathlib
 import platform
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,8 @@ SCHEMA_VERSION = 1
 PROTOCOL_VERSION = 1
 MAX_STORE_BYTES = 4 * 1024 * 1024
 MAX_PACKET_BYTES = 256 * 1024
+MAX_LAUNCH_TRANSPORT_BYTES = 2 * 1024 * 1024
+MAX_TMUX_COMMAND_BYTES = 8 * 1024
 INTERNAL_EVENT_PREFIX = "amux:"
 REQUIRED_CLAUDE_FLAGS = [
     "--allowed-tools", "--disable-slash-commands", "--disallowed-tools", "--mcp-config",
@@ -1266,6 +1269,11 @@ def private_runtime_paths(store: ReceiptStore, delegation_id: str) -> tuple[path
     return runtime / "mcp.json", runtime / "settings.json"
 
 
+def private_launch_transport_path(store: ReceiptStore, delegation_id: str) -> pathlib.Path:
+    mcp_path, _ = private_runtime_paths(store, delegation_id)
+    return mcp_path.with_name("launch.json")
+
+
 def require_tmux_session(session: str) -> None:
     try:
         run_command(["tmux", "has-session", "-t", "=" + session])
@@ -1375,9 +1383,13 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         raise HelperError("launch packet must not contain NUL bytes")
     helper = pathlib.Path(__file__).resolve()
     python = pathlib.Path(sys.executable).resolve()
-    claude = shutil.which("claude")
-    if not claude:
+    claude_candidate = shutil.which("claude")
+    if not claude_candidate:
         raise HelperError("Claude Code is unavailable")
+    try:
+        claude = str(pathlib.Path(claude_candidate).resolve(strict=True))
+    except OSError as error:
+        raise HelperError(f"resolve Claude Code executable: {error}") from error
     run_command([claude, "--version"])
     help_text = run_command([claude, "--help"])
     missing_flags = [flag for flag in REQUIRED_CLAUDE_FLAGS if flag not in help_text]
@@ -1411,8 +1423,29 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         "false",
         packet_text,
     ]
-    process_argv = ["env", "-u", "GH_TOKEN", "-u", "GITHUB_TOKEN", "-u", "GITLAB_TOKEN", *argv] if mutating else argv
-    start_command = f"cd {shlex.quote(workdir)} && exec {shlex.join(process_argv)}"
+    removed_environment = ["GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN"] if mutating else []
+    transport_path = private_launch_transport_path(store, request["delegation_id"])
+    transport = {"argv": argv, "remove_environment": removed_environment, "workdir": workdir}
+    transport_bytes = encode_private_json(transport)
+    if len(transport_bytes) > MAX_LAUNCH_TRANSPORT_BYTES:
+        raise HelperError("launch packet cannot be encoded within the deterministic transport limit")
+    transport_digest = hashlib.sha256(transport_bytes).hexdigest()
+    start_command = "exec " + shlex.join(
+        [
+            str(python),
+            str(helper),
+            "--state-dir",
+            str(store.state_dir),
+            "launch",
+            "transport",
+            "--delegation-id",
+            request["delegation_id"],
+            "--transport-sha256",
+            transport_digest,
+        ]
+    )
+    if len(start_command.encode()) > MAX_TMUX_COMMAND_BYTES:
+        raise HelperError("launch command exceeds the deterministic tmux transport limit")
     mcp_config = {
         "mcpServers": {
             "amux-claude-delegation": {
@@ -1432,23 +1465,29 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         "start_command": start_command,
         "mcp_path": mcp_path,
         "settings_path": settings_path,
+        "transport_path": transport_path,
         "mcp_config": mcp_config,
         "settings": settings,
+        "transport": transport,
+        "transport_bytes": transport_bytes,
         "workflow": workflow,
         "capacity_decision_digest": decision_digest_value,
         "capacity_decision": capacity_decision if mutating else None,
     }
 
 
-def write_private_json(path: pathlib.Path, value: Any) -> None:
+def encode_private_json(value: Any) -> bytes:
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def write_private_bytes(path: pathlib.Path, payload: bytes) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
     descriptor, temporary = tempfile.mkstemp(prefix=path.name + ".tmp.", dir=path.parent)
     try:
         os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-            json.dump(value, output, sort_keys=True, separators=(",", ":"))
-            output.write("\n")
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(payload)
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
@@ -1462,6 +1501,68 @@ def write_private_json(path: pathlib.Path, value: Any) -> None:
             os.unlink(temporary)
         except FileNotFoundError:
             pass
+
+
+def write_private_json(path: pathlib.Path, value: Any) -> None:
+    write_private_bytes(path, encode_private_json(value))
+
+
+def execute_launch_transport(store: ReceiptStore, delegation_id: str, expected_digest: str) -> None:
+    protocol_id({"delegation_id": delegation_id}, "delegation_id")
+    if len(expected_digest) != 64 or any(character not in "0123456789abcdef" for character in expected_digest):
+        raise HelperError("transport_sha256 must be a lowercase SHA-256 value")
+    path = private_launch_transport_path(store, delegation_id)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise HelperError(f"open private launch transport: {error}") from error
+    with os.fdopen(descriptor, "rb") as transport_file:
+        try:
+            info = os.fstat(transport_file.fileno())
+            raw = transport_file.read(MAX_LAUNCH_TRANSPORT_BYTES + 1)
+        except OSError as error:
+            raise HelperError(f"read private launch transport: {error}") from error
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+        raise HelperError("private launch transport must be a regular owner-only file")
+    if not raw or len(raw) > MAX_LAUNCH_TRANSPORT_BYTES:
+        raise HelperError("private launch transport has an invalid size")
+    if hashlib.sha256(raw).hexdigest() != expected_digest:
+        raise HelperError("private launch transport digest does not match launch command")
+    try:
+        transport = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise HelperError("private launch transport is invalid JSON") from error
+    if not isinstance(transport, dict):
+        raise HelperError("private launch transport must be an object")
+    reject_unknown(transport, {"argv", "remove_environment", "workdir"}, "private launch transport")
+    argv = transport.get("argv")
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or len(argv) > 64
+        or any(not isinstance(argument, str) or "\x00" in argument for argument in argv)
+        or not pathlib.Path(argv[0]).is_absolute()
+    ):
+        raise HelperError("private launch transport argv is invalid")
+    removed_environment = transport.get("remove_environment")
+    if removed_environment not in ([], ["GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN"]):
+        raise HelperError("private launch transport environment policy is invalid")
+    workdir_value = transport.get("workdir")
+    if not isinstance(workdir_value, str) or not workdir_value:
+        raise HelperError("private launch transport workdir is invalid")
+    try:
+        workdir = pathlib.Path(workdir_value).resolve(strict=True)
+        os.chdir(workdir)
+    except OSError as error:
+        raise HelperError(f"enter private launch transport workdir: {error}") from error
+    environment = os.environ.copy()
+    for name in removed_environment:
+        environment.pop(name, None)
+    try:
+        os.execve(argv[0], argv, environment)
+    except OSError as error:
+        raise HelperError(f"execute private launch transport: {error}") from error
 
 
 def plan_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
@@ -1559,12 +1660,13 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
         os.chmod(runtime_root, 0o700)
         write_private_json(components["mcp_path"], components["mcp_config"])
         write_private_json(components["settings_path"], components["settings"])
+        write_private_bytes(components["transport_path"], components["transport_bytes"])
         output = run_command(
             [
                 "tmux", "new-window", "-d", "-P", "-F",
                 "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}",
                 "-t", "=" + request_data["tmux_session"] + ":",
-                "-n", request_data["tmux_window"], components["start_command"],
+                "-n", request_data["tmux_window"], "-c", components["workdir"], components["start_command"],
             ]
         )
         fields = output.split("\t")
@@ -2178,6 +2280,9 @@ def parser() -> argparse.ArgumentParser:
     launch_commands.add_parser("policy-digest")
     launch_commands.add_parser("plan")
     launch_commands.add_parser("execute")
+    transport = launch_commands.add_parser("transport")
+    transport.add_argument("--delegation-id", required=True)
+    transport.add_argument("--transport-sha256", required=True)
     capacity = commands.add_parser("capacity")
     capacity_commands = capacity.add_subparsers(dest="command", required=True)
     capacity_commands.add_parser("decide-mutating")
@@ -2194,6 +2299,9 @@ def main() -> int:
     store = ReceiptStore(arguments.state_dir.expanduser().resolve())
     if arguments.area == "mcp" and arguments.command == "serve":
         return serve_mcp(store, arguments.delegation_id)
+    if arguments.area == "launch" and arguments.command == "transport":
+        execute_launch_transport(store, arguments.delegation_id, arguments.transport_sha256)
+        raise HelperError("private launch transport returned without executing Claude")
     if arguments.area == "amp" and arguments.command == "inspect":
         print(json.dumps(inspect_amp_target(arguments.pane, arguments.origin_thread), sort_keys=True, separators=(",", ":")))
         return 0

@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -612,9 +614,28 @@ func TestMutatingLaunchIsAnExplicitSeparateWriterPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"env -u GH_TOKEN -u GITHUB_TOKEN -u GITLAB_TOKEN", "--tools Read,Grep,Glob,Bash,Edit,Write", "Bash(git push:*)", "Bash(gh:*)", "Bash(git worktree:*)"} {
-		if !strings.Contains(string(log), want) {
-			t.Errorf("mutating launch command missing %q:\n%s", want, log)
+	if strings.Contains(string(log), "--tools") || strings.Contains(string(log), "Bash(git push:*)") {
+		t.Fatalf("tmux command metadata exposed transported mutating arguments:\n%s", log)
+	}
+	runtimeKey := fmt.Sprintf("%x", sha256.Sum256([]byte(fixture.request["delegation_id"].(string))))
+	transportBytes, err := os.ReadFile(filepath.Join(fixture.stateDir, "runtime", runtimeKey, "launch.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var transport struct {
+		Argv              []string `json:"argv"`
+		RemoveEnvironment []string `json:"remove_environment"`
+	}
+	if err := json.Unmarshal(transportBytes, &transport); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(transport.RemoveEnvironment, ",") != "GH_TOKEN,GITHUB_TOKEN,GITLAB_TOKEN" {
+		t.Fatalf("mutating launch environment removal = %#v", transport.RemoveEnvironment)
+	}
+	transportedArgv := strings.Join(transport.Argv, " ")
+	for _, want := range []string{"--tools Read,Grep,Glob,Bash,Edit,Write", "Bash(git push:*)", "Bash(gh:*)", "Bash(git worktree:*)"} {
+		if !strings.Contains(transportedArgv, want) {
+			t.Errorf("mutating launch transport missing %q", want)
 		}
 	}
 }
