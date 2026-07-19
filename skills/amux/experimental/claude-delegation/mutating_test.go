@@ -2,13 +2,16 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMutatingCapacityDecisionUsesEveryReserveAndTightestWindow(t *testing.T) {
@@ -554,6 +557,13 @@ func TestMutatingLaunchIsAnExplicitSeparateWriterPolicy(t *testing.T) {
 	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	environmentLog := filepath.Join(t.TempDir(), "claude.env")
+	probeEnvironmentLog := filepath.Join(t.TempDir(), "claude-probes.env")
+	fixture.environment = append(fixture.environment,
+		"GH_TOKEN=must-be-removed", "GITHUB_TOKEN=must-be-removed", "GITLAB_TOKEN=must-be-removed",
+		"BENIGN_SENTINEL=must-survive", "ENV_LOG="+environmentLog, "PROBE_ENV_LOG="+probeEnvironmentLog,
+	)
+	enableAsyncClaudeLaunch(t, fixture.binDir, &fixture.environment)
 	capacityRequest := map[string]any{
 		"capacity": map[string]any{
 			"status": "supported", "source": "web", "confidence": "reported",
@@ -602,6 +612,41 @@ func TestMutatingLaunchIsAnExplicitSeparateWriterPolicy(t *testing.T) {
 		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
 	}, "receipt", "create")
 	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "launched", fixture.request, "launch", "execute")
+	var environmentBytes []byte
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		environmentBytes, err = os.ReadFile(environmentLog)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	environmentResult := string(environmentBytes)
+	for _, removed := range []string{"GH_TOKEN=false:", "GITHUB_TOKEN=false:", "GITLAB_TOKEN=false:"} {
+		if !strings.Contains(environmentResult, removed) {
+			t.Errorf("mutating Claude environment did not remove credential: %s", environmentResult)
+		}
+	}
+	if !strings.Contains(environmentResult, "BENIGN_SENTINEL=true:must-survive") {
+		t.Errorf("mutating Claude environment dropped benign sentinel: %s", environmentResult)
+	}
+	probeEnvironmentBytes, err := os.ReadFile(probeEnvironmentLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeEnvironmentResult := string(probeEnvironmentBytes)
+	if strings.Count(probeEnvironmentResult, "probe=--version") < 2 || strings.Count(probeEnvironmentResult, "probe=--help") < 2 {
+		t.Errorf("mutating launch did not inspect both sanitized probe environments: %s", probeEnvironmentResult)
+	}
+	for _, removed := range []string{"GH_TOKEN=false:", "GITHUB_TOKEN=false:", "GITLAB_TOKEN=false:"} {
+		if strings.Count(probeEnvironmentResult, removed) < 4 {
+			t.Errorf("mutating Claude probe environment exposed credential: %s", probeEnvironmentResult)
+		}
+	}
+	if strings.Count(probeEnvironmentResult, "BENIGN_SENTINEL=true:must-survive") < 4 {
+		t.Errorf("mutating Claude probe environment dropped benign sentinel: %s", probeEnvironmentResult)
+	}
 	conflictingReplay := cloneJSONMap(t, fixture.request)
 	conflictingReplay["capacity_request"].(map[string]any)["capacity"].(map[string]any)["windows"].([]any)[0].(map[string]any)["used_percent"] = float64(21)
 	_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, conflictingReplay, "launch", "execute")
@@ -612,9 +657,28 @@ func TestMutatingLaunchIsAnExplicitSeparateWriterPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"env -u GH_TOKEN -u GITHUB_TOKEN -u GITLAB_TOKEN", "--tools Read,Grep,Glob,Bash,Edit,Write", "Bash(git push:*)", "Bash(gh:*)", "Bash(git worktree:*)"} {
-		if !strings.Contains(string(log), want) {
-			t.Errorf("mutating launch command missing %q:\n%s", want, log)
+	if strings.Contains(string(log), "--tools") || strings.Contains(string(log), "Bash(git push:*)") {
+		t.Fatalf("tmux command metadata exposed transported mutating arguments:\n%s", log)
+	}
+	runtimeKey := fmt.Sprintf("%x", sha256.Sum256([]byte(fixture.request["delegation_id"].(string))))
+	transportBytes, err := os.ReadFile(filepath.Join(fixture.stateDir, "runtime", runtimeKey, "launch.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var transport struct {
+		Argv              []string `json:"argv"`
+		RemoveEnvironment []string `json:"remove_environment"`
+	}
+	if err := json.Unmarshal(transportBytes, &transport); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(transport.RemoveEnvironment, ",") != "GH_TOKEN,GITHUB_TOKEN,GITLAB_TOKEN" {
+		t.Fatalf("mutating launch environment removal = %#v", transport.RemoveEnvironment)
+	}
+	transportedArgv := strings.Join(transport.Argv, " ")
+	for _, want := range []string{"--tools Read,Grep,Glob,Bash,Edit,Write", "Bash(git push:*)", "Bash(gh:*)", "Bash(git worktree:*)"} {
+		if !strings.Contains(transportedArgv, want) {
+			t.Errorf("mutating launch transport missing %q", want)
 		}
 	}
 }
