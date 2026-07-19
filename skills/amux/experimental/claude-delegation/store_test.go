@@ -236,6 +236,92 @@ print("ok")
 	}
 }
 
+func TestDarwinProbeRejectsCopiedExecutableReplacementBeforeExec(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin probes execute a private copy of the verified source descriptor")
+	}
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import importlib.util, os, pathlib, sys, tempfile
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+directory = pathlib.Path(tempfile.mkdtemp())
+source = directory / "source-claude"
+wrong_marker = directory / "wrong-executed"
+wrong_script = f"#!/bin/sh\nprintf wrong > {wrong_marker}\nprintf wrong\n".encode()
+source_prefix = b"#!/bin/sh\nprintf source\n#"
+assert len(source_prefix) < len(wrong_script)
+source_script = source_prefix + b"s" * (len(wrong_script) - len(source_prefix))
+assert len(source_script) == len(wrong_script)
+source.write_bytes(source_script)
+source.chmod(0o755)
+source_descriptor, source_path, _, _ = module.open_verified_executable(source)
+probe_root = pathlib.Path(tempfile.gettempdir())
+before = set(probe_root.glob("amux-claude-probe.*"))
+original_materialize = module.materialize_executable
+replacement_performed = False
+def substitute(descriptor, output_directory, destination=None):
+    global replacement_performed
+    output = original_materialize(descriptor, output_directory, destination)
+    replacement = output_directory / "wrong-probe"
+    replacement.write_bytes(wrong_script)
+    replacement.chmod(0o500)
+    os.replace(replacement, output)
+    replacement_performed = True
+    return output
+module.materialize_executable = substitute
+seal_calls = 0
+restore_calls = 0
+retained_descriptors = []
+original_seal = module.seal_darwin_launch_container
+original_restore = module.restore_darwin_launch_container
+def observe_seal(container_descriptor, executable_descriptor):
+    global seal_calls
+    seal_calls += 1
+    original_seal(container_descriptor, executable_descriptor)
+def observe_restore(container_descriptor, executable_descriptor):
+    global restore_calls
+    restore_calls += 1
+    retained_descriptors.extend([container_descriptor, executable_descriptor])
+    original_restore(container_descriptor, executable_descriptor)
+module.seal_darwin_launch_container = observe_seal
+module.restore_darwin_launch_container = observe_restore
+try:
+    module.run_command([source_path, "--version"], {"PATH": "/usr/bin:/bin"}, source_descriptor)
+except module.HelperError as error:
+    assert "verified Claude probe executable copy changed" in str(error), error
+else:
+    raise AssertionError("replaced Darwin probe executable was accepted")
+finally:
+    os.close(source_descriptor)
+assert replacement_performed
+assert seal_calls == 0, seal_calls
+assert restore_calls == 1, restore_calls
+assert not wrong_marker.exists(), "wrong Darwin probe code executed"
+for descriptor in retained_descriptors:
+    try:
+        os.fstat(descriptor)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("Darwin probe retained descriptor was not closed")
+after = set(probe_root.glob("amux-claude-probe.*"))
+assert after == before, (before, after)
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil {
+		t.Fatalf("Darwin probe executable fixture: %v\n%s", err, output)
+	}
+	if string(output) != "ok\n" {
+		t.Fatalf("Darwin probe executable output = %q", output)
+	}
+}
+
 func TestPrivateReaderRejectsWrongEffectiveOwner(t *testing.T) {
 	t.Parallel()
 	helper, err := filepath.Abs("claude_delegation.py")

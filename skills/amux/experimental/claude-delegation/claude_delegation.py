@@ -947,44 +947,56 @@ def run_command(
     temporary_directory_descriptor: int | None = None
     if environment is not None:
         options["env"] = environment
-    if executable_fd is not None:
-        if platform.system() == "Darwin":
-            temporary_directory = pathlib.Path(tempfile.mkdtemp(prefix="amux-claude-probe."))
-            os.chmod(temporary_directory, 0o700)
-            temporary_executable = materialize_executable(executable_fd, temporary_directory)
-            temporary_executable_descriptor, _, _, _ = open_exact_verified_executable(
-                temporary_executable
-            )
-            temporary_directory_descriptor = os.open(
-                temporary_directory,
-                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-            )
-            seal_darwin_launch_container(
-                temporary_directory_descriptor, temporary_executable_descriptor
-            )
-            options["executable"] = str(temporary_executable)
-        else:
-            options["executable"] = descriptor_path(executable_fd)
-            options["pass_fds"] = (executable_fd,)
     try:
+        if executable_fd is not None:
+            if platform.system() == "Darwin":
+                source_descriptor = os.dup(executable_fd)
+                _, _, _, source_object_identity = verified_executable_descriptor(
+                    source_descriptor, "verified Claude probe source"
+                )
+                os.close(source_descriptor)
+                temporary_directory = pathlib.Path(tempfile.mkdtemp(prefix="amux-claude-probe."))
+                os.chmod(temporary_directory, 0o700)
+                temporary_executable = materialize_executable(executable_fd, temporary_directory)
+                temporary_executable_descriptor, _, _, copied_object_identity = (
+                    open_exact_verified_executable(temporary_executable)
+                )
+                temporary_directory_descriptor = os.open(
+                    temporary_directory,
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+                )
+                if (
+                    executable_content_identity(copied_object_identity)
+                    != executable_content_identity(source_object_identity)
+                ):
+                    raise HelperError("verified Claude probe executable copy changed")
+                seal_darwin_launch_container(
+                    temporary_directory_descriptor, temporary_executable_descriptor
+                )
+                options["executable"] = str(temporary_executable)
+            else:
+                options["executable"] = descriptor_path(executable_fd)
+                options["pass_fds"] = (executable_fd,)
         completed = subprocess.run(
             arguments, capture_output=True, text=True, timeout=5, check=False, **options
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise HelperError(f"run {arguments[0]}: {error}") from error
     finally:
-        if temporary_directory_descriptor is not None and temporary_executable_descriptor is not None:
-            try:
+        try:
+            if temporary_directory_descriptor is not None and temporary_executable_descriptor is not None:
                 restore_darwin_launch_container(
                     temporary_directory_descriptor, temporary_executable_descriptor
                 )
-            finally:
+        finally:
+            if temporary_executable_descriptor is not None:
                 os.close(temporary_executable_descriptor)
+            if temporary_directory_descriptor is not None:
                 os.close(temporary_directory_descriptor)
-        if temporary_executable is not None:
-            temporary_executable.unlink(missing_ok=True)
-        if temporary_directory is not None:
-            temporary_directory.rmdir()
+            if temporary_executable is not None:
+                temporary_executable.unlink(missing_ok=True)
+            if temporary_directory is not None:
+                temporary_directory.rmdir()
     if completed.returncode != 0:
         detail = completed.stderr.strip() or f"exit {completed.returncode}"
         raise HelperError(f"run {arguments[0]}: {detail}")
