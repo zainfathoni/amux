@@ -102,12 +102,32 @@ func TestInvocationPolicyIsProgressivelyDisclosedWithoutChangingClaudeRoutes(t *
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
 	for _, required := range []string{
 		"resolve-amp-invocation-policy",
-		`{"version":1,"action":"amux_spawn","mode":"medium","automatic":true}`,
-		"Exit `2` stops before `amux spawn`",
+		"MODE=medium",
+		`"mode":"%s"`,
+		"exact deterministic `allow` document",
+		"Every automatic `amux spawn` command in this reference",
+		"Exit nonzero stops before `amux spawn`",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("automatic spawn workflow is missing resolver preflight %q", required)
 		}
+	}
+	if count := strings.Count(workflow, "Run the shared automatic-spawn preflight above before this block."); count != 2 {
+		t.Errorf("automatic spawn route markers=%d, want 2 for sprawl and durable coordination", count)
+	}
+	spawnCommands := 0
+	scanLines(t, filepath.Join(root, "skills", "amux", "reference", "workflows.md"), func(lineNumber int, line string) {
+		command := commandText(line)
+		if !strings.HasPrefix(command, "amux ") || !strings.Contains(command, " spawn ") {
+			return
+		}
+		spawnCommands++
+		if !strings.Contains(command, `--mode "$MODE"`) {
+			t.Errorf("workflows.md:%d automatic spawn does not bind shared MODE: %s", lineNumber, strings.TrimSpace(line))
+		}
+	})
+	if spawnCommands != 6 {
+		t.Errorf("automatic spawn command coverage=%d, want 6", spawnCommands)
 	}
 }
 
@@ -122,7 +142,7 @@ func TestReadThreadDiscrepancyRecoveryContractStaysAligned(t *testing.T) {
 		contents := readSkillFile(t, root, relativePath)
 		for _, required := range []string{
 			"authorized `/amux` lifecycle or coordination operation",
-			"concrete discrepancy",
+			"concrete local/GitHub discrepancy",
 			"deterministic evidence",
 			"durable/local/GitHub evidence",
 			"one narrow query",
@@ -131,6 +151,33 @@ func TestReadThreadDiscrepancyRecoveryContractStaysAligned(t *testing.T) {
 			if !strings.Contains(contents, required) {
 				t.Errorf("%s is missing discrepancy-recovery contract %q", relativePath, required)
 			}
+		}
+	}
+}
+
+func TestInvocationProbeEvidenceIsReproducibleAndBounded(t *testing.T) {
+	t.Parallel()
+	probe := readSkillFile(t, repoRoot(t), filepath.Join("docs", "proposals", "issue-175-invocation-policy-probes.md"))
+	for _, required := range []string{
+		"https://ampcode.com/notes/permissions",
+		"https://ampcode.com/manual#permissions",
+		"https://ampcode.com/manual#use-a-built-in-agent",
+		"amp --settings-file \"$PROBE/settings.json\" permissions add delegate",
+		"permissions test shell_command",
+		"helper=0 cli=0",
+		"helper=1 cli=1",
+		"helper=2 cli=2",
+		"name=create_thread exit=1 stdout=No such tool: create_thread",
+		"reported/unverified",
+		"not publicly reproducible evidence",
+	} {
+		if !strings.Contains(probe, required) {
+			t.Errorf("probe evidence is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"/Users/", "used_percent", "resets_at", "T-019f"} {
+		if strings.Contains(probe, forbidden) {
+			t.Errorf("probe evidence contains private/runtime marker %q", forbidden)
 		}
 	}
 }
@@ -365,7 +412,7 @@ func TestSkillDrivenSpawnCommandsUseExplicitMedium(t *testing.T) {
 			if strings.Contains(command, "[selectors]") || strings.Contains(command, "|") {
 				return
 			}
-			if !strings.Contains(command, "--mode medium") {
+			if !strings.Contains(command, "--mode medium") && !(relativePath == filepath.Join("skills", "amux", "reference", "workflows.md") && strings.Contains(command, `--mode "$MODE"`)) {
 				t.Errorf("%s:%d spawn example omits explicit --mode medium: %s", relativePath, lineNumber, strings.TrimSpace(line))
 			}
 		})

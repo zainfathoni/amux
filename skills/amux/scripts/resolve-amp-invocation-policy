@@ -16,7 +16,7 @@ ACTION_KEYS = {
         "exact_approval",
         "target_count",
         "url_provenance",
-        "concrete_discrepancy",
+        "concrete_local_github_discrepancy",
         "deterministic_evidence_exhausted",
         "relationship_evidenced",
         "prior_queries",
@@ -44,18 +44,26 @@ CAPACITY_KEYS = {
 
 
 def result(action, decision, enforcement, reason, capability):
-    outward = decision
-    if enforcement == "observed" and decision in ("ask", "reject"):
-        outward = "would_" + decision
     return {
-        "version": 1,
         "action": action,
         "decision": decision,
-        "result": outward,
         "enforcement": enforcement,
         "reason": reason,
         "capability": capability,
         "sources": ["public"],
+    }
+
+
+def public_result(document):
+    outward = document["decision"]
+    if document["enforcement"] == "observed":
+        outward = "would_" + outward
+    return {
+        "action": document["action"],
+        "result": outward,
+        "reason": document["reason"],
+        "capability": document["capability"],
+        "sources": document["sources"],
     }
 
 
@@ -124,7 +132,7 @@ def resolve(request):
             required = BASE_KEYS | {
                 "purpose",
                 "target_count",
-                "concrete_discrepancy",
+                "concrete_local_github_discrepancy",
                 "deterministic_evidence_exhausted",
                 "relationship_evidenced",
                 "prior_queries",
@@ -137,7 +145,11 @@ def resolve(request):
                 return result(action, "reject", "observed", "discrepancy_query_exhausted", "read_thread_unproven")
             if all(
                 request.get(field) is True
-                for field in ("concrete_discrepancy", "deterministic_evidence_exhausted", "relationship_evidenced")
+                for field in (
+                    "concrete_local_github_discrepancy",
+                    "deterministic_evidence_exhausted",
+                    "relationship_evidenced",
+                )
             ):
                 return result(action, "allow", "observed", "bounded_discrepancy_query", "read_thread_unproven")
             return result(action, "reject", "observed", "discrepancy_evidence_incomplete", "read_thread_unproven")
@@ -161,13 +173,15 @@ def resolve(request):
         "reservation",
         "reserve_status",
     )
+    amount = capacity["observed_amount"]
+    valid_amount = (type(amount) is int and amount >= 0 and amount.bit_length() <= 1024) or (
+        type(amount) is float and math.isfinite(amount) and amount >= 0
+    )
     if (
         any(not isinstance(capacity[field], str) or not capacity[field] for field in string_fields)
         or type(capacity["window_minutes"]) is not int
         or capacity["window_minutes"] <= 0
-        or type(capacity["observed_amount"]) not in (int, float)
-        or not math.isfinite(capacity["observed_amount"])
-        or capacity["observed_amount"] < 0
+        or not valid_amount
     ):
         return result(action, "ask", "observed", "capacity_fields_unknown", "capacity_unproven")
     if capacity["freshness"] != "fresh" or capacity["confidence"] not in ("reported", "verified"):
@@ -182,12 +196,13 @@ def resolve(request):
 
 
 def emit(document, diagnostic=False):
-    print(json.dumps(document, sort_keys=True, separators=(",", ":")))
+    public = public_result(document)
+    print(json.dumps(public, sort_keys=True, separators=(",", ":")))
     if diagnostic:
         print(
             "amux-invocation-policy "
-            f"action={document['action']} result={document['result']} "
-            f"reason={document['reason']} capability={document['capability']}",
+            f"action={public['action']} result={public['result']} "
+            f"reason={public['reason']} capability={public['capability']}",
             file=sys.stderr,
         )
 
@@ -210,8 +225,11 @@ def main():
         emit(document, True)
         return 0
     try:
-        request = json.load(sys.stdin)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+        request = json.load(
+            sys.stdin,
+            parse_constant=lambda value: (_ for _ in ()).throw(ValueError("non-standard JSON constant")),
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
         emit(invalid(), True)
         return 2
 
