@@ -556,6 +556,12 @@ func TestMutatingLaunchIsAnExplicitSeparateWriterPolicy(t *testing.T) {
 	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	environmentLog := filepath.Join(t.TempDir(), "claude.env")
+	fixture.environment = append(fixture.environment,
+		"GH_TOKEN=must-be-removed", "GITHUB_TOKEN=must-be-removed", "GITLAB_TOKEN=must-be-removed",
+		"BENIGN_SENTINEL=must-survive", "ENV_LOG="+environmentLog,
+	)
+	enableAsyncClaudeLaunch(t, fixture.binDir, &fixture.environment)
 	capacityRequest := map[string]any{
 		"capacity": map[string]any{
 			"status": "supported", "source": "web", "confidence": "reported",
@@ -604,6 +610,19 @@ func TestMutatingLaunchIsAnExplicitSeparateWriterPolicy(t *testing.T) {
 		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
 	}, "receipt", "create")
 	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "launched", fixture.request, "launch", "execute")
+	environmentBytes, err := os.ReadFile(environmentLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	environmentResult := string(environmentBytes)
+	for _, removed := range []string{"GH_TOKEN=false:", "GITHUB_TOKEN=false:", "GITLAB_TOKEN=false:"} {
+		if !strings.Contains(environmentResult, removed) {
+			t.Errorf("mutating Claude environment did not remove credential: %s", environmentResult)
+		}
+	}
+	if !strings.Contains(environmentResult, "BENIGN_SENTINEL=true:must-survive") {
+		t.Errorf("mutating Claude environment dropped benign sentinel: %s", environmentResult)
+	}
 	conflictingReplay := cloneJSONMap(t, fixture.request)
 	conflictingReplay["capacity_request"].(map[string]any)["capacity"].(map[string]any)["windows"].([]any)[0].(map[string]any)["used_percent"] = float64(21)
 	_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, conflictingReplay, "launch", "execute")

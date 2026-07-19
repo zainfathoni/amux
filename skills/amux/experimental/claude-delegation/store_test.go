@@ -9,8 +9,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
 
@@ -68,6 +70,44 @@ print("ok")
 	}
 	if string(output) != "ok\n" {
 		t.Fatalf("Linux stat parser output = %q", output)
+	}
+}
+
+func TestPrivateReaderRejectsWrongEffectiveOwner(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import importlib.util, os, pathlib, stat, sys, tempfile, types
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+descriptor, name = tempfile.mkstemp()
+os.write(descriptor, b"packet")
+os.close(descriptor)
+os.chmod(name, 0o600)
+real_fstat = module.os.fstat
+info = os.stat(name)
+module.os.fstat = lambda descriptor: types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=module.os.geteuid() + 1)
+try:
+    module.read_owner_private_regular_file(pathlib.Path(name), 1024, "launch packet")
+except module.HelperError as error:
+    assert "owner-only regular file" in str(error)
+else:
+    raise AssertionError("wrong effective owner was accepted")
+finally:
+    module.os.fstat = real_fstat
+    os.unlink(name)
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrong-owner private reader fixture: %v\n%s", err, output)
+	}
+	if string(output) != "ok\n" {
+		t.Fatalf("wrong-owner private reader output = %q", output)
 	}
 }
 
@@ -364,7 +404,7 @@ func TestNotificationFailsClosedAndRunsOnlyAfterDurableReport(t *testing.T) {
 	stateDir := t.TempDir()
 	binDir := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "tmux.log")
-	panePID := startProcessFixture(t, "amp", "threads", "continue", "T-origin")
+	panePID, _ := startProcessFixture(t, "amp", "threads", "continue", "T-origin")
 	writeExecutable(t, filepath.Join(binDir, "tmux"), `#!/bin/sh
 set -eu
 case "$1" in
@@ -485,7 +525,10 @@ func TestParkingReverifiesExactClaudeIncarnationAfterAcknowledgement(t *testing.
 	logPath := filepath.Join(t.TempDir(), "tmux.log")
 	identityUnavailable := filepath.Join(t.TempDir(), "identity-unavailable")
 	sessionID := "550e8400-e29b-41d4-a716-446655440000"
-	panePID := startProcessFixture(t, "claude", "--session-id", sessionID, "argument with spaces", "literal'quote")
+	expectedArguments := []string{"--session-id", sessionID, "argument with spaces", "literal'quote"}
+	panePID, paneExecutable := startProcessFixture(t, "claude", expectedArguments...)
+	expectedArgvDigest := nulDigest(expectedArguments)
+	expectedLauncherIdentity := testExecutableIdentity(t, paneExecutable)
 	startCommand := "exec claude --session-id " + sessionID
 	writeExecutable(t, filepath.Join(binDir, "tmux"), `#!/bin/sh
 set -eu
@@ -528,7 +571,8 @@ esac
 	}, "receipt", "create")
 	recordTestLaunch(t, stateDir, binding["delegation_id"].(string), map[string]any{
 		"session": "Claude", "window": "thinker", "window_id": "@10", "pane_id": "%10",
-	})
+		"process_executable_identity": expectedLauncherIdentity,
+	}, expectedArgvDigest, expectedLauncherIdentity)
 	wrongEnvironment := replaceEnvironment(environment, "CLAUDE_PANE_ID", "%11")
 	wrongAcquire := map[string]any{
 		"delegation_id": binding["delegation_id"], "event_id": "acquire-wrong-pane", "pane_id": "%11", "claude_session_id": sessionID,
@@ -536,6 +580,17 @@ esac
 	_, stderr, err := runHelperEnv(t, stateDir, wrongEnvironment, wrongAcquire, "session", "acquire")
 	if err == nil || !strings.Contains(stderr, "exact pane created by this receipt") {
 		t.Fatalf("wrong launch pane acquisition error = %v, stderr %q", err, stderr)
+	}
+	substitutedPID, _ := startProcessFixture(t, "claude", "--session-id", sessionID, "dropped policy")
+	substitutedEnvironment := replaceEnvironment(environment, "PANE_PID", fmt.Sprint(substitutedPID))
+	_, stderr, err = runHelperEnv(t, stateDir, substitutedEnvironment, map[string]any{
+		"delegation_id": binding["delegation_id"], "event_id": "acquire-substituted-argv", "pane_id": "%10", "claude_session_id": sessionID,
+	}, "session", "acquire")
+	if err == nil || !strings.Contains(stderr, "argv does not match immutable launch intent") {
+		t.Fatalf("substituted argv acquisition error = %v, stderr %q", err, stderr)
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("substituted process was killed during rejected acquisition: %v", err)
 	}
 	acquire := map[string]any{
 		"delegation_id": binding["delegation_id"], "event_id": "acquire-1", "pane_id": "%10", "claude_session_id": sessionID,
@@ -770,6 +825,57 @@ func TestLaunchExecutionRejectsDisappearedTargetSessionBeforeIntent(t *testing.T
 	}
 }
 
+func TestReadOnlyLaunchRevalidatesWorktreeImmediatelyBeforeIntent(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("experimental Claude launch requires an exact supported process identity")
+	}
+	fixture := newLaunchFixture(t)
+	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "plan")
+	if err != nil {
+		t.Fatalf("launch plan: %v: %s", err, stderr)
+	}
+	plan := decodeJSONMap(t, stdout)
+	binding := testBinding(fixture.request["delegation_id"].(string))
+	binding["workdir"] = fixture.request["workdir"]
+	binding["base"] = fixture.request["base"]
+	binding["packet_digest"] = plan["packet_digest"]
+	binding["launch_policy_digest"] = plan["launch_policy_digest"]
+	binding["launch_command_digest"] = plan["launch_command_digest"]
+	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "recorded", map[string]any{
+		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	receiptPath := filepath.Join(fixture.stateDir, "receipts.json")
+	before, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.dirtyAfterPreflight, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute")
+	if err == nil || !strings.Contains(stderr, "read-only thinker worktree must be clean before launch") {
+		t.Fatalf("dirty final read-only worktree error = %v, stderr %q", err, stderr)
+	}
+	after, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("dirty read-only worktree changed receipt before intent:\nbefore: %s\nafter:  %s", before, after)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.stateDir, "runtime")); !os.IsNotExist(err) {
+		t.Fatalf("dirty read-only worktree created runtime state: %v", err)
+	}
+	if log, err := os.ReadFile(fixture.tmuxLog); err == nil && strings.Contains(string(log), "new-window") {
+		t.Fatalf("dirty read-only worktree created tmux window: %s", log)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
 func TestLaunchExecutionRejectsUntransportablePacketWithoutChangingDurableState(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("experimental Claude launch requires an exact supported process identity")
@@ -828,6 +934,240 @@ func TestLaunchExecutionRejectsUntransportablePacketWithoutChangingDurableState(
 	}
 }
 
+func TestLinuxPlanRejectsPacketBeyondProcessStringLimitWithoutMutation(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux has a kernel per-string exec limit")
+	}
+	fixture := newLaunchFixture(t)
+	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	packetSize := os.Getpagesize() * 32
+	if packetSize > 262144 {
+		t.Skip("platform process string limit exceeds the packet protocol maximum")
+	}
+	if err := os.WriteFile(fixture.request["packet_file"].(string), bytes.Repeat([]byte("x"), packetSize), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "plan")
+	if err == nil || !strings.Contains(stderr, "platform process string limit") {
+		t.Fatalf("Linux process string limit error = %v, stderr %q", err, stderr)
+	}
+	entries, err := os.ReadDir(fixture.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("Linux process string rejection mutated private state: %#v", entries)
+	}
+	if log, err := os.ReadFile(fixture.tmuxLog); err == nil && strings.Contains(string(log), "new-window") {
+		t.Fatalf("Linux process string rejection created tmux window: %s", log)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
+func TestLinuxExecutionRejectsAggregateExecBudgetWithoutChangingDurableState(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("test lowers Linux stack-backed ARG_MAX")
+	}
+	fixture := newLaunchFixture(t)
+	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.request["packet_file"].(string), bytes.Repeat([]byte("x"), 100*1024), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err := runHelperEnvWithStackLimit(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "plan")
+	if err == nil || !strings.Contains(stderr, "conservative platform process budget") {
+		t.Fatalf("aggregate plan exec budget error = %v, stderr %q", err, stderr)
+	}
+	entries, err := os.ReadDir(fixture.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("aggregate plan rejection mutated private state: %#v", entries)
+	}
+	stdout, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "plan")
+	if err != nil {
+		t.Fatalf("launch plan at normal exec budget: %v: %s", err, stderr)
+	}
+	plan := decodeJSONMap(t, stdout)
+	binding := testBinding(fixture.request["delegation_id"].(string))
+	binding["workdir"] = fixture.request["workdir"]
+	binding["base"] = fixture.request["base"]
+	binding["packet_digest"] = plan["packet_digest"]
+	binding["launch_policy_digest"] = plan["launch_policy_digest"]
+	binding["launch_command_digest"] = plan["launch_command_digest"]
+	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "recorded", map[string]any{
+		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	receiptPath := filepath.Join(fixture.stateDir, "receipts.json")
+	before, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err = runHelperEnvWithStackLimit(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute")
+	if err == nil || !strings.Contains(stderr, "conservative platform process budget") {
+		t.Fatalf("aggregate exec budget error = %v, stderr %q", err, stderr)
+	}
+	after, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("aggregate exec budget rejection changed durable receipt bytes:\nbefore: %s\nafter:  %s", before, after)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.stateDir, "runtime")); !os.IsNotExist(err) {
+		t.Fatalf("aggregate exec budget rejection created runtime state: %v", err)
+	}
+	if log, err := os.ReadFile(fixture.tmuxLog); err == nil && strings.Contains(string(log), "new-window") {
+		t.Fatalf("aggregate exec budget rejection created tmux window: %s", log)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
+func TestLaunchExecutionRejectsOverBudgetTmuxEnvironmentWithoutMutation(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("tmux launch budget requires a supported launch platform")
+	}
+	fixture := newLaunchFixture(t)
+	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "plan")
+	if err != nil {
+		t.Fatalf("launch plan: %v: %s", err, stderr)
+	}
+	plan := decodeJSONMap(t, stdout)
+	binding := testBinding(fixture.request["delegation_id"].(string))
+	binding["workdir"] = fixture.request["workdir"]
+	binding["base"] = fixture.request["base"]
+	binding["packet_digest"] = plan["packet_digest"]
+	binding["launch_policy_digest"] = plan["launch_policy_digest"]
+	binding["launch_command_digest"] = plan["launch_command_digest"]
+	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "recorded", map[string]any{
+		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	receiptPath := filepath.Join(fixture.stateDir, "receipts.json")
+	before, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.oversizedTmuxEnv, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute")
+	if err == nil || !strings.Contains(stderr, "target tmux environment exceeds") {
+		t.Fatalf("tmux environment budget error = %v, stderr %q", err, stderr)
+	}
+	after, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("tmux environment rejection changed durable receipt bytes:\nbefore: %s\nafter:  %s", before, after)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.stateDir, "runtime")); !os.IsNotExist(err) {
+		t.Fatalf("tmux environment rejection created runtime state: %v", err)
+	}
+	if log, err := os.ReadFile(fixture.tmuxLog); err == nil && strings.Contains(string(log), "new-window") {
+		t.Fatalf("tmux environment rejection created tmux window: %s", log)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
+func TestLaunchExecutionRejectsUnsafePacketFilesWithoutMutationOrPathLeakage(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("private descriptor validation requires a supported launch platform")
+	}
+	for _, test := range []struct {
+		name   string
+		create func(t *testing.T) string
+	}{
+		{name: "symlink", create: func(t *testing.T) string {
+			target := filepath.Join(t.TempDir(), "target-packet")
+			if err := os.WriteFile(target, []byte("packet"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "private-packet-link")
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+		{name: "fifo", create: func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "private-packet-fifo")
+			if err := syscall.Mkfifo(path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+		{name: "device", create: func(t *testing.T) string { return "/dev/null" }},
+		{name: "wrong mode", create: func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "private-packet-mode")
+			if err := os.WriteFile(path, []byte("packet"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newLaunchFixture(t)
+			if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stdout, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "plan")
+			if err != nil {
+				t.Fatalf("launch plan: %v: %s", err, stderr)
+			}
+			plan := decodeJSONMap(t, stdout)
+			binding := testBinding(fixture.request["delegation_id"].(string))
+			binding["workdir"] = fixture.request["workdir"]
+			binding["base"] = fixture.request["base"]
+			binding["packet_digest"] = plan["packet_digest"]
+			binding["launch_policy_digest"] = plan["launch_policy_digest"]
+			binding["launch_command_digest"] = plan["launch_command_digest"]
+			assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "recorded", map[string]any{
+				"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+			}, "receipt", "create")
+			receiptPath := filepath.Join(fixture.stateDir, "receipts.json")
+			before, err := os.ReadFile(receiptPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			unsafePath := test.create(t)
+			request := cloneJSONMap(t, fixture.request)
+			request["packet_file"] = unsafePath
+			_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, request, "launch", "execute")
+			if err == nil || (!strings.Contains(stderr, "launch packet is unavailable or unsafe") && !strings.Contains(stderr, "launch packet must be one owner-only regular file")) {
+				t.Fatalf("unsafe packet error = %v, stderr %q", err, stderr)
+			}
+			if strings.Contains(stderr, unsafePath) {
+				t.Fatalf("unsafe packet error leaked private path: %s", stderr)
+			}
+			after, err := os.ReadFile(receiptPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatalf("unsafe packet changed durable receipt bytes:\nbefore: %s\nafter:  %s", before, after)
+			}
+			if _, err := os.Stat(filepath.Join(fixture.stateDir, "runtime")); !os.IsNotExist(err) {
+				t.Fatalf("unsafe packet created runtime state: %v", err)
+			}
+			if log, err := os.ReadFile(fixture.tmuxLog); err == nil && strings.Contains(string(log), "new-window") {
+				t.Fatalf("unsafe packet created tmux window: %s", log)
+			} else if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestLaunchExecutionRejectsPlanIdentityMismatchBeforeIntent(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("experimental Claude launch requires an exact supported process identity")
@@ -878,6 +1218,64 @@ func TestLaunchExecutionRejectsPlanIdentityMismatchBeforeIntent(t *testing.T) {
 	}
 }
 
+func TestLaunchStartupFailureRemainsIndeterminateWithoutFalseCompletion(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("experimental Claude launch requires an exact supported process identity")
+	}
+	for _, test := range []struct {
+		name        string
+		environment string
+	}{
+		{name: "transport exits before Claude startup", environment: "STARTUP_EXIT=1"},
+		{name: "same session drops policy argv", environment: "SUBSTITUTE_ARGV=1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newLaunchFixture(t)
+			if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fixture.environment = append(fixture.environment, test.environment)
+			enableAsyncClaudeLaunch(t, fixture.binDir, &fixture.environment)
+			stdout, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "plan")
+			if err != nil {
+				t.Fatalf("launch plan: %v: %s", err, stderr)
+			}
+			plan := decodeJSONMap(t, stdout)
+			binding := testBinding(fixture.request["delegation_id"].(string))
+			binding["workdir"] = fixture.request["workdir"]
+			binding["base"] = fixture.request["base"]
+			binding["packet_digest"] = plan["packet_digest"]
+			binding["launch_policy_digest"] = plan["launch_policy_digest"]
+			binding["launch_command_digest"] = plan["launch_command_digest"]
+			assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "recorded", map[string]any{
+				"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+			}, "receipt", "create")
+			_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute")
+			if err == nil || !strings.Contains(stderr, "Claude startup was not verified before timeout") {
+				t.Fatalf("startup failure error = %v, stderr %q", err, stderr)
+			}
+			receiptBytes, err := os.ReadFile(filepath.Join(fixture.stateDir, "receipts.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(receiptBytes, []byte(`"kind":"launch_intent"`)) || bytes.Contains(receiptBytes, []byte(`"kind":"launch_completed"`)) {
+				t.Fatalf("startup failure did not remain indeterminate: %s", receiptBytes)
+			}
+			_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute")
+			if err == nil || !strings.Contains(stderr, "launch outcome is indeterminate") {
+				t.Fatalf("startup failure replay error = %v, stderr %q", err, stderr)
+			}
+			log, err := os.ReadFile(fixture.tmuxLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(log, []byte("new-window")) || bytes.Contains(log, []byte("kill-pane")) {
+				t.Fatalf("startup failure tmux mutations = %s", log)
+			}
+		})
+	}
+}
+
 func TestLaunchCanonicalizesRelativeClaudePathBeforeAcceptingPlan(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("experimental Claude launch requires an exact supported process identity")
@@ -886,6 +1284,7 @@ func TestLaunchCanonicalizesRelativeClaudePathBeforeAcceptingPlan(t *testing.T) 
 	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	enableAsyncClaudeLaunch(t, fixture.binDir, &fixture.environment)
 	currentDir, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -1070,6 +1469,7 @@ func TestLaunchPolicyDigestCanFinalizeSelfContainedPacketBeforePlan(t *testing.T
 
 type launchFixture struct {
 	stateDir            string
+	binDir              string
 	environment         []string
 	request             map[string]any
 	tmuxLog             string
@@ -1077,6 +1477,7 @@ type launchFixture struct {
 	disappearAfterCheck string
 	dirtyAfterPreflight string
 	dirtyState          string
+	oversizedTmuxEnv    string
 }
 
 func newLaunchFixture(t *testing.T) launchFixture {
@@ -1096,6 +1497,7 @@ func newLaunchFixture(t *testing.T) launchFixture {
 	disappearAfterCheck := filepath.Join(t.TempDir(), "disappear-after-check")
 	dirtyAfterPreflight := filepath.Join(t.TempDir(), "dirty-after-preflight")
 	dirtyState := filepath.Join(t.TempDir(), "dirty-state")
+	oversizedTmuxEnv := filepath.Join(t.TempDir(), "oversized-tmux-environment")
 	base := "0123456789abcdef0123456789abcdef01234567"
 	writeExecutable(t, filepath.Join(binDir, "git"), `#!/bin/sh
 set -eu
@@ -1122,6 +1524,11 @@ if [ "$1" = "has-session" ]; then
   test -e "$TMUX_SESSION"
   exit 0
 fi
+if [ "$1" = "show-environment" ]; then
+  if [ -e "$OVERSIZED_TMUX_ENV" ]; then python3 -c 'print("OVERSIZED=" + "x" * (3 * 1024 * 1024))'; fi
+  exit 0
+fi
+if [ "$1" = "show-options" ]; then printf '%s\n' '/bin/sh'; exit 0; fi
 printf '%s\n' "$*" >> "$TMUX_LOG"
 if [ "$1" = "new-window" ]; then
   test -e "$TMUX_SESSION"
@@ -1149,7 +1556,7 @@ esac
 	environment := append(os.Environ(),
 		"PATH="+binDir+":"+os.Getenv("PATH"), "WORKDIR="+workdir, "BASE="+base,
 		"TMUX_LOG="+tmuxLog, "TMUX_SESSION="+session, "DISAPPEAR_AFTER_CHECK="+disappearAfterCheck,
-		"DIRTY_AFTER_PREFLIGHT="+dirtyAfterPreflight, "DIRTY_STATE="+dirtyState,
+		"DIRTY_AFTER_PREFLIGHT="+dirtyAfterPreflight, "DIRTY_STATE="+dirtyState, "OVERSIZED_TMUX_ENV="+oversizedTmuxEnv,
 	)
 	request := map[string]any{
 		"delegation_id": "delegation-session-preflight", "event_id": "launch-session-preflight", "workdir": workdir,
@@ -1158,9 +1565,9 @@ esac
 		"expected_launch_policy_digest": "bf1c109e7270e8d6a37a3a1a30198172bc23472be0cc29ca84cf6a3fef927445",
 	}
 	return launchFixture{
-		stateDir: stateDir, environment: environment, request: request, tmuxLog: tmuxLog,
+		stateDir: stateDir, binDir: binDir, environment: environment, request: request, tmuxLog: tmuxLog,
 		session: session, disappearAfterCheck: disappearAfterCheck,
-		dirtyAfterPreflight: dirtyAfterPreflight, dirtyState: dirtyState,
+		dirtyAfterPreflight: dirtyAfterPreflight, dirtyState: dirtyState, oversizedTmuxEnv: oversizedTmuxEnv,
 	}
 }
 
@@ -1195,13 +1602,17 @@ func TestLaunchPlanAndExecutionKeepPacketOutOfReceiptAndDenyMutationTools(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	packetValue["padding"] = strings.Repeat("x", 262144-len(packetBytes))
+	packetSize := 80 * 1024
+	if runtime.GOOS == "darwin" {
+		packetSize = 262144
+	}
+	packetValue["padding"] = strings.Repeat("x", packetSize-len(packetBytes))
 	packetBytes, err = json.Marshal(packetValue)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(packetBytes) != 262144 {
-		t.Fatalf("near-maximum packet size = %d, want 262144", len(packetBytes))
+	if len(packetBytes) != packetSize {
+		t.Fatalf("large packet size = %d, want %d", len(packetBytes), packetSize)
 	}
 	packet := string(packetBytes)
 	if err := os.WriteFile(packetPath, packetBytes, 0o600); err != nil {
@@ -1219,35 +1630,10 @@ case "$*" in
   *) exit 2 ;;
 esac
 `)
-	writeExecutable(t, filepath.Join(binDir, "tmux"), `#!/bin/sh
-set -eu
-if [ "$1" = "-V" ]; then
-  printf '%s\n' 'tmux 3.7b'
-  exit 0
-fi
-if [ "$1" = "has-session" ]; then
-  test "$2" = "-t"
-  test "$3" = "=Claude"
-  exit 0
-fi
-printf '%s\n' "$*" >> "$TMUX_LOG"
-for argument do start_command=$argument; done
-/bin/sh -c "$start_command"
-printf '%s\n' 'Claude	thinker	@20	%20'
-`)
-	writeExecutable(t, filepath.Join(binDir, "claude"), `#!/bin/sh
-case "$1" in
-  --version) printf '%s\n' '2.1.212 (Claude Code)' ;;
-  --help) printf '%s\n' '--allowed-tools --disable-slash-commands --disallowed-tools --mcp-config --no-chrome --permission-mode --prompt-suggestions --session-id --setting-sources --settings --strict-mcp-config --tools' ;;
-  *)
-    : > "$ARGV_LOG"
-    for argument do printf '%s\0' "$argument" >> "$ARGV_LOG"; done
-    ;;
-esac
-`)
 	environment := append(os.Environ(),
 		"PATH="+binDir+":"+os.Getenv("PATH"), "WORKDIR="+workdir, "BASE="+base, "TMUX_LOG="+logPath, "ARGV_LOG="+argvPath,
 	)
+	enableAsyncClaudeLaunch(t, binDir, &environment)
 	request := map[string]any{
 		"delegation_id": "../delegation-launch", "event_id": "launch-1", "workdir": workdir, "packet_file": packetPath,
 		"tmux_session": "Claude", "tmux_window": "thinker", "claude_session_id": "550e8400-e29b-41d4-a716-446655440000",
@@ -1255,24 +1641,6 @@ esac
 		"expected_launch_policy_digest": "bf1c109e7270e8d6a37a3a1a30198172bc23472be0cc29ca84cf6a3fef927445",
 	}
 	stdout, stderr, err := runHelperEnv(t, stateDir, environment, request, "launch", "plan")
-	if runtime.GOOS == "linux" {
-		if err == nil || !strings.Contains(stderr, "launch packet exceeds the Linux process argument limit") {
-			t.Fatalf("near-maximum Linux packet plan error = %v, stderr %q", err, stderr)
-		}
-		entries, readErr := os.ReadDir(stateDir)
-		if readErr != nil {
-			t.Fatal(readErr)
-		}
-		if len(entries) != 0 {
-			t.Fatalf("rejected near-maximum Linux packet mutated private state: %#v", entries)
-		}
-		if log, readErr := os.ReadFile(logPath); readErr == nil && strings.Contains(string(log), "new-window") {
-			t.Fatalf("rejected near-maximum Linux packet created a tmux window:\n%s", log)
-		} else if readErr != nil && !os.IsNotExist(readErr) {
-			t.Fatal(readErr)
-		}
-		return
-	}
 	if err != nil {
 		t.Fatalf("launch plan: %v: %s", err, stderr)
 	}
@@ -1280,9 +1648,11 @@ esac
 		t.Fatalf("launch plan exposed packet content: %s", stdout)
 	}
 	var plan struct {
-		PacketDigest        string `json:"packet_digest"`
-		LaunchPolicyDigest  string `json:"launch_policy_digest"`
-		LaunchCommandDigest string `json:"launch_command_digest"`
+		PacketDigest             string `json:"packet_digest"`
+		LaunchPolicyDigest       string `json:"launch_policy_digest"`
+		LaunchCommandDigest      string `json:"launch_command_digest"`
+		ExpectedArgvDigest       string `json:"expected_argv_digest"`
+		ExpectedLauncherIdentity string `json:"expected_launcher_identity"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &plan); err != nil {
 		t.Fatal(err)
@@ -1298,6 +1668,15 @@ esac
 	}, "receipt", "create")
 	assertHelperOutcomeEnv(t, stateDir, environment, "launched", request, "launch", "execute")
 	assertHelperOutcomeEnv(t, stateDir, environment, "duplicate", request, "launch", "execute")
+	receiptBytes, err := os.ReadFile(filepath.Join(stateDir, "receipts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{plan.ExpectedArgvDigest, plan.ExpectedLauncherIdentity} {
+		if expected == "" || !bytes.Contains(receiptBytes, []byte(expected)) {
+			t.Fatalf("launch intent did not preserve expected process identity %q: %s", expected, receiptBytes)
+		}
+	}
 	log, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
@@ -1351,12 +1730,49 @@ esac
 	if err := os.Remove(argvPath); err != nil {
 		t.Fatal(err)
 	}
-	_, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{}, "launch", "transport", "--delegation-id", "../delegation-launch", "--transport-sha256", transportDigest)
+	_, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{}, "launch", "transport", "--delegation-id", "../delegation-launch", "--transport-sha256", transportDigest, "--tmux-environment-sha256", strings.Repeat("0", 64))
 	if err == nil || !strings.Contains(stderr, "private launch transport digest does not match launch command") {
 		t.Fatalf("tampered transport error = %v, stderr %q", err, stderr)
 	}
 	if _, err := os.Stat(argvPath); !os.IsNotExist(err) {
 		t.Fatalf("tampered transport executed fake Claude: %v", err)
+	}
+	if err := os.WriteFile(transportPath, transportBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(transportPath, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{}, "launch", "transport", "--delegation-id", "../delegation-launch", "--transport-sha256", transportDigest, "--tmux-environment-sha256", strings.Repeat("0", 64))
+	if err == nil || !strings.Contains(stderr, "private launch transport must be one owner-only regular file") {
+		t.Fatalf("wrong-mode transport error = %v, stderr %q", err, stderr)
+	}
+	if strings.Contains(stderr, transportPath) {
+		t.Fatalf("wrong-mode transport error leaked private path: %s", stderr)
+	}
+	var invalidSchema map[string]any
+	if err := json.Unmarshal(transportBytes, &invalidSchema); err != nil {
+		t.Fatal(err)
+	}
+	invalidSchema["unexpected_private_field"] = true
+	invalidSchemaBytes, err := json.Marshal(invalidSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidSchemaBytes = append(invalidSchemaBytes, '\n')
+	invalidSchemaDigest := fmt.Sprintf("%x", sha256.Sum256(invalidSchemaBytes))
+	if err := os.WriteFile(transportPath, invalidSchemaBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(transportPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{}, "launch", "transport", "--delegation-id", "../delegation-launch", "--transport-sha256", invalidSchemaDigest, "--tmux-environment-sha256", strings.Repeat("0", 64))
+	if err == nil || !strings.Contains(stderr, "private launch transport contains unknown fields") {
+		t.Fatalf("invalid-schema transport error = %v, stderr %q", err, stderr)
+	}
+	if err := os.WriteFile(transportPath, transportBytes, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	var deliveredPacket struct {
 		ReportEnvelope map[string]any `json:"report_envelope"`
@@ -1580,10 +1996,10 @@ func testMessage(binding map[string]any, messageID, kind string, payload map[str
 	}
 }
 
-func startProcessFixture(t *testing.T, name string, arguments ...string) int {
+func startProcessFixture(t *testing.T, name string, arguments ...string) (int, string) {
 	t.Helper()
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
-		return 5252
+		return 5252, "/usr/local/bin/claude"
 	}
 	dir := t.TempDir()
 	source := filepath.Join(dir, "main.go")
@@ -1603,10 +2019,10 @@ func startProcessFixture(t *testing.T, name string, arguments ...string) int {
 		_ = process.Process.Kill()
 		_ = process.Wait()
 	})
-	return process.Process.Pid
+	return process.Process.Pid, binary
 }
 
-func recordTestLaunch(t *testing.T, stateDir, delegationID string, identity map[string]any) {
+func recordTestLaunch(t *testing.T, stateDir, delegationID string, identity map[string]any, expectedArgvDigest, expectedLauncherIdentity string) {
 	t.Helper()
 	path := filepath.Join(stateDir, "receipts.json")
 	data, err := os.ReadFile(path)
@@ -1622,7 +2038,10 @@ func recordTestLaunch(t *testing.T, stateDir, delegationID string, identity map[
 		t.Fatal("test receipt identity mismatch")
 	}
 	receipt["events"] = append(receipt["events"].([]any),
-		map[string]any{"event_id": "launch-fixture", "kind": "launch_intent", "at": "2026-07-17T12:00:00Z"},
+		map[string]any{
+			"event_id": "launch-fixture", "kind": "launch_intent", "at": "2026-07-17T12:00:00Z",
+			"expected_argv_digest": expectedArgvDigest, "expected_launcher_identity": expectedLauncherIdentity,
+		},
 		map[string]any{"event_id": "amux:test-launch-result", "kind": "launch_completed", "operation_event_id": "launch-fixture", "identity": identity, "at": "2026-07-17T12:00:01Z"},
 	)
 	updated, err := json.Marshal(store)
@@ -1632,6 +2051,23 @@ func recordTestLaunch(t *testing.T, stateDir, delegationID string, identity map[
 	if err := os.WriteFile(path, updated, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func nulDigest(arguments []string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(arguments, "\x00"))))
+}
+
+func testExecutableIdentity(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("file:%d:%d:%x", info.Sys().(*syscall.Stat_t).Dev, info.Sys().(*syscall.Stat_t).Ino, sha256.Sum256([]byte(resolved)))
 }
 
 func replaceEnvironment(environment []string, key, value string) []string {
@@ -1699,11 +2135,126 @@ func runHelperEnv(t *testing.T, stateDir string, environment []string, input map
 	return stdout.String(), stderr.String(), err
 }
 
+func runHelperEnvWithStackLimit(t *testing.T, stateDir string, environment []string, input map[string]any, args ...string) (string, string, error) {
+	t.Helper()
+	payload, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := append([]string{"python3", helper, "--state-dir", stateDir}, args...)
+	command := exec.Command("/bin/sh", append([]string{"-c", `ulimit -s 256; exec "$@"`, "sh"}, arguments...)...)
+	command.Env = environment
+	command.Stdin = bytes.NewReader(payload)
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err = command.Run()
+	return stdout.String(), stderr.String(), err
+}
+
 func writeExecutable(t *testing.T, path, contents string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func enableAsyncClaudeLaunch(t *testing.T, binDir string, environment *[]string) {
+	t.Helper()
+	claudePath := filepath.Join(binDir, "claude")
+	source := filepath.Join(t.TempDir(), "fake_claude.go")
+	program := `package main
+import (
+  "fmt"
+  "os"
+  "syscall"
+  "time"
+)
+func main() {
+  if len(os.Args) > 1 && os.Args[1] == "--version" { fmt.Println("2.1.212 (Claude Code)"); return }
+  if len(os.Args) > 1 && os.Args[1] == "--help" {
+    fmt.Println("--allowed-tools --disable-slash-commands --disallowed-tools --mcp-config --no-chrome --permission-mode --prompt-suggestions --session-id --setting-sources --settings --strict-mcp-config --tools")
+    if path := os.Getenv("DISAPPEAR_AFTER_CHECK"); path != "" { if _, err := os.Stat(path); err == nil { _ = os.Remove(path); _ = os.Remove(os.Getenv("TMUX_SESSION")) } }
+    if path := os.Getenv("DIRTY_AFTER_PREFLIGHT"); path != "" { if _, err := os.Stat(path); err == nil { _ = os.Remove(path); _ = os.WriteFile(os.Getenv("DIRTY_STATE"), nil, 0600) } }
+    return
+  }
+  if os.Getenv("STARTUP_EXIT") == "1" { return }
+  if os.Getenv("SUBSTITUTE_ARGV") == "1" && os.Getenv("SUBSTITUTE_REEXECED") == "" {
+    filtered := []string{os.Args[0]}
+    for index := 1; index < len(os.Args); index++ {
+      if os.Args[index] == "--disallowed-tools" && index + 1 < len(os.Args) { index++; continue }
+      filtered = append(filtered, os.Args[index])
+    }
+    _ = os.Setenv("SUBSTITUTE_REEXECED", "1")
+    _ = syscall.Exec(os.Args[0], filtered, os.Environ())
+    return
+  }
+  if path := os.Getenv("ARGV_LOG"); path != "" {
+    output, _ := os.Create(path)
+    for _, argument := range os.Args[1:] { _, _ = output.Write(append([]byte(argument), 0)) }
+    _ = output.Close()
+  }
+  if path := os.Getenv("ENV_LOG"); path != "" {
+    output, _ := os.Create(path)
+    for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN", "BENIGN_SENTINEL"} {
+      value, present := os.LookupEnv(name)
+      _, _ = fmt.Fprintf(output, "%s=%t:%s\n", name, present, value)
+    }
+    _ = output.Close()
+  }
+  for { time.Sleep(time.Second) }
+}
+`
+	if err := os.WriteFile(source, []byte(program), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("go", "build", "-o", claudePath, source)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build async Claude fixture: %v\n%s", err, output)
+	}
+	panePID := filepath.Join(t.TempDir(), "pane.pid")
+	paneOutput := filepath.Join(t.TempDir(), "pane.output")
+	writeExecutable(t, filepath.Join(binDir, "tmux"), `#!/bin/sh
+set -eu
+case "$1" in
+  -V) printf '%s\n' 'tmux 3.7b' ;;
+  has-session) test "$2" = "-t"; test "$3" = "=Claude"; test ! -n "${TMUX_SESSION:-}" || test -e "$TMUX_SESSION" ;;
+  show-environment) exit 0 ;;
+  show-options) printf '%s\n' '/bin/sh' ;;
+  new-window)
+    printf '%s\n' "$*" >> "$TMUX_LOG"
+    for argument do start_command=$argument; done
+    /bin/sh -c "$start_command" </dev/null >"$PANE_OUTPUT" 2>&1 &
+    printf '%s' "$!" > "$PANE_PID_FILE"
+    printf 'Claude\tthinker\t@20\t%%20\n'
+    ;;
+  display-message)
+    test -s "$PANE_PID_FILE"
+    pane_pid=$(cat "$PANE_PID_FILE")
+    kill -0 "$pane_pid"
+    start_command=$(sed -n '1s/^.* -c [^ ]* //p' "$TMUX_LOG")
+    printf 'Claude\tthinker\t@20\t%%20\t%s\t%s\tclaude\t%s\n' "$pane_pid" "$WORKDIR" "$start_command"
+    ;;
+  kill-pane) pane_pid=$(cat "$PANE_PID_FILE"); kill "$pane_pid"; printf '%s\n' "$*" >> "$TMUX_LOG" ;;
+  list-panes) test -s "$PANE_PID_FILE" && printf '%%20\n' ;;
+  *) exit 2 ;;
+esac
+`)
+	*environment = append(*environment, "PANE_PID_FILE="+panePID, "PANE_OUTPUT="+paneOutput)
+	t.Cleanup(func() {
+		data, err := os.ReadFile(panePID)
+		if err != nil {
+			return
+		}
+		pid, err := strconv.Atoi(string(data))
+		if err == nil {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
 }
 
 func cloneJSONMap(t *testing.T, input map[string]any) map[string]any {
