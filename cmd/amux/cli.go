@@ -457,6 +457,14 @@ func parseCLIOptions(args []string) (cliOptions, []string, error) {
 			words = append(words, arg)
 			continue
 		}
+		if commandOptionRequiresValue(arg) {
+			words = append(words, arg)
+			if i+1 < len(args) {
+				i++
+				words = append(words, args[i])
+			}
+			continue
+		}
 		switch arg {
 		case "--json", "-j":
 			opts.JSON = true
@@ -521,6 +529,22 @@ func parseCLIOptions(args []string) (cliOptions, []string, error) {
 		}
 	}
 	return opts, words, nil
+}
+
+func commandOptionRequiresValue(arg string) bool {
+	name, _, hasInline := splitFlag(arg)
+	if hasInline {
+		return false
+	}
+	switch name {
+	case "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--thread", "-t",
+		"--group", "--mode", "-m", "--title-prefix", "--shelf", "--idempotency-key",
+		"--report-id", "--pane", "--status", "--issue", "--reference", "--pr", "--summary",
+		"--message", "--message-file", "--update-owner":
+		return true
+	default:
+		return false
+	}
 }
 
 func resolveCommand(words []string) (*commandSpec, []string, []string, error) {
@@ -1168,9 +1192,14 @@ func (a app) printCommandHelp(command *commandSpec) {
 }
 
 func jsonRequested(args []string) bool {
-	for _, arg := range args {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		if arg == "--" {
 			return false
+		}
+		if commandOptionRequiresValue(arg) || arg == "--config-dir" || arg == "-c" || arg == "--terminal-launcher" {
+			i++
+			continue
 		}
 		if arg == "--json" || arg == "-j" {
 			return true
