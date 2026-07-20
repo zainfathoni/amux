@@ -46,6 +46,7 @@ REQUIRED_CLAUDE_FLAGS = [
     "--no-chrome", "--permission-mode", "--prompt-suggestions", "--session-id",
     "--setting-sources", "--settings", "--strict-mcp-config", "--tools",
 ]
+APPROVED_READ_ONLY_MODELS = {"claude-fable-5"}
 
 
 class HelperError(Exception):
@@ -636,6 +637,29 @@ def protocol_id(value: dict[str, Any], key: str, limit: int = 256) -> str:
     return candidate
 
 
+def optional_read_only_model(value: dict[str, Any]) -> str | None:
+    if "model" not in value:
+        return None
+    model = value["model"]
+    if not isinstance(model, str) or model not in APPROVED_READ_ONLY_MODELS:
+        raise HelperError("model must be an exact approved read-only model identifier")
+    return model
+
+
+def help_exposes_option(help_text: str, option: str) -> bool:
+    for line in help_text.splitlines():
+        stripped = line.lstrip()
+        if not stripped.startswith("-"):
+            continue
+        for token in stripped.split():
+            candidate = token.rstrip(",")
+            if candidate == option or candidate.startswith(option + "="):
+                return True
+            if not token.startswith("-"):
+                break
+    return False
+
+
 def internal_event_id(kind: str, event_id: str) -> str:
     return f"{INTERNAL_EVENT_PREFIX}{kind}:{hashlib.sha256(event_id.encode()).hexdigest()}"
 
@@ -669,15 +693,18 @@ def validate_binding(value: Any) -> dict[str, Any]:
     }
     if value.get("producer_role") == "mutating_delegate":
         allowed |= mutating_fields
+    elif value.get("producer_role") == "thinker":
+        allowed.add("model")
     reject_unknown(value, allowed, "binding")
     if value.get("protocol_version") != PROTOCOL_VERSION:
         raise HelperError("unsupported protocol_version")
-    for key in allowed - {"protocol_version"}:
+    for key in allowed - {"protocol_version", "model"}:
         required_string(value, key, 2048 if key == "workdir" else 256)
     protocol_id(value, "delegation_id")
     if value["producer_role"] == "thinker":
         if value["authority"] != "read_only":
             raise HelperError("thinker authority must remain read_only")
+        optional_read_only_model(value)
     elif value["producer_role"] == "mutating_delegate":
         if value["authority"] != "exclusive_writer":
             raise HelperError("mutating delegate authority must be exclusive_writer")
@@ -1580,15 +1607,18 @@ def validate_launch_request(value: Any) -> dict[str, Any]:
     if workflow == "mutating":
         fields |= mutating_fields
     else:
-        fields.add("expected_launch_policy_digest")
+        fields |= {"expected_launch_policy_digest", "model"}
     reject_unknown(value, fields, "launch request")
     result: dict[str, Any] = {}
-    for key in fields - mutating_fields - {"workflow", "expected_launch_policy_digest"}:
+    for key in fields - mutating_fields - {"workflow", "expected_launch_policy_digest", "model"}:
         result[key] = required_string(value, key, 2048 if key in {"workdir", "packet_file"} else 256)
     if workflow not in {"read_only", "mutating"}:
         raise HelperError("launch workflow must be read_only or mutating")
     result["workflow"] = workflow
     if workflow == "read_only":
+        model = optional_read_only_model(value)
+        if model is not None:
+            result["model"] = model
         expected_policy_digest = value.get("expected_launch_policy_digest")
         if (
             not isinstance(expected_policy_digest, str)
@@ -1672,7 +1702,7 @@ def require_tmux_session(session: str) -> None:
         raise HelperError("target tmux session does not exist or cannot be verified") from error
 
 
-def launch_policy(workflow: str) -> dict[str, Any]:
+def launch_policy(workflow: str, model: str | None = None) -> dict[str, Any]:
     if workflow not in {"read_only", "mutating"}:
         raise HelperError("launch workflow must be read_only or mutating")
     mcp_tool_prefix = "mcp__amux-claude-delegation__"
@@ -1699,25 +1729,31 @@ def launch_policy(workflow: str) -> dict[str, Any]:
     if mutating:
         policy["workflow"] = "mutating"
         policy["removed_credential_environment"] = ["GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN"]
+    elif model is not None:
+        policy["model"] = model
     return policy
 
 
 def plan_launch_policy_digest(request: Any) -> dict[str, str]:
     if not isinstance(request, dict):
         raise HelperError("launch policy digest request must be an object")
-    reject_unknown(request, {"workflow"}, "launch policy digest request")
+    reject_unknown(request, {"workflow", "model"}, "launch policy digest request")
     workflow = required_string(request, "workflow", 32)
     if workflow != "read_only":
         raise HelperError("launch policy digest preflight supports only read_only")
-    policy = launch_policy(workflow)
-    return {
+    model = optional_read_only_model(request)
+    policy = launch_policy(workflow, model)
+    result = {
         "workflow": workflow,
         "launch_policy_digest": hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
     }
+    if model is not None:
+        result["model"] = model
+    return result
 
 
 def expected_launch_policy(request: dict[str, Any]) -> dict[str, Any]:
-    policy = launch_policy(request["workflow"])
+    policy = launch_policy(request["workflow"], request.get("model"))
     digest = hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     if request["workflow"] == "read_only" and request["expected_launch_policy_digest"] != digest:
         raise HelperError("expected launch policy digest does not match selected workflow")
@@ -1918,6 +1954,8 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
     missing_flags = [flag for flag in REQUIRED_CLAUDE_FLAGS if flag not in help_text]
     if missing_flags:
         raise HelperError("Claude Code is missing required flags: " + ", ".join(missing_flags))
+    if request.get("model") is not None and not help_exposes_option(help_text, "--model"):
+        raise HelperError("Claude Code does not expose explicit model selection")
     mcp_path, settings_path = private_runtime_paths(store, request["delegation_id"])
     built_in_tools = policy["built_in_tools"]
     argv = [
@@ -1943,8 +1981,10 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         "--no-chrome",
         "--prompt-suggestions",
         "false",
-        packet_text,
     ]
+    if request.get("model") is not None:
+        argv.extend(["--model", request["model"]])
+    argv.append(packet_text)
     validate_exec_budget(argv, environment, system)
     expected_argv_digest = normalized_argv_digest(argv[1:])
     transport_path = private_launch_transport_path(store, request["delegation_id"])
@@ -2212,6 +2252,8 @@ def plan_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
         result["workflow"] = "mutating"
         result["capacity_decision"] = components["capacity_decision"]
         result["capabilities"].update({"writer_authority": "exclusive", "handoff": "one_clean_local_commit"})
+    elif components["request"].get("model") is not None:
+        result["model"] = components["request"]["model"]
     return result
 
 
@@ -2222,8 +2264,13 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
     delegation_id = request_data["delegation_id"]
     event_id = request_data["event_id"]
     result_id = internal_event_id("launch-result", event_id)
+    receipt = store.find(store.load_store(), delegation_id)
+    if receipt["binding"].get("model") != request_data.get("model"):
+        raise HelperError("model selection does not match immutable receipt binding")
     with store.mutation_lock():
         receipt = store.find(store.load_store(), delegation_id)
+        if receipt["binding"].get("model") != request_data.get("model"):
+            raise HelperError("model selection does not match immutable receipt binding")
         replay = find_event(receipt, event_id)
         if replay is not None:
             if (
@@ -2263,9 +2310,13 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
         "packet_identity": components["packet_identity"],
         "workdir_identity": components["workdir_identity"],
     }
+    if request_data.get("model") is not None:
+        intent["model"] = request_data["model"]
     with store.mutation_lock():
         receipt_store = store.load_store()
         receipt = store.find(receipt_store, delegation_id)
+        if receipt["binding"].get("model") != request_data.get("model"):
+            raise HelperError("model selection does not match immutable receipt binding")
         for key in ("packet_digest", "launch_policy_digest", "launch_command_digest"):
             if receipt["binding"][key] != components[key]:
                 raise HelperError(f"launch {key} does not match immutable receipt binding")
@@ -2448,8 +2499,15 @@ def diagnostics() -> dict[str, Any]:
         help_text = run_command(["claude", "--help"], probe_environment)
         missing = [flag for flag in REQUIRED_CLAUDE_FLAGS if flag not in help_text]
         capabilities["claude_code"] = {"status": "supported" if not missing else "unavailable", "version": version[:128], "missing_flags": missing}
+        exposes_model = help_exposes_option(help_text, "--model")
+        capabilities["model_selection"] = {
+            "status": "supported" if exposes_model else "unavailable",
+            "reason": "installed Claude CLI exposes --model; model provisioning and availability are not observed"
+            if exposes_model else "installed Claude CLI does not expose --model",
+        }
     except HelperError as error:
         capabilities["claude_code"] = {"status": "unavailable", "reason": str(error)[:512]}
+        capabilities["model_selection"] = {"status": "unavailable", "reason": "Claude CLI capability is unavailable"}
     try:
         capabilities["tmux"] = {"status": "supported", "version": run_command(["tmux", "-V"])[:128]}
     except HelperError as error:
