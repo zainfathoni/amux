@@ -173,10 +173,12 @@ class ReceiptStore:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             yield
 
-    def load_store(self) -> dict[str, Any]:
+    def load_store(self, require_exists: bool = False) -> dict[str, Any]:
         try:
             raw = self.path.read_bytes()
         except FileNotFoundError:
+            if require_exists:
+                raise HelperError("registered receipt store is unavailable")
             return {"schema_version": SCHEMA_VERSION, "receipts": []}
         except OSError as error:
             raise HelperError("receipt store is unavailable") from error
@@ -331,6 +333,7 @@ class ReceiptStore:
 
     def worker_teardown(self, origin_thread: str, dry_run: bool) -> dict[str, Any]:
         required_string({"origin_thread": origin_thread}, "origin_thread", 256)
+        origin_thread_sha256 = hashlib.sha256(origin_thread.encode()).hexdigest()
         try:
             if dry_run:
                 lifecycle = self.lifecycle.load()
@@ -343,12 +346,13 @@ class ReceiptStore:
                             "created_at": utc_now(),
                         }
                         self.lifecycle.commit(lifecycle)
-            state_paths = set(lifecycle["stores"])
+            registered_state_paths = set(lifecycle["stores"])
+            state_paths = set(registered_state_paths)
             state_paths.add(str(self.lifecycle.state_dir.resolve()))
             receipts: list[tuple[ReceiptStore, dict[str, Any]]] = []
             for state_path in sorted(state_paths):
                 owner = ReceiptStore(pathlib.Path(state_path), self.lifecycle.state_dir)
-                owner_store = owner.load_store()
+                owner_store = owner.load_store(require_exists=state_path in registered_state_paths)
                 receipts.extend(
                     (owner, copy.deepcopy(receipt)) for receipt in owner_store["receipts"]
                     if receipt["binding"].get("origin_thread") == origin_thread
@@ -396,14 +400,14 @@ class ReceiptStore:
                 pair["action"] = "block"
                 pair["blocker"] = blocker
                 pairs.append(pair)
-                blockers.append({"delegation_id": delegation_id, "blocker": blocker})
+                blockers.append({"pair_sha256": pair_id, "blocker": blocker})
                 continue
             if current != identity:
                 blocker = "identity_mismatch_or_unavailable"
                 pair["action"] = "block"
                 pair["blocker"] = blocker
                 pairs.append(pair)
-                blockers.append({"delegation_id": delegation_id, "blocker": blocker})
+                blockers.append({"pair_sha256": pair_id, "blocker": blocker})
                 continue
             pair["action"] = "park"
             pairs.append(pair)
@@ -415,7 +419,7 @@ class ReceiptStore:
         if blockers:
             return {
                 "action": "worker_teardown",
-                "origin_thread": origin_thread,
+                "origin_thread_sha256": origin_thread_sha256,
                 "outcome": "blocked",
                 "dry_run": dry_run,
                 "pairs": pairs,
@@ -429,7 +433,7 @@ class ReceiptStore:
                 except HelperError:
                     return {
                         "action": "worker_teardown",
-                        "origin_thread": origin_thread,
+                        "origin_thread_sha256": origin_thread_sha256,
                         "outcome": "blocked",
                         "dry_run": False,
                         "pairs": pairs,
@@ -441,7 +445,7 @@ class ReceiptStore:
                     }
         return {
             "action": "worker_teardown",
-            "origin_thread": origin_thread,
+            "origin_thread_sha256": origin_thread_sha256,
             "outcome": "ready" if dry_run or not park_requests else "cleaned",
             "dry_run": dry_run,
             "pairs": pairs,
@@ -449,20 +453,22 @@ class ReceiptStore:
 
     def release_worker_teardown(self, origin_thread: str) -> dict[str, Any]:
         required_string({"origin_thread": origin_thread}, "origin_thread", 256)
+        origin_thread_sha256 = hashlib.sha256(origin_thread.encode()).hexdigest()
         try:
             with self.lifecycle.mutation_lock():
                 lifecycle = self.lifecycle.load()
-                state_paths = set(lifecycle["stores"])
+                registered_state_paths = set(lifecycle["stores"])
+                state_paths = set(registered_state_paths)
                 state_paths.add(str(self.lifecycle.state_dir.resolve()))
                 for state_path in sorted(state_paths):
                     owner = ReceiptStore(pathlib.Path(state_path), self.lifecycle.state_dir)
-                    for receipt in owner.load_store()["receipts"]:
+                    for receipt in owner.load_store(require_exists=state_path in registered_state_paths)["receipts"]:
                         if receipt["binding"].get("origin_thread") != origin_thread:
                             continue
                         if worker_teardown_receipt_blocker(receipt) is not None or receipt.get("state") != "verified_parked":
                             return {
                                 "action": "worker_teardown_release",
-                                "origin_thread": origin_thread,
+                                "origin_thread_sha256": origin_thread_sha256,
                                 "outcome": "blocked",
                                 "blockers": [{"blocker": "paired_state_not_safely_parked"}],
                             }
@@ -473,7 +479,7 @@ class ReceiptStore:
             return worker_teardown_store_blocked(origin_thread, False)
         return {
             "action": "worker_teardown_release",
-            "origin_thread": origin_thread,
+            "origin_thread_sha256": origin_thread_sha256,
             "outcome": outcome,
         }
 
@@ -3581,7 +3587,7 @@ def worker_teardown_receipt_blocker(receipt: dict[str, Any]) -> str | None:
 def worker_teardown_store_blocked(origin_thread: str, dry_run: bool) -> dict[str, Any]:
     return {
         "action": "worker_teardown",
-        "origin_thread": origin_thread,
+        "origin_thread_sha256": hashlib.sha256(origin_thread.encode()).hexdigest(),
         "outcome": "blocked",
         "dry_run": dry_run,
         "pairs": [],

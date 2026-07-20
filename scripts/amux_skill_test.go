@@ -541,6 +541,8 @@ func TestClaudePairTeardownIsFailClosedAndRunsBeforeWorkerTeardown(t *testing.T)
 		"exact immutable origin-thread binding",
 		"never becomes an Amp worker, runner, group member, or generic CLI resource",
 		"non-content action and blocker codes",
+		"origin-thread SHA-256",
+		"missing or unreadable registered directory or `receipts.json` blocks",
 		"30-day cleanup eligibility",
 	} {
 		if !strings.Contains(contract, required) {

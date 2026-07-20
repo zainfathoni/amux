@@ -955,17 +955,21 @@ func TestWorkerTeardownLifecycleScopesPairsByImmutableOriginThread(t *testing.T)
 		t.Fatalf("dry-run unrelated worker teardown: %v: %s", err, stderr)
 	}
 	var result struct {
-		Action       string `json:"action"`
-		OriginThread string `json:"origin_thread"`
-		Outcome      string `json:"outcome"`
-		DryRun       bool   `json:"dry_run"`
-		Pairs        []any  `json:"pairs"`
+		Action             string `json:"action"`
+		OriginThreadSHA256 string `json:"origin_thread_sha256"`
+		Outcome            string `json:"outcome"`
+		DryRun             bool   `json:"dry_run"`
+		Pairs              []any  `json:"pairs"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
 		t.Fatalf("decode worker teardown dry-run: %v\n%s", err, stdout)
 	}
-	if result.Action != "worker_teardown" || result.OriginThread != "T-origin" || result.Outcome != "ready" || !result.DryRun || len(result.Pairs) != 0 {
+	wantOriginDigest := fmt.Sprintf("%x", sha256.Sum256([]byte("T-origin")))
+	if result.Action != "worker_teardown" || result.OriginThreadSHA256 != wantOriginDigest || result.Outcome != "ready" || !result.DryRun || len(result.Pairs) != 0 {
 		t.Fatalf("worker teardown dry-run = %#v, want ready no-pair result", result)
+	}
+	if strings.Contains(stdout+stderr, "T-origin") || strings.Contains(stdout+stderr, "delegation-unrelated") {
+		t.Fatalf("worker teardown dry-run leaked raw lifecycle identity: %s%s", stdout, stderr)
 	}
 
 	stored, err := os.ReadFile(filepath.Join(stateDir, "receipts.json"))
@@ -1016,7 +1020,7 @@ esac
 		"IDENTITY_UNAVAILABLE="+identityUnavailable, "CLAUDE_WINDOW_ID=@40",
 		fmt.Sprintf("PANE_PID=%d", panePID),
 	)
-	binding := testBinding("delegation-worker-teardown")
+	binding := testBinding("private-identity-mismatch-sentinel")
 	binding["workdir"] = stateDir
 	binding["launch_command_digest"] = fmt.Sprintf("%x", sha256.Sum256([]byte(startCommand)))
 	assertHelperOutcomeEnv(t, stateDir, environment, "recorded", map[string]any{
@@ -1060,6 +1064,9 @@ esac
 		if err == nil || !strings.Contains(stdout, `"blocker":"identity_mismatch_or_unavailable"`) {
 			t.Fatalf("%s worker teardown was not blocked: %v: %s%s", name, err, stdout, stderr)
 		}
+		if strings.Contains(stdout+stderr, "private-identity-mismatch-sentinel") || strings.Contains(stdout+stderr, "T-origin") {
+			t.Fatalf("%s worker teardown leaked raw lifecycle identity: %s%s", name, stdout, stderr)
+		}
 		if _, err := os.Stat(logPath); !os.IsNotExist(err) {
 			t.Fatalf("%s worker teardown killed a pane: %v", name, err)
 		}
@@ -1079,6 +1086,9 @@ esac
 	if err != nil || !strings.Contains(stdout, `"action":"park"`) || !strings.Contains(stdout, `"outcome":"ready"`) {
 		t.Fatalf("worker teardown dry-run did not plan exact pair parking: %v: %s%s", err, stdout, stderr)
 	}
+	if strings.Contains(stdout+stderr, "private-identity-mismatch-sentinel") || strings.Contains(stdout+stderr, "T-origin") {
+		t.Fatalf("worker teardown dry-run leaked raw lifecycle identity: %s%s", stdout, stderr)
+	}
 	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
 		t.Fatalf("worker teardown dry-run killed a pane: %v", err)
 	}
@@ -1087,6 +1097,9 @@ esac
 		"lifecycle", "worker-teardown", "--origin-thread", "T-origin")
 	if err != nil || !strings.Contains(stdout, `"action":"park"`) || !strings.Contains(stdout, `"outcome":"cleaned"`) {
 		t.Fatalf("worker teardown did not clean exact pair: %v: %s%s", err, stdout, stderr)
+	}
+	if strings.Contains(stdout+stderr, "private-identity-mismatch-sentinel") || strings.Contains(stdout+stderr, "T-origin") {
+		t.Fatalf("worker teardown cleanup leaked raw lifecycle identity: %s%s", stdout, stderr)
 	}
 	log, err := os.ReadFile(logPath)
 	if err != nil || strings.Count(string(log), "kill-pane -t %40") != 1 {
@@ -1114,6 +1127,9 @@ esac
 		"lifecycle", "worker-teardown-release", "--origin-thread", "T-origin")
 	if err != nil || !strings.Contains(stdout, `"outcome":"released"`) {
 		t.Fatalf("explicit safe fence release failed: %v: %s%s", err, stdout, stderr)
+	}
+	if strings.Contains(stdout+stderr, "T-origin") {
+		t.Fatalf("worker teardown release leaked raw origin thread: %s%s", stdout, stderr)
 	}
 	assertHelperOutcomeEnv(t, stateDir, environment, "recorded", map[string]any{
 		"binding": lateBinding, "routing": map[string]any{"target": "machine_local_inbox"},
@@ -1204,7 +1220,7 @@ func TestWorkerTeardownLifecycleBlocksUnsafeStatesWithPrivacySafeJSON(t *testing
 			if err == nil || !strings.Contains(stdout, `"outcome":"blocked"`) || !strings.Contains(stdout, `"blocker":"`+test.blocker+`"`) {
 				t.Fatalf("unsafe worker teardown result = %v: %s%s", err, stdout, stderr)
 			}
-			if strings.Contains(stdout+stderr, "private-") || strings.Contains(stdout+stderr, "--session-id") {
+			if strings.Contains(stdout+stderr, "private-") || strings.Contains(stdout+stderr, "T-origin") || strings.Contains(stdout+stderr, "--session-id") {
 				t.Fatalf("unsafe worker teardown leaked content or argv: %s%s", stdout, stderr)
 			}
 			after, err := os.ReadFile(filepath.Join(stateDir, "receipts.json"))
@@ -1227,7 +1243,11 @@ func TestCanonicalLifecycleRegistryFindsAlternateStoresAndFencesOrigin(t *testin
 	home := t.TempDir()
 	firstState := t.TempDir()
 	secondState := t.TempDir()
-	environment := replaceEnvironment(os.Environ(), "HOME", home)
+	binDir := t.TempDir()
+	tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
+	writeExecutable(t, filepath.Join(binDir, "tmux"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TMUX_LOG\"\nexit 99\n")
+	environment := append(replaceEnvironment(os.Environ(), "HOME", home),
+		"PATH="+binDir+":"+os.Getenv("PATH"), "TMUX_LOG="+tmuxLog)
 	run := func(stateDir string, input map[string]any, args ...string) (string, string, error) {
 		payload, err := json.Marshal(input)
 		if err != nil {
@@ -1258,8 +1278,26 @@ func TestCanonicalLifecycleRegistryFindsAlternateStoresAndFencesOrigin(t *testin
 	if err == nil || !strings.Contains(stdout, `"outcome":"blocked"`) || !strings.Contains(stdout, `"blocker":"launch_unverified"`) {
 		t.Fatalf("canonical teardown missed alternate-store pair: %v: %s%s", err, stdout, stderr)
 	}
-	if strings.Contains(stdout+stderr, firstState) || strings.Contains(stdout+stderr, "alternate-store-pair") {
-		t.Fatalf("canonical teardown leaked store path or delegation identity: %s%s", stdout, stderr)
+	if strings.Contains(stdout+stderr, firstState) || strings.Contains(stdout+stderr, "alternate-store-pair") || strings.Contains(stdout+stderr, "T-origin") {
+		t.Fatalf("canonical teardown leaked store, delegation, or thread identity: %s%s", stdout, stderr)
+	}
+	if err := os.Remove(filepath.Join(firstState, "receipts.json")); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err = run("", map[string]any{}, "lifecycle", "worker-teardown", "--origin-thread", "T-origin")
+	if err == nil || !strings.Contains(stdout, `"blocker":"receipt_store_invalid_or_unavailable"`) {
+		t.Fatalf("missing registered store did not block teardown: %v: %s%s", err, stdout, stderr)
+	}
+	if strings.Contains(stdout+stderr, firstState) || strings.Contains(stdout+stderr, "alternate-store-pair") || strings.Contains(stdout+stderr, "T-origin") {
+		t.Fatalf("missing registered store leaked lifecycle identity: %s%s", stdout, stderr)
+	}
+	if _, err := os.Stat(tmuxLog); !os.IsNotExist(err) {
+		t.Fatalf("missing registered store attempted tmux mutation: %v", err)
+	}
+	lifecyclePath := filepath.Join(home, "Library", "Application Support", "amux", "experimental", "claude-delegation", "lifecycle.json")
+	lifecycleEvidence, err := os.ReadFile(lifecyclePath)
+	if err != nil || !bytes.Contains(lifecycleEvidence, []byte(`"T-origin"`)) {
+		t.Fatalf("missing registered store did not preserve durable fence evidence: %v: %s", err, lifecycleEvidence)
 	}
 
 	secondBinding := testBinding("late-pair")
@@ -1290,7 +1328,7 @@ func TestWorkerTeardownMalformedStoreReturnsBoundedJSONBlocker(t *testing.T) {
 	if err == nil || !strings.Contains(stdout, `"blocker":"receipt_store_invalid_or_unavailable"`) {
 		t.Fatalf("malformed store did not return JSON blocker: %v: %s%s", err, stdout, stderr)
 	}
-	if stderr != "" || strings.Contains(stdout, stateDir) || strings.Contains(stdout, "private-") || strings.Contains(stdout, "Traceback") {
+	if stderr != "" || strings.Contains(stdout, stateDir) || strings.Contains(stdout, "private-") || strings.Contains(stdout, "T-origin") || strings.Contains(stdout, "Traceback") {
 		t.Fatalf("malformed store leaked private detail or traceback: %s%s", stdout, stderr)
 	}
 }
