@@ -8,6 +8,7 @@ import ast
 import contextlib
 import copy
 import ctypes
+import errno
 import fcntl
 import hashlib
 import json
@@ -257,7 +258,9 @@ class ReceiptStore:
                         try:
                             fcntl.flock(gate_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                             break
-                        except BlockingIOError as error:
+                        except OSError as error:
+                            if error.errno not in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+                                raise
                             if time.monotonic() >= deadline:
                                 raise LaunchGateBusy("launch gate is busy") from error
                             time.sleep(0.01)
@@ -2894,8 +2897,9 @@ def execute_launch_transport_locked(
             if transport.get("darwin_executable_path") is not None:
                 raise HelperError("private launch transport Darwin executable route is invalid")
             execution_path = descriptor_path(executable_descriptor)
-        require_launch_transport_allowed(store, delegation_id)
-        os.execve(execution_path, argv, environment)
+        execute_authorized_launch_transport(
+            store, delegation_id, execution_path, argv, environment
+        )
     except OSError as error:
         raise HelperError("private launch transport could not execute Claude") from error
     finally:
@@ -3099,57 +3103,62 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
                 os.close(darwin_executable_descriptor)
                 os.close(darwin_container_descriptor)
                 raise
-        try:
-            output = run_command(
-                [
-                    "tmux", "new-window", "-d", "-P", "-F",
-                    "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}",
-                    "-t", "=" + request_data["tmux_session"] + ":",
-                    "-n", request_data["tmux_window"], "-c", components["workdir"], components["start_command"],
-                ]
-            )
-            fields = output.split("\t")
-            if len(fields) != 4 or fields[0] != request_data["tmux_session"] or fields[1] != request_data["tmux_window"] or not fields[2].startswith("@") or not fields[3].startswith("%"):
-                raise HelperError("tmux launch did not return one exact session/window/pane identity")
-            tmux_identity = {"session": fields[0], "window": fields[1], "window_id": fields[2], "pane_id": fields[3]}
-            identity = wait_for_claude_startup(
-                fields[3],
-                request_data["claude_session_id"],
-                components["expected_argv_digest"],
-                components["expected_launcher_identity"],
-                components["expected_executable_object_identity"],
-                darwin_executable_object_identity,
-                components["expected_launcher_argv0_digest"],
-            )
-        finally:
-            if darwin_container_descriptor is not None and darwin_executable_descriptor is not None:
-                try:
-                    restore_darwin_launch_container(
-                        darwin_container_descriptor, darwin_executable_descriptor
-                    )
-                finally:
-                    os.close(darwin_executable_descriptor)
-                    os.close(darwin_container_descriptor)
-        for key, value in tmux_identity.items():
-            if identity[key] != value:
-                raise HelperError("verified Claude startup does not match created tmux identity")
-        if identity["workdir"] != components["workdir"]:
-            raise HelperError("verified Claude startup workdir does not match launch plan")
-        if identity["launch_command_digest"] != components["launch_command_digest"]:
-            raise HelperError("verified Claude startup command does not match launch plan")
-        result = {
-            "event_id": result_id,
-            "kind": "launch_completed",
-            "operation_event_id": event_id,
-            "identity": identity,
-            "at": utc_now(),
-        }
+    try:
+        output = run_command(
+            [
+                "tmux", "new-window", "-d", "-P", "-F",
+                "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}",
+                "-t", "=" + request_data["tmux_session"] + ":",
+                "-n", request_data["tmux_window"], "-c", components["workdir"], components["start_command"],
+            ]
+        )
+        fields = output.split("\t")
+        if len(fields) != 4 or fields[0] != request_data["tmux_session"] or fields[1] != request_data["tmux_window"] or not fields[2].startswith("@") or not fields[3].startswith("%"):
+            raise HelperError("tmux launch did not return one exact session/window/pane identity")
+        tmux_identity = {"session": fields[0], "window": fields[1], "window_id": fields[2], "pane_id": fields[3]}
+        identity = wait_for_claude_startup(
+            fields[3],
+            request_data["claude_session_id"],
+            components["expected_argv_digest"],
+            components["expected_launcher_identity"],
+            components["expected_executable_object_identity"],
+            darwin_executable_object_identity,
+            components["expected_launcher_argv0_digest"],
+        )
+    finally:
+        if darwin_container_descriptor is not None and darwin_executable_descriptor is not None:
+            try:
+                restore_darwin_launch_container(
+                    darwin_container_descriptor, darwin_executable_descriptor
+                )
+            finally:
+                os.close(darwin_executable_descriptor)
+                os.close(darwin_container_descriptor)
+    for key, value in tmux_identity.items():
+        if identity[key] != value:
+            raise HelperError("verified Claude startup does not match created tmux identity")
+    if identity["workdir"] != components["workdir"]:
+        raise HelperError("verified Claude startup workdir does not match launch plan")
+    if identity["launch_command_digest"] != components["launch_command_digest"]:
+        raise HelperError("verified Claude startup command does not match launch plan")
+    result = {
+        "event_id": result_id,
+        "kind": "launch_completed",
+        "operation_event_id": event_id,
+        "identity": identity,
+        "at": utc_now(),
+    }
+    with store.mutation_lock():
+        receipt_store = store.load_store()
+        receipt = store.find(receipt_store, delegation_id)
+        if not valid_indeterminate_detach_candidate(receipt) or find_event(receipt, event_id) != intent:
+            raise HelperError("receipt changed while launch completion was being verified")
         receipt["events"].append(result)
         receipt["updated_at"] = result["at"]
         store.commit(receipt_store)
-        for descriptor in held_descriptors:
-            os.close(descriptor)
-        return {"outcome": "launched", **tmux_launch_identity(identity)}
+    for descriptor in held_descriptors:
+        os.close(descriptor)
+    return {"outcome": "launched", **tmux_launch_identity(identity)}
 
 
 def diagnostics() -> dict[str, Any]:
@@ -3915,6 +3924,24 @@ def require_launch_transport_allowed(store: ReceiptStore, delegation_id: str) ->
     origin_thread = receipt["binding"]["origin_thread"]
     if origin_thread in store.lifecycle.load()["teardown_fences"]:
         raise HelperError("launch transport is revoked by the durable origin fence")
+
+
+def execute_authorized_launch_transport(
+    store: ReceiptStore,
+    delegation_id: str,
+    execution_path: str,
+    argv: list[str],
+    environment: dict[str, str],
+) -> None:
+    with store.lifecycle.mutation_lock():
+        store_lock = (
+            contextlib.nullcontext()
+            if store.lifecycle.state_dir == store.state_dir
+            else store.mutation_lock()
+        )
+        with store_lock:
+            require_launch_transport_allowed(store, delegation_id)
+            os.execve(execution_path, argv, environment)
 
 
 def completed_launch_identity(receipt: dict[str, Any]) -> dict[str, str]:

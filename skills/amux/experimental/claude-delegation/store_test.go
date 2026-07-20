@@ -1766,7 +1766,7 @@ func TestDetachedReceiptIsSealedAndLaunchGateSerializesPreExecRace(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := `import importlib.util, os, pathlib, sys, tempfile, time
+	script := `import importlib.util, os, pathlib, select, sys, tempfile, time
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
 module = importlib.util.module_from_spec(spec)
@@ -1835,6 +1835,47 @@ for terminal_state in ("launch_completed", "verified_parked"):
     except module.HelperError as error: assert "not authorized" in str(error), error
     else: raise AssertionError("retained transport executed after " + terminal_state)
     assert not executed and retained.path.read_bytes() == retained_before
+
+fenced, _, _ = fixture("pre-fenced")
+with fenced.lifecycle.mutation_lock():
+    lifecycle = fenced.lifecycle.load()
+    lifecycle["teardown_fences"]["T-synthetic"] = {"operation_id":"fence", "created_at":module.utc_now()}
+    fenced.lifecycle.commit(lifecycle)
+fenced_before = fenced.path.read_bytes(); executed = []
+module.os.execve = lambda *arguments: executed.append(arguments)
+try:
+    with fenced.launch_gate("pre-fenced"):
+        module.execute_authorized_launch_transport(fenced, "pre-fenced", "/synthetic", ["synthetic"], {})
+except module.HelperError as error: assert "revoked" in str(error), error
+else: raise AssertionError("pre-existing origin fence permitted transport execution")
+assert not executed and fenced.path.read_bytes() == fenced_before
+
+writer_store, _, _ = fixture("fence-writer-race")
+writer_store.lifecycle = module.LifecycleRegistry(pathlib.Path(tempfile.mkdtemp()).resolve())
+preexec_read, preexec_write = os.pipe(); release_read, release_write = os.pipe()
+committed_read, committed_write = os.pipe(); transport_pid = os.fork()
+if transport_pid == 0:
+    try:
+        with writer_store.launch_gate("fence-writer-race"):
+            def pause_at_exec(*arguments):
+                os.write(preexec_write, b"1"); assert os.read(release_read, 1) == b"1"
+            module.os.execve = pause_at_exec
+            module.execute_authorized_launch_transport(
+                writer_store, "fence-writer-race", "/synthetic", ["synthetic"], {})
+    finally: os._exit(0)
+assert os.read(preexec_read, 1) == b"1"; writer_pid = os.fork()
+if writer_pid == 0:
+    try:
+        with writer_store.lifecycle.mutation_lock():
+            lifecycle = writer_store.lifecycle.load()
+            lifecycle["teardown_fences"]["T-synthetic"] = {"operation_id":"writer", "created_at":module.utc_now()}
+            writer_store.lifecycle.commit(lifecycle); os.write(committed_write, b"1")
+    finally: os._exit(0)
+assert select.select([committed_read], [], [], 0.3)[0] == []
+os.write(release_write, b"1")
+_, transport_status = os.waitpid(transport_pid, 0); assert os.WEXITSTATUS(transport_status) == 0
+assert os.read(committed_read, 1) == b"1"
+_, writer_status = os.waitpid(writer_pid, 0); assert os.WEXITSTATUS(writer_status) == 0
 
 race_store, _, race_detach = fixture("race")
 ready_read, ready_write = os.pipe(); continue_read, continue_write = os.pipe()
