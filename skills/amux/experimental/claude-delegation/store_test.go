@@ -835,6 +835,23 @@ except module.HelperError as error:
 else:
     raise AssertionError("Darwin transport without private executable identity was accepted")
 
+try:
+    module.inspect_claude_identity(
+        "%20", session_id, module.normalized_argv_digest(arguments[1:]),
+        launcher_identity, launcher_object, None, private_object,
+    )
+except module.HelperError as error:
+    assert "launcher path does not match" in str(error), error
+else:
+    raise AssertionError("missing launcher argv0 digest was accepted without compatibility")
+historical = module.inspect_claude_identity(
+    "%20", session_id, module.normalized_argv_digest(arguments[1:]),
+    launcher_identity, launcher_object, None, private_object,
+    allow_missing_launcher_argv0_digest=True,
+)
+assert historical["normalized_argv_digest"] == module.normalized_argv_digest(arguments[1:])
+assert historical["process_executable_object_identity"] == private_object
+
 snapshots = iter([
     ("verified-claude", "100.000001", arguments, hashlib.sha256(b"before").hexdigest()),
     ("verified-claude", "100.000002", arguments, hashlib.sha256(b"after").hexdigest()),
@@ -2045,6 +2062,100 @@ assert store.worker_teardown("T-synthetic", True)["pairs"] == [{
     "pair_sha256":hashlib.sha256(b"synthetic-live").hexdigest(), "state":"pair_retired", "action":"none"}]
 assert store.retire_live_indeterminate_pair(request)["outcome"] == "duplicate" and len(stops) == 1
 
+# The explicit historical-modern selector accepts only the modern read-only shape missing launcher argv0.
+compatibility = "historical_modern_read_only_launch_intent_v1"
+historical, current_identity, request = fixture("synthetic-historical-modern")
+data = historical.load_store(); historical_intent = data["receipts"][0]["events"][1]
+historical_intent.pop("expected_launcher_argv0_digest"); historical.commit(data)
+current_identity.pop("expected_launcher_argv0_digest"); request["compatibility"] = compatibility; stops.clear()
+module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+module.stop_exact_retirement_target = lambda bound: stops.append(copy.deepcopy(bound))
+result = historical.retire_live_indeterminate_pair(request)
+assert result["outcome"] == "retired" and result["compatibility"] == compatibility, result
+assert len(stops) == 1 and stops[0] == current_identity
+receipt = historical.load_store()["receipts"][0]
+assert receipt["retirement_intent"]["compatibility"] == compatibility
+assert module.valid_pair_retirement_chain(receipt)
+assert historical.worker_teardown("T-synthetic", True)["pairs"] == [{
+    "pair_sha256":hashlib.sha256(b"synthetic-historical-modern").hexdigest(),
+    "state":"pair_retired", "action":"none"}]
+assert historical.retire_live_indeterminate_pair(request)["outcome"] == "duplicate"
+
+# The historical selector still requires the immutable expected argv digest to match live argv.
+blocked, current_identity, candidate = fixture("blocked-historical-argv")
+data = blocked.load_store(); data["receipts"][0]["events"][1].pop("expected_launcher_argv0_digest")
+blocked.commit(data); current_identity.pop("expected_launcher_argv0_digest")
+current_identity["normalized_argv_digest"] = "9" * 64; candidate["compatibility"] = compatibility
+stops.clear(); module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+module.stop_exact_retirement_target = lambda bound: stops.append(bound)
+try: outcome = blocked.retire_live_indeterminate_pair(candidate)
+except module.HelperError: outcome = {"outcome":"blocked"}
+assert outcome["outcome"] == "blocked" and not stops
+
+# Selector omission/substitution and every shape other than exact missing-one-field fail before stop.
+for name, selector, mutate in [
+    ("historical-without-selector", None,
+     lambda launch: launch.pop("expected_launcher_argv0_digest")),
+    ("selector-on-current", compatibility, lambda launch: None),
+    ("historical-extra", compatibility,
+     lambda launch: (launch.pop("expected_launcher_argv0_digest"), launch.update(extra="blocked"))),
+    ("historical-missing-two", compatibility,
+     lambda launch: (launch.pop("expected_launcher_argv0_digest"), launch.pop("packet_identity"))),
+]:
+    blocked, current_identity, candidate = fixture("blocked-" + name)
+    data = blocked.load_store(); mutate(data["receipts"][0]["events"][1]); blocked.commit(data)
+    if selector is not None: candidate["compatibility"] = selector
+    stops.clear(); module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+    module.stop_exact_retirement_target = lambda bound: stops.append(bound)
+    try: outcome = blocked.retire_live_indeterminate_pair(candidate)
+    except module.HelperError: outcome = {"outcome":"blocked"}
+    assert outcome["outcome"] == "blocked" and not stops, name
+
+# The historical-modern selector cannot substitute for the distinct pre-identity schema.
+blocked, current_identity, candidate = fixture("blocked-pre-identity-substitution")
+data = blocked.load_store(); launch = data["receipts"][0]["events"][1]
+launch.clear(); launch.update({"event_id":"launch", "kind":"launch_intent", "workflow":"read_only",
+    "request_digest":"8" * 64, "claude_session_id":identity["claude_session_id"],
+    "tmux_session":identity["session"], "tmux_window":identity["window"],
+    "packet_digest":"3" * 64, "launch_policy_digest":"4" * 64,
+    "launch_command_digest":"5" * 64, "at":"2026-07-20T12:00:00Z"})
+blocked.commit(data); candidate["compatibility"] = compatibility; stops.clear()
+module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+module.stop_exact_retirement_target = lambda bound: stops.append(bound)
+try: outcome = blocked.retire_live_indeterminate_pair(candidate)
+except module.HelperError: outcome = {"outcome":"blocked"}
+assert outcome["outcome"] == "blocked" and not stops
+
+# Historical-modern interruption binds the selector durably and requires it for exact recovery.
+historical, current_identity, request = fixture("synthetic-historical-interrupted")
+data = historical.load_store(); data["receipts"][0]["events"][1].pop("expected_launcher_argv0_digest")
+historical.commit(data); current_identity.pop("expected_launcher_argv0_digest")
+request["compatibility"] = compatibility
+module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+module.stop_exact_retirement_target = lambda bound: (_ for _ in ()).throw(RuntimeError("synthetic interruption"))
+try: historical.retire_live_indeterminate_pair(request)
+except RuntimeError: pass
+else: raise AssertionError("synthetic historical interruption was not exposed")
+interrupted = historical.load_store(); durable = interrupted["receipts"][0]["retirement_intent"]
+assert durable["compatibility"] == compatibility
+assert "expected_launcher_argv0_digest" not in durable["identity"]
+without_selector = dict(request, recover=True); without_selector.pop("compatibility"); stops.clear()
+module.stop_exact_retirement_target = lambda bound: stops.append(bound)
+try: historical.retire_live_indeterminate_pair(without_selector)
+except module.HelperError: pass
+else: raise AssertionError("historical recovery omitted its durable compatibility selector")
+assert historical.load_store() == interrupted and not stops
+module.confirm_retirement_target_absent = lambda bound: "exact_retirement_target_absent"
+assert historical.retire_live_indeterminate_pair(dict(request, recover=True))["outcome"] == "retired"
+sealed = historical.load_store(); receipt = sealed["receipts"][0]
+assert "cleanup_eligible_at" not in receipt and module.valid_pair_retirement_chain(receipt) and not stops
+try:
+    historical.route({"delegation_id":"synthetic-historical-interrupted", "event_id":"sealed-route",
+                      "routing":{"target":"machine_local_inbox"}})
+except module.HelperError: pass
+else: raise AssertionError("historical pair retirement did not seal later mutation")
+assert historical.load_store() == sealed
+
 # Durable intent precedes mutation; recovery observes exact evidence and never blindly repeats a stop after absence.
 store, current_identity, request = fixture("synthetic-interrupted")
 module.stop_exact_retirement_target = lambda bound: (_ for _ in ()).throw(RuntimeError("synthetic interruption"))
@@ -2185,6 +2296,19 @@ def inspect_retained(*args, **kwargs):
 module.inspect_claude_identity = inspect_retained
 real_stop_exact_retirement_target(darwin_identity)
 assert len(control_instances) == 1 and control_instances[0].commands[-2] == ["kill-pane", "-t", "%23"]
+
+# Historical-modern final revalidation keeps the same retained connection and all non-argv0 identity.
+historical_darwin_identity = dict(darwin_identity)
+historical_darwin_identity.pop("expected_launcher_argv0_digest")
+def inspect_historical_retained(*args, **kwargs):
+    assert kwargs["allow_missing_launcher_argv0_digest"] is True
+    return {key:value for key,value in historical_darwin_identity.items() if key not in
+        {"session_id", "process_start_identity", "expected_launcher_identity",
+         "expected_executable_object_identity"}}
+module.inspect_claude_identity = inspect_historical_retained
+real_stop_exact_retirement_target(historical_darwin_identity)
+assert len(control_instances) == 2 and control_instances[1].commands[-2] == ["kill-pane", "-t", "%23"]
+module.inspect_claude_identity = inspect_retained
 
 # Complete queued fake frames cannot satisfy a fresh per-command token and never authorize kill.
 class PrequeuedControl(FakeControl):

@@ -42,6 +42,9 @@ MAX_ABSENCE_PANES = 256
 MAX_ABSENCE_PROCESSES = 2048
 MAX_ABSENCE_OUTPUT_BYTES = 64 * 1024
 PRE_IDENTITY_LAUNCH_INTENT_COMPATIBILITY = "pre_identity_launch_intent_v1"
+HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY = (
+    "historical_modern_read_only_launch_intent_v1"
+)
 EXEC_BUDGET_MARGIN_BYTES = 32 * 1024
 STARTUP_TIMEOUT_SECONDS = 4.0
 STARTUP_STABILITY_SECONDS = 1.5
@@ -541,12 +544,21 @@ class ReceiptStore:
         event_id = protocol_id(request, "event_id")
         origin_thread = required_string(request, "origin_thread", 256)
         authorization = validate_terminal_amp_authorization(request.get("authorization"))
+        compatibility = request.get("compatibility")
+        if (
+            compatibility is not None
+            and compatibility != HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY
+        ):
+            raise HelperError("live pair retirement compatibility is unsupported")
         recover = request.get("recover", False)
         if not isinstance(recover, bool):
             raise HelperError("live pair retirement recover must be boolean")
         reject_unknown(
             request,
-            {"delegation_id", "event_id", "origin_thread", "authorization", "recover"},
+            {
+                "delegation_id", "event_id", "origin_thread", "authorization", "compatibility",
+                "recover",
+            },
             "live indeterminate pair retirement",
         )
         origin_sha256 = hashlib.sha256(origin_thread.encode()).hexdigest()
@@ -577,11 +589,13 @@ class ReceiptStore:
                 if terminal is not None:
                     if existing is None or not valid_pair_retirement_chain(receipt):
                         raise HelperError("terminal pair retirement proof is invalid")
-                    validate_retirement_operation(existing, authorization)
-                    return pair_retirement_result(origin_sha256, pair_sha256, "duplicate")
-                if not valid_live_retirement_candidate(receipt, authorization):
+                    validate_retirement_operation(existing, authorization, compatibility)
+                    return pair_retirement_result(
+                        origin_sha256, pair_sha256, "duplicate", compatibility
+                    )
+                if not valid_live_retirement_candidate(receipt, authorization, compatibility):
                     raise HelperError("retirement requires the exact live report-bearing launch-indeterminate chain")
-                launch_intent = modern_read_only_retirement_launch_intent(receipt)
+                launch_intent = modern_read_only_retirement_launch_intent(receipt, compatibility)
                 try:
                     with self.launch_gate(delegation_id, timeout_seconds=0.2):
                         if existing is None:
@@ -601,6 +615,8 @@ class ReceiptStore:
                                 "identity": identity,
                                 "at": utc_now(),
                             }
+                            if compatibility is not None:
+                                retirement_intent["compatibility"] = compatibility
                             receipt["events"].append(retirement_intent)
                             receipt["retirement_intent"] = copy.deepcopy(retirement_intent)
                             receipt["updated_at"] = retirement_intent["at"]
@@ -616,7 +632,7 @@ class ReceiptStore:
                         else:
                             if not recover:
                                 raise HelperError("retirement outcome is indeterminate; explicit recovery is required")
-                            validate_retirement_operation(existing, authorization)
+                            validate_retirement_operation(existing, authorization, compatibility)
                             identity = copy.deepcopy(existing.get("identity"))
                             if not valid_retirement_identity(identity, launch_intent, receipt["binding"]):
                                 raise HelperError("durable retirement identity is invalid")
@@ -653,7 +669,7 @@ class ReceiptStore:
                     return pair_retirement_blocked(
                         origin_sha256, pair_sha256, "launch_transport_active_or_indeterminate"
                     )
-        return pair_retirement_result(origin_sha256, pair_sha256, "retired")
+        return pair_retirement_result(origin_sha256, pair_sha256, "retired", compatibility)
 
     def worker_teardown(self, origin_thread: str, dry_run: bool) -> dict[str, Any]:
         required_string({"origin_thread": origin_thread}, "origin_thread", 256)
@@ -2418,6 +2434,7 @@ def inspect_claude_identity(
     expected_launcher_argv0_digest: str | None = None,
     tmux_fields: list[str] | None = None,
     include_process_executable_object_identity: bool = False,
+    allow_missing_launcher_argv0_digest: bool = False,
 ) -> dict[str, Any]:
     if not pane_id.startswith("%") or len(pane_id) < 2:
         raise HelperError("Claude identity requires an exact tmux pane ID")
@@ -2494,8 +2511,10 @@ def inspect_claude_identity(
         if expected_process_executable_object_identity is None:
             raise HelperError("Claude transport requires the planned private executable object identity")
         if (
-            expected_launcher_argv0_digest is None
-            or launcher_argv0_digest(process_args[0]) != expected_launcher_argv0_digest
+            expected_launcher_argv0_digest is None and not allow_missing_launcher_argv0_digest
+        ) or (
+            expected_launcher_argv0_digest is not None
+            and launcher_argv0_digest(process_args[0]) != expected_launcher_argv0_digest
         ):
             raise HelperError("Claude transport launcher path does not match immutable launch intent")
         try:
@@ -4527,7 +4546,11 @@ def valid_indeterminate_detach_candidate(receipt: dict[str, Any]) -> bool:
     return len(intents) == 1 and worker_teardown_receipt_blocker(receipt) == "launch_indeterminate"
 
 
-def modern_read_only_retirement_launch_intent(receipt: dict[str, Any]) -> dict[str, Any]:
+def modern_read_only_retirement_launch_intent(
+    receipt: dict[str, Any], compatibility: str | None = None
+) -> dict[str, Any]:
+    if compatibility not in (None, HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY):
+        raise HelperError("retirement launch intent compatibility is unsupported")
     intents = [event for event in receipt.get("events", []) if event.get("kind") == "launch_intent"]
     if len(intents) != 1:
         raise HelperError("retirement requires one modern launch intent")
@@ -4538,6 +4561,8 @@ def modern_read_only_retirement_launch_intent(receipt: dict[str, Any]) -> dict[s
         "expected_argv_digest", "expected_launcher_argv0_digest", "expected_launcher_identity",
         "expected_executable_object_identity", "packet_identity", "workdir_identity", "at",
     }
+    if compatibility == HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY:
+        fields.remove("expected_launcher_argv0_digest")
     binding = receipt.get("binding")
     if not isinstance(binding, dict) or binding.get("producer_role") != "thinker":
         raise HelperError("retirement launch intent authority is not read-only thinker")
@@ -4553,11 +4578,17 @@ def modern_read_only_retirement_launch_intent(receipt: dict[str, Any]) -> dict[s
         raise HelperError("retirement launch intent timestamp is invalid")
     for key in (
         "request_digest", "packet_digest", "launch_policy_digest", "launch_command_digest",
-        "expected_argv_digest", "expected_launcher_argv0_digest",
+        "expected_argv_digest",
     ):
         digest = required_string(intent, key, 64)
         if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
             raise HelperError(f"retirement launch intent {key} is not a lowercase SHA-256")
+    if compatibility is None:
+        digest = required_string(intent, "expected_launcher_argv0_digest", 64)
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise HelperError(
+                "retirement launch intent expected_launcher_argv0_digest is not a lowercase SHA-256"
+            )
     for key in ("expected_launcher_identity", "expected_executable_object_identity"):
         required_string(intent, key, 512)
     for key in ("packet_digest", "launch_policy_digest", "launch_command_digest"):
@@ -4569,7 +4600,7 @@ def modern_read_only_retirement_launch_intent(receipt: dict[str, Any]) -> dict[s
 
 
 def valid_live_retirement_candidate(
-    receipt: dict[str, Any], authorization: dict[str, str]
+    receipt: dict[str, Any], authorization: dict[str, str], compatibility: str | None = None
 ) -> bool:
     events = receipt.get("events")
     if (
@@ -4613,14 +4644,14 @@ def valid_live_retirement_candidate(
     try:
         envelope = validate_envelope(message, "thinker_report")
         validate_envelope_binding(envelope, receipt["binding"])
-        modern_read_only_retirement_launch_intent(receipt)
+        modern_read_only_retirement_launch_intent(receipt, compatibility)
     except HelperError:
         return False
     if envelope != message or canonical_sha256(message) != authorization["report_sha256"]:
         return False
     if intents:
         try:
-            validate_retirement_operation(intents[0], authorization)
+            validate_retirement_operation(intents[0], authorization, compatibility)
         except HelperError:
             return False
         if receipt.get("retirement_intent") != intents[0]:
@@ -4630,16 +4661,21 @@ def valid_live_retirement_candidate(
     return True
 
 
-def validate_retirement_operation(event: dict[str, Any], authorization: dict[str, str]) -> None:
+def validate_retirement_operation(
+    event: dict[str, Any], authorization: dict[str, str], compatibility: str | None = None
+) -> None:
     fields = {
         "event_id", "kind", "terminal_state", "report_sha256",
         "coordinator_authorization_sha256", "identity", "at",
     }
+    if compatibility is not None:
+        fields.add("compatibility")
     if (
         set(event) != fields
         or event.get("kind") != "retirement_intent"
         or not bounded_utc_timestamp(event.get("at"))
         or any(event.get(key) != authorization[key] for key in authorization)
+        or event.get("compatibility") != compatibility
     ):
         raise HelperError("retirement operation conflicts with durable intent")
 
@@ -4669,10 +4705,11 @@ def valid_pair_retirement_chain(receipt: dict[str, Any]) -> bool:
         key: intent.get(key)
         for key in ("terminal_state", "report_sha256", "coordinator_authorization_sha256")
     }
+    compatibility = intent.get("compatibility")
     try:
         validate_terminal_amp_authorization(authorization)
-        validate_retirement_operation(intent, authorization)
-        launch_intent = modern_read_only_retirement_launch_intent(receipt)
+        validate_retirement_operation(intent, authorization, compatibility)
+        launch_intent = modern_read_only_retirement_launch_intent(receipt, compatibility)
     except HelperError:
         return False
     if not valid_retirement_identity(intent.get("identity"), launch_intent, receipt.get("binding", {})):
@@ -4680,11 +4717,13 @@ def valid_pair_retirement_chain(receipt: dict[str, Any]) -> bool:
     prior = copy.deepcopy(receipt)
     prior.pop("pair_retired", None)
     prior["events"] = prior["events"][:-1]
-    return valid_live_retirement_candidate(prior, authorization)
+    return valid_live_retirement_candidate(prior, authorization, compatibility)
 
 
-def pair_retirement_result(origin_sha256: str, pair_sha256: str, outcome: str) -> dict[str, str]:
-    return {
+def pair_retirement_result(
+    origin_sha256: str, pair_sha256: str, outcome: str, compatibility: str | None = None
+) -> dict[str, str]:
+    result = {
         "action": "live_indeterminate_pair_retirement",
         "origin_thread_sha256": origin_sha256,
         "pair_sha256": pair_sha256,
@@ -4692,6 +4731,9 @@ def pair_retirement_result(origin_sha256: str, pair_sha256: str, outcome: str) -
         "absence_code": "exact_retirement_target_absent",
         "fence": "retained",
     }
+    if compatibility is not None:
+        result["compatibility"] = compatibility
+    return result
 
 
 def pair_retirement_blocked(origin_sha256: str, pair_sha256: str, blocker: str) -> dict[str, str]:
@@ -4823,6 +4865,7 @@ def inspect_live_indeterminate_target(
         expected_process_executable_object_identity=expected_process_object,
         expected_launcher_argv0_digest=launch_intent.get("expected_launcher_argv0_digest"),
         include_process_executable_object_identity=True,
+        allow_missing_launcher_argv0_digest="expected_launcher_argv0_digest" not in launch_intent,
     )
     if identity.get("window_id") != window_id:
         raise HelperError("retirement tmux target changed during inspection")
@@ -4870,6 +4913,9 @@ def stop_exact_retirement_target(identity: dict[str, Any]) -> None:
             identity.get("expected_launcher_argv0_digest"),
             tmux_fields=tmux_fields,
             include_process_executable_object_identity=True,
+            allow_missing_launcher_argv0_digest=(
+                "expected_launcher_argv0_digest" not in identity
+            ),
         )
         current["session_id"] = values[1]
         current["process_start_identity"] = process_start_identity_from_process_identity(
