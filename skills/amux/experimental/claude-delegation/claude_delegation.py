@@ -1652,6 +1652,128 @@ def run_command(
     return completed.stdout.rstrip("\r\n")
 
 
+def decode_tmux_control_text(value: str) -> str:
+    output: list[str] = []
+    index = 0
+    while index < len(value):
+        if value[index] != "\\":
+            output.append(value[index])
+            index += 1
+            continue
+        if index + 1 < len(value) and value[index + 1] == "\\":
+            output.append("\\")
+            index += 2
+            continue
+        octal = value[index + 1 : index + 4]
+        if len(octal) != 3 or any(character not in "01234567" for character in octal):
+            raise HelperError("tmux control response contains invalid escaping")
+        output.append(chr(int(octal, 8)))
+        index += 4
+    return "".join(output)
+
+
+class TmuxControlConnection:
+    def __init__(
+        self, session: str, command_prefix: list[str] | None = None
+    ):
+        self.session = required_string({"session": session}, "session", 256)
+        self.command_prefix = list(command_prefix or ["tmux"])
+        self.process: subprocess.Popen[bytes] | None = None
+        self.selector: selectors.BaseSelector | None = None
+        self.buffer = b""
+
+    def __enter__(self) -> TmuxControlConnection:
+        try:
+            self.process = subprocess.Popen(
+                self.command_prefix + ["-C", "attach-session", "-t", self.session],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+            )
+        except OSError as error:
+            raise HelperError("retirement tmux control connection is unavailable") from error
+        assert self.process.stdout is not None
+        self.selector = selectors.DefaultSelector()
+        self.selector.register(self.process.stdout, selectors.EVENT_READ)
+        self._read_response()
+        return self
+
+    def _read_response(self) -> list[str]:
+        if self.process is None or self.process.stdout is None or self.selector is None:
+            raise HelperError("retirement tmux control connection is unavailable")
+        deadline = time.monotonic() + 2.0
+        in_response = False
+        output: list[str] = []
+        total = 0
+        while time.monotonic() < deadline:
+            while b"\n" not in self.buffer:
+                if not self.selector.select(deadline - time.monotonic()):
+                    raise HelperError("retirement tmux control response timed out")
+                chunk = os.read(self.process.stdout.fileno(), 4096)
+                if not chunk:
+                    raise HelperError("retirement tmux control connection disappeared")
+                self.buffer += chunk
+                if len(self.buffer) > MAX_ABSENCE_OUTPUT_BYTES:
+                    raise HelperError("retirement tmux control response exceeds the size limit")
+            raw_line, self.buffer = self.buffer.split(b"\n", 1)
+            total += len(raw_line) + 1
+            if total > MAX_ABSENCE_OUTPUT_BYTES:
+                raise HelperError("retirement tmux control response exceeds the size limit")
+            try:
+                line = raw_line.rstrip(b"\r").decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise HelperError("retirement tmux control response is not UTF-8") from error
+            if line.startswith("%begin "):
+                if in_response:
+                    raise HelperError("retirement tmux control response is ambiguous")
+                in_response = True
+                output = []
+            elif in_response and line.startswith("%end "):
+                return [decode_tmux_control_text(value) for value in output]
+            elif in_response and line.startswith("%error "):
+                raise HelperError("retirement tmux control command failed")
+            elif line == "%exit" or line.startswith("%exit "):
+                raise HelperError("retirement tmux control connection disappeared")
+            elif in_response:
+                output.append(line)
+        raise HelperError("retirement tmux control response timed out")
+
+    def command(self, arguments: list[str]) -> list[str]:
+        if self.process is None or self.process.stdin is None or self.process.poll() is not None:
+            raise HelperError("retirement tmux control connection disappeared")
+        try:
+            self.process.stdin.write((shlex.join(arguments) + "\n").encode())
+            self.process.stdin.flush()
+        except (BrokenPipeError, OSError) as error:
+            raise HelperError("retirement tmux control connection disappeared") from error
+        return self._read_response()
+
+    def close(self) -> None:
+        process = self.process
+        selector = self.selector
+        self.process = None
+        self.selector = None
+        if selector is not None:
+            selector.close()
+        if process is None:
+            return
+        if process.stdin is not None:
+            process.stdin.close()
+        try:
+            process.wait(timeout=0.2)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+    def __exit__(self, *_: Any) -> None:
+        self.close()
+
+
 def exact_pane_absent(pane_id: str) -> bool:
     try:
         panes = run_command(["tmux", "list-panes", "-a", "-F", "#{pane_id}"]).splitlines()
@@ -1769,6 +1891,14 @@ def exact_process_identity(pid: int) -> tuple[str, str, list[str], str]:
     started = f"{info.start_seconds}.{info.start_microseconds:06d}"
     digest = hashlib.sha256(b"\0".join(os.fsencode(argument) for argument in arguments)).hexdigest()
     return name, started, arguments, digest
+
+
+def process_start_identity_from_process_identity(process_identity: str) -> str:
+    required_string({"process_identity": process_identity}, "process_identity", 512)
+    fields = process_identity.split(":")
+    if len(fields) == 5 and fields[0] == "linux" and fields[1]:
+        return f"linux:{fields[1]}"
+    return f"process-start:{process_identity}"
 
 
 def executable_file_identity(path: str | pathlib.Path) -> str:
@@ -2198,19 +2328,23 @@ def inspect_claude_identity(
     expected_process_executable_identity: str | None = None,
     expected_process_executable_object_identity: str | None = None,
     expected_launcher_argv0_digest: str | None = None,
+    tmux_fields: list[str] | None = None,
+    include_process_executable_object_identity: bool = False,
 ) -> dict[str, Any]:
     if not pane_id.startswith("%") or len(pane_id) < 2:
         raise HelperError("Claude identity requires an exact tmux pane ID")
-    fields = run_command(
-        [
-            "tmux",
-            "display-message",
-            "-p",
-            "-t",
-            pane_id,
-            "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}",
-        ]
-    ).split("\t")
+    fields = tmux_fields
+    if fields is None:
+        fields = run_command(
+            [
+                "tmux",
+                "display-message",
+                "-p",
+                "-t",
+                pane_id,
+                "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}",
+            ]
+        ).split("\t")
     if len(fields) != 8 or fields[3] != pane_id or not fields[6] or not fields[7]:
         raise HelperError("Claude pane is missing exact live tmux identity")
     try:
@@ -2311,7 +2445,10 @@ def inspect_claude_identity(
             raise HelperError("Claude launcher identity is unavailable") from error
         if live_object_identity != expected_executable_object_identity:
             raise HelperError("Claude launcher content does not match immutable launch intent")
-    if process_executable_object_identity is None:
+    if process_executable_object_identity is None and (
+        include_process_executable_object_identity
+        or expected_process_executable_object_identity is not None
+    ):
         try:
             process_descriptor, _, _, process_executable_object_identity = open_exact_verified_executable(
                 process_executable, follow_kernel_link=platform.system() == "Linux"
@@ -2355,7 +2492,11 @@ def inspect_claude_identity(
         "process_command_digest": process_command_digest,
         "launch_command_digest": hashlib.sha256(start_command.encode()).hexdigest(),
     }
-    identity["process_executable_object_identity"] = process_executable_object_identity
+    if (
+        include_process_executable_object_identity
+        or expected_process_executable_object_identity is not None
+    ):
+        identity["process_executable_object_identity"] = process_executable_object_identity
     return identity
 
 
@@ -4500,8 +4641,9 @@ def valid_retirement_identity(
     identity: Any, launch_intent: dict[str, Any], binding: dict[str, Any]
 ) -> bool:
     required_strings = {
-        "session", "window", "window_id", "pane_id", "claude_session_id", "workdir",
-        "current_command", "process_name", "process_identity", "process_executable_identity",
+        "session", "session_id", "window", "window_id", "pane_id", "claude_session_id", "workdir",
+        "current_command", "process_name", "process_identity", "process_start_identity",
+        "process_executable_identity",
         "process_executable_object_identity", "normalized_argv_digest", "process_command_digest",
         "launch_command_digest", "expected_launcher_identity", "expected_executable_object_identity",
     }
@@ -4525,6 +4667,8 @@ def valid_retirement_identity(
         and identity["window"] == launch_intent.get("tmux_window")
         and identity["claude_session_id"] == launch_intent.get("claude_session_id")
         and identity["normalized_argv_digest"] == launch_intent.get("expected_argv_digest")
+        and identity["process_start_identity"]
+        == process_start_identity_from_process_identity(identity["process_identity"])
         and identity["expected_launcher_identity"] == launch_intent.get("expected_launcher_identity")
         and identity["expected_executable_object_identity"]
         == launch_intent.get("expected_executable_object_identity")
@@ -4544,32 +4688,33 @@ def inspect_live_indeterminate_target(
     try:
         output = read_bounded_command([
             "tmux", "list-panes", "-a", "-F",
-            "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}",
+            "#{session_name}\t#{session_id}\t#{window_name}\t#{window_id}\t#{pane_id}",
         ], MAX_ABSENCE_OUTPUT_BYTES)
     except HelperError as error:
         raise HelperError("retirement tmux inspection is unavailable") from error
     rows = output.splitlines() if output else []
     if len(rows) > MAX_ABSENCE_PANES:
         raise HelperError("retirement tmux inspection is ambiguous")
-    candidates: list[tuple[str, str]] = []
+    candidates: list[tuple[str, str, str]] = []
     pane_ids: set[str] = set()
     for row in rows:
         fields = row.split("\t")
         if (
-            len(fields) != 4
+            len(fields) != 5
             or not fields[0]
-            or not fields[1]
-            or not fields[2].startswith("@")
-            or not fields[3].startswith("%")
-            or fields[3] in pane_ids
+            or not fields[1].startswith("$")
+            or not fields[2]
+            or not fields[3].startswith("@")
+            or not fields[4].startswith("%")
+            or fields[4] in pane_ids
         ):
             raise HelperError("retirement tmux inspection is ambiguous")
-        pane_ids.add(fields[3])
-        if fields[0] == launch_intent.get("tmux_session") and fields[1] == launch_intent.get("tmux_window"):
-            candidates.append((fields[2], fields[3]))
+        pane_ids.add(fields[4])
+        if fields[0] == launch_intent.get("tmux_session") and fields[2] == launch_intent.get("tmux_window"):
+            candidates.append((fields[1], fields[3], fields[4]))
     if len(candidates) != 1:
         raise HelperError("retirement requires one exact live launch target")
-    window_id, pane_id = candidates[0]
+    session_id, window_id, pane_id = candidates[0]
     expected_process_object: str | None = None
     expected_process_path: pathlib.Path | None = None
     if platform.system() == "Darwin":
@@ -4589,6 +4734,7 @@ def inspect_live_indeterminate_target(
         launch_intent["expected_executable_object_identity"],
         expected_process_executable_object_identity=expected_process_object,
         expected_launcher_argv0_digest=launch_intent.get("expected_launcher_argv0_digest"),
+        include_process_executable_object_identity=True,
     )
     if identity.get("window_id") != window_id:
         raise HelperError("retirement tmux target changed during inspection")
@@ -4596,6 +4742,10 @@ def inspect_live_indeterminate_target(
         raise HelperError("retirement process is not the exact private executable route")
     identity["expected_launcher_identity"] = launch_intent["expected_launcher_identity"]
     identity["expected_executable_object_identity"] = launch_intent["expected_executable_object_identity"]
+    identity["session_id"] = session_id
+    identity["process_start_identity"] = process_start_identity_from_process_identity(
+        identity["process_identity"]
+    )
     if launch_intent.get("expected_launcher_argv0_digest") is not None:
         identity["expected_launcher_argv0_digest"] = launch_intent["expected_launcher_argv0_digest"]
     if not valid_retirement_identity(identity, launch_intent, binding):
@@ -4604,23 +4754,45 @@ def inspect_live_indeterminate_target(
 
 
 def stop_exact_retirement_target(identity: dict[str, Any]) -> None:
-    current = inspect_claude_identity(
-        identity["pane_id"],
-        identity["claude_session_id"],
-        identity["normalized_argv_digest"],
-        identity["expected_launcher_identity"],
-        identity["expected_executable_object_identity"],
-        identity["process_executable_identity"],
-        identity["process_executable_object_identity"],
-        identity.get("expected_launcher_argv0_digest"),
-    )
-    current["expected_launcher_identity"] = identity["expected_launcher_identity"]
-    current["expected_executable_object_identity"] = identity["expected_executable_object_identity"]
-    if identity.get("expected_launcher_argv0_digest") is not None:
-        current["expected_launcher_argv0_digest"] = identity["expected_launcher_argv0_digest"]
-    if current != identity:
-        raise HelperError("retirement target changed immediately before exact stop")
-    run_command(["tmux", "kill-pane", "-t", identity["pane_id"]])
+    formats = [
+        "#{session_name}", "#{session_id}", "#{window_name}", "#{window_id}",
+        "#{pane_id}", "#{pane_pid}", "#{pane_current_path}", "#{pane_current_command}",
+        "#{pane_start_command}",
+    ]
+    with TmuxControlConnection(identity["session"]) as control:
+        values: list[str] = []
+        for format_value in formats:
+            response = control.command([
+                "display-message", "-p", "-t", identity["pane_id"], format_value,
+            ])
+            if len(response) != 1:
+                raise HelperError("retirement tmux control snapshot is ambiguous")
+            values.append(response[0])
+        tmux_fields = [values[index] for index in (0, 2, 3, 4, 5, 6, 7, 8)]
+        current = inspect_claude_identity(
+            identity["pane_id"],
+            identity["claude_session_id"],
+            identity["normalized_argv_digest"],
+            identity["expected_launcher_identity"],
+            identity["expected_executable_object_identity"],
+            identity["process_executable_identity"],
+            identity["process_executable_object_identity"],
+            identity.get("expected_launcher_argv0_digest"),
+            tmux_fields=tmux_fields,
+            include_process_executable_object_identity=True,
+        )
+        current["session_id"] = values[1]
+        current["process_start_identity"] = process_start_identity_from_process_identity(
+            current["process_identity"]
+        )
+        current["expected_launcher_identity"] = identity["expected_launcher_identity"]
+        current["expected_executable_object_identity"] = identity["expected_executable_object_identity"]
+        if identity.get("expected_launcher_argv0_digest") is not None:
+            current["expected_launcher_argv0_digest"] = identity["expected_launcher_argv0_digest"]
+        if current != identity:
+            raise HelperError("retirement target changed immediately before exact stop")
+        if control.command(["kill-pane", "-t", identity["pane_id"]]):
+            raise HelperError("retirement tmux exact stop returned ambiguous output")
 
 
 def process_pid_is_absent(pid: int) -> bool:
@@ -4652,7 +4824,7 @@ def confirm_retirement_target_absent(identity: dict[str, Any]) -> str:
         if identity["pane_id"] in panes:
             return "retirement_target_still_live"
         try:
-            name, process_identity, arguments, command_digest = exact_process_identity(identity["pane_pid"])
+            name, process_identity, _, command_digest = exact_process_identity(identity["pane_pid"])
             executable_identity = process_executable_identity(identity["pane_pid"])
         except HelperError:
             if not process_pid_is_absent(identity["pane_pid"]):
@@ -4662,9 +4834,11 @@ def confirm_retirement_target_absent(identity: dict[str, Any]) -> str:
                 return "exact_retirement_target_absent"
             time.sleep(STARTUP_POLL_SECONDS)
             continue
-        if process_identity == identity["process_identity"]:
+        current_start_identity = process_start_identity_from_process_identity(process_identity)
+        if current_start_identity == identity["process_start_identity"]:
             if (
-                name == identity["process_name"]
+                process_identity == identity["process_identity"]
+                and name == identity["process_name"]
                 and command_digest == identity["process_command_digest"]
                 and executable_identity == identity["process_executable_identity"]
             ):
