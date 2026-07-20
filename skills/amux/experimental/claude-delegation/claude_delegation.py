@@ -67,6 +67,10 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def canonical_sha256(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def reject_duplicate_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for key, nested in pairs:
@@ -531,6 +535,125 @@ class ReceiptStore:
                     }
         return worker_detach_result(origin_sha256, pair_sha256, "detached", absence_code, compatibility)
 
+    def retire_live_indeterminate_pair(self, request: dict[str, Any]) -> dict[str, Any]:
+        delegation_id = protocol_id(request, "delegation_id")
+        event_id = protocol_id(request, "event_id")
+        origin_thread = required_string(request, "origin_thread", 256)
+        authorization = validate_terminal_amp_authorization(request.get("authorization"))
+        recover = request.get("recover", False)
+        if not isinstance(recover, bool):
+            raise HelperError("live pair retirement recover must be boolean")
+        reject_unknown(
+            request,
+            {"delegation_id", "event_id", "origin_thread", "authorization", "recover"},
+            "live indeterminate pair retirement",
+        )
+        origin_sha256 = hashlib.sha256(origin_thread.encode()).hexdigest()
+        pair_sha256 = hashlib.sha256(delegation_id.encode()).hexdigest()
+        result_id = internal_event_id("retirement-result", event_id)
+        with self.lifecycle.mutation_lock():
+            lifecycle = self.lifecycle.load()
+            state_path = str(self.state_dir.resolve())
+            if state_path not in lifecycle["stores"]:
+                raise HelperError("receipt store is not registered in the canonical lifecycle registry")
+            verify_registered_store_object(state_path, lifecycle["legacy_store_objects"].get(state_path))
+            if origin_thread not in lifecycle["teardown_fences"]:
+                lifecycle["teardown_fences"][origin_thread] = {
+                    "operation_id": hashlib.sha256(f"worker-teardown\0{origin_thread}".encode()).hexdigest(),
+                    "created_at": utc_now(),
+                }
+                self.lifecycle.commit(lifecycle)
+            store_lock = contextlib.nullcontext() if self.lifecycle.state_dir == self.state_dir else self.mutation_lock()
+            with store_lock:
+                store = load_registered_receipt_store(
+                    self, state_path, lifecycle["legacy_store_objects"].get(state_path), acquire_lock=False
+                )
+                receipt = self.find(store, delegation_id)
+                if receipt["binding"].get("origin_thread") != origin_thread:
+                    raise HelperError("receipt immutable origin does not match retirement authority")
+                terminal = find_event(receipt, result_id)
+                existing = find_event(receipt, event_id)
+                if terminal is not None:
+                    if existing is None or not valid_pair_retirement_chain(receipt):
+                        raise HelperError("terminal pair retirement proof is invalid")
+                    validate_retirement_operation(existing, authorization)
+                    return pair_retirement_result(origin_sha256, pair_sha256, "duplicate")
+                if not valid_live_retirement_candidate(receipt, authorization):
+                    raise HelperError("retirement requires the exact live report-bearing launch-indeterminate chain")
+                launch_intent = modern_read_only_retirement_launch_intent(receipt)
+                try:
+                    with self.launch_gate(delegation_id, timeout_seconds=0.2):
+                        if existing is None:
+                            if recover:
+                                raise HelperError("retirement recovery requires a durable retirement intent")
+                            identity = inspect_live_indeterminate_target(
+                                launch_intent, receipt["binding"], self, delegation_id
+                            )
+                            if not valid_retirement_identity(identity, launch_intent, receipt["binding"]):
+                                raise HelperError("retirement target does not match complete launch identity")
+                            retirement_intent = {
+                                "event_id": event_id,
+                                "kind": "retirement_intent",
+                                "terminal_state": authorization["terminal_state"],
+                                "report_sha256": authorization["report_sha256"],
+                                "coordinator_authorization_sha256": authorization["coordinator_authorization_sha256"],
+                                "identity": identity,
+                                "at": utc_now(),
+                            }
+                            receipt["events"].append(retirement_intent)
+                            receipt["retirement_intent"] = copy.deepcopy(retirement_intent)
+                            receipt["updated_at"] = retirement_intent["at"]
+                            self.commit(store)
+                            current = inspect_live_indeterminate_target(
+                                launch_intent, receipt["binding"], self, delegation_id
+                            )
+                            if current != identity:
+                                return pair_retirement_blocked(
+                                    origin_sha256, pair_sha256, "retirement_identity_changed"
+                                )
+                            stop_exact_retirement_target(identity)
+                        else:
+                            if not recover:
+                                raise HelperError("retirement outcome is indeterminate; explicit recovery is required")
+                            validate_retirement_operation(existing, authorization)
+                            identity = copy.deepcopy(existing.get("identity"))
+                            if not valid_retirement_identity(identity, launch_intent, receipt["binding"]):
+                                raise HelperError("durable retirement identity is invalid")
+                            absence = confirm_retirement_target_absent(identity)
+                            if absence != "exact_retirement_target_absent":
+                                try:
+                                    current = inspect_live_indeterminate_target(
+                                        launch_intent, receipt["binding"], self, delegation_id
+                                    )
+                                except HelperError:
+                                    return pair_retirement_blocked(origin_sha256, pair_sha256, absence)
+                                if current != identity:
+                                    return pair_retirement_blocked(
+                                        origin_sha256, pair_sha256, "retirement_identity_changed"
+                                    )
+                                stop_exact_retirement_target(identity)
+                        absence = confirm_retirement_target_absent(identity)
+                        if absence != "exact_retirement_target_absent":
+                            return pair_retirement_blocked(origin_sha256, pair_sha256, absence)
+                        result = {
+                            "event_id": result_id,
+                            "kind": "pair_retired",
+                            "operation_event_id": event_id,
+                            "absence_code": absence,
+                            "at": utc_now(),
+                        }
+                        receipt["events"].append(result)
+                        receipt["pair_retired"] = copy.deepcopy(result)
+                        receipt["updated_at"] = result["at"]
+                        if not valid_pair_retirement_chain(receipt):
+                            raise HelperError("terminal pair retirement proof did not seal exactly")
+                        self.commit(store)
+                except LaunchGateBusy:
+                    return pair_retirement_blocked(
+                        origin_sha256, pair_sha256, "launch_transport_active_or_indeterminate"
+                    )
+        return pair_retirement_result(origin_sha256, pair_sha256, "retired")
+
     def worker_teardown(self, origin_thread: str, dry_run: bool) -> dict[str, Any]:
         required_string({"origin_thread": origin_thread}, "origin_thread", 256)
         origin_thread_sha256 = hashlib.sha256(origin_thread.encode()).hexdigest()
@@ -575,6 +698,8 @@ class ReceiptStore:
             )
             if valid_worker_detach_chain(receipt):
                 public_state = "worker_detached"
+            elif valid_pair_retirement_chain(receipt):
+                public_state = "pair_retired"
             pair = {"pair_sha256": pair_id, "state": public_state}
             blocker = worker_teardown_receipt_blocker(receipt)
             if blocker is not None:
@@ -588,6 +713,10 @@ class ReceiptStore:
                 pairs.append(pair)
                 continue
             if valid_worker_detach_chain(receipt):
+                pair["action"] = "none"
+                pairs.append(pair)
+                continue
+            if valid_pair_retirement_chain(receipt):
                 pair["action"] = "none"
                 pairs.append(pair)
                 continue
@@ -2137,6 +2266,7 @@ def inspect_claude_identity(
             != executable_content_identity(expected_executable_object_identity)
         ):
             raise HelperError("Claude process executable content does not match immutable launch intent")
+        process_executable_object_identity = live_object_identity
         launcher_identity = expected_launcher_identity
     elif executable_form == "darwin_transport":
         if expected_process_executable_object_identity is None:
@@ -2159,8 +2289,7 @@ def inspect_claude_identity(
             raise HelperError("Claude transport executable identity is unavailable") from error
         if (
             process_launcher_identity != executable_identity
-            or process_executable_object_identity
-            != expected_process_executable_object_identity
+            or process_executable_object_identity != expected_process_executable_object_identity
             or executable_content_identity(process_executable_object_identity)
             != executable_content_identity(expected_executable_object_identity)
         ):
@@ -2182,6 +2311,14 @@ def inspect_claude_identity(
             raise HelperError("Claude launcher identity is unavailable") from error
         if live_object_identity != expected_executable_object_identity:
             raise HelperError("Claude launcher content does not match immutable launch intent")
+    if process_executable_object_identity is None:
+        try:
+            process_descriptor, _, _, process_executable_object_identity = open_exact_verified_executable(
+                process_executable, follow_kernel_link=platform.system() == "Linux"
+            )
+            os.close(process_descriptor)
+        except (OSError, RuntimeError) as error:
+            raise HelperError("Claude process executable object identity is unavailable") from error
     if launcher_identity != expected_launcher_identity:
         raise HelperError("Claude process launcher does not match immutable launch intent")
     if expected_process_executable_identity is not None and executable_identity != expected_process_executable_identity:
@@ -2218,8 +2355,7 @@ def inspect_claude_identity(
         "process_command_digest": process_command_digest,
         "launch_command_digest": hashlib.sha256(start_command.encode()).hexdigest(),
     }
-    if process_executable_object_identity is not None:
-        identity["process_executable_object_identity"] = process_executable_object_identity
+    identity["process_executable_object_identity"] = process_executable_object_identity
     return identity
 
 
@@ -3929,11 +4065,20 @@ def find_event(receipt: dict[str, Any], event_id: str) -> dict[str, Any] | None:
 
 def require_receipt_mutable(receipt: dict[str, Any]) -> None:
     events = receipt.get("events")
-    if receipt.get("worker_detached") is not None or (
+    if (
+        receipt.get("worker_detached") is not None
+        or receipt.get("retirement_intent") is not None
+        or receipt.get("pair_retired") is not None
+        or (
         isinstance(events, list)
-        and any(isinstance(event, dict) and event.get("kind") == "worker_detached" for event in events)
+        and any(
+            isinstance(event, dict)
+            and event.get("kind") in {"worker_detached", "retirement_intent", "pair_retired"}
+            for event in events
+        )
+        )
     ):
-        raise HelperError("detached receipt is sealed against further mutation")
+        raise HelperError("terminal receipt is sealed against further mutation")
 
 
 def require_launch_transport_allowed(store: ReceiptStore, delegation_id: str) -> None:
@@ -4037,7 +4182,7 @@ def pre_identity_launch_intent(receipt: dict[str, Any]) -> dict[str, Any]:
 
 
 def worker_teardown_receipt_blocker(receipt: dict[str, Any]) -> str | None:
-    if valid_worker_detach_chain(receipt):
+    if valid_worker_detach_chain(receipt) or valid_pair_retirement_chain(receipt):
         return None
     if receipt.get("input_state") in {"pending", "seen"}:
         return "unresolved_input"
@@ -4153,6 +4298,184 @@ def valid_indeterminate_detach_candidate(receipt: dict[str, Any]) -> bool:
     return len(intents) == 1 and worker_teardown_receipt_blocker(receipt) == "launch_indeterminate"
 
 
+def modern_read_only_retirement_launch_intent(receipt: dict[str, Any]) -> dict[str, Any]:
+    intents = [event for event in receipt.get("events", []) if event.get("kind") == "launch_intent"]
+    if len(intents) != 1:
+        raise HelperError("retirement requires one modern launch intent")
+    intent = intents[0]
+    fields = {
+        "event_id", "kind", "workflow", "request_digest", "claude_session_id", "tmux_session",
+        "tmux_window", "packet_digest", "launch_policy_digest", "launch_command_digest",
+        "expected_argv_digest", "expected_launcher_argv0_digest", "expected_launcher_identity",
+        "expected_executable_object_identity", "packet_identity", "workdir_identity", "at",
+    }
+    binding = receipt.get("binding")
+    if not isinstance(binding, dict) or binding.get("producer_role") != "thinker":
+        raise HelperError("retirement launch intent authority is not read-only thinker")
+    if binding.get("model") is not None:
+        fields.add("model")
+    if set(intent) != fields or intent.get("workflow") != "read_only":
+        raise HelperError("retirement launch intent is not the exact modern read-only shape")
+    protocol_id(intent, "event_id")
+    protocol_id(intent, "claude_session_id")
+    for key in ("tmux_session", "tmux_window", "packet_identity", "workdir_identity"):
+        required_string(intent, key, 2048)
+    if not bounded_utc_timestamp(intent.get("at")):
+        raise HelperError("retirement launch intent timestamp is invalid")
+    for key in (
+        "request_digest", "packet_digest", "launch_policy_digest", "launch_command_digest",
+        "expected_argv_digest", "expected_launcher_argv0_digest",
+    ):
+        digest = required_string(intent, key, 64)
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise HelperError(f"retirement launch intent {key} is not a lowercase SHA-256")
+    for key in ("expected_launcher_identity", "expected_executable_object_identity"):
+        required_string(intent, key, 512)
+    for key in ("packet_digest", "launch_policy_digest", "launch_command_digest"):
+        if intent[key] != binding.get(key):
+            raise HelperError("retirement launch intent substituted immutable binding evidence")
+    if intent.get("model") != binding.get("model"):
+        raise HelperError("retirement launch intent model differs from immutable binding")
+    return copy.deepcopy(intent)
+
+
+def valid_live_retirement_candidate(
+    receipt: dict[str, Any], authorization: dict[str, str]
+) -> bool:
+    events = receipt.get("events")
+    if (
+        not isinstance(events, list)
+        or any(not isinstance(event, dict) for event in events)
+        or receipt.get("state") != "valid_report"
+        or not isinstance(receipt.get("report_message_id"), str)
+        or not receipt["report_message_id"]
+        or any(key in receipt for key in (
+            "session_identity", "input_state", "input_message_id", "worker_detached", "pair_retired",
+            "parked_at", "cleanup_eligible_at", "submission_frozen", "handoff_validation",
+        ))
+    ):
+        return False
+    kinds = [event.get("kind") for event in events]
+    if kinds not in (
+        ["created", "launch_intent", "valid_report"],
+        ["created", "launch_intent", "valid_report", "retirement_intent"],
+    ):
+        return False
+    created = events[0]
+    binding = receipt.get("binding", {})
+    if (
+        set(created) != {"event_id", "kind", "at", "routing"}
+        or created.get("event_id") != f"create:{binding.get('delegation_id', '')}"
+        or not bounded_utc_timestamp(created.get("at"))
+        or created.get("routing") != receipt.get("routing")
+    ):
+        return False
+    reports = [event for event in events if event.get("kind") == "valid_report"]
+    intents = [event for event in events if event.get("kind") == "retirement_intent"]
+    if (
+        len(reports) != 1
+        or len(intents) > 1
+        or reports[0].get("event_id") != receipt["report_message_id"]
+        or set(reports[0]) != {"event_id", "kind", "message", "at"}
+        or not bounded_utc_timestamp(reports[0].get("at"))
+    ):
+        return False
+    message = reports[0].get("message")
+    try:
+        envelope = validate_envelope(message, "thinker_report")
+        validate_envelope_binding(envelope, receipt["binding"])
+        modern_read_only_retirement_launch_intent(receipt)
+    except HelperError:
+        return False
+    if envelope != message or canonical_sha256(message) != authorization["report_sha256"]:
+        return False
+    if intents:
+        try:
+            validate_retirement_operation(intents[0], authorization)
+        except HelperError:
+            return False
+        if receipt.get("retirement_intent") != intents[0]:
+            return False
+    elif receipt.get("retirement_intent") is not None:
+        return False
+    return True
+
+
+def validate_retirement_operation(event: dict[str, Any], authorization: dict[str, str]) -> None:
+    fields = {
+        "event_id", "kind", "terminal_state", "report_sha256",
+        "coordinator_authorization_sha256", "identity", "at",
+    }
+    if (
+        set(event) != fields
+        or event.get("kind") != "retirement_intent"
+        or not bounded_utc_timestamp(event.get("at"))
+        or any(event.get(key) != authorization[key] for key in authorization)
+    ):
+        raise HelperError("retirement operation conflicts with durable intent")
+
+
+def valid_pair_retirement_chain(receipt: dict[str, Any]) -> bool:
+    events = receipt.get("events")
+    intent = receipt.get("retirement_intent")
+    result = receipt.get("pair_retired")
+    if not isinstance(events, list) or not isinstance(intent, dict) or not isinstance(result, dict):
+        return False
+    intents = [event for event in events if isinstance(event, dict) and event.get("kind") == "retirement_intent"]
+    results = [event for event in events if isinstance(event, dict) and event.get("kind") == "pair_retired"]
+    if len(intents) != 1 or len(results) != 1 or intents[0] != intent or results[0] != result:
+        return False
+    if events[-1] != result or events[-2] != intent:
+        return False
+    result_fields = {"event_id", "kind", "operation_event_id", "absence_code", "at"}
+    if (
+        set(result) != result_fields
+        or result.get("event_id") != internal_event_id("retirement-result", intent.get("event_id", ""))
+        or result.get("operation_event_id") != intent.get("event_id")
+        or result.get("absence_code") != "exact_retirement_target_absent"
+        or not bounded_utc_timestamp(result.get("at"))
+    ):
+        return False
+    authorization = {
+        key: intent.get(key)
+        for key in ("terminal_state", "report_sha256", "coordinator_authorization_sha256")
+    }
+    try:
+        validate_terminal_amp_authorization(authorization)
+        validate_retirement_operation(intent, authorization)
+        launch_intent = modern_read_only_retirement_launch_intent(receipt)
+    except HelperError:
+        return False
+    if not valid_retirement_identity(intent.get("identity"), launch_intent, receipt.get("binding", {})):
+        return False
+    prior = copy.deepcopy(receipt)
+    prior.pop("pair_retired", None)
+    prior["events"] = prior["events"][:-1]
+    return valid_live_retirement_candidate(prior, authorization)
+
+
+def pair_retirement_result(origin_sha256: str, pair_sha256: str, outcome: str) -> dict[str, str]:
+    return {
+        "action": "live_indeterminate_pair_retirement",
+        "origin_thread_sha256": origin_sha256,
+        "pair_sha256": pair_sha256,
+        "outcome": outcome,
+        "absence_code": "exact_retirement_target_absent",
+        "fence": "retained",
+    }
+
+
+def pair_retirement_blocked(origin_sha256: str, pair_sha256: str, blocker: str) -> dict[str, str]:
+    return {
+        "action": "live_indeterminate_pair_retirement",
+        "origin_thread_sha256": origin_sha256,
+        "pair_sha256": pair_sha256,
+        "outcome": "blocked",
+        "blocker": blocker,
+        "fence": "retained",
+    }
+
+
 def worker_detach_result(
     origin_sha256: str,
     pair_sha256: str,
@@ -4171,6 +4494,187 @@ def worker_detach_result(
     if compatibility is not None:
         result["compatibility"] = compatibility
     return result
+
+
+def valid_retirement_identity(
+    identity: Any, launch_intent: dict[str, Any], binding: dict[str, Any]
+) -> bool:
+    required_strings = {
+        "session", "window", "window_id", "pane_id", "claude_session_id", "workdir",
+        "current_command", "process_name", "process_identity", "process_executable_identity",
+        "process_executable_object_identity", "normalized_argv_digest", "process_command_digest",
+        "launch_command_digest", "expected_launcher_identity", "expected_executable_object_identity",
+    }
+    expected_fields = required_strings | {"pane_pid"}
+    if launch_intent.get("expected_launcher_argv0_digest") is not None:
+        expected_fields.add("expected_launcher_argv0_digest")
+    if (
+        not isinstance(identity, dict)
+        or set(identity) != expected_fields
+        or any(not isinstance(identity.get(key), str) or not identity[key] for key in required_strings)
+        or not isinstance(identity.get("pane_pid"), int)
+        or identity["pane_pid"] <= 0
+    ):
+        return False
+    try:
+        workdir = str(pathlib.Path(binding["workdir"]).resolve(strict=True))
+    except (KeyError, OSError):
+        return False
+    return (
+        identity["session"] == launch_intent.get("tmux_session")
+        and identity["window"] == launch_intent.get("tmux_window")
+        and identity["claude_session_id"] == launch_intent.get("claude_session_id")
+        and identity["normalized_argv_digest"] == launch_intent.get("expected_argv_digest")
+        and identity["expected_launcher_identity"] == launch_intent.get("expected_launcher_identity")
+        and identity["expected_executable_object_identity"]
+        == launch_intent.get("expected_executable_object_identity")
+        and identity.get("expected_launcher_argv0_digest")
+        == launch_intent.get("expected_launcher_argv0_digest")
+        and identity["workdir"] == workdir
+        and identity["launch_command_digest"] == binding.get("launch_command_digest")
+    )
+
+
+def inspect_live_indeterminate_target(
+    launch_intent: dict[str, Any],
+    binding: dict[str, Any],
+    store: ReceiptStore,
+    delegation_id: str,
+) -> dict[str, Any]:
+    try:
+        output = read_bounded_command([
+            "tmux", "list-panes", "-a", "-F",
+            "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}",
+        ], MAX_ABSENCE_OUTPUT_BYTES)
+    except HelperError as error:
+        raise HelperError("retirement tmux inspection is unavailable") from error
+    rows = output.splitlines() if output else []
+    if len(rows) > MAX_ABSENCE_PANES:
+        raise HelperError("retirement tmux inspection is ambiguous")
+    candidates: list[tuple[str, str]] = []
+    pane_ids: set[str] = set()
+    for row in rows:
+        fields = row.split("\t")
+        if (
+            len(fields) != 4
+            or not fields[0]
+            or not fields[1]
+            or not fields[2].startswith("@")
+            or not fields[3].startswith("%")
+            or fields[3] in pane_ids
+        ):
+            raise HelperError("retirement tmux inspection is ambiguous")
+        pane_ids.add(fields[3])
+        if fields[0] == launch_intent.get("tmux_session") and fields[1] == launch_intent.get("tmux_window"):
+            candidates.append((fields[2], fields[3]))
+    if len(candidates) != 1:
+        raise HelperError("retirement requires one exact live launch target")
+    window_id, pane_id = candidates[0]
+    expected_process_object: str | None = None
+    expected_process_path: pathlib.Path | None = None
+    if platform.system() == "Darwin":
+        expected_process_path = private_launch_transport_path(store, delegation_id).with_name("verified-claude")
+        try:
+            descriptor, _, _, expected_process_object = open_exact_verified_executable(
+                expected_process_path
+            )
+            os.close(descriptor)
+        except (OSError, RuntimeError) as error:
+            raise HelperError("retirement private executable identity is unavailable") from error
+    identity = inspect_claude_identity(
+        pane_id,
+        launch_intent["claude_session_id"],
+        launch_intent["expected_argv_digest"],
+        launch_intent["expected_launcher_identity"],
+        launch_intent["expected_executable_object_identity"],
+        expected_process_executable_object_identity=expected_process_object,
+        expected_launcher_argv0_digest=launch_intent.get("expected_launcher_argv0_digest"),
+    )
+    if identity.get("window_id") != window_id:
+        raise HelperError("retirement tmux target changed during inspection")
+    if expected_process_path is not None and process_executable_path(identity["pane_pid"]) != expected_process_path:
+        raise HelperError("retirement process is not the exact private executable route")
+    identity["expected_launcher_identity"] = launch_intent["expected_launcher_identity"]
+    identity["expected_executable_object_identity"] = launch_intent["expected_executable_object_identity"]
+    if launch_intent.get("expected_launcher_argv0_digest") is not None:
+        identity["expected_launcher_argv0_digest"] = launch_intent["expected_launcher_argv0_digest"]
+    if not valid_retirement_identity(identity, launch_intent, binding):
+        raise HelperError("retirement target does not match complete launch identity")
+    return identity
+
+
+def stop_exact_retirement_target(identity: dict[str, Any]) -> None:
+    current = inspect_claude_identity(
+        identity["pane_id"],
+        identity["claude_session_id"],
+        identity["normalized_argv_digest"],
+        identity["expected_launcher_identity"],
+        identity["expected_executable_object_identity"],
+        identity["process_executable_identity"],
+        identity["process_executable_object_identity"],
+        identity.get("expected_launcher_argv0_digest"),
+    )
+    current["expected_launcher_identity"] = identity["expected_launcher_identity"]
+    current["expected_executable_object_identity"] = identity["expected_executable_object_identity"]
+    if identity.get("expected_launcher_argv0_digest") is not None:
+        current["expected_launcher_argv0_digest"] = identity["expected_launcher_argv0_digest"]
+    if current != identity:
+        raise HelperError("retirement target changed immediately before exact stop")
+    run_command(["tmux", "kill-pane", "-t", identity["pane_id"]])
+
+
+def process_pid_is_absent(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OSError):
+        return False
+    return False
+
+
+def confirm_retirement_target_absent(identity: dict[str, Any]) -> str:
+    deadline = time.monotonic() + 2.0
+    confirmed = 0
+    while time.monotonic() < deadline:
+        try:
+            panes = read_bounded_command(
+                ["tmux", "list-panes", "-a", "-F", "#{pane_id}"], MAX_ABSENCE_OUTPUT_BYTES
+            ).splitlines()
+        except HelperError:
+            return "tmux_inspection_unavailable"
+        if (
+            len(panes) > MAX_ABSENCE_PANES
+            or any(len(pane) < 2 or pane[0] != "%" or not pane[1:].isdigit() for pane in panes)
+            or len(panes) != len(set(panes))
+        ):
+            return "tmux_inspection_ambiguous"
+        if identity["pane_id"] in panes:
+            return "retirement_target_still_live"
+        try:
+            name, process_identity, arguments, command_digest = exact_process_identity(identity["pane_pid"])
+            executable_identity = process_executable_identity(identity["pane_pid"])
+        except HelperError:
+            if not process_pid_is_absent(identity["pane_pid"]):
+                return "process_inspection_unavailable"
+            confirmed += 1
+            if confirmed >= 2:
+                return "exact_retirement_target_absent"
+            time.sleep(STARTUP_POLL_SECONDS)
+            continue
+        if process_identity == identity["process_identity"]:
+            if (
+                name == identity["process_name"]
+                and command_digest == identity["process_command_digest"]
+                and executable_identity == identity["process_executable_identity"]
+            ):
+                return "retirement_target_still_live"
+            return "retirement_target_identity_changed_after_stop"
+        confirmed += 1
+        if confirmed >= 2:
+            return "exact_retirement_target_absent"
+        time.sleep(STARTUP_POLL_SECONDS)
+    return "retirement_absence_unconfirmed"
 
 
 def inspect_pre_identity_launch_absence(intent: dict[str, Any]) -> str:
@@ -4484,6 +4988,7 @@ def parser() -> argparse.ArgumentParser:
     register_legacy.add_argument("--origin-thread", required=True)
     register_legacy.add_argument("--store-path", type=pathlib.Path, required=True)
     lifecycle_commands.add_parser("detach-indeterminate-worker")
+    lifecycle_commands.add_parser("retire-live-indeterminate-pair")
     commands.add_parser("diagnose")
     return root
 
@@ -4539,6 +5044,18 @@ def main() -> int:
                 "action": "indeterminate_worker_detach",
                 "outcome": "blocked",
                 "blocker": "detach_proof_invalid_or_unavailable",
+                "fence": "unchanged_or_retained",
+            }
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 2 if result["outcome"] == "blocked" else 0
+    if arguments.area == "lifecycle" and arguments.command == "retire-live-indeterminate-pair":
+        try:
+            result = store.retire_live_indeterminate_pair(read_input())
+        except HelperError:
+            result = {
+                "action": "live_indeterminate_pair_retirement",
+                "outcome": "blocked",
+                "blocker": "retirement_proof_invalid_or_unavailable",
                 "fence": "unchanged_or_retained",
             }
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))

@@ -1968,6 +1968,207 @@ print("ok")
 	}
 }
 
+func TestLiveReportBearingIndeterminatePairRetirementIsExactDurableAndRecoverable(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import copy, hashlib, importlib.util, json, pathlib, sys, tempfile
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+real_confirm_retirement_target_absent = module.confirm_retirement_target_absent
+real_inspect_live_indeterminate_target = module.inspect_live_indeterminate_target
+
+identity = {"session":"Synthetic", "window":"live-indeterminate", "window_id":"@17", "pane_id":"%23",
+    "pane_pid":4242, "claude_session_id":"550e8400-e29b-41d4-a716-446655440000",
+    "workdir":"", "current_command":"claude", "process_name":"claude", "process_identity":"start:17",
+    "process_executable_identity":"file:7:11", "process_executable_object_identity":"object:7:11:13:" + "b" * 64,
+    "normalized_argv_digest":"a" * 64, "process_command_digest":"c" * 64,
+    "launch_command_digest":"5" * 64, "expected_launcher_identity":"file:7:11",
+    "expected_executable_object_identity":"object:7:11:13:" + "b" * 64,
+    "expected_launcher_argv0_digest":"d" * 64}
+intent = {"event_id":"launch", "kind":"launch_intent", "workflow":"read_only",
+    "claude_session_id":identity["claude_session_id"], "tmux_session":identity["session"],
+    "tmux_window":identity["window"], "expected_argv_digest":identity["normalized_argv_digest"],
+    "expected_launcher_identity":"file:7:11", "expected_executable_object_identity":"object:7:11:13:" + "b" * 64,
+    "expected_launcher_argv0_digest":"d" * 64, "request_digest":"8" * 64,
+    "packet_digest":"3" * 64, "launch_policy_digest":"4" * 64, "launch_command_digest":"5" * 64,
+    "packet_identity":"file:synthetic-packet", "workdir_identity":"directory:synthetic-workdir",
+    "at":"2026-07-20T12:00:00Z"}
+
+def fixture(name="synthetic-live"):
+    state = pathlib.Path(tempfile.mkdtemp()).resolve(); state.chmod(0o700)
+    store = module.ReceiptStore(state, state)
+    binding = {"protocol_version":1, "delegation_id":name, "nonce":"1" * 64, "task_id":"task",
+        "question_message_id":"question", "origin_thread":"T-synthetic", "repository":"repository",
+        "base":"2" * 40, "workdir":str(state), "producer_role":"thinker", "authority":"read_only",
+        "task_reference":"fixture", "packet_digest":"3" * 64, "launch_policy_digest":"4" * 64,
+        "launch_command_digest":"5" * 64}
+    assert store.create({"binding":binding, "routing":{"target":"machine_local_inbox"}}) == "recorded"
+    data = store.load_store(); receipt = data["receipts"][0]; receipt["events"].append(dict(intent))
+    report = {"protocol_version":1, "delegation_id":name, "nonce":"1" * 64, "message_id":"report",
+        "in_reply_to":"question", "kind":"thinker_report", "task_id":"task", "origin_thread":"T-synthetic",
+        "repository":"repository", "base":"2" * 40, "workdir":str(state), "producer_role":"thinker",
+        "authority":"read_only", "launch_policy_digest":"4" * 64, "created_at":"2026-07-20T12:00:00Z",
+        "report":{"accepted_role":True, "accepted_exclusions":True, "status":"complete", "verdict":"synthetic",
+          "rationale":"synthetic", "evidence":[], "assumptions":[], "unsupported_claims":[], "blockers":[],
+          "verification":[], "changed_artifacts":[], "references":[]}}
+    receipt["state"] = "valid_report"; receipt["report_message_id"] = "report"
+    receipt["events"].append({"event_id":"report", "kind":"valid_report", "message":report,
+                              "at":"2026-07-20T12:00:01Z"}); store.commit(data)
+    bound = dict(identity, workdir=str(state))
+    request = {"delegation_id":name, "event_id":"retire-stable", "origin_thread":"T-synthetic",
+        "authorization":{"terminal_state":"merged", "report_sha256":module.canonical_sha256(report),
+                         "coordinator_authorization_sha256":"7" * 64}}
+    return store, bound, request
+
+stops = []
+module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+module.stop_exact_retirement_target = lambda bound: stops.append(copy.deepcopy(bound))
+module.confirm_retirement_target_absent = lambda bound: "exact_retirement_target_absent"
+store, current_identity, request = fixture()
+result = store.retire_live_indeterminate_pair(request)
+assert result["outcome"] == "retired" and result["fence"] == "retained", result
+assert len(stops) == 1 and stops[0] == current_identity
+receipt = store.load_store()["receipts"][0]
+assert [event["kind"] for event in receipt["events"]][-2:] == ["retirement_intent", "pair_retired"]
+assert receipt["state"] == "valid_report" and receipt["report_message_id"] == "report"
+assert "cleanup_eligible_at" not in receipt and module.valid_pair_retirement_chain(receipt)
+assert store.worker_teardown("T-synthetic", True)["pairs"] == [{
+    "pair_sha256":hashlib.sha256(b"synthetic-live").hexdigest(), "state":"pair_retired", "action":"none"}]
+assert store.retire_live_indeterminate_pair(request)["outcome"] == "duplicate" and len(stops) == 1
+
+# Durable intent precedes mutation; recovery observes exact evidence and never blindly repeats a stop after absence.
+store, current_identity, request = fixture("synthetic-interrupted")
+module.stop_exact_retirement_target = lambda bound: (_ for _ in ()).throw(RuntimeError("synthetic interruption"))
+try: store.retire_live_indeterminate_pair(request)
+except RuntimeError: pass
+else: raise AssertionError("synthetic interruption was not exposed")
+receipt = store.load_store()["receipts"][0]
+assert receipt["events"][-1]["kind"] == "retirement_intent" and not module.valid_pair_retirement_chain(receipt)
+recover = dict(request, recover=True); stops.clear()
+module.inspect_live_indeterminate_target = lambda *args: (_ for _ in ()).throw(module.HelperError("absent"))
+module.stop_exact_retirement_target = lambda bound: stops.append(bound)
+module.confirm_retirement_target_absent = lambda bound: "exact_retirement_target_absent"
+assert store.retire_live_indeterminate_pair(recover)["outcome"] == "retired" and not stops
+
+# Every identity, report, receipt-chain, and inspection mismatch blocks before process mutation.
+for name, mutate in [
+    ("argv", lambda live, receipt, req: live.update(normalized_argv_digest="9" * 64)),
+    ("workdir", lambda live, receipt, req: live.update(workdir="/synthetic/substitute")),
+    ("report", lambda live, receipt, req: req["authorization"].update(report_sha256="8" * 64)),
+    ("input", lambda live, receipt, req: receipt["events"].append({"event_id":"input", "kind":"input_request"})),
+    ("launch-shape", lambda live, receipt, req: receipt["events"][1].pop("packet_identity")),
+    ("extra-created", lambda live, receipt, req: receipt["events"].append({"event_id":"extra", "kind":"created"})),
+]:
+    blocked, current_identity, candidate = fixture("blocked-" + name); data = blocked.load_store(); rec = data["receipts"][0]
+    mutate(current_identity, rec, candidate); blocked.commit(data); stops.clear()
+    module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+    module.stop_exact_retirement_target = lambda bound: stops.append(bound)
+    try: outcome = blocked.retire_live_indeterminate_pair(candidate)
+    except module.HelperError: outcome = {"outcome":"blocked"}
+    assert outcome["outcome"] == "blocked" and not stops, name
+
+blocked, current_identity, candidate = fixture("blocked-materialized-intent"); stops.clear()
+module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+module.stop_exact_retirement_target = lambda bound: (_ for _ in ()).throw(RuntimeError("synthetic interruption"))
+try: blocked.retire_live_indeterminate_pair(candidate)
+except RuntimeError: pass
+data = blocked.load_store(); data["receipts"][0]["retirement_intent"]["identity"]["pane_id"] = "%99"
+blocked.commit(data); module.stop_exact_retirement_target = lambda bound: stops.append(bound)
+try: blocked.retire_live_indeterminate_pair(dict(candidate, recover=True))
+except module.HelperError: pass
+else: raise AssertionError("mismatched materialized retirement intent recovered")
+assert not stops
+
+for name, field, replacement in [("wrong-pane", "pane_id", "%99"),
+                                 ("pid-reuse", "process_identity", "start:reused")]:
+    blocked, current_identity, candidate = fixture("blocked-" + name); changed = dict(current_identity)
+    changed[field] = replacement; observations = [current_identity, changed]; stops.clear()
+    module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(observations.pop(0))
+    module.stop_exact_retirement_target = lambda bound: stops.append(bound)
+    outcome = blocked.retire_live_indeterminate_pair(candidate)
+    assert outcome["outcome"] == "blocked" and outcome["blocker"] == "retirement_identity_changed"
+    assert not stops, name
+
+# Inaccessible live identity and a surviving changed incarnation never become absence.
+module.read_bounded_command = lambda command, limit: ""
+module.exact_process_identity = lambda pid: (_ for _ in ()).throw(module.HelperError("inaccessible"))
+module.process_pid_is_absent = lambda pid: False
+absence = real_confirm_retirement_target_absent(current_identity)
+assert absence == "process_inspection_unavailable", absence
+module.exact_process_identity = lambda pid: ("changed", current_identity["process_identity"], ["changed"], "changed")
+module.process_executable_identity = lambda pid: "file:changed"
+absence = real_confirm_retirement_target_absent(current_identity)
+assert absence == "retirement_target_identity_changed_after_stop", absence
+for panes in ("%bad", "%1\n%1", "\n".join("%" + str(index) for index in range(module.MAX_ABSENCE_PANES + 1))):
+    module.read_bounded_command = lambda command, limit, panes=panes: panes
+    assert real_confirm_retirement_target_absent(current_identity) == "tmux_inspection_ambiguous"
+module.read_bounded_command = lambda command, limit: ""
+observations = iter([module.HelperError("absent"),
+    (current_identity["process_name"], current_identity["process_identity"], ["synthetic"],
+     current_identity["process_command_digest"])])
+def transient_process(pid):
+    observation = next(observations)
+    if isinstance(observation, Exception): raise observation
+    return observation
+module.exact_process_identity = transient_process
+module.process_pid_is_absent = lambda pid: True
+module.process_executable_identity = lambda pid: current_identity["process_executable_identity"]
+assert real_confirm_retirement_target_absent(current_identity) == "retirement_target_still_live"
+module.exact_process_identity = lambda pid: (_ for _ in ()).throw(module.HelperError("absent"))
+assert real_confirm_retirement_target_absent(current_identity) == "exact_retirement_target_absent"
+
+# Darwin retirement derives and requires this delegation's exact private executable route and object.
+darwin_store, darwin_identity, _ = fixture("synthetic-darwin")
+private_path = module.private_launch_transport_path(darwin_store, "synthetic-darwin").with_name("verified-claude")
+private_path.parent.mkdir(mode=0o700, parents=True); private_path.write_bytes(b"synthetic executable"); private_path.chmod(0o500)
+descriptor, _, _, private_object = module.open_exact_verified_executable(private_path); module.os.close(descriptor)
+module.platform.system = lambda: "Darwin"
+module.read_bounded_command = lambda command, limit: "Synthetic\tlive-indeterminate\t@17\t%23"
+observed_private_objects = []
+def inspect_darwin(*args, **kwargs):
+    observed_private_objects.append(kwargs.get("expected_process_executable_object_identity"))
+    return copy.deepcopy(darwin_identity)
+module.inspect_claude_identity = inspect_darwin
+module.process_executable_path = lambda pid: private_path
+binding = darwin_store.load_store()["receipts"][0]["binding"]
+assert real_inspect_live_indeterminate_target(intent, binding, darwin_store, "synthetic-darwin")["pane_id"] == "%23"
+assert observed_private_objects == [private_object]
+alternate = private_path.with_name("alternate-verified-claude"); alternate.write_bytes(private_path.read_bytes()); alternate.chmod(0o500)
+module.process_executable_path = lambda pid: alternate
+try: real_inspect_live_indeterminate_target(intent, binding, darwin_store, "synthetic-darwin")
+except module.HelperError: pass
+else: raise AssertionError("equal-content alternate Darwin executable route was accepted")
+
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil || string(output) != "ok\n" {
+		t.Fatalf("live indeterminate pair retirement fixture: %v\n%s", err, output)
+	}
+
+	stateDir := t.TempDir()
+	private := map[string]any{
+		"delegation_id": "private-delegation", "event_id": "private-event",
+		"origin_thread": "private-origin", "authorization": map[string]any{
+			"terminal_state": "merged", "report_sha256": strings.Repeat("6", 64),
+			"coordinator_authorization_sha256": strings.Repeat("7", 64),
+		},
+	}
+	stdout, stderr, err := runHelper(t, stateDir, private, "lifecycle", "retire-live-indeterminate-pair")
+	if err == nil || !strings.Contains(stdout, `"blocker":"retirement_proof_invalid_or_unavailable"`) {
+		t.Fatalf("privacy-safe retirement CLI blocker = %v: %s%s", err, stdout, stderr)
+	}
+	for _, forbidden := range []string{"private-delegation", "private-event", "private-origin"} {
+		if strings.Contains(stdout+stderr, forbidden) {
+			t.Fatalf("retirement CLI leaked private identity %q: %s%s", forbidden, stdout, stderr)
+		}
+	}
+}
+
 func TestDetachedReceiptIsSealedAndLaunchGateSerializesPreExecRace(t *testing.T) {
 	t.Parallel()
 	helper, err := filepath.Abs("claude_delegation.py")

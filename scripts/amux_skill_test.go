@@ -558,6 +558,8 @@ func TestClaudePairTeardownIsFailClosedAndRunsBeforeWorkerTeardown(t *testing.T)
 	for _, required := range []string{
 		"register-legacy-store --origin-thread <thread-id> --store-path <exact-private-store>",
 		"detach-indeterminate-worker",
+		"retire-live-indeterminate-pair",
+		"state:pair_retired",
 		"terminal Amp work authorization",
 		"durable origin fence",
 		"must not continue to worktree removal",
