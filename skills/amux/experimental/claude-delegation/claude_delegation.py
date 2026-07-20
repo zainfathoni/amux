@@ -11,9 +11,11 @@ import ctypes
 import fcntl
 import hashlib
 import json
+import math
 import os
 import pathlib
 import platform
+import selectors
 import shlex
 import shutil
 import stat
@@ -30,12 +32,15 @@ PROTOCOL_VERSION = 1
 MAX_STORE_BYTES = 4 * 1024 * 1024
 MAX_PACKET_BYTES = 256 * 1024
 MAX_LAUNCH_TRANSPORT_BYTES = 2 * 1024 * 1024
+MAX_CAPACITY_SOURCE_BYTES = 256 * 1024
+MAX_CAPACITY_EXTRA_WINDOWS = 32
 MAX_TMUX_COMMAND_BYTES = 8 * 1024
 EXEC_BUDGET_MARGIN_BYTES = 32 * 1024
 STARTUP_TIMEOUT_SECONDS = 4.0
 STARTUP_STABILITY_SECONDS = 1.5
 STARTUP_POLL_SECONDS = 0.05
 INTERNAL_EVENT_PREFIX = "amux:"
+LINUX_PROC_ROOT = pathlib.Path("/proc")
 REQUIRED_CLAUDE_FLAGS = [
     "--allowed-tools", "--disable-slash-commands", "--disallowed-tools", "--mcp-config",
     "--no-chrome", "--permission-mode", "--prompt-suggestions", "--session-id",
@@ -51,6 +56,15 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def reject_duplicate_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, nested in pairs:
+        if key in value:
+            raise HelperError("JSON input contains a duplicated field")
+        value[key] = nested
+    return value
+
+
 def read_input() -> dict[str, Any]:
     raw = sys.stdin.buffer.read(MAX_STORE_BYTES + 1)
     if len(raw) > MAX_STORE_BYTES:
@@ -58,7 +72,7 @@ def read_input() -> dict[str, Any]:
     if not raw:
         return {}
     try:
-        value = json.loads(raw)
+        value = json.loads(raw, object_pairs_hook=reject_duplicate_json_pairs)
     except json.JSONDecodeError as error:
         raise HelperError(f"invalid JSON input: {error.msg}") from error
     if not isinstance(value, dict):
@@ -492,9 +506,13 @@ class ReceiptStore:
             current_intent = receipt_launch_intent(receipt)
             if current_intent != launch_intent:
                 raise HelperError("immutable launch intent changed during session acquisition")
-            for key in ("session", "window", "window_id", "pane_id"):
-                if identity[key] != launch_identity[key]:
-                    raise HelperError("Claude session does not match the exact pane created by this receipt")
+            if platform.system() == "Linux":
+                if identity != launch_identity:
+                    raise HelperError("Claude session does not match the exact process and pane created by this receipt")
+            else:
+                for key in ("session", "window", "window_id", "pane_id"):
+                    if identity[key] != launch_identity[key]:
+                        raise HelperError("Claude session does not match the exact pane created by this receipt")
             if identity["workdir"] != str(pathlib.Path(receipt["binding"]["workdir"]).resolve(strict=True)):
                 raise HelperError("Claude session workdir does not match immutable receipt binding")
             if identity["launch_command_digest"] != receipt["binding"]["launch_command_digest"]:
@@ -1052,7 +1070,7 @@ def read_linux_process_command(proc: pathlib.Path) -> bytes:
 
 
 def read_linux_process_snapshot(pid: int) -> tuple[str, str, bytes, str]:
-    proc = pathlib.Path("/proc") / str(pid)
+    proc = LINUX_PROC_ROOT / str(pid)
     try:
         start_before = read_linux_process_start(proc)
         executable_before = read_linux_process_executable(proc)
@@ -1293,7 +1311,7 @@ def process_executable_identity(pid: int) -> str:
 def process_executable_path(pid: int) -> pathlib.Path:
     system = platform.system()
     if system == "Linux":
-        return pathlib.Path("/proc") / str(pid) / "exe"
+        return LINUX_PROC_ROOT / str(pid) / "exe"
     if system != "Darwin":
         raise HelperError(f"process executable identity is unavailable on {system}")
     libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
@@ -1467,7 +1485,7 @@ def inspect_claude_identity(
         try:
             script = pathlib.PurePath(process_args[1])
             if platform.system() == "Linux" and len(script.parts) >= 3 and script.parts[-2] == "fd" and script.name.isdigit():
-                launcher_path: str | pathlib.Path = pathlib.Path("/proc") / str(pane_pid) / "fd" / script.name
+                launcher_path: str | pathlib.Path = LINUX_PROC_ROOT / str(pane_pid) / "fd" / script.name
             else:
                 launcher_path = process_args[1]
             live_descriptor, _, launcher_identity, live_object_identity = open_exact_verified_executable(
@@ -2440,32 +2458,132 @@ def diagnostics() -> dict[str, Any]:
     try:
         diagnostic_environment = exact_launch_environment(["GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN"])
         raw = json.loads(
-            run_command(
+            read_capacity_source(
                 ["codexbar", "usage", "--provider", "claude", "--format", "json"],
                 diagnostic_environment,
-            )
+            ),
+            object_pairs_hook=reject_duplicate_json_pairs,
         )
-        provider = raw[0] if isinstance(raw, list) and raw and isinstance(raw[0], dict) else {}
-        usage = provider.get("usage", {}) if isinstance(provider.get("usage"), dict) else {}
-        windows = []
-        for name in ("primary", "secondary", "tertiary"):
-            window = usage.get(name)
-            if isinstance(window, dict):
-                windows.append({"name": name, "used_percent": window.get("usedPercent"), "window_minutes": window.get("windowMinutes"), "resets_at": window.get("resetsAt")})
-        for index, window in enumerate(usage.get("extraRateWindows", [])):
-            if isinstance(window, dict):
-                windows.append({"name": f"extra_{index}", "used_percent": window.get("usedPercent"), "window_minutes": window.get("windowMinutes"), "resets_at": window.get("resetsAt"), "model_specific": True})
-        source = provider.get("source", "unknown")
-        capacity = {"status": "supported", "source": source, "confidence": "reported" if source in {"web", "api", "oauth"} else "unknown", "windows": windows}
-    except (HelperError, json.JSONDecodeError, KeyError, TypeError) as error:
-        capacity = {"status": "unavailable", "reason": str(error)[:512], "windows": []}
+        validate_codexbar_capacity_payload(raw)
+        capacity = {"status": "unavailable", "reason": "capacity source payload has no supported versioned contract", "windows": []}
+    except (HelperError, json.JSONDecodeError, KeyError, RecursionError, TypeError):
+        capacity = {"status": "unavailable", "reason": "capacity source is unavailable", "windows": []}
     return {"experimental": True, "capabilities": capabilities, "capacity": capacity}
 
 
+def read_capacity_source(arguments: list[str], environment: dict[str, str]) -> str:
+    try:
+        process = subprocess.Popen(
+            arguments,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as error:
+        raise HelperError("capacity source is unavailable") from error
+    output = bytearray()
+    deadline = time.monotonic() + 5
+    selector = selectors.DefaultSelector()
+    try:
+        if process.stdout is None:
+            raise HelperError("capacity source is unavailable")
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise HelperError("capacity source is unavailable")
+            if not selector.select(remaining):
+                raise HelperError("capacity source is unavailable")
+            chunk = os.read(process.stdout.fileno(), min(64 * 1024, MAX_CAPACITY_SOURCE_BYTES + 1 - len(output)))
+            if not chunk:
+                break
+            output.extend(chunk)
+            if len(output) > MAX_CAPACITY_SOURCE_BYTES:
+                raise HelperError("capacity source is unavailable")
+        process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        if process.returncode != 0:
+            raise HelperError("capacity source is unavailable")
+        return output.decode("utf-8")
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as error:
+        raise HelperError("capacity source is unavailable") from error
+    finally:
+        selector.close()
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        if process.stdout is not None:
+            process.stdout.close()
+
+
+def validate_codexbar_capacity_payload(value: Any) -> None:
+    if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
+        raise HelperError("capacity source payload contract is unsupported")
+    provider = value[0]
+    if set(provider) != {"provider", "source", "usage"}:
+        raise HelperError("capacity source payload contract is unsupported")
+    if provider.get("provider") != "claude" or provider.get("source") not in {"web", "oauth"}:
+        raise HelperError("capacity source payload contract is unsupported")
+    usage = provider.get("usage")
+    if not isinstance(usage, dict) or set(usage) != {"primary", "secondary", "tertiary", "extraRateWindows", "updatedAt"}:
+        raise HelperError("capacity source payload contract is unsupported")
+    if not isinstance(usage.get("updatedAt"), str) or not bounded_utc_timestamp(usage["updatedAt"]):
+        raise HelperError("capacity source payload contract is unsupported")
+    for name in ("primary", "secondary", "tertiary"):
+        window = usage.get(name)
+        if window is not None:
+            validate_codexbar_window(window)
+    extra = usage.get("extraRateWindows")
+    if not isinstance(extra, list) or len(extra) > MAX_CAPACITY_EXTRA_WINDOWS:
+        raise HelperError("capacity source payload contract is unsupported")
+    for named in extra:
+        if not isinstance(named, dict) or set(named) != {"id", "title", "window"}:
+            raise HelperError("capacity source payload contract is unsupported")
+        required_string(named, "id", 256)
+        required_string(named, "title", 256)
+        validate_codexbar_window(named.get("window"))
+
+
+def validate_codexbar_window(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != {"usedPercent", "windowMinutes", "resetsAt"}:
+        raise HelperError("capacity source payload contract is unsupported")
+    percentage(value.get("usedPercent"), "capacity source usedPercent")
+    if type(value.get("windowMinutes")) is not int or value["windowMinutes"] <= 0:
+        raise HelperError("capacity source payload contract is unsupported")
+    if not bounded_utc_timestamp(value.get("resetsAt")):
+        raise HelperError("capacity source payload contract is unsupported")
+
+
 def percentage(value: Any, label: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 or value > 100:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+        or value > 100
+    ):
         raise HelperError(f"{label} must be a number from 0 to 100")
     return float(value)
+
+
+def bounded_utc_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not value or len(value.encode()) > 64 or not value.endswith("Z"):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        return False
+    return parsed.utcoffset() == timedelta(0)
+
+
+def capacity_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def bounded_capacity_reset(value: Any, window_minutes: int, observed_at: datetime) -> bool:
+    if not bounded_utc_timestamp(value):
+        return False
+    parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    return observed_at < parsed <= observed_at + timedelta(minutes=window_minutes)
 
 
 def capacity_decision_digest(value: Any) -> str:
@@ -2474,8 +2592,6 @@ def capacity_decision_digest(value: Any) -> str:
             return {key: normalize(nested) for key, nested in item.items()}
         if isinstance(item, list):
             return [normalize(nested) for nested in item]
-        if isinstance(item, (int, float)) and not isinstance(item, bool):
-            return float(item)
         return item
 
     canonical = json.dumps(normalize(value), sort_keys=True, separators=(",", ":"))
@@ -2552,33 +2668,80 @@ def decide_mutating_capacity(request: Any) -> dict[str, Any]:
             raise HelperError("model-specific reserve floor names must be non-empty strings")
         percentage(floor, f"{name} reserve floor")
 
-    reliable = capacity.get("status") == "supported" and capacity.get("confidence") == "reported"
+    capacity_fields = {"status", "provider", "source", "source_version", "schema_version", "confidence", "windows"}
+    reliable = (
+        set(capacity) == capacity_fields
+        and capacity.get("status") == "supported"
+        and capacity.get("provider") == "claude"
+        and capacity.get("source") in {"web", "api", "oauth"}
+        and type(capacity.get("source_version")) is int
+        and capacity.get("source_version") == 1
+        and type(capacity.get("schema_version")) is int
+        and capacity.get("schema_version") == 1
+        and capacity.get("confidence") == "reported"
+    )
     windows = capacity.get("windows")
     if not isinstance(windows, list) or not windows:
         return unknown_capacity_decision(acknowledged, acknowledgement_of, "capacity has no available windows; reserve impact is unknown", request_digest, capacity_source, capacity_confidence)
     evaluated = []
     present_window_classes = {"five_hour": False, "weekly": False}
+    present_model_windows = {name: 0 for name in model_floors}
+    seen_window_names: set[str] = set()
     missing_capacity = not reliable
+    observed_at = capacity_now()
     for raw in windows:
         if not isinstance(raw, dict):
             missing_capacity = True
             continue
         name = required_string(raw, "name", 256)
+        duration = raw.get("window_minutes")
+        if name == "primary" and ("model_specific" in raw or type(duration) is not int or duration != 300):
+            raise HelperError("capacity window name conflicts with its declared class")
+        if name == "secondary" and ("model_specific" in raw or type(duration) is not int or duration != 10080):
+            raise HelperError("capacity window name conflicts with its declared class")
+        if name in model_floors and raw.get("model_specific") is not True:
+            raise HelperError("capacity window name conflicts with its declared class")
         if raw.get("model_specific") is True:
+            if name in {"primary", "secondary"}:
+                raise HelperError("capacity window name conflicts with its declared class")
+            if set(raw) != {"name", "used_percent", "window_minutes", "resets_at", "model_specific"}:
+                missing_capacity = True
+            if raw.get("window_minutes") not in {300, 10080}:
+                missing_capacity = True
             if name not in model_floors:
                 raise HelperError("reserve floor is required for every available model-specific window")
             floor = percentage(model_floors[name], f"{name} reserve floor")
             window_class = "model_specific"
+            present_model_windows[name] += 1
         elif raw.get("window_minutes") == 300:
+            if name != "primary" or name in model_floors:
+                raise HelperError("capacity window name conflicts with its declared class")
+            if set(raw) != {"name", "used_percent", "window_minutes", "resets_at"}:
+                missing_capacity = True
             floor = five_hour_floor
             window_class = "five_hour"
+            if present_window_classes[window_class]:
+                missing_capacity = True
             present_window_classes[window_class] = True
         elif raw.get("window_minutes") == 10080:
+            if name != "secondary" or name in model_floors:
+                raise HelperError("capacity window name conflicts with its declared class")
+            if set(raw) != {"name", "used_percent", "window_minutes", "resets_at"}:
+                missing_capacity = True
             floor = weekly_floor
             window_class = "weekly"
+            if present_window_classes[window_class]:
+                missing_capacity = True
             present_window_classes[window_class] = True
         else:
-            raise HelperError("reserve floor is required for every available capacity window")
+            missing_capacity = True
+            continue
+        if name in seen_window_names:
+            missing_capacity = True
+        seen_window_names.add(name)
+        window_minutes = raw.get("window_minutes")
+        if type(window_minutes) is not int or not bounded_capacity_reset(raw.get("resets_at"), window_minutes, observed_at):
+            missing_capacity = True
         if isinstance(raw.get("used_percent"), bool) or not isinstance(raw.get("used_percent"), (int, float)):
             missing_capacity = True
             continue
@@ -2596,6 +2759,8 @@ def decide_mutating_capacity(request: Any) -> dict[str, Any]:
     governing = min(evaluated, key=lambda window: (window["margin_percent"], window["name"])) if evaluated else None
     if governing is not None and governing["margin_percent"] < 0:
         raise HelperError(f"capacity is below the hard reserve floor for governing window {governing['name']}")
+    if any(count != 1 for count in present_model_windows.values()):
+        missing_capacity = True
     if missing_capacity or not all(present_window_classes.values()):
         reason = "capacity is low-confidence; reserve impact is unknown" if not reliable else "one or more required capacity windows are missing; reserve impact is unknown"
         return unknown_capacity_decision(acknowledged, acknowledgement_of, reason, request_digest, capacity_source, capacity_confidence)
@@ -2944,9 +3109,17 @@ def completed_launch_identity(receipt: dict[str, Any]) -> dict[str, str]:
     if len(completed) != 1 or not isinstance(completed[0].get("identity"), dict):
         raise HelperError("session acquisition requires one completed receipt launch")
     identity = completed[0]["identity"]
-    for key in ("session", "window", "window_id", "pane_id"):
-        if not isinstance(identity.get(key), str) or not identity[key]:
-            raise HelperError("completed receipt launch has incomplete tmux identity")
+    string_fields = {"session", "window", "window_id", "pane_id"}
+    if platform.system() == "Linux":
+        string_fields |= {
+            "claude_session_id", "workdir", "current_command", "process_name", "process_identity",
+            "process_executable_identity", "normalized_argv_digest", "process_command_digest",
+            "launch_command_digest",
+        }
+    if any(not isinstance(identity.get(key), str) or not identity[key] for key in string_fields):
+        raise HelperError("completed receipt launch has incomplete process or tmux identity")
+    if platform.system() == "Linux" and (not isinstance(identity.get("pane_pid"), int) or identity["pane_pid"] <= 0):
+        raise HelperError("completed receipt launch has incomplete process or tmux identity")
     return identity
 
 

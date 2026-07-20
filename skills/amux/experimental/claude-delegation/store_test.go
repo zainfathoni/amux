@@ -73,6 +73,142 @@ print("ok")
 	}
 }
 
+func TestLinuxLifecycleRejectsIndependentObservedIdentityDriftWithoutTargetMutation(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux process identity is backed by procfs")
+	}
+	sessionID := "650e8400-e29b-41d4-a716-446655440000"
+	_, executable := startProcessFixture(t, "claude", "--session-id", sessionID, "policy")
+	_, alternateExecutable := startProcessFixture(t, "claude", "--session-id", sessionID, "policy")
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir := t.TempDir()
+	script := `import hashlib, importlib.util, os, pathlib, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+state = pathlib.Path(sys.argv[2])
+executable = pathlib.Path(sys.argv[3])
+alternate = pathlib.Path(sys.argv[4])
+session_id = sys.argv[5]
+proc_root = state / "proc"
+module.LINUX_PROC_ROOT = proc_root
+pane = {"pid": 4242, "window_id": "@20", "pane_id": "%20"}
+mutations = []
+start_command = "exec claude --session-id " + session_id + " policy"
+arguments = ["--session-id", session_id, "policy"]
+
+def write_proc(pid, start, target, argv):
+    proc = proc_root / str(pid)
+    proc.mkdir(parents=True, exist_ok=True)
+    fields = ["S"] + ["0"] * 18 + [str(start)]
+    (proc / "stat").write_text(f"{pid} (claude) " + " ".join(fields))
+    (proc / "cmdline").write_bytes(b"\0".join(os.fsencode(value) for value in [str(target), *argv]) + b"\0")
+    (proc / "exe").unlink(missing_ok=True)
+    (proc / "exe").symlink_to(target)
+
+def reset_observation():
+    pane.update(pid=4242, window_id="@20", pane_id="%20")
+    write_proc(4242, 100, executable, arguments)
+    write_proc(4343, 100, executable, arguments)
+    mutations.clear()
+
+def run_command(command, environment=None, executable_fd=None):
+    if command[:2] == ["tmux", "display-message"]:
+        return "\t".join(["Claude", "thinker", pane["window_id"], pane["pane_id"], str(pane["pid"]), str(state), "claude", start_command])
+    if command[:2] == ["tmux", "kill-pane"]:
+        mutations.append("kill")
+        return ""
+    if command and command[0] == "tmux":
+        mutations.append("unexpected-tmux")
+        return ""
+    raise AssertionError(f"unexpected command: {command}")
+
+module.run_command = run_command
+reset_observation()
+descriptor, _, launcher_identity, object_identity = module.open_verified_executable(executable)
+os.close(descriptor)
+argv_digest = module.normalized_argv_digest(arguments)
+baseline_identity = module.inspect_claude_identity("%20", session_id, argv_digest, launcher_identity, object_identity)
+binding = {
+    "protocol_version": 1, "delegation_id": "linux-observed-drift", "nonce": "a" * 64,
+    "task_id": "task", "question_message_id": "question", "origin_thread": "origin",
+    "repository": "repository", "base": "b" * 40, "workdir": str(state),
+    "producer_role": "thinker", "authority": "read_only", "task_reference": "fixture",
+    "packet_digest": "c" * 64, "launch_policy_digest": "d" * 64,
+    "launch_command_digest": hashlib.sha256(start_command.encode()).hexdigest(),
+}
+store = module.ReceiptStore(state)
+assert store.create({"binding": binding, "routing": {"target": "machine_local_inbox"}}) == "recorded"
+data = store.load_store()
+receipt = data["receipts"][0]
+receipt["events"].extend([
+    {"event_id": "launch", "kind": "launch_intent", "expected_argv_digest": argv_digest,
+     "expected_launcher_identity": launcher_identity, "expected_executable_object_identity": object_identity},
+    {"event_id": "launch-result", "kind": "launch_completed", "operation_event_id": "launch", "identity": baseline_identity},
+])
+store.commit(data)
+before_acquisition = store.path.read_bytes()
+
+def start_drift(): write_proc(4242, 101, executable, arguments)
+def executable_drift(): write_proc(4242, 100, alternate, arguments)
+def argv_drift(): write_proc(4242, 100, executable, ["--session-id", session_id, "changed-policy"])
+def pid_reuse(): pane.update(pid=4343)
+def pane_drift(): pane.update(window_id="@21")
+cases = {
+    "kernel start identity": start_drift,
+    "executable identity": executable_drift,
+    "NUL-delimited argv digest": argv_drift,
+    "PID reuse state": pid_reuse,
+    "tmux pane identity": pane_drift,
+}
+
+for name, mutate in cases.items():
+    store.path.write_bytes(before_acquisition)
+    reset_observation()
+    mutate()
+    try:
+        store.acquire_session({"delegation_id": binding["delegation_id"], "event_id": "acquire-" + name.replace(" ", "-"), "pane_id": "%20", "claude_session_id": session_id})
+    except module.HelperError:
+        pass
+    else:
+        raise AssertionError(f"acquisition accepted changed {name}")
+    assert store.path.read_bytes() == before_acquisition, f"rejected acquisition mutated receipt for {name}"
+    assert not mutations, f"rejected acquisition mutated target for {name}: {mutations}"
+
+store.path.write_bytes(before_acquisition)
+reset_observation()
+assert store.acquire_session({"delegation_id": binding["delegation_id"], "event_id": "acquire-baseline", "pane_id": "%20", "claude_session_id": session_id}) == "recorded"
+data = store.load_store()
+data["receipts"][0]["state"] = "acknowledged"
+store.commit(data)
+before_parking = store.path.read_bytes()
+for name, mutate in cases.items():
+    store.path.write_bytes(before_parking)
+    reset_observation()
+    mutate()
+    try:
+        store.park({"delegation_id": binding["delegation_id"], "event_id": "park-" + name.replace(" ", "-")})
+    except module.HelperError:
+        pass
+    else:
+        raise AssertionError(f"parking accepted changed {name}")
+    assert "kill" not in mutations, f"rejected parking killed target for {name}"
+    assert "unexpected-tmux" not in mutations, f"rejected parking adopted or notified target for {name}"
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper, stateDir, executable, alternateExecutable, sessionID).CombinedOutput()
+	if err != nil {
+		t.Fatalf("Linux lifecycle identity fixture: %v\n%s", err, output)
+	}
+	if string(output) != "ok\n" {
+		t.Fatalf("Linux lifecycle identity output = %q", output)
+	}
+}
+
 func TestLinuxNodeDescriptorIdentityRejectsSameInodeContentSubstitution(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux node and bun launchers use proc descriptor identity")
@@ -818,16 +954,14 @@ esac
 	assertHelperOutcomeEnv(t, stateDir, environment, "recorded", map[string]any{
 		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
 	}, "receipt", "create")
-	recordTestLaunch(t, stateDir, binding["delegation_id"].(string), map[string]any{
-		"session": "Claude", "window": "thinker", "window_id": "@10", "pane_id": "%10",
-		"process_executable_identity": expectedLauncherIdentity,
-	}, expectedArgvDigest, expectedLauncherIdentity, testExecutableObjectIdentity(t, paneExecutable))
+	launchIdentity := inspectTestClaudeIdentity(t, environment, "%10", sessionID, expectedArgvDigest, expectedLauncherIdentity, testExecutableObjectIdentity(t, paneExecutable))
+	recordTestLaunch(t, stateDir, binding["delegation_id"].(string), launchIdentity, expectedArgvDigest, expectedLauncherIdentity, testExecutableObjectIdentity(t, paneExecutable))
 	wrongEnvironment := replaceEnvironment(environment, "CLAUDE_PANE_ID", "%11")
 	wrongAcquire := map[string]any{
 		"delegation_id": binding["delegation_id"], "event_id": "acquire-wrong-pane", "pane_id": "%11", "claude_session_id": sessionID,
 	}
 	_, stderr, err := runHelperEnv(t, stateDir, wrongEnvironment, wrongAcquire, "session", "acquire")
-	if err == nil || !strings.Contains(stderr, "exact pane created by this receipt") {
+	if err == nil || !strings.Contains(stderr, "pane created by this receipt") {
 		t.Fatalf("wrong launch pane acquisition error = %v, stderr %q", err, stderr)
 	}
 	substitutedPID, _ := startProcessFixture(t, "claude", "--session-id", sessionID, "dropped policy")
@@ -910,23 +1044,10 @@ esac
 	if err := os.WriteFile(filepath.Join(stateDir, "receipts.json"), acknowledgedStore, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var changedStart map[string]any
-	if err := json.Unmarshal(acknowledgedStore, &changedStart); err != nil {
-		t.Fatal(err)
-	}
-	changedReceipt := changedStart["receipts"].([]any)[0].(map[string]any)
-	changedReceipt["session_identity"].(map[string]any)["process_identity"] = "linux:start-time-reused"
-	changedStartBytes, err := json.Marshal(changedStart)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stateDir, "receipts.json"), changedStartBytes, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{
+	_, stderr, err = runHelperEnv(t, stateDir, substitutedEnvironment, map[string]any{
 		"delegation_id": binding["delegation_id"], "event_id": "park-reused-pid",
 	}, "session", "park")
-	if err == nil || !strings.Contains(stderr, "identity changed") {
+	if err == nil || !strings.Contains(stderr, "argv does not match immutable launch intent") {
 		t.Fatalf("reused PID parking error = %v, stderr %q", err, stderr)
 	}
 	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
@@ -1004,10 +1125,11 @@ esac
 			assertHelperOutcomeEnv(t, stateDir, environment, "recorded", map[string]any{
 				"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
 			}, "receipt", "create")
-			recordTestLaunch(t, stateDir, binding["delegation_id"].(string), map[string]any{
-				"session": "Claude", "window": "thinker", "window_id": "@30", "pane_id": "%30",
-				"process_executable_identity": testExecutableIdentity(t, nodeExecutable),
-			}, nulDigest(expectedArguments), expectedLauncherIdentity, expectedLauncherObjectIdentity)
+			launchIdentity := inspectTestClaudeIdentity(t, environment, "%30", sessionID, nulDigest(expectedArguments), expectedLauncherIdentity, expectedLauncherObjectIdentity)
+			if launchIdentity["process_executable_identity"] != testExecutableIdentity(t, nodeExecutable) {
+				t.Fatal("node fixture executable identity mismatch")
+			}
+			recordTestLaunch(t, stateDir, binding["delegation_id"].(string), launchIdentity, nulDigest(expectedArguments), expectedLauncherIdentity, expectedLauncherObjectIdentity)
 			acquire := map[string]any{
 				"delegation_id": binding["delegation_id"], "event_id": "acquire-node-descriptor",
 				"pane_id": "%30", "claude_session_id": sessionID,
@@ -2616,21 +2738,64 @@ esac
 `)
 	writeExecutable(t, filepath.Join(binDir, "tmux"), "#!/bin/sh\nprintf '%s\\n' 'tmux 3.7b'\n")
 	writeExecutable(t, filepath.Join(binDir, "codexbar"), `#!/bin/sh
-printf '%s\n' '[{"provider":"claude","source":"web","usage":{"primary":{"usedPercent":12,"windowMinutes":300,"resetsAt":"2026-07-17T15:00:00Z"},"secondary":{"usedPercent":34,"windowMinutes":10080,"resetsAt":"2026-07-24T00:00:00Z"},"extraRateWindows":[]}}]'
+printf '%s\n' '[{"provider":"claude","source":"web","usage":{"primary":{"usedPercent":12,"windowMinutes":300,"resetsAt":"2026-07-20T15:00:00Z"},"secondary":{"usedPercent":34,"windowMinutes":10080,"resetsAt":"2026-07-24T00:00:00Z"},"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]'
 `)
 	environment := append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"))
 	stdout, stderr, err := runHelperEnv(t, stateDir, environment, map[string]any{}, "diagnose")
 	if err != nil {
 		t.Fatalf("diagnose: %v: %s", err, stderr)
 	}
-	for _, required := range []string{`"status":"supported"`, `"status":"unavailable"`, `"status":"untested"`, `"automatic_interactive_input"`, `"strict_mcp_runtime"`, `"window_minutes":300`, `"window_minutes":10080`} {
+	for _, required := range []string{`"status":"supported"`, `"status":"unavailable"`, `"status":"untested"`, `"automatic_interactive_input"`, `"strict_mcp_runtime"`, `"capacity source payload has no supported versioned contract"`} {
 		if !strings.Contains(stdout, required) {
 			t.Errorf("diagnostics missing %q:\n%s", required, stdout)
 		}
 	}
-	for _, forbidden := range []string{"accountEmail", "accountOrganization", "transcript", "prompt"} {
+	for _, forbidden := range []string{"accountEmail", "accountOrganization", "transcript", "prompt", `"source":"web"`, `"used_percent"`, `"window_minutes"`, `"source_version"`, `"schema_version"`} {
 		if strings.Contains(stdout, forbidden) {
 			t.Errorf("diagnostics leaked forbidden field %q", forbidden)
+		}
+	}
+	malformed := []string{
+		`[{"provider":"claude","source":"private-sentinel","source":"web","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
+		`[{"provider":"claude","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
+		`[{"provider":"claude","source":"claude","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
+		`[{"provider":"claude","source":"web","extra":"unsupported","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
+		`[{"provider":"claude","source":"web","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z","extra":"unsupported"}}]`,
+		`[{"provider":"claude","source":"web","usage":{"primary":{"usedPercent":12,"windowMinutes":300,"resetsAt":"2026-07-20T15:00:00Z","extra":"unsupported"},"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
+		`[{"provider":"claude","source":"web","sourceVersion":1,"schemaVersion":1,"usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
+	}
+	for index, payload := range malformed {
+		writeExecutable(t, filepath.Join(binDir, "codexbar"), "#!/bin/sh\nprintf '%s\\n' '"+payload+"'\n")
+		stdout, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{}, "diagnose")
+		if err != nil {
+			t.Fatalf("diagnose malformed capacity shape %d: %v: %s", index, err, stderr)
+		}
+		diagnostic := decodeJSONMap(t, stdout)
+		capacity, ok := diagnostic["capacity"].(map[string]any)
+		if !ok || capacity["status"] != "unavailable" || strings.Contains(stdout, "private-sentinel") {
+			t.Fatalf("malformed diagnostic capacity %d was accepted or leaked: %s", index, stdout)
+		}
+	}
+
+	writeExecutable(t, filepath.Join(binDir, "codexbar"), "#!/bin/sh\nprintf '%s\\n' 'private-stderr-sentinel' >&2\nexit 1\n")
+	stdout, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{}, "diagnose")
+	if err != nil || strings.Contains(stdout+stderr, "private-stderr-sentinel") || !strings.Contains(stdout, `"status":"unavailable"`) {
+		t.Fatalf("diagnostic command failure leaked stderr: %v: %s%s", err, stdout, stderr)
+	}
+
+	tooManyExtraWindows := strings.Repeat(`{"id":"id","title":"title","window":{"usedPercent":1,"windowMinutes":1,"resetsAt":"2026-07-20T12:01:00Z"}},`, 33)
+	tooManyExtraWindows = strings.TrimSuffix(tooManyExtraWindows, ",")
+	boundedMalformed := []string{
+		"printf '\\377'",
+		"python3 -c 'print(\"x\" * 262145)'",
+		"python3 -c 'print(\"[\" * 1100 + \"0\" + \"]\" * 1100)'",
+		"printf '%s\\n' '" + `[{"provider":"claude","source":"web","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[` + tooManyExtraWindows + `],"updatedAt":"2026-07-20T12:00:00Z"}}]` + "'",
+	}
+	for index, command := range boundedMalformed {
+		writeExecutable(t, filepath.Join(binDir, "codexbar"), "#!/bin/sh\n"+command+"\n")
+		stdout, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{}, "diagnose")
+		if err != nil || len(stdout) > 4096 || !strings.Contains(stdout, `"status":"unavailable"`) {
+			t.Fatalf("unbounded malformed diagnostic %d: %v: %s%s", index, err, stdout, stderr)
 		}
 	}
 }
@@ -2767,6 +2932,32 @@ func recordTestLaunch(t *testing.T, stateDir, delegationID string, identity map[
 	if err := os.WriteFile(path, updated, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func inspectTestClaudeIdentity(t *testing.T, environment []string, paneID, sessionID, argvDigest, launcherIdentity, objectIdentity string) map[string]any {
+	t.Helper()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import importlib.util, json, pathlib, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps(module.inspect_claude_identity(*sys.argv[2:])))
+`
+	command := exec.Command("python3", "-c", script, helper, paneID, sessionID, argvDigest, launcherIdentity, objectIdentity)
+	command.Env = environment
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("inspect Claude fixture identity: %v\n%s", err, output)
+	}
+	var identity map[string]any
+	if err := json.Unmarshal(output, &identity); err != nil {
+		t.Fatal(err)
+	}
+	return identity
 }
 
 func nulDigest(arguments []string) string {

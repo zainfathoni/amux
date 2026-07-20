@@ -18,11 +18,11 @@ func TestMutatingCapacityDecisionUsesEveryReserveAndTightestWindow(t *testing.T)
 	t.Parallel()
 	request := map[string]any{
 		"capacity": map[string]any{
-			"status": "supported", "source": "web", "confidence": "reported",
+			"status": "supported", "provider": "claude", "source": "web", "source_version": 1, "schema_version": 1, "confidence": "reported",
 			"windows": []any{
-				map[string]any{"name": "primary", "used_percent": 20, "window_minutes": 300},
-				map[string]any{"name": "secondary", "used_percent": 40, "window_minutes": 10080},
-				map[string]any{"name": "sonnet", "used_percent": 65, "model_specific": true},
+				map[string]any{"name": "primary", "used_percent": 20, "window_minutes": 300, "resets_at": futureCapacityReset(300)},
+				map[string]any{"name": "secondary", "used_percent": 40, "window_minutes": 10080, "resets_at": futureCapacityReset(10080)},
+				map[string]any{"name": "sonnet", "used_percent": 65, "window_minutes": 300, "resets_at": futureCapacityReset(300), "model_specific": true},
 			},
 		},
 		"reserve_floors": map[string]any{
@@ -65,6 +65,279 @@ func TestMutatingCapacityDecisionUsesEveryReserveAndTightestWindow(t *testing.T)
 	_, stderr, err = runHelper(t, t.TempDir(), knownLowWithUnknown, "capacity", "decide-mutating")
 	if err == nil || !strings.Contains(stderr, "hard reserve floor") {
 		t.Fatalf("unknown capacity bypassed known hard floor: %v, stderr %q", err, stderr)
+	}
+}
+
+func TestMutatingCapacityAutonomyRequiresExactSupportedContract(t *testing.T) {
+	t.Parallel()
+	valid := map[string]any{
+		"status": "supported", "provider": "claude", "source": "web", "source_version": 1, "schema_version": 1, "confidence": "reported",
+		"windows": []any{
+			map[string]any{"name": "primary", "used_percent": 10, "window_minutes": 300, "resets_at": futureCapacityReset(300)},
+			map[string]any{"name": "secondary", "used_percent": 10, "window_minutes": 10080, "resets_at": futureCapacityReset(10080)},
+		},
+	}
+	mutations := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{name: "empty provider", mutate: func(c map[string]any) { c["provider"] = "" }},
+		{name: "wrong provider", mutate: func(c map[string]any) { c["provider"] = "other" }},
+		{name: "unknown source", mutate: func(c map[string]any) { c["source"] = "unknown" }},
+		{name: "unsupported source", mutate: func(c map[string]any) { c["source"] = "scrape" }},
+		{name: "wrong source version", mutate: func(c map[string]any) { c["source_version"] = float64(2) }},
+		{name: "missing schema", mutate: func(c map[string]any) { delete(c, "schema_version") }},
+		{name: "extra capacity field", mutate: func(c map[string]any) { c["account"] = "private" }},
+		{name: "missing window field", mutate: func(c map[string]any) { delete(c["windows"].([]any)[0].(map[string]any), "resets_at") }},
+		{name: "extra window field", mutate: func(c map[string]any) { c["windows"].([]any)[0].(map[string]any)["extra"] = true }},
+		{name: "malformed reset", mutate: func(c map[string]any) { c["windows"].([]any)[0].(map[string]any)["resets_at"] = "not-a-time" }},
+		{name: "duplicate class", mutate: func(c map[string]any) { c["windows"].([]any)[1].(map[string]any)["window_minutes"] = float64(300) }},
+		{name: "unbounded window", mutate: func(c map[string]any) { c["windows"].([]any)[0].(map[string]any)["window_minutes"] = nil }},
+		{name: "non-finite utilization", mutate: func(c map[string]any) { c["windows"].([]any)[0].(map[string]any)["used_percent"] = "NaN" }},
+		{name: "wrong window name", mutate: func(c map[string]any) { c["windows"].([]any)[0].(map[string]any)["name"] = "tertiary" }},
+		{name: "wrong class", mutate: func(c map[string]any) { c["windows"].([]any)[0].(map[string]any)["model_specific"] = false }},
+	}
+	for _, test := range mutations {
+		t.Run(test.name, func(t *testing.T) {
+			capacity := cloneJSONMap(t, valid)
+			test.mutate(capacity)
+			request := map[string]any{
+				"capacity":                      capacity,
+				"reserve_floors":                map[string]any{"five_hour": 20, "weekly": 20, "model_specific": map[string]any{}},
+				"acknowledged_unknown_capacity": false,
+			}
+			stdout, _, _ := runHelper(t, t.TempDir(), request, "capacity", "decide-mutating")
+			if strings.Contains(stdout, `"decision":"autonomous_allowed"`) {
+				t.Fatalf("unsupported contract became autonomous: %s", stdout)
+			}
+		})
+	}
+}
+
+func TestWrongCapacityClassCannotBypassKnownReserveFloor(t *testing.T) {
+	t.Parallel()
+	capacities := []map[string]any{
+		{
+			"status": "supported", "provider": "claude", "source": "web", "source_version": 1, "schema_version": 1, "confidence": "reported",
+			"windows": []any{
+				map[string]any{"name": "primary", "used_percent": 10, "window_minutes": 300, "resets_at": "2026-07-19T20:00:00Z"},
+				map[string]any{"name": "secondary", "used_percent": 60, "window_minutes": 300, "resets_at": "2026-07-26T00:00:00Z"},
+			},
+		},
+		{
+			"status": "supported", "provider": "claude", "source": "web", "source_version": 1, "schema_version": 1, "confidence": "reported",
+			"windows": []any{
+				map[string]any{"name": "primary", "used_percent": 10, "window_minutes": 300, "resets_at": "2026-07-19T20:00:00Z"},
+				map[string]any{"name": "secondary", "used_percent": 10, "window_minutes": 10080, "resets_at": "2026-07-26T00:00:00Z"},
+				map[string]any{"name": "sonnet", "used_percent": 80, "window_minutes": nil, "resets_at": "2026-07-19T20:00:00Z"},
+			},
+		},
+	}
+	for _, capacity := range capacities {
+		request := map[string]any{
+			"capacity":                      capacity,
+			"reserve_floors":                map[string]any{"five_hour": 10, "weekly": 50, "model_specific": map[string]any{"sonnet": 30}},
+			"acknowledged_unknown_capacity": false,
+		}
+		_, stderr, err := runHelper(t, t.TempDir(), request, "capacity", "decide-mutating")
+		if err == nil || !strings.Contains(stderr, "conflicts with its declared class") {
+			t.Fatalf("wrong-class known floor was acknowledgement-eligible: %v, stderr %q", err, stderr)
+		}
+	}
+}
+
+func TestConfiguredModelFloorRequiresExactlyOneMatchingWindow(t *testing.T) {
+	t.Parallel()
+	base := map[string]any{
+		"status": "supported", "provider": "claude", "source": "web", "source_version": 1, "schema_version": 1, "confidence": "reported",
+		"windows": []any{
+			map[string]any{"name": "primary", "used_percent": 10, "window_minutes": 300, "resets_at": futureCapacityReset(300)},
+			map[string]any{"name": "secondary", "used_percent": 10, "window_minutes": 10080, "resets_at": futureCapacityReset(10080)},
+		},
+	}
+	for _, capacity := range []map[string]any{base, func() map[string]any {
+		duplicate := cloneJSONMap(t, base)
+		duplicate["windows"] = append(duplicate["windows"].([]any),
+			map[string]any{"name": "sonnet", "used_percent": 10, "window_minutes": 300, "resets_at": futureCapacityReset(300), "model_specific": true},
+			map[string]any{"name": "sonnet", "used_percent": 10, "window_minutes": 300, "resets_at": futureCapacityReset(300), "model_specific": true},
+		)
+		return duplicate
+	}()} {
+		request := map[string]any{
+			"capacity":                      capacity,
+			"reserve_floors":                map[string]any{"five_hour": 20, "weekly": 20, "model_specific": map[string]any{"sonnet": 20}},
+			"acknowledged_unknown_capacity": false,
+		}
+		stdout, _, _ := runHelper(t, t.TempDir(), request, "capacity", "decide-mutating")
+		if strings.Contains(stdout, `"decision":"autonomous_allowed"`) {
+			t.Fatalf("missing or duplicate configured model window became autonomous: %s", stdout)
+		}
+	}
+}
+
+func TestCanonicalWindowWithMalformedDurationIsNeverAcknowledgementEligible(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		window map[string]any
+	}{
+		{name: "primary duration", window: map[string]any{"name": "primary", "used_percent": 99, "window_minutes": 60, "resets_at": futureCapacityReset(60)}},
+		{name: "secondary duration", window: map[string]any{"name": "secondary", "used_percent": 99, "window_minutes": 60, "resets_at": futureCapacityReset(60)}},
+		{name: "primary class marker", window: map[string]any{"name": "primary", "used_percent": 99, "window_minutes": 300, "resets_at": futureCapacityReset(300), "model_specific": false}},
+		{name: "secondary class marker", window: map[string]any{"name": "secondary", "used_percent": 99, "window_minutes": 10080, "resets_at": futureCapacityReset(10080), "model_specific": false}},
+	} {
+		request := map[string]any{
+			"capacity": map[string]any{
+				"status": "supported", "provider": "claude", "source": "web", "source_version": 1, "schema_version": 1, "confidence": "reported",
+				"windows": []any{test.window},
+			},
+			"reserve_floors":                map[string]any{"five_hour": 20, "weekly": 20, "model_specific": map[string]any{}},
+			"acknowledged_unknown_capacity": false,
+		}
+		_, stderr, err := runHelper(t, t.TempDir(), request, "capacity", "decide-mutating")
+		if err == nil || !strings.Contains(stderr, "conflicts with its declared class") {
+			t.Fatalf("malformed canonical %s was acknowledgement-eligible: %v, stderr %q", test.name, err, stderr)
+		}
+	}
+}
+
+func TestCanonicalWindowRequiresAnExactIntegerDuration(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, input := range []string{
+		fmt.Sprintf(`{"capacity":{"status":"supported","provider":"claude","source":"web","source_version":1,"schema_version":1,"confidence":"reported","windows":[{"name":"primary","used_percent":99,"window_minutes":300.0,"resets_at":%q}]},"reserve_floors":{"five_hour":20,"weekly":20,"model_specific":{}},"acknowledged_unknown_capacity":false}`, futureCapacityReset(300)),
+		fmt.Sprintf(`{"capacity":{"status":"supported","provider":"claude","source":"web","source_version":1,"schema_version":1,"confidence":"reported","windows":[{"name":"secondary","used_percent":99,"window_minutes":10080.0,"resets_at":%q}]},"reserve_floors":{"five_hour":20,"weekly":20,"model_specific":{}},"acknowledged_unknown_capacity":false}`, futureCapacityReset(10080)),
+	} {
+		command := exec.Command("python3", helper, "--state-dir", t.TempDir(), "capacity", "decide-mutating")
+		command.Stdin = strings.NewReader(input)
+		output, err := command.CombinedOutput()
+		if err == nil || !strings.Contains(string(output), "conflicts with its declared class") {
+			t.Fatalf("non-integer canonical duration was acknowledgement-eligible: %v: %s", err, output)
+		}
+	}
+}
+
+func TestCapacityResetFreshnessUsesOneDecisionClock(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import importlib.util, pathlib, sys
+from datetime import datetime, timezone
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+now = datetime(2026, 7, 20, 12, 0, 0, tzinfo=timezone.utc)
+module.capacity_now = lambda: now
+request = {
+    "capacity": {"status":"supported", "provider":"claude", "source":"web", "source_version":1, "schema_version":1, "confidence":"reported", "windows":[
+        {"name":"primary", "used_percent":10, "window_minutes":300, "resets_at":"2026-07-20T14:00:00Z"},
+        {"name":"secondary", "used_percent":10, "window_minutes":10080, "resets_at":"2026-07-25T12:00:00Z"},
+    ]},
+    "reserve_floors":{"five_hour":20, "weekly":20, "model_specific":{}},
+    "acknowledged_unknown_capacity":False,
+}
+assert module.decide_mutating_capacity(request)["decision"] == "autonomous_allowed"
+module.capacity_now = lambda: datetime(2026, 7, 20, 14, 0, 0, tzinfo=timezone.utc)
+assert module.decide_mutating_capacity(request)["decision"] == "acknowledgement_required"
+module.capacity_now = lambda: now
+request["capacity"]["windows"][0]["resets_at"] = "2026-07-21T12:00:01Z"
+assert module.decide_mutating_capacity(request)["decision"] == "acknowledgement_required"
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil || string(output) != "ok\n" {
+		t.Fatalf("capacity reset freshness: %v: %s", err, output)
+	}
+}
+
+func TestUnknownCapacityAcknowledgementDigestBindsProvenanceSchemaAndWindows(t *testing.T) {
+	t.Parallel()
+	request := map[string]any{
+		"capacity": map[string]any{
+			"status": "supported", "provider": "claude", "source": "unknown", "source_version": 1, "schema_version": 1, "confidence": "unknown",
+			"windows": []any{
+				map[string]any{"name": "primary", "used_percent": 10, "window_minutes": 300, "resets_at": futureCapacityReset(300)},
+				map[string]any{"name": "secondary", "used_percent": 10, "window_minutes": 10080, "resets_at": futureCapacityReset(10080)},
+			},
+		},
+		"reserve_floors":                map[string]any{"five_hour": 20, "weekly": 20, "model_specific": map[string]any{}},
+		"acknowledged_unknown_capacity": false,
+	}
+	stdout, stderr, err := runHelper(t, t.TempDir(), request, "capacity", "decide-mutating")
+	if err != nil {
+		t.Fatalf("unknown capacity decision: %v: %s", err, stderr)
+	}
+	required := decodeJSONMap(t, stdout)
+	mutations := []func(map[string]any){
+		func(c map[string]any) { c["provider"] = "other" },
+		func(c map[string]any) { c["source"] = "web" },
+		func(c map[string]any) { c["schema_version"] = float64(2) },
+		func(c map[string]any) {
+			c["windows"].([]any)[0].(map[string]any)["resets_at"] = futureCapacityReset(240)
+		},
+	}
+	for index, mutate := range mutations {
+		changed := cloneJSONMap(t, request)
+		mutate(changed["capacity"].(map[string]any))
+		changed["acknowledged_unknown_capacity"] = true
+		changed["acknowledgement_of"] = required["decision_digest"]
+		_, stderr, err = runHelper(t, t.TempDir(), changed, "capacity", "decide-mutating")
+		if err == nil {
+			t.Fatalf("changed contract %d replay error = %v, stderr %q", index, err, stderr)
+		}
+	}
+	request["acknowledged_unknown_capacity"] = true
+	request["acknowledgement_of"] = required["decision_digest"]
+	stdout, stderr, err = runHelper(t, t.TempDir(), request, "capacity", "decide-mutating")
+	if err != nil || !strings.Contains(stdout, `"decision":"explicit_acknowledgement"`) {
+		t.Fatalf("exact acknowledgement replay: %v: %s%s", err, stdout, stderr)
+	}
+}
+
+func TestMutatingCapacityRejectsDuplicatedAndNonFiniteJSON(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputs := []string{
+		`{"capacity":{"status":"supported","provider":"claude","provider":"claude","source":"web","source_version":1,"schema_version":1,"confidence":"reported","windows":[]},"reserve_floors":{"five_hour":20,"weekly":20,"model_specific":{}},"acknowledged_unknown_capacity":false}`,
+		`{"capacity":{"status":"supported","provider":"claude","source":"web","source_version":1,"schema_version":1,"confidence":"reported","windows":[{"name":"primary","used_percent":NaN,"window_minutes":300,"resets_at":"2026-07-19T20:00:00Z"},{"name":"secondary","used_percent":10,"window_minutes":10080,"resets_at":"2026-07-26T00:00:00Z"}]},"reserve_floors":{"five_hour":20,"weekly":20,"model_specific":{}},"acknowledged_unknown_capacity":false}`,
+	}
+	for _, input := range inputs {
+		command := exec.Command("python3", helper, "--state-dir", t.TempDir(), "capacity", "decide-mutating")
+		command.Stdin = strings.NewReader(input)
+		output, err := command.CombinedOutput()
+		if err == nil || strings.Contains(string(output), `"decision":"autonomous_allowed"`) {
+			t.Fatalf("malformed JSON became autonomous: %v: %s", err, output)
+		}
+	}
+}
+
+func TestCapacityDecisionDigestPreservesNumericTypes(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import importlib.util, pathlib, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert module.capacity_decision_digest({"schema_version": 1}) != module.capacity_decision_digest({"schema_version": 1.0})
+assert module.capacity_decision_digest({"source_version": 1}) != module.capacity_decision_digest({"source_version": 1.0})
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil || string(output) != "ok\n" {
+		t.Fatalf("capacity digest numeric types: %v: %s", err, output)
 	}
 }
 
@@ -566,10 +839,10 @@ func TestMutatingLaunchIsAnExplicitSeparateWriterPolicy(t *testing.T) {
 	enableAsyncClaudeLaunch(t, fixture.binDir, &fixture.environment)
 	capacityRequest := map[string]any{
 		"capacity": map[string]any{
-			"status": "supported", "source": "web", "confidence": "reported",
+			"status": "supported", "provider": "claude", "source": "web", "source_version": 1, "schema_version": 1, "confidence": "reported",
 			"windows": []any{
-				map[string]any{"name": "primary", "used_percent": 20, "window_minutes": 300},
-				map[string]any{"name": "secondary", "used_percent": 30, "window_minutes": 10080},
+				map[string]any{"name": "primary", "used_percent": 20, "window_minutes": 300, "resets_at": futureCapacityReset(300)},
+				map[string]any{"name": "secondary", "used_percent": 30, "window_minutes": 10080, "resets_at": futureCapacityReset(10080)},
 			},
 		},
 		"reserve_floors":                map[string]any{"five_hour": 20, "weekly": 20, "model_specific": map[string]any{}},
@@ -693,10 +966,10 @@ func TestMutatingLaunchRevalidatesTheLeasedBaselineBeforeRecordingIntent(t *test
 	}
 	capacityRequest := map[string]any{
 		"capacity": map[string]any{
-			"status": "supported", "source": "web", "confidence": "reported",
+			"status": "supported", "provider": "claude", "source": "web", "source_version": 1, "schema_version": 1, "confidence": "reported",
 			"windows": []any{
-				map[string]any{"name": "primary", "used_percent": 20, "window_minutes": 300},
-				map[string]any{"name": "secondary", "used_percent": 30, "window_minutes": 10080},
+				map[string]any{"name": "primary", "used_percent": 20, "window_minutes": 300, "resets_at": futureCapacityReset(300)},
+				map[string]any{"name": "secondary", "used_percent": 30, "window_minutes": 10080, "resets_at": futureCapacityReset(10080)},
 			},
 		},
 		"reserve_floors":                map[string]any{"five_hour": 20, "weekly": 20, "model_specific": map[string]any{}},
@@ -921,4 +1194,8 @@ func decodeJSONMap(t *testing.T, value string) map[string]any {
 		t.Fatal(err)
 	}
 	return result
+}
+
+func futureCapacityReset(windowMinutes int) string {
+	return time.Now().UTC().Add(time.Duration(windowMinutes/2) * time.Minute).Format(time.RFC3339)
 }
