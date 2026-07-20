@@ -96,11 +96,11 @@ Repository policy may additionally require an add-only issue label, exactly one 
 ### 2. Declare the group and register the verified coordinator lease
 
 ```sh
-amux --json group declare --group amux-135 --thread <coordinator-thread>
-amux --json callback register --group amux-135 --thread <coordinator-thread> --pane <coordinator-pane>
+amux --json group declare --group <durable-issue-group> --thread <coordinator-thread>
+amux --json callback register --group <durable-issue-group> --thread <coordinator-thread> --pane <coordinator-pane>
 ```
 
-Before registration, independently verify the pane belongs to the configured coordinator worker. Parse the successful callback outcome and confirm its config directory, group/thread, pane, session/window IDs, PID, generation, and registration time against fresh tmux/process metadata. Registration human output is tab-separated: `<group><TAB>registered<TAB><generation><TAB><pane>`. A restart or any identity change invalidates the lease; explicitly register a new generation. Never guess a pane.
+Before registration, independently verify the pane belongs to the configured coordinator worker. Parse the successful callback outcome and confirm its config directory, group/thread, pane, session/window IDs, PID, generation, and registration time against fresh tmux/process metadata. Registration human output is tab-separated: `<durable-issue-group><TAB>registered<TAB><generation><TAB><pane>`. A restart or any identity change invalidates the lease; explicitly register a new generation. Never guess a pane.
 
 ### 3. Spawn and attach the authoritative receiving thread
 
@@ -112,8 +112,8 @@ git worktree add -b <type>/issue-<issue>-<slug> <dedicated-worktree> origin/main
 Run the shared automatic-spawn preflight above before this block.
 
 ```sh
-amux --dry-run spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode "$MODE" --title-prefix '#135' --group amux-135 --message-file <assignment> --idempotency-key issue-135
-amux --json spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode "$MODE" --title-prefix '#135' --group amux-135 --message-file <assignment> --idempotency-key issue-135
+amux --dry-run spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode "$MODE" --title-prefix '#<issue>' --group <durable-issue-group> --message-file <assignment> --idempotency-key issue-<issue>
+amux --json spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode "$MODE" --title-prefix '#<issue>' --group <durable-issue-group> --message-file <assignment> --idempotency-key issue-<issue>
 ```
 
 Spawn resolves #104 alternate-thread delivery before persisting group intent. Verify the worker and membership outcomes name only the final receiving thread; never add the abandoned provisioned identity. If label ensure fails after creation, the worker and local membership remain, exit is `1`, and retry with the identical idempotency key resumes grouping without recreating or resubmitting.
@@ -121,14 +121,14 @@ Spawn resolves #104 alternate-thread delivery before persisting group intent. Ve
 Give the child one stable report ID (for example `amux-135-worker-1`) and the exact group/thread/issue/reference binding. Require the child to remain alive after every status. `ready` means implementation, focused tests/checks, one review, addressed findings, PR, and normal CI are complete. A blocker uses the same report identity and `--pr none` when no PR exists:
 
 ```sh
-amux report submit --report-id <stable-report-id> --group <group> --thread <member-thread> --status blocked --issue '#<issue>' --pr none --summary <concise-hyphenated-blocker>
+amux report submit --report-id <stable-report-id> --group <durable-issue-group> --thread <member-thread> --status blocked --issue '#<issue>' --pr none --summary <concise-hyphenated-blocker>
 ```
 
 ### 4. Persist ready, wake, acknowledge, and independently verify
 
 ```sh
-amux report submit --report-id <stable-report-id> --group <group> --thread <member-thread> --status ready --issue '#<issue>' --pr <pr-url> --summary implementation-tests-review-pr-ci-complete
-amux report pending --group <group>
+amux report submit --report-id <stable-report-id> --group <durable-issue-group> --thread <member-thread> --status ready --issue '#<issue>' --pr <pr-url> --summary implementation-tests-review-pr-ci-complete
+amux report pending --group <durable-issue-group>
 amux report history --report-id <stable-report-id>
 amux report acknowledge --report-id <stable-report-id>
 ```
@@ -137,10 +137,10 @@ Successful human submission is exactly:
 
 ```text
 <stable-report-id><TAB>ready<TAB>recorded<TAB><member-thread>
-CALLBACK<TAB><group><TAB><stable-report-id><TAB>notified
+CALLBACK<TAB><durable-issue-group><TAB><stable-report-id><TAB>notified
 ```
 
-The wake-up text is only `AMUX_REPORT group=<group> report=<stable-report-id>` plus Enter. If callback verification/send fails, submission exits `1` after recording the report and prints `CALLBACK<TAB><group><TAB><stable-report-id><TAB>failed`; keep the child alive. An identical retry prints the report line with `duplicate`, leaves one durable status event, and may retry notification only after the exact pane is independently known safe for input. If the composer is suspected or observed busy, do not send again: recover from `report pending`/`history` and acknowledge the durable report. Duplicate/late/reordered tokens cannot alter durable state.
+The wake-up text is only `AMUX_REPORT group=<durable-issue-group> report=<stable-report-id>` plus Enter. If callback verification/send fails, submission exits `1` after recording the report and prints `CALLBACK<TAB><durable-issue-group><TAB><stable-report-id><TAB>failed`; keep the child alive. An identical retry prints the report line with `duplicate`, leaves one durable status event, and may retry notification only after the exact pane is independently known safe for input. If the composer is suspected or observed busy, do not send again: recover from `report pending`/`history` and acknowledge the durable report. Duplicate/late/reordered tokens cannot alter durable state.
 
 Acknowledgement is receipt only. Before merge, the coordinator independently verifies the exact PR URL, head branch/SHA, issue scope and diff, mergeability, closing-issue metadata, worker/worktree identity and cleanliness, review evidence, and every required CI check. Do not substitute the child's summary, callback success, or acknowledgement for this evidence.
 
@@ -160,7 +160,7 @@ Human output is `<stable-report-id><TAB>authorized`. Authorization is durable, s
 The child confirms the durable authorization and independently verifies merge, then progresses the same report ID without changing its immutable binding or authorized payload:
 
 ```sh
-amux report submit --report-id <stable-report-id> --group <group> --thread <member-thread> --status merged --issue '#<issue>' --pr <pr-url> --summary implementation-tests-review-pr-ci-complete
+amux report submit --report-id <stable-report-id> --group <durable-issue-group> --thread <member-thread> --status merged --issue '#<issue>' --pr <pr-url> --summary implementation-tests-review-pr-ci-complete
 ```
 
 `merged` is terminal. The callback remains a wake-up; the coordinator inspects and acknowledges the merged event. Then the coordinator explicitly directs `/amux finish`. Finish verifies GitHub/Git/worktree/runner ownership, cleans the worktree and safe branch state, and invokes `amux teardown --thread <member-thread>` last. Group membership and report history survive teardown unless a separate explicit group removal is requested. Never force-delete a branch, infer finish from a callback, or release automatically.

@@ -290,10 +290,11 @@ func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
 		"fresh `origin/main`",
 		"issue-unprefixed semantic window",
 		"--mode medium",
-		"--group amux-135",
+		"--group <durable-issue-group>",
 		"authoritative receiving thread",
-		"amux --json callback register --group amux-135 --thread <coordinator-thread> --pane <coordinator-pane>",
-		"amux report submit --report-id <stable-report-id>",
+		"amux --json callback register --group <durable-issue-group> --thread <coordinator-thread> --pane <coordinator-pane>",
+		"amux report submit --report-id <stable-report-id> --group <durable-issue-group>",
+		"amux report pending --group <durable-issue-group>",
 		"amux report acknowledge --report-id <stable-report-id>",
 		"PR URL, head branch/SHA, issue scope and diff, mergeability, closing-issue metadata",
 		"amux report authorize-finish --report-id <stable-report-id>",
@@ -302,12 +303,18 @@ func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
 		"invokes `amux teardown --thread <member-thread>` last",
 		"Group membership and report history survive teardown",
 		"<stable-report-id><TAB>ready<TAB>recorded<TAB><member-thread>",
-		"CALLBACK<TAB><group><TAB><stable-report-id><TAB>notified",
+		"CALLBACK<TAB><durable-issue-group><TAB><stable-report-id><TAB>notified",
+		"AMUX_REPORT group=<durable-issue-group> report=<stable-report-id>",
 		"Do not edit `reports.json` directly",
 		"current CLI exposes no command to create or update deadline records",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("coordinator workflow is missing %q", required)
+		}
+	}
+	for _, inconsistent := range []string{"--group amux-135", "--group <group>", "CALLBACK<TAB><group><TAB><stable-report-id>", "AMUX_REPORT group=<group> report=<stable-report-id>"} {
+		if strings.Contains(workflow, inconsistent) {
+			t.Errorf("coordinator workflow contains inconsistent durable issue placeholder %q", inconsistent)
 		}
 	}
 
