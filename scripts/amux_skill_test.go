@@ -290,9 +290,9 @@ func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
 		"fresh `origin/main`",
 		"issue-unprefixed semantic window",
 		"--mode medium",
-		"--group <group>",
+		"--group amux-135",
 		"authoritative receiving thread",
-		"amux --json callback register --group <group> --thread <coordinator-thread> --pane <coordinator-pane>",
+		"amux --json callback register --group amux-135 --thread <coordinator-thread> --pane <coordinator-pane>",
 		"amux report submit --report-id <stable-report-id>",
 		"amux report acknowledge --report-id <stable-report-id>",
 		"PR URL, head branch/SHA, issue scope and diff, mergeability, closing-issue metadata",
@@ -337,6 +337,47 @@ func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
 	} {
 		if !strings.Contains(troubleshooting, required) {
 			t.Errorf("coordinator recovery is missing %q", required)
+		}
+	}
+}
+
+func TestIssueCoordinationUsesRepositoryQualifiedDurableIdentity(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	checks := map[string][]string{
+		filepath.Join("skills", "amux", "reference", "workflows.md"): {
+			"`amux-<issue-number>`",
+			"`amux-<issue-number>-worker-<ordinal>`",
+			"`<repository-slug>-<issue-number>`",
+			"`<repository-slug>-<issue-number>-worker-<ordinal>`",
+			"not a generic `amux group` validation rule",
+			"`amux-135-worker-1`",
+			"purpose-specific groups such as `pr-181-review`",
+		},
+		"README.md": {
+			"--group amux-110",
+			"--report-id amux-133-worker-1 --group amux-133",
+			"another repository uses the equivalent `<repository-slug>-131` and `<repository-slug>-131-worker-1`",
+			"Legacy `issue-*` identities and purpose-specific groups such as `pr-181-review` remain valid",
+		},
+		filepath.Join("docs", "skill", "index.html"): {
+			"amux-&lt;issue-number&gt;",
+			"amux-&lt;issue-number&gt;-worker-&lt;ordinal&gt;",
+			"--group amux-135",
+			"--report-id amux-135-worker-1 --group amux-135",
+		},
+	}
+	for relativePath, required := range checks {
+		contents := readSkillFile(t, root, relativePath)
+		for _, want := range required {
+			if !strings.Contains(contents, want) {
+				t.Errorf("%s is missing issue identity convention %q", relativePath, want)
+			}
+		}
+		for _, obsolete := range []string{"--group issue-110", "--group issue-131", "--group issue-133", "`issue-135-worker-1`"} {
+			if strings.Contains(contents, obsolete) {
+				t.Errorf("%s still teaches obsolete issue identity %q", relativePath, obsolete)
+			}
 		}
 	}
 }
@@ -437,6 +478,7 @@ func TestSprawlContractUsesDedicatedSemanticWorkers(t *testing.T) {
 		"--window <semantic-window>",
 		"--mode medium",
 		"--title-prefix '#<issue>'",
+		"--group <durable-issue-group>",
 		"focused Oracle review",
 		"callback destination metadata",
 	} {

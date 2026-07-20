@@ -35,6 +35,8 @@ Fetch `origin/main`, read every requested issue and comment, and inspect native 
 
 Apply the `amux-agent-first` label to accepted issue work. This label operation is add-only: confirm the desired label is present, but do not remove unrelated labels to force exact equality. Give each worker one narrow issue, one dedicated worktree, and one branch. When a coordinator supervises the batch, use the durable work-group workflow below; a group associates threads, not multiple issues in one worker assignment.
 
+For issue work in the Amux repository, derive the durable group ID and additive Amp label as `amux-<issue-number>`, and each stable report ID as `amux-<issue-number>-worker-<ordinal>`. For another repository, use the equivalent `<repository-slug>-<issue-number>` and `<repository-slug>-<issue-number>-worker-<ordinal>` forms with its lowercase, group-safe repository slug. Use the resulting group ID wherever the commands below show `<durable-issue-group>`. This is an issue-coordination convention, not a generic `amux group` validation rule. Existing `issue-*` groups and reports and purpose-specific groups such as `pr-181-review` remain valid and untouched; do not migrate, rename, remove their labels, or rewrite their history.
+
 ### 2. Use stable issue identity
 
 - Branch/worktree names include the issue number.
@@ -49,8 +51,8 @@ git worktree add -b <type>/issue-<issue>-<slug> <dedicated-worktree> origin/main
 Run the shared automatic-spawn preflight above before this block.
 
 ```sh
-amux --dry-run spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode "$MODE" --title-prefix '#<issue>' --group <group> --message-file <prompt> --idempotency-key issue-<issue>
-amux spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode "$MODE" --title-prefix '#<issue>' --group <group> --message-file <prompt> --idempotency-key issue-<issue>
+amux --dry-run spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode "$MODE" --title-prefix '#<issue>' --group <durable-issue-group> --message-file <prompt> --idempotency-key issue-<issue>
+amux spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode "$MODE" --title-prefix '#<issue>' --group <durable-issue-group> --message-file <prompt> --idempotency-key issue-<issue>
 ```
 
 Use explicit `--mode medium` unless the user requested another mode. The worker prompt must include:
@@ -94,8 +96,8 @@ Repository policy may additionally require an add-only issue label, exactly one 
 ### 2. Declare the group and register the verified coordinator lease
 
 ```sh
-amux --json group declare --group <group> --thread <coordinator-thread>
-amux --json callback register --group <group> --thread <coordinator-thread> --pane <coordinator-pane>
+amux --json group declare --group amux-135 --thread <coordinator-thread>
+amux --json callback register --group amux-135 --thread <coordinator-thread> --pane <coordinator-pane>
 ```
 
 Before registration, independently verify the pane belongs to the configured coordinator worker. Parse the successful callback outcome and confirm its config directory, group/thread, pane, session/window IDs, PID, generation, and registration time against fresh tmux/process metadata. Registration human output is tab-separated: `<group><TAB>registered<TAB><generation><TAB><pane>`. A restart or any identity change invalidates the lease; explicitly register a new generation. Never guess a pane.
@@ -110,13 +112,13 @@ git worktree add -b <type>/issue-<issue>-<slug> <dedicated-worktree> origin/main
 Run the shared automatic-spawn preflight above before this block.
 
 ```sh
-amux --dry-run spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode "$MODE" --title-prefix '#<issue>' --group <group> --message-file <assignment> --idempotency-key issue-<issue>
-amux --json spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode "$MODE" --title-prefix '#<issue>' --group <group> --message-file <assignment> --idempotency-key issue-<issue>
+amux --dry-run spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode "$MODE" --title-prefix '#135' --group amux-135 --message-file <assignment> --idempotency-key issue-135
+amux --json spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode "$MODE" --title-prefix '#135' --group amux-135 --message-file <assignment> --idempotency-key issue-135
 ```
 
 Spawn resolves #104 alternate-thread delivery before persisting group intent. Verify the worker and membership outcomes name only the final receiving thread; never add the abandoned provisioned identity. If label ensure fails after creation, the worker and local membership remain, exit is `1`, and retry with the identical idempotency key resumes grouping without recreating or resubmitting.
 
-Give the child one stable report ID (for example `issue-135-worker-1`) and the exact group/thread/issue/reference binding. Require the child to remain alive after every status. `ready` means implementation, focused tests/checks, one review, addressed findings, PR, and normal CI are complete. A blocker uses the same report identity and `--pr none` when no PR exists:
+Give the child one stable report ID (for example `amux-135-worker-1`) and the exact group/thread/issue/reference binding. Require the child to remain alive after every status. `ready` means implementation, focused tests/checks, one review, addressed findings, PR, and normal CI are complete. A blocker uses the same report identity and `--pr none` when no PR exists:
 
 ```sh
 amux report submit --report-id <stable-report-id> --group <group> --thread <member-thread> --status blocked --issue '#<issue>' --pr none --summary <concise-hyphenated-blocker>

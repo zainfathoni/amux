@@ -138,7 +138,7 @@ Removed aliases and positional forms fail with remediation. In particular, do no
 `spawn`, `shelve`, `unshelve`, and `teardown` are worker-only and have concise top-level routes.
 
 ```sh
-amux --dry-run spawn --workspace amux --window install-diagnostics --workdir ~/Code/amux-issue-110 --mode medium --title-prefix '#110' --group issue-110 --message-file /tmp/issue-110.md --idempotency-key issue-110
+amux --dry-run spawn --workspace amux --window install-diagnostics --workdir ~/Code/amux-issue-110 --mode medium --title-prefix '#110' --group amux-110 --message-file /tmp/issue-110.md --idempotency-key issue-110
 ```
 
 An exact `#<issue>` title prefix owns issue identity. The window must be an issue-unprefixed semantic slug; obvious duplicates such as `issue-110-install-diagnostics` are rejected before side effects. `--message`, `--message-file`, and `--message-stdin` are mutually exclusive. Spawn requires a stable idempotency key. If verification times out after delivery starts, rerun the complete identical spawn request with `--reconcile` only after read-only inspection identifies either the exact assignment in the provisioned thread or one unambiguous fresh active alternate receiver. amux verifies the immutable request hash, exact assignment, workdir, freshness, empty provisioned residue, and unstarted receiver; it then creates or verifies only the authoritative worker row and local tmux client without creating a thread or resubmitting the message. Alternate adoption is rejected when ownership, content, freshness, activity, or local identity is ambiguous. Other indeterminate outcomes remain terminal.
@@ -162,18 +162,20 @@ amux teardown --thread T-example
 Work groups are explicit, durable many-to-many associations between Amp thread IDs and byte-preserving group IDs. Declare a group with one coordinator, then add any worker, archived, recovered, evidence, duplicate, or runner-managed thread by its canonical ID:
 
 ```sh
-amux group declare --group issue-131 --thread T-coordinator
-amux group add --group issue-131 --thread T-worker
-amux group coordinator --group issue-131 --thread T-worker
+amux group declare --group amux-131 --thread T-coordinator
+amux group add --group amux-131 --thread T-worker
+amux group coordinator --group amux-131 --thread T-worker
 amux group list
-amux group show --group issue-131
-amux group reconcile --group issue-131
+amux group show --group amux-131
+amux group reconcile --group amux-131
 amux group reconcile --thread T-worker
 amux group reconcile --all
-amux group remove --group issue-131 --thread T-worker
+amux group remove --group amux-131 --thread T-worker
 ```
 
 Group IDs map byte-for-byte to Amp labels and must match `^[a-z0-9]+(?:-[a-z0-9]+)*$`; amux never normalizes or infers them from titles, branches, issue numbers, or existing labels. Local `groups.tsv` intent is authoritative and survives worker/tmux/worktree lifecycle changes. `group list` and `group show` are deterministic local-only reads.
+
+The bundled issue-coordination workflow uses repository-qualified identities. For this repository, issue `#131` uses group/Amp label `amux-131`, and its first worker uses report ID `amux-131-worker-1`; another repository uses the equivalent `<repository-slug>-131` and `<repository-slug>-131-worker-1`. This convention does not narrow the generic group-ID contract. Legacy `issue-*` identities and purpose-specific groups such as `pr-181-review` remain valid and are never migrated, renamed, removed externally, or rewritten.
 
 Worker spawn accepts repeatable `--group <id>`. amux validates and deterministically sorts/deduplicates the complete set before creation, binds memberships only to the final authoritative receiving thread, persists all local intent before add-only label synchronization, and resumes a partial grouping failure with the same idempotency key without recreating or resubmitting the worker.
 
@@ -184,21 +186,21 @@ External synchronization is deliberately add-only. Declare, add, coordinator cha
 Reports are persisted locally before callback notification. A stable report ID can progress between `ready` and `blocked`; `merged` is terminal and is accepted only after the group coordinator records a separate durable finish authorization. Acknowledgement never implies authorization, and neither `ready`, `blocked`, callback success, nor deadline expiry authorizes cleanup.
 
 ```sh
-amux report submit --report-id issue-133-worker --group issue-133 --thread T-worker \
+amux report submit --report-id amux-133-worker-1 --group amux-133 --thread T-worker \
   --status ready --issue '#133' --pr https://github.com/owner/repo/pull/123 \
   --summary implementation-tests-review-pr-ci-complete
-amux report pending --group issue-133
-amux report history --report-id issue-133-worker
-amux report acknowledge --report-id issue-133-worker
-amux report authorize-finish --report-id issue-133-worker \
+amux report pending --group amux-133
+amux report history --report-id amux-133-worker-1
+amux report acknowledge --report-id amux-133-worker-1
+amux report authorize-finish --report-id amux-133-worker-1 \
   --thread T-coordinator --reference coordinator-verification
 ```
 
 Register an exact live interactive coordinator pane explicitly, and clear it when it should no longer receive wake-ups:
 
 ```sh
-amux callback register --group issue-133 --thread T-coordinator --pane %16
-amux callback clear --group issue-133
+amux callback register --group amux-133 --thread T-coordinator --pane %16
+amux callback clear --group amux-133
 ```
 
 The single lease for each config-directory/group is machine runtime state, not portable group/report history. Registration captures the exact pane, session/window IDs and names, start/current command, canonical workdir, PID, process start identity, generation, and registration time. Every report submission—including an identical retry—freshly verifies all metadata before sending `AMUX_REPORT group=<group> report=<id>` plus Enter. Missing or changed leases fail separately after the durable report is confirmed; amux never guesses another pane. A sent token is only a best-effort wake-up and never acknowledgement or finish authorization.
