@@ -416,6 +416,7 @@ class ReceiptStore:
                 launch_intent["expected_launcher_identity"],
                 launch_intent["expected_executable_object_identity"],
                 identity["process_executable_identity"],
+                identity.get("process_executable_object_identity"),
             )
             if current != identity:
                 raise HelperError("Claude pane, process, workdir, or incarnation identity changed")
@@ -499,6 +500,7 @@ class ReceiptStore:
             launch_intent["expected_launcher_identity"],
             launch_intent["expected_executable_object_identity"],
             launch_identity["process_executable_identity"],
+            launch_identity.get("process_executable_object_identity"),
         )
         with self.mutation_lock():
             store = self.load_store()
@@ -507,13 +509,8 @@ class ReceiptStore:
             current_intent = receipt_launch_intent(receipt)
             if current_intent != launch_intent:
                 raise HelperError("immutable launch intent changed during session acquisition")
-            if platform.system() == "Linux":
-                if identity != launch_identity:
-                    raise HelperError("Claude session does not match the exact process and pane created by this receipt")
-            else:
-                for key in ("session", "window", "window_id", "pane_id"):
-                    if identity[key] != launch_identity[key]:
-                        raise HelperError("Claude session does not match the exact pane created by this receipt")
+            if identity != launch_identity:
+                raise HelperError("Claude session does not match the exact process and pane created by this receipt")
             if identity["workdir"] != str(pathlib.Path(receipt["binding"]["workdir"]).resolve(strict=True)):
                 raise HelperError("Claude session workdir does not match immutable receipt binding")
             if identity["launch_command_digest"] != receipt["binding"]["launch_command_digest"]:
@@ -1353,9 +1350,23 @@ def normalized_argv_digest(arguments: list[str]) -> str:
     return hashlib.sha256(b"\0".join(os.fsencode(argument) for argument in arguments)).hexdigest()
 
 
-def normalized_claude_arguments(system: str, process_name: str, process_args: list[str]) -> tuple[str, list[str]]:
+def normalized_claude_arguments(
+    system: str,
+    process_name: str,
+    process_args: list[str],
+    process_executable: pathlib.Path | None = None,
+) -> tuple[str, list[str]]:
     if process_args and pathlib.Path(process_args[0]).name == "claude":
         return "direct", process_args[1:]
+    if (
+        system == "Darwin"
+        and process_name == "verified-claude"
+        and process_executable is not None
+        and process_executable.name == "verified-claude"
+        and process_args
+        and pathlib.Path(process_args[0]).is_absolute()
+    ):
+        return "darwin_transport", process_args[1:]
     if system == "Linux" and process_name in {"node", "bun"} and len(process_args) > 2:
         script = pathlib.PurePath(process_args[1])
         descriptor_script = len(script.parts) >= 3 and script.parts[-2] == "fd" and script.name.isdigit()
@@ -1450,6 +1461,7 @@ def inspect_claude_identity(
     expected_launcher_identity: str,
     expected_executable_object_identity: str,
     expected_process_executable_identity: str | None = None,
+    expected_process_executable_object_identity: str | None = None,
 ) -> dict[str, Any]:
     if not pane_id.startswith("%") or len(pane_id) < 2:
         raise HelperError("Claude identity requires an exact tmux pane ID")
@@ -1480,8 +1492,17 @@ def inspect_claude_identity(
             raise HelperError("Claude pane launch command has invalid tmux quoting")
         start_command = decoded
     process_name, process_identity, process_args, process_command_digest = exact_process_identity(pane_pid)
-    executable_identity = process_executable_identity(pane_pid)
-    executable_form, normalized_arguments = normalized_claude_arguments(platform.system(), process_name, process_args)
+    process_executable = process_executable_path(pane_pid)
+    if platform.system() == "Darwin":
+        try:
+            executable_identity = executable_file_identity(process_executable)
+        except OSError as error:
+            raise HelperError("read exact process executable identity") from error
+    else:
+        executable_identity = process_executable_identity(pane_pid)
+    executable_form, normalized_arguments = normalized_claude_arguments(
+        platform.system(), process_name, process_args, process_executable
+    )
     session_positions = [index for index, argument in enumerate(process_args) if argument == "--session-id"]
     if (
         len(session_positions) != 1
@@ -1491,16 +1512,18 @@ def inspect_claude_identity(
         raise HelperError("pane process is not the expected Claude session")
     if normalized_argv_digest(normalized_arguments) != expected_argv_digest:
         raise HelperError("Claude process argv does not match immutable launch intent")
+    process_executable_object_identity: str | None = None
     if executable_form == "direct":
         try:
             live_descriptor, _, _, live_object_identity = open_exact_verified_executable(
-                process_executable_path(pane_pid), follow_kernel_link=platform.system() == "Linux"
+                process_executable, follow_kernel_link=platform.system() == "Linux"
             )
         except OSError as error:
             raise HelperError("Claude process executable content is unavailable") from error
         os.close(live_descriptor)
         if (
-            platform.system() == "Linux" and live_object_identity != expected_executable_object_identity
+            platform.system() == "Linux"
+            and live_object_identity != expected_executable_object_identity
         ) or (
             platform.system() == "Darwin"
             and executable_content_identity(live_object_identity)
@@ -1508,6 +1531,31 @@ def inspect_claude_identity(
         ):
             raise HelperError("Claude process executable content does not match immutable launch intent")
         launcher_identity = expected_launcher_identity
+    elif executable_form == "darwin_transport":
+        try:
+            process_descriptor, _, process_launcher_identity, process_executable_object_identity = (
+                open_exact_verified_executable(process_executable)
+            )
+            os.close(process_descriptor)
+            launcher_descriptor, _, launcher_identity, launcher_object_identity = (
+                open_exact_verified_executable(process_args[0])
+            )
+            os.close(launcher_descriptor)
+        except (OSError, RuntimeError) as error:
+            raise HelperError("Claude transport executable identity is unavailable") from error
+        if (
+            process_launcher_identity != executable_identity
+            or (
+                expected_process_executable_object_identity is not None
+                and process_executable_object_identity
+                != expected_process_executable_object_identity
+            )
+            or executable_content_identity(process_executable_object_identity)
+            != executable_content_identity(expected_executable_object_identity)
+        ):
+            raise HelperError("Claude transport executable does not match the planned private copy")
+        if launcher_object_identity != expected_executable_object_identity:
+            raise HelperError("Claude transport launcher content does not match immutable launch intent")
     else:
         try:
             script = pathlib.PurePath(process_args[1])
@@ -1527,7 +1575,23 @@ def inspect_claude_identity(
         raise HelperError("Claude process launcher does not match immutable launch intent")
     if expected_process_executable_identity is not None and executable_identity != expected_process_executable_identity:
         raise HelperError("Claude process executable changed after verified startup")
-    return {
+    if platform.system() == "Darwin":
+        final_name, final_process_identity, final_args, final_command_digest = exact_process_identity(pane_pid)
+        final_process_executable = process_executable_path(pane_pid)
+        try:
+            final_executable_identity = executable_file_identity(final_process_executable)
+        except OSError as error:
+            raise HelperError("read exact process executable identity") from error
+        if (
+            final_name != process_name
+            or final_process_identity != process_identity
+            or final_args != process_args
+            or final_command_digest != process_command_digest
+            or final_process_executable != process_executable
+            or final_executable_identity != executable_identity
+        ):
+            raise HelperError("Darwin Claude process changed during identity inspection")
+    identity = {
         "claude_session_id": claude_session_id,
         "session": fields[0],
         "window": fields[1],
@@ -1543,6 +1607,9 @@ def inspect_claude_identity(
         "process_command_digest": process_command_digest,
         "launch_command_digest": hashlib.sha256(start_command.encode()).hexdigest(),
     }
+    if process_executable_object_identity is not None:
+        identity["process_executable_object_identity"] = process_executable_object_identity
+    return identity
 
 
 def wait_for_claude_startup(
@@ -1551,6 +1618,7 @@ def wait_for_claude_startup(
     expected_argv_digest: str,
     expected_launcher_identity: str,
     expected_executable_object_identity: str,
+    expected_process_executable_object_identity: str | None = None,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
     last_error = "startup identity unavailable"
@@ -1564,6 +1632,7 @@ def wait_for_claude_startup(
                 expected_argv_digest,
                 expected_launcher_identity,
                 expected_executable_object_identity,
+                expected_process_executable_object_identity=expected_process_executable_object_identity,
             )
             if current == candidate:
                 if time.monotonic() - candidate_since >= STARTUP_STABILITY_SECONDS:
@@ -2391,16 +2460,20 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
         write_private_bytes(components["transport_path"], components["transport_bytes"])
         darwin_container_descriptor: int | None = None
         darwin_executable_descriptor: int | None = None
+        darwin_executable_object_identity: str | None = None
         if platform.system() == "Darwin":
             darwin_executable = pathlib.Path(components["transport"]["darwin_executable_path"])
             materialize_executable(
                 held_executable_descriptor, darwin_executable.parent, darwin_executable
             )
-            darwin_executable_descriptor, _, _, copied_object_identity = open_exact_verified_executable(
-                darwin_executable
-            )
+            (
+                darwin_executable_descriptor,
+                _,
+                _,
+                darwin_executable_object_identity,
+            ) = open_exact_verified_executable(darwin_executable)
             if (
-                executable_content_identity(copied_object_identity)
+                executable_content_identity(darwin_executable_object_identity)
                 != executable_content_identity(components["expected_executable_object_identity"])
             ):
                 os.close(darwin_executable_descriptor)
@@ -2436,6 +2509,7 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
                 components["expected_argv_digest"],
                 components["expected_launcher_identity"],
                 components["expected_executable_object_identity"],
+                darwin_executable_object_identity,
             )
         finally:
             if darwin_container_descriptor is not None and darwin_executable_descriptor is not None:
