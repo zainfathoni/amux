@@ -2168,9 +2168,12 @@ class FakeControl:
     def __exit__(self, *args): pass
     def command(self, args):
         self.commands.append(args)
-        if args[0] == "kill-pane": return []
         formats = {module.tmux_single_line_format(key[2:-1]): value for key,value in control_values.items()}
-        return [json.dumps(formats[args[-1]])]
+        token, format_value = args[-1].split(":", 1)
+        return [token + ":" + json.dumps(formats[format_value])]
+    def command_sequence(self, commands):
+        self.commands.extend(commands)
+        return [[], [commands[1][-1]]]
 module.TmuxControlConnection = FakeControl
 def inspect_retained(*args, **kwargs):
     assert kwargs["tmux_fields"] == [control_values[key] for key in
@@ -2181,7 +2184,34 @@ def inspect_retained(*args, **kwargs):
          "expected_executable_object_identity", "expected_launcher_argv0_digest"}}
 module.inspect_claude_identity = inspect_retained
 real_stop_exact_retirement_target(darwin_identity)
-assert len(control_instances) == 1 and control_instances[0].commands[-1] == ["kill-pane", "-t", "%23"]
+assert len(control_instances) == 1 and control_instances[0].commands[-2] == ["kill-pane", "-t", "%23"]
+
+# Complete queued fake frames cannot satisfy a fresh per-command token and never authorize kill.
+class PrequeuedControl(FakeControl):
+    def command(self, args):
+        self.commands.append(args)
+        formats = {module.tmux_single_line_format(key[2:-1]): value for key,value in control_values.items()}
+        _, format_value = args[-1].split(":", 1)
+        return ["0" * 64 + ":" + json.dumps(formats[format_value])]
+    def command_sequence(self, commands):
+        raise AssertionError("queued fake snapshot reached kill sequence")
+module.TmuxControlConnection = PrequeuedControl
+try: real_stop_exact_retirement_target(darwin_identity)
+except module.HelperError: pass
+else: raise AssertionError("wrong-token queued frame was accepted")
+assert all(command[0] != "kill-pane" for command in control_instances[-1].commands)
+
+# An injected empty or wrong-token second frame cannot acknowledge an exact kill sequence.
+for injected in ([], ["retirement-kill:" + "0" * 64]):
+    class InjectedKillControl(FakeControl):
+        def command_sequence(self, commands):
+            self.commands.extend(commands)
+            return [[], injected]
+    module.TmuxControlConnection = InjectedKillControl
+    try: real_stop_exact_retirement_target(darwin_identity)
+    except module.HelperError: pass
+    else: raise AssertionError("injected kill response was accepted")
+module.TmuxControlConnection = FakeControl
 
 # Encoded literal backslashes and encoded newlines remain exact values and cannot forge a match or kill.
 def inspect_encoded_cwd(*args, **kwargs):
@@ -2247,11 +2277,18 @@ module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 socket = sys.argv[2]
 prefix = ["tmux", "-f", "/dev/null", "-S", socket]
 subprocess.run(prefix + ["new-session", "-d", "-s", "Synthetic"], check=True)
+subprocess.run(prefix + ["new-window", "-d", "-t", "Synthetic"], check=True)
 connection = module.TmuxControlConnection("Synthetic", prefix)
 connection.__enter__()
 original_pane = connection.command([
     "display-message", "-p", "-t", "%0", module.tmux_single_line_format("pane_id")])
 assert len(original_pane) == 1 and module.decode_tmux_command_argument(original_pane[0]) == "%0", original_pane
+kill_token = "synthetic-kill-token"
+kill_response = connection.command_sequence([
+    ["kill-pane", "-t", "%1"], ["display-message", "-p", kill_token]])
+assert kill_response == [[], [kill_token]], kill_response
+assert "%1" not in subprocess.check_output(
+    prefix + ["list-panes", "-a", "-F", "#{pane_id}"], text=True).splitlines()
 subprocess.run(prefix + ["kill-server"], check=True)
 deadline = time.monotonic() + 2
 while True:
@@ -2305,10 +2342,11 @@ def read_frames(payload, count=1):
 # Notifications outside a complete response frame are ignored. Ordinary command output stays literal.
 literal = read_frames(
     b"%sessions-changed\n%begin 10 7 1\ntrusted\\057work\n%end 10 7 1\n"
-    b"%window-add @1\n%begin 10 8 1\nsecond\n%end 10 8 1\n%session-window-changed $1 @1\n",
+    b"%window-add @1\n%begin 10 8 1\ncurrent-token:value\n"
+    b"%end 10 8 1\n%session-window-changed $1 @1\n",
     2,
 )
-assert literal == [[r"trusted\057work"], ["second"]], literal
+assert literal == [[r"trusted\057work"], ["current-token:value"]], literal
 
 for payload in (
     b"%begin 10 7 1\nsafe\n%end 10 8 1\n",
@@ -2317,6 +2355,7 @@ for payload in (
     "%begin ١٠ 7 1\nsafe\n%end ١٠ 7 1\n".encode(),
     "%begin 10 7 1\nsafe\n%end 10 ٧ 1\n".encode(),
     "%begin 10 7 1\nsafe\n%error 10 7 ١\n".encode(),
+    b"%begin 10 7 1\n%output %0 current-token:value\ncurrent-token:value\n%end 10 7 1\n",
 ):
     try:
         read_frames(payload)

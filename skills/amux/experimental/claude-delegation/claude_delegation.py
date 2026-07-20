@@ -16,6 +16,7 @@ import math
 import os
 import pathlib
 import platform
+import secrets
 import selectors
 import shlex
 import shutil
@@ -1813,20 +1814,28 @@ class TmuxControlConnection:
                 raise HelperError("retirement tmux control connection disappeared")
             elif response_frame is not None:
                 if line.startswith("%"):
-                    continue
+                    raise HelperError("retirement tmux control response is ambiguous")
                 output.append(line)
         raise HelperError("retirement tmux control response timed out")
 
-    def command(self, arguments: list[str]) -> list[str]:
+    def command_sequence(self, commands: list[list[str]]) -> list[list[str]]:
         if self.process is None or self.process.stdin is None or self.process.poll() is not None:
             raise HelperError("retirement tmux control connection disappeared")
+        if not commands or any(not command for command in commands):
+            raise HelperError("retirement tmux control command sequence is invalid")
         try:
-            command = " ".join(encode_tmux_command_argument(argument) for argument in arguments)
-            self.process.stdin.write((command + "\n").encode())
+            encoded = [
+                " ".join(encode_tmux_command_argument(argument) for argument in command)
+                for command in commands
+            ]
+            self.process.stdin.write((" ; ".join(encoded) + "\n").encode())
             self.process.stdin.flush()
         except (BrokenPipeError, OSError) as error:
             raise HelperError("retirement tmux control connection disappeared") from error
-        return self._read_response()
+        return [self._read_response() for _ in commands]
+
+    def command(self, arguments: list[str]) -> list[str]:
+        return self.command_sequence([arguments])[0]
 
     def close(self) -> None:
         process = self.process
@@ -4840,13 +4849,15 @@ def stop_exact_retirement_target(identity: dict[str, Any]) -> None:
     with TmuxControlConnection(identity["session"]) as control:
         values: list[str] = []
         for format_value in formats:
+            token = secrets.token_hex(32)
             response = control.command([
                 "display-message", "-p", "-t", identity["pane_id"],
-                tmux_single_line_format(format_value),
+                f"{token}:{tmux_single_line_format(format_value)}",
             ])
-            if len(response) != 1:
+            prefix = f"{token}:"
+            if len(response) != 1 or not response[0].startswith(prefix):
                 raise HelperError("retirement tmux control snapshot is ambiguous")
-            values.append(decode_tmux_command_argument(response[0]))
+            values.append(decode_tmux_command_argument(response[0][len(prefix) :]))
         tmux_fields = [values[index] for index in (0, 2, 3, 4, 5, 6, 7, 8)]
         current = inspect_claude_identity(
             identity["pane_id"],
@@ -4870,7 +4881,12 @@ def stop_exact_retirement_target(identity: dict[str, Any]) -> None:
             current["expected_launcher_argv0_digest"] = identity["expected_launcher_argv0_digest"]
         if current != identity:
             raise HelperError("retirement target changed immediately before exact stop")
-        if control.command(["kill-pane", "-t", identity["pane_id"]]):
+        kill_token = secrets.token_hex(32)
+        kill_responses = control.command_sequence([
+            ["kill-pane", "-t", identity["pane_id"]],
+            ["display-message", "-p", f"retirement-kill:{kill_token}"],
+        ])
+        if kill_responses != [[], [f"retirement-kill:{kill_token}"]]:
             raise HelperError("retirement tmux exact stop returned ambiguous output")
 
 
