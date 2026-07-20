@@ -1652,23 +1652,55 @@ def run_command(
     return completed.stdout.rstrip("\r\n")
 
 
-def decode_tmux_control_text(value: str) -> str:
+def decode_tmux_command_argument(value: str) -> str:
+    if "\n" in value or "\r" in value:
+        raise HelperError("tmux command argument encoding is not single-line")
     output: list[str] = []
     index = 0
+    quote: str | None = None
     while index < len(value):
-        if value[index] != "\\":
-            output.append(value[index])
+        character = value[index]
+        if quote == "'":
+            if character == "'":
+                quote = None
+            else:
+                output.append(character)
             index += 1
             continue
-        if index + 1 < len(value) and value[index + 1] == "\\":
-            output.append("\\")
+        if character in "'\"":
+            if quote is None:
+                quote = character
+            elif quote == character:
+                quote = None
+            else:
+                output.append(character)
+            index += 1
+            continue
+        if quote is None and character.isspace():
+            raise HelperError("tmux command argument encoding contains multiple arguments")
+        if character != "\\":
+            output.append(character)
+            index += 1
+            continue
+        if index + 1 >= len(value):
+            raise HelperError("tmux command argument encoding is truncated")
+        escaped = value[index + 1]
+        replacements = {"e": "\x1b", "r": "\r", "n": "\n", "t": "\t"}
+        if escaped in replacements:
+            output.append(replacements[escaped])
             index += 2
             continue
-        octal = value[index + 1 : index + 4]
-        if len(octal) != 3 or any(character not in "01234567" for character in octal):
-            raise HelperError("tmux control response contains invalid escaping")
-        output.append(chr(int(octal, 8)))
-        index += 4
+        if escaped in "01234567":
+            octal = value[index + 1 : index + 4]
+            if len(octal) != 3 or any(digit not in "01234567" for digit in octal):
+                raise HelperError("tmux command argument encoding contains invalid octal")
+            output.append(chr(int(octal, 8)))
+            index += 4
+            continue
+        output.append(escaped)
+        index += 2
+    if quote is not None:
+        raise HelperError("tmux command argument encoding has unterminated quoting")
     return "".join(output)
 
 
@@ -1703,7 +1735,7 @@ class TmuxControlConnection:
         if self.process is None or self.process.stdout is None or self.selector is None:
             raise HelperError("retirement tmux control connection is unavailable")
         deadline = time.monotonic() + 2.0
-        in_response = False
+        response_frame: tuple[str, str, str] | None = None
         output: list[str] = []
         total = 0
         while time.monotonic() < deadline:
@@ -1721,21 +1753,44 @@ class TmuxControlConnection:
             if total > MAX_ABSENCE_OUTPUT_BYTES:
                 raise HelperError("retirement tmux control response exceeds the size limit")
             try:
-                line = raw_line.rstrip(b"\r").decode("utf-8")
+                line = raw_line.decode("utf-8")
             except UnicodeDecodeError as error:
                 raise HelperError("retirement tmux control response is not UTF-8") from error
-            if line.startswith("%begin "):
-                if in_response:
+
+            marker: str | None = None
+            frame: tuple[str, str, str] | None = None
+            for candidate in ("begin", "end", "error"):
+                prefix = f"%{candidate} "
+                if line.startswith(prefix):
+                    fields = line.split(" ")
+                    if len(fields) != 4 or any(
+                        not field
+                        or any(character < "0" or character > "9" for character in field)
+                        for field in fields[1:]
+                    ):
+                        raise HelperError("retirement tmux control frame is invalid")
+                    marker = candidate
+                    frame = (fields[1], fields[2], fields[3])
+                    break
+                if line == f"%{candidate}" or line.startswith(f"%{candidate}"):
+                    raise HelperError("retirement tmux control frame is invalid")
+
+            if marker == "begin":
+                if response_frame is not None:
                     raise HelperError("retirement tmux control response is ambiguous")
-                in_response = True
+                response_frame = frame
                 output = []
-            elif in_response and line.startswith("%end "):
-                return [decode_tmux_control_text(value) for value in output]
-            elif in_response and line.startswith("%error "):
-                raise HelperError("retirement tmux control command failed")
+            elif marker in {"end", "error"}:
+                if response_frame is None or frame != response_frame:
+                    raise HelperError("retirement tmux control frame does not match")
+                if marker == "error":
+                    raise HelperError("retirement tmux control command failed")
+                return output
             elif line == "%exit" or line.startswith("%exit "):
                 raise HelperError("retirement tmux control connection disappeared")
-            elif in_response:
+            elif response_frame is not None:
+                if line.startswith("%"):
+                    continue
                 output.append(line)
         raise HelperError("retirement tmux control response timed out")
 
@@ -4755,19 +4810,18 @@ def inspect_live_indeterminate_target(
 
 def stop_exact_retirement_target(identity: dict[str, Any]) -> None:
     formats = [
-        "#{session_name}", "#{session_id}", "#{window_name}", "#{window_id}",
-        "#{pane_id}", "#{pane_pid}", "#{pane_current_path}", "#{pane_current_command}",
-        "#{pane_start_command}",
+        "session_name", "session_id", "window_name", "window_id", "pane_id", "pane_pid",
+        "pane_current_path", "pane_current_command", "pane_start_command",
     ]
     with TmuxControlConnection(identity["session"]) as control:
         values: list[str] = []
         for format_value in formats:
             response = control.command([
-                "display-message", "-p", "-t", identity["pane_id"], format_value,
+                "display-message", "-p", "-t", identity["pane_id"], f"#{{qa:{format_value}}}",
             ])
             if len(response) != 1:
                 raise HelperError("retirement tmux control snapshot is ambiguous")
-            values.append(response[0])
+            values.append(decode_tmux_command_argument(response[0]))
         tmux_fields = [values[index] for index in (0, 2, 3, 4, 5, 6, 7, 8)]
         current = inspect_claude_identity(
             identity["pane_id"],

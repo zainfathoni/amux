@@ -2168,7 +2168,9 @@ class FakeControl:
     def __exit__(self, *args): pass
     def command(self, args):
         self.commands.append(args)
-        return [] if args[0] == "kill-pane" else [control_values[args[-1]]]
+        if args[0] == "kill-pane": return []
+        assert args[-1].startswith("#{qa:") and args[-1].endswith("}"), args
+        return [json.dumps(control_values["#{" + args[-1][5:-1] + "}"])]
 module.TmuxControlConnection = FakeControl
 def inspect_retained(*args, **kwargs):
     assert kwargs["tmux_fields"] == [control_values[key] for key in
@@ -2180,6 +2182,22 @@ def inspect_retained(*args, **kwargs):
 module.inspect_claude_identity = inspect_retained
 real_stop_exact_retirement_target(darwin_identity)
 assert len(control_instances) == 1 and control_instances[0].commands[-1] == ["kill-pane", "-t", "%23"]
+
+# Encoded literal backslashes and encoded newlines remain exact values and cannot forge a match or kill.
+def inspect_encoded_cwd(*args, **kwargs):
+    current = {key:value for key,value in darwin_identity.items() if key not in
+        {"session_id", "process_start_identity", "expected_launcher_identity",
+         "expected_executable_object_identity", "expected_launcher_argv0_digest"}}
+    current["workdir"] = kwargs["tmux_fields"][5]
+    return current
+module.inspect_claude_identity = inspect_encoded_cwd
+for encoded_cwd in (r"trusted\057work", "line\n%end 10 7 1", "line\r%error 10 7 1"):
+    control_values["#{pane_current_path}"] = encoded_cwd
+    before = len(control_instances)
+    try: real_stop_exact_retirement_target(darwin_identity)
+    except module.HelperError: pass
+    else: raise AssertionError("ambiguous encoded cwd reached exact kill")
+    assert all(command[0] != "kill-pane" for command in control_instances[before].commands)
 
 print("ok")
 `
@@ -2231,8 +2249,8 @@ prefix = ["tmux", "-f", "/dev/null", "-S", socket]
 subprocess.run(prefix + ["new-session", "-d", "-s", "Synthetic"], check=True)
 connection = module.TmuxControlConnection("Synthetic", prefix)
 connection.__enter__()
-original_pane = connection.command(["display-message", "-p", "-t", "%0", "#{pane_id}"])
-assert original_pane == ["%0"], original_pane
+original_pane = connection.command(["display-message", "-p", "-t", "%0", "#{qa:pane_id}"])
+assert len(original_pane) == 1 and module.decode_tmux_command_argument(original_pane[0]) == "%0", original_pane
 subprocess.run(prefix + ["kill-server"], check=True)
 subprocess.run(prefix + ["new-session", "-d", "-s", "Synthetic"], check=True)
 replacement_before = subprocess.check_output(prefix + ["list-panes", "-a", "-F", "#{pane_id}"], text=True).strip()
@@ -2251,6 +2269,64 @@ print("ok")
 	output, err := exec.Command("python3", "-c", script, helper, socket).CombinedOutput()
 	if err != nil || string(output) != "ok\n" {
 		t.Fatalf("retained tmux control replacement boundary: %v\n%s", err, output)
+	}
+}
+
+func TestRetirementControlParserPreservesLiteralOutputAndMatchesFrames(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import importlib.util, os, pathlib, selectors, sys, types
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+
+def read_frames(payload, count=1):
+    reader, writer = os.pipe()
+    os.write(writer, payload); os.close(writer)
+    connection = module.TmuxControlConnection("Synthetic")
+    connection.process = types.SimpleNamespace(stdout=os.fdopen(reader, "rb", buffering=0))
+    connection.selector = selectors.DefaultSelector()
+    connection.selector.register(connection.process.stdout, selectors.EVENT_READ)
+    try:
+        return [connection._read_response() for _ in range(count)]
+    finally:
+        connection.selector.close(); connection.process.stdout.close()
+
+# Notifications outside a complete response frame are ignored. Ordinary command output stays literal.
+literal = read_frames(
+    b"%sessions-changed\n%begin 10 7 1\ntrusted\\057work\n%end 10 7 1\n"
+    b"%window-add @1\n%begin 10 8 1\nsecond\n%end 10 8 1\n%session-window-changed $1 @1\n",
+    2,
+)
+assert literal == [[r"trusted\057work"], ["second"]], literal
+
+for payload in (
+    b"%begin 10 7 1\nsafe\n%end 10 8 1\n",
+    b"%begin 10 7 1\nencoded-cwd\n%end 90 90 1\n%begin 90 90 1\nfabricated\n%end 90 90 1\n",
+    b"%begin 10 7 1\nsafe\n%error 10 8 1\n",
+    "%begin ١٠ 7 1\nsafe\n%end ١٠ 7 1\n".encode(),
+    "%begin 10 7 1\nsafe\n%end 10 ٧ 1\n".encode(),
+    "%begin 10 7 1\nsafe\n%error 10 7 ١\n".encode(),
+):
+    try:
+        read_frames(payload)
+    except module.HelperError:
+        pass
+    else:
+        raise AssertionError("mismatched tmux control frame was accepted")
+
+# tmux's documented qa format is reversible and keeps LF/CR out of newline-delimited output.
+assert module.decode_tmux_command_argument(r'"trusted\\057work"') == r"trusted\057work"
+assert module.decode_tmux_command_argument(r'"line\n%end 10 7 1"') == "line\n%end 10 7 1"
+assert module.decode_tmux_command_argument(r'"line\r%error 10 7 1"') == "line\r%error 10 7 1"
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil || string(output) != "ok\n" {
+		t.Fatalf("retirement tmux control parser fixture: %v\n%s", err, output)
 	}
 }
 
