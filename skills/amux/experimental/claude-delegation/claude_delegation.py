@@ -8,6 +8,7 @@ import ast
 import contextlib
 import copy
 import ctypes
+import errno
 import fcntl
 import hashlib
 import json
@@ -36,6 +37,9 @@ MAX_LAUNCH_TRANSPORT_BYTES = 2 * 1024 * 1024
 MAX_CAPACITY_SOURCE_BYTES = 256 * 1024
 MAX_CAPACITY_EXTRA_WINDOWS = 32
 MAX_TMUX_COMMAND_BYTES = 8 * 1024
+MAX_ABSENCE_PANES = 256
+MAX_ABSENCE_PROCESSES = 2048
+MAX_ABSENCE_OUTPUT_BYTES = 64 * 1024
 EXEC_BUDGET_MARGIN_BYTES = 32 * 1024
 STARTUP_TIMEOUT_SECONDS = 4.0
 STARTUP_STABILITY_SECONDS = 1.5
@@ -51,6 +55,10 @@ APPROVED_READ_ONLY_MODELS = {"claude-fable-5"}
 
 
 class HelperError(Exception):
+    pass
+
+
+class LaunchGateBusy(HelperError):
     pass
 
 
@@ -82,6 +90,45 @@ def read_input() -> dict[str, Any]:
     return value
 
 
+def decode_receipt_store(raw: bytes) -> dict[str, Any]:
+    try:
+        store = json.loads(raw, object_pairs_hook=reject_duplicate_json_pairs)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise HelperError("invalid receipt store") from error
+    if not isinstance(store, dict) or store.get("schema_version") != SCHEMA_VERSION:
+        raise HelperError("unsupported or invalid receipt store")
+    receipts = store.get("receipts")
+    if not isinstance(receipts, list):
+        raise HelperError("invalid receipt store receipts")
+    identities: set[str] = set()
+    for receipt in receipts:
+        if not isinstance(receipt, dict):
+            raise HelperError("invalid receipt record")
+        binding = receipt.get("binding")
+        if not isinstance(binding, dict):
+            raise HelperError("invalid receipt binding")
+        try:
+            binding = validate_binding(binding)
+        except HelperError as error:
+            raise HelperError("invalid receipt binding") from error
+        delegation_id = binding["delegation_id"]
+        if delegation_id in identities:
+            raise HelperError("invalid or duplicate receipt identity")
+        events = receipt.get("events")
+        if not isinstance(events, list):
+            raise HelperError("invalid receipt event history")
+        event_ids: set[str] = set()
+        for event in events:
+            if not isinstance(event, dict):
+                raise HelperError("invalid receipt event history")
+            event_id = event.get("event_id")
+            if not isinstance(event_id, str) or not event_id or event_id in event_ids:
+                raise HelperError("invalid or duplicate receipt event identity")
+            event_ids.add(event_id)
+        identities.add(delegation_id)
+    return store
+
+
 class LifecycleRegistry:
     def __init__(self, state_dir: pathlib.Path):
         self.state_dir = state_dir
@@ -105,7 +152,7 @@ class LifecycleRegistry:
         try:
             raw = self.path.read_bytes()
         except FileNotFoundError:
-            return {"schema_version": LIFECYCLE_SCHEMA_VERSION, "stores": [], "teardown_fences": {}}
+            return {"schema_version": LIFECYCLE_SCHEMA_VERSION, "stores": [], "legacy_store_objects": {}, "teardown_fences": {}}
         except OSError as error:
             raise HelperError("lifecycle registry is unavailable") from error
         if len(raw) > MAX_STORE_BYTES:
@@ -117,15 +164,22 @@ class LifecycleRegistry:
         if not isinstance(registry, dict) or registry.get("schema_version") != LIFECYCLE_SCHEMA_VERSION:
             raise HelperError("unsupported or invalid lifecycle registry")
         stores = registry.get("stores")
+        legacy_objects = registry.get("legacy_store_objects", {})
         fences = registry.get("teardown_fences")
         if (
             not isinstance(stores, list)
             or any(not isinstance(path, str) or not path for path in stores)
             or len(stores) != len(set(stores))
+            or not isinstance(legacy_objects, dict)
+            or any(
+                path not in stores or not isinstance(identity, str) or not identity.startswith("directory:")
+                for path, identity in legacy_objects.items()
+            )
             or not isinstance(fences, dict)
             or any(not isinstance(thread, str) or not isinstance(value, dict) for thread, value in fences.items())
         ):
             raise HelperError("invalid lifecycle registry")
+        registry["legacy_store_objects"] = legacy_objects
         return registry
 
     def commit(self, registry: dict[str, Any]) -> None:
@@ -173,6 +227,48 @@ class ReceiptStore:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             yield
 
+    @contextlib.contextmanager
+    def launch_gate(self, delegation_id: str, timeout_seconds: float | None = None) -> Iterator[None]:
+        protocol_id({"delegation_id": delegation_id}, "delegation_id")
+        self.prepare()
+        gate_dir = self.state_dir / "launch-gates"
+        gate_path = gate_dir / hashlib.sha256(delegation_id.encode()).hexdigest()
+        try:
+            gate_dir.mkdir(mode=0o700, exist_ok=True)
+            os.chmod(gate_dir, 0o700)
+            descriptor = os.open(
+                gate_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600
+            )
+        except OSError as error:
+            raise HelperError("launch gate is unavailable") from error
+        with os.fdopen(descriptor, "r+") as gate_file:
+            try:
+                gate_stat = os.fstat(gate_file.fileno())
+                if (
+                    not stat.S_ISREG(gate_stat.st_mode)
+                    or gate_stat.st_uid != os.geteuid()
+                    or stat.S_IMODE(gate_stat.st_mode) != 0o600
+                ):
+                    raise HelperError("launch gate is unavailable")
+                if timeout_seconds is None:
+                    fcntl.flock(gate_file.fileno(), fcntl.LOCK_EX)
+                else:
+                    deadline = time.monotonic() + timeout_seconds
+                    while True:
+                        try:
+                            fcntl.flock(gate_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except OSError as error:
+                            if error.errno not in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+                                raise
+                            if time.monotonic() >= deadline:
+                                raise LaunchGateBusy("launch gate is busy") from error
+                            time.sleep(0.01)
+                os.set_inheritable(gate_file.fileno(), True)
+            except OSError as error:
+                raise HelperError("launch gate is unavailable") from error
+            yield
+
     def load_store(self, require_exists: bool = False) -> dict[str, Any]:
         try:
             raw = self.path.read_bytes()
@@ -184,42 +280,7 @@ class ReceiptStore:
             raise HelperError("receipt store is unavailable") from error
         if len(raw) > MAX_STORE_BYTES:
             raise HelperError("receipt store exceeds the experimental size limit")
-        try:
-            store = json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError) as error:
-            raise HelperError("invalid receipt store") from error
-        if not isinstance(store, dict) or store.get("schema_version") != SCHEMA_VERSION:
-            raise HelperError("unsupported or invalid receipt store")
-        receipts = store.get("receipts")
-        if not isinstance(receipts, list):
-            raise HelperError("invalid receipt store receipts")
-        identities: set[str] = set()
-        for receipt in receipts:
-            if not isinstance(receipt, dict):
-                raise HelperError("invalid receipt record")
-            binding = receipt.get("binding")
-            if not isinstance(binding, dict):
-                raise HelperError("invalid receipt binding")
-            try:
-                binding = validate_binding(binding)
-            except HelperError as error:
-                raise HelperError("invalid receipt binding") from error
-            delegation_id = binding["delegation_id"]
-            if delegation_id in identities:
-                raise HelperError("invalid or duplicate receipt identity")
-            events = receipt.get("events")
-            if not isinstance(events, list):
-                raise HelperError("invalid receipt event history")
-            event_ids: set[str] = set()
-            for event in events:
-                if not isinstance(event, dict):
-                    raise HelperError("invalid receipt event history")
-                event_id = event.get("event_id")
-                if not isinstance(event_id, str) or not event_id or event_id in event_ids:
-                    raise HelperError("invalid or duplicate receipt event identity")
-                event_ids.add(event_id)
-            identities.add(delegation_id)
-        return store
+        return decode_receipt_store(raw)
 
     def commit(self, store: dict[str, Any]) -> None:
         payload = (json.dumps(store, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -273,6 +334,7 @@ class ReceiptStore:
         for receipt in store["receipts"]:
             if receipt["binding"]["delegation_id"] != binding["delegation_id"]:
                 continue
+            require_receipt_mutable(receipt)
             if receipt["binding"] != binding:
                 raise HelperError("delegation ID is already bound to a different immutable binding")
             if receipt["events"][0]["routing"] != routing:
@@ -318,6 +380,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             event = {"event_id": event_id, "kind": "routing_changed", "routing": routing}
             replay = find_event(receipt, event_id)
             if replay is not None:
@@ -330,6 +393,123 @@ class ReceiptStore:
             receipt["events"].append(event)
             self.commit(store)
             return "recorded"
+
+    def register_legacy_store(self, origin_thread: str, store_path: pathlib.Path) -> dict[str, Any]:
+        required_string({"origin_thread": origin_thread}, "origin_thread", 256)
+        exact_path = exact_canonical_store_path(store_path)
+        with self.lifecycle.mutation_lock():
+            with locked_owner_private_store(
+                pathlib.Path(exact_path), acquire_lock=pathlib.Path(exact_path) != self.lifecycle.state_dir
+            ) as (object_identity, raw):
+                store = decode_receipt_store(raw)
+                matching = [
+                    receipt for receipt in store["receipts"]
+                    if receipt["binding"].get("origin_thread") == origin_thread
+                ]
+                if not matching:
+                    raise HelperError("legacy receipt store has no exact immutable origin match")
+                if any(receipt["binding"].get("origin_thread") != origin_thread for receipt in store["receipts"]):
+                    raise HelperError("legacy receipt store contains a different immutable origin")
+                lifecycle = self.lifecycle.load()
+                existing_object = lifecycle["legacy_store_objects"].get(exact_path)
+                if exact_path in lifecycle["stores"] and existing_object != object_identity:
+                    raise HelperError("legacy receipt store path is already bound to a different object")
+                outcome = "duplicate" if existing_object == object_identity else "registered"
+                if outcome == "registered":
+                    if exact_path not in lifecycle["stores"]:
+                        lifecycle["stores"].append(exact_path)
+                    lifecycle["stores"].sort()
+                    lifecycle["legacy_store_objects"][exact_path] = object_identity
+                    self.lifecycle.commit(lifecycle)
+        return {
+            "action": "legacy_store_registration",
+            "origin_thread_sha256": hashlib.sha256(origin_thread.encode()).hexdigest(),
+            "store_object_sha256": hashlib.sha256(object_identity.encode()).hexdigest(),
+            "outcome": outcome,
+        }
+
+    def detach_indeterminate_worker(self, request: dict[str, Any]) -> dict[str, Any]:
+        delegation_id = protocol_id(request, "delegation_id")
+        event_id = protocol_id(request, "event_id")
+        origin_thread = required_string(request, "origin_thread", 256)
+        authorization = validate_terminal_amp_authorization(request.get("authorization"))
+        reject_unknown(
+            request,
+            {"delegation_id", "event_id", "origin_thread", "authorization"},
+            "indeterminate worker detach",
+        )
+        pair_sha256 = hashlib.sha256(delegation_id.encode()).hexdigest()
+        origin_sha256 = hashlib.sha256(origin_thread.encode()).hexdigest()
+        event = {
+            "event_id": event_id,
+            "kind": "worker_detached",
+            "terminal_state": authorization["terminal_state"],
+            "report_sha256": authorization["report_sha256"],
+            "coordinator_authorization_sha256": authorization["coordinator_authorization_sha256"],
+            "absence_code": "exact_launch_target_absent",
+        }
+        with self.lifecycle.mutation_lock():
+            lifecycle = self.lifecycle.load()
+            state_path = str(self.state_dir.resolve())
+            if state_path not in lifecycle["stores"]:
+                raise HelperError("receipt store is not registered in the canonical lifecycle registry")
+            verify_registered_store_object(state_path, lifecycle["legacy_store_objects"].get(state_path))
+            if origin_thread not in lifecycle["teardown_fences"]:
+                lifecycle["teardown_fences"][origin_thread] = {
+                    "operation_id": hashlib.sha256(f"worker-teardown\0{origin_thread}".encode()).hexdigest(),
+                    "created_at": utc_now(),
+                }
+                self.lifecycle.commit(lifecycle)
+            store_lock = contextlib.nullcontext() if self.lifecycle.state_dir == self.state_dir else self.mutation_lock()
+            with store_lock:
+                store = load_registered_receipt_store(
+                    self, state_path, lifecycle["legacy_store_objects"].get(state_path), acquire_lock=False
+                )
+                receipt = self.find(store, delegation_id)
+                if receipt["binding"].get("origin_thread") != origin_thread:
+                    raise HelperError("receipt immutable origin does not match detach authority")
+                replay = find_event(receipt, event_id)
+                if replay is not None:
+                    if event_without_time(replay) == event and valid_worker_detach_chain(receipt):
+                        return worker_detach_result(origin_sha256, pair_sha256, "duplicate")
+                    raise HelperError("event ID is already bound to a conflicting event")
+                if any(existing.get("kind") == "worker_detached" for existing in receipt["events"]):
+                    raise HelperError("receipt already has a different worker detach operation")
+                if not valid_indeterminate_detach_candidate(receipt):
+                    raise HelperError("worker detach requires one unresolved launch-indeterminate receipt")
+                launch_intent = receipt_launch_intent(receipt)
+                try:
+                    with self.launch_gate(delegation_id, timeout_seconds=0.2):
+                        absence = inspect_indeterminate_launch_absence(launch_intent)
+                        if absence != "exact_launch_target_absent":
+                            return {
+                                "action": "indeterminate_worker_detach",
+                                "origin_thread_sha256": origin_sha256,
+                                "pair_sha256": pair_sha256,
+                                "outcome": "blocked",
+                                "blocker": absence,
+                                "fence": "retained",
+                            }
+                        timestamp = utc_now()
+                        event["at"] = timestamp
+                        receipt["worker_detached"] = {
+                            "event_id": event_id,
+                            "at": timestamp,
+                            "absence_code": event["absence_code"],
+                        }
+                        receipt["events"].append(event)
+                        receipt["updated_at"] = timestamp
+                        self.commit(store)
+                except LaunchGateBusy:
+                    return {
+                        "action": "indeterminate_worker_detach",
+                        "origin_thread_sha256": origin_sha256,
+                        "pair_sha256": pair_sha256,
+                        "outcome": "blocked",
+                        "blocker": "launch_transport_active_or_indeterminate",
+                        "fence": "retained",
+                    }
+        return worker_detach_result(origin_sha256, pair_sha256, "detached")
 
     def worker_teardown(self, origin_thread: str, dry_run: bool) -> dict[str, Any]:
         required_string({"origin_thread": origin_thread}, "origin_thread", 256)
@@ -352,7 +532,10 @@ class ReceiptStore:
             receipts: list[tuple[ReceiptStore, dict[str, Any]]] = []
             for state_path in sorted(state_paths):
                 owner = ReceiptStore(pathlib.Path(state_path), self.lifecycle.state_dir)
-                owner_store = owner.load_store(require_exists=state_path in registered_state_paths)
+                owner_store = load_registered_receipt_store(
+                    owner, state_path, lifecycle["legacy_store_objects"].get(state_path),
+                    require_exists=state_path in registered_state_paths,
+                )
                 receipts.extend(
                     (owner, copy.deepcopy(receipt)) for receipt in owner_store["receipts"]
                     if receipt["binding"].get("origin_thread") == origin_thread
@@ -370,6 +553,8 @@ class ReceiptStore:
                 state if state in {"created", "valid_report", "delivered", "acknowledged", "verified_parked"}
                 else "unknown"
             )
+            if valid_worker_detach_chain(receipt):
+                public_state = "worker_detached"
             pair = {"pair_sha256": pair_id, "state": public_state}
             blocker = worker_teardown_receipt_blocker(receipt)
             if blocker is not None:
@@ -379,6 +564,10 @@ class ReceiptStore:
                 blockers.append({"pair_sha256": pair_id, "blocker": blocker})
                 continue
             if state == "verified_parked":
+                pair["action"] = "none"
+                pairs.append(pair)
+                continue
+            if valid_worker_detach_chain(receipt):
                 pair["action"] = "none"
                 pairs.append(pair)
                 continue
@@ -462,7 +651,12 @@ class ReceiptStore:
                 state_paths.add(str(self.lifecycle.state_dir.resolve()))
                 for state_path in sorted(state_paths):
                     owner = ReceiptStore(pathlib.Path(state_path), self.lifecycle.state_dir)
-                    for receipt in owner.load_store(require_exists=state_path in registered_state_paths)["receipts"]:
+                    owner_store = load_registered_receipt_store(
+                        owner, state_path, lifecycle["legacy_store_objects"].get(state_path),
+                        require_exists=state_path in registered_state_paths,
+                        acquire_lock=pathlib.Path(state_path) != self.lifecycle.state_dir,
+                    )
+                    for receipt in owner_store["receipts"]:
                         if receipt["binding"].get("origin_thread") != origin_thread:
                             continue
                         if worker_teardown_receipt_blocker(receipt) is not None or receipt.get("state") != "verified_parked":
@@ -488,6 +682,7 @@ class ReceiptStore:
             store = self.load_store()
             delegation_id = protocol_id(request, "delegation_id")
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             if expected_kind == "report":
                 expected_kind = "mutating_report" if receipt["binding"]["producer_role"] == "mutating_delegate" else "thinker_report"
             envelope = validate_envelope(request, expected_kind)
@@ -543,6 +738,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             source = find_event(receipt, message_id)
             if source is None or source.get("kind") not in {"valid_report", "input_request"}:
                 raise HelperError("inbox message was not found")
@@ -579,6 +775,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             event = {"event_id": event_id, "kind": "acknowledged", "message_id": message_id}
             replay = find_event(receipt, event_id)
             if replay is not None:
@@ -602,6 +799,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             event = {"event_id": event_id, "kind": "input_accepted", "message_id": message_id}
             replay = find_event(receipt, event_id)
             if replay is not None:
@@ -629,6 +827,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             replay = find_event(receipt, event_id)
             if replay is None:
                 if receipt["state"] != "acknowledged":
@@ -689,6 +888,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             replay = find_event(receipt, result_id)
             if replay is not None:
                 if event_without_time(replay) == result_event:
@@ -712,6 +912,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             replay = find_event(receipt, failure_id)
             if replay is not None:
                 if replay.get("kind") != "park_failed" or replay.get("operation_event_id") != event_id:
@@ -732,6 +933,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             launch_identity = completed_launch_identity(receipt)
             launch_intent = receipt_launch_intent(receipt)
             replay = find_event(receipt, event_id)
@@ -758,6 +960,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             launch_identity = completed_launch_identity(receipt)
             current_intent = receipt_launch_intent(receipt)
             if current_intent != launch_intent:
@@ -799,6 +1002,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             source = find_event(receipt, message_id)
             if source is None or source.get("kind") != "valid_report":
                 raise HelperError("notification requires a durably persisted valid report")
@@ -857,6 +1061,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             replay = find_event(receipt, result_id)
             if replay is not None:
                 if event_without_time(replay) != result_event:
@@ -1576,6 +1781,127 @@ def open_verified_directory(path: str | pathlib.Path, expected_identity: str | N
     except BaseException:
         os.close(descriptor)
         raise
+
+
+def exact_canonical_store_path(path: pathlib.Path) -> str:
+    supplied = os.fspath(path)
+    if not path.is_absolute():
+        raise HelperError("legacy receipt store path must be absolute")
+    try:
+        resolved = os.fspath(path.resolve(strict=True))
+    except OSError as error:
+        raise HelperError("legacy receipt store is unavailable") from error
+    if supplied != resolved:
+        raise HelperError("legacy receipt store path must be exact, canonical, and free of symlinks")
+    return resolved
+
+
+def verify_registered_store_object(path: str, expected_identity: str | None) -> None:
+    if expected_identity is None:
+        return
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except OSError as error:
+        raise HelperError("registered legacy store object is unavailable") from error
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_IMODE(info.st_mode) != 0o700
+        or info.st_uid != os.geteuid()
+        or directory_identity(info) != expected_identity
+    ):
+        raise HelperError("registered legacy store object changed")
+
+
+def load_registered_receipt_store(
+    owner: ReceiptStore,
+    path: str,
+    expected_identity: str | None,
+    require_exists: bool = True,
+    acquire_lock: bool = True,
+) -> dict[str, Any]:
+    if expected_identity is None:
+        return owner.load_store(require_exists=require_exists)
+    verify_registered_store_object(path, expected_identity)
+    with locked_owner_private_store(pathlib.Path(path), acquire_lock=acquire_lock) as (identity, raw):
+        if identity != expected_identity:
+            raise HelperError("registered legacy store object changed")
+        return decode_receipt_store(raw)
+
+
+@contextlib.contextmanager
+def locked_owner_private_store(path: pathlib.Path, acquire_lock: bool = True) -> Iterator[tuple[str, bytes]]:
+    try:
+        directory_descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
+    except OSError as error:
+        raise HelperError("legacy receipt store is unavailable") from error
+    try:
+        info = os.fstat(directory_descriptor)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o700
+            or info.st_uid != os.geteuid()
+        ):
+            raise HelperError("legacy receipt store must be one owner-private directory")
+        lock_descriptor = open_owner_private_file_at(directory_descriptor, "experimental.lock", "legacy receipt lock")
+        try:
+            if acquire_lock:
+                fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+            receipt_descriptor = open_owner_private_file_at(directory_descriptor, "receipts.json", "legacy receipt store")
+            try:
+                raw = read_stable_descriptor(receipt_descriptor, MAX_STORE_BYTES, "legacy receipt store")
+                if not raw:
+                    raise HelperError("legacy receipt store is empty")
+                yield directory_identity(info), raw
+                current_directory = os.stat(path, follow_symlinks=False)
+                current_receipt = os.stat(path / "receipts.json", follow_symlinks=False)
+                if not os.path.samestat(info, current_directory) or not os.path.samestat(os.fstat(receipt_descriptor), current_receipt):
+                    raise HelperError("legacy receipt store object changed before registration")
+            finally:
+                os.close(receipt_descriptor)
+        finally:
+            os.close(lock_descriptor)
+    except BaseException:
+        raise
+    finally:
+        os.close(directory_descriptor)
+
+
+def open_owner_private_file_at(directory_descriptor: int, name: str, label: str) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(name, flags, dir_fd=directory_descriptor)
+    except OSError as error:
+        raise HelperError(f"{label} is unavailable or unsafe") from error
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.geteuid():
+        os.close(descriptor)
+        raise HelperError(f"{label} must be one owner-only regular file")
+    return descriptor
+
+
+def read_stable_descriptor(descriptor: int, limit: int, label: str) -> bytes:
+    before = os.fstat(descriptor)
+    chunks: list[bytes] = []
+    remaining = limit + 1
+    while remaining:
+        chunk = os.read(descriptor, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    raw = b"".join(chunks)
+    after = os.fstat(descriptor)
+    if len(raw) > limit:
+        raise HelperError(f"{label} exceeds the experimental size limit")
+    if (
+        before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns
+    ) != (
+        after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns
+    ):
+        raise HelperError(f"{label} changed during descriptor read")
+    return raw
 
 
 def process_executable_identity(pid: int) -> str:
@@ -2436,6 +2762,14 @@ def write_private_json(path: pathlib.Path, value: Any) -> None:
 def execute_launch_transport(
     store: ReceiptStore, delegation_id: str, expected_digest: str, tmux_environment_digest: str
 ) -> None:
+    with store.launch_gate(delegation_id):
+        require_launch_transport_allowed(store, delegation_id)
+        execute_launch_transport_locked(store, delegation_id, expected_digest, tmux_environment_digest)
+
+
+def execute_launch_transport_locked(
+    store: ReceiptStore, delegation_id: str, expected_digest: str, tmux_environment_digest: str
+) -> None:
     protocol_id({"delegation_id": delegation_id}, "delegation_id")
     for value, label in (
         (expected_digest, "transport_sha256"),
@@ -2563,7 +2897,9 @@ def execute_launch_transport(
             if transport.get("darwin_executable_path") is not None:
                 raise HelperError("private launch transport Darwin executable route is invalid")
             execution_path = descriptor_path(executable_descriptor)
-        os.execve(execution_path, argv, environment)
+        execute_authorized_launch_transport(
+            store, delegation_id, execution_path, argv, environment
+        )
     except OSError as error:
         raise HelperError("private launch transport could not execute Claude") from error
     finally:
@@ -2612,6 +2948,7 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
         raise HelperError("model selection does not match immutable receipt binding")
     with store.mutation_lock():
         receipt = store.find(store.load_store(), delegation_id)
+        require_receipt_mutable(receipt)
         if receipt["binding"].get("model") != request_data.get("model"):
             raise HelperError("model selection does not match immutable receipt binding")
         replay = find_event(receipt, event_id)
@@ -2659,6 +2996,7 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
     with store.mutation_lock():
         receipt_store = store.load_store()
         receipt = store.find(receipt_store, delegation_id)
+        require_receipt_mutable(receipt)
         if receipt["binding"].get("model") != request_data.get("model"):
             raise HelperError("model selection does not match immutable receipt binding")
         for key in ("packet_digest", "launch_policy_digest", "launch_command_digest"):
@@ -2765,57 +3103,62 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
                 os.close(darwin_executable_descriptor)
                 os.close(darwin_container_descriptor)
                 raise
-        try:
-            output = run_command(
-                [
-                    "tmux", "new-window", "-d", "-P", "-F",
-                    "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}",
-                    "-t", "=" + request_data["tmux_session"] + ":",
-                    "-n", request_data["tmux_window"], "-c", components["workdir"], components["start_command"],
-                ]
-            )
-            fields = output.split("\t")
-            if len(fields) != 4 or fields[0] != request_data["tmux_session"] or fields[1] != request_data["tmux_window"] or not fields[2].startswith("@") or not fields[3].startswith("%"):
-                raise HelperError("tmux launch did not return one exact session/window/pane identity")
-            tmux_identity = {"session": fields[0], "window": fields[1], "window_id": fields[2], "pane_id": fields[3]}
-            identity = wait_for_claude_startup(
-                fields[3],
-                request_data["claude_session_id"],
-                components["expected_argv_digest"],
-                components["expected_launcher_identity"],
-                components["expected_executable_object_identity"],
-                darwin_executable_object_identity,
-                components["expected_launcher_argv0_digest"],
-            )
-        finally:
-            if darwin_container_descriptor is not None and darwin_executable_descriptor is not None:
-                try:
-                    restore_darwin_launch_container(
-                        darwin_container_descriptor, darwin_executable_descriptor
-                    )
-                finally:
-                    os.close(darwin_executable_descriptor)
-                    os.close(darwin_container_descriptor)
-        for key, value in tmux_identity.items():
-            if identity[key] != value:
-                raise HelperError("verified Claude startup does not match created tmux identity")
-        if identity["workdir"] != components["workdir"]:
-            raise HelperError("verified Claude startup workdir does not match launch plan")
-        if identity["launch_command_digest"] != components["launch_command_digest"]:
-            raise HelperError("verified Claude startup command does not match launch plan")
-        result = {
-            "event_id": result_id,
-            "kind": "launch_completed",
-            "operation_event_id": event_id,
-            "identity": identity,
-            "at": utc_now(),
-        }
+    try:
+        output = run_command(
+            [
+                "tmux", "new-window", "-d", "-P", "-F",
+                "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}",
+                "-t", "=" + request_data["tmux_session"] + ":",
+                "-n", request_data["tmux_window"], "-c", components["workdir"], components["start_command"],
+            ]
+        )
+        fields = output.split("\t")
+        if len(fields) != 4 or fields[0] != request_data["tmux_session"] or fields[1] != request_data["tmux_window"] or not fields[2].startswith("@") or not fields[3].startswith("%"):
+            raise HelperError("tmux launch did not return one exact session/window/pane identity")
+        tmux_identity = {"session": fields[0], "window": fields[1], "window_id": fields[2], "pane_id": fields[3]}
+        identity = wait_for_claude_startup(
+            fields[3],
+            request_data["claude_session_id"],
+            components["expected_argv_digest"],
+            components["expected_launcher_identity"],
+            components["expected_executable_object_identity"],
+            darwin_executable_object_identity,
+            components["expected_launcher_argv0_digest"],
+        )
+    finally:
+        if darwin_container_descriptor is not None and darwin_executable_descriptor is not None:
+            try:
+                restore_darwin_launch_container(
+                    darwin_container_descriptor, darwin_executable_descriptor
+                )
+            finally:
+                os.close(darwin_executable_descriptor)
+                os.close(darwin_container_descriptor)
+    for key, value in tmux_identity.items():
+        if identity[key] != value:
+            raise HelperError("verified Claude startup does not match created tmux identity")
+    if identity["workdir"] != components["workdir"]:
+        raise HelperError("verified Claude startup workdir does not match launch plan")
+    if identity["launch_command_digest"] != components["launch_command_digest"]:
+        raise HelperError("verified Claude startup command does not match launch plan")
+    result = {
+        "event_id": result_id,
+        "kind": "launch_completed",
+        "operation_event_id": event_id,
+        "identity": identity,
+        "at": utc_now(),
+    }
+    with store.mutation_lock():
+        receipt_store = store.load_store()
+        receipt = store.find(receipt_store, delegation_id)
+        if not valid_indeterminate_detach_candidate(receipt) or find_event(receipt, event_id) != intent:
+            raise HelperError("receipt changed while launch completion was being verified")
         receipt["events"].append(result)
         receipt["updated_at"] = result["at"]
         store.commit(receipt_store)
-        for descriptor in held_descriptors:
-            os.close(descriptor)
-        return {"outcome": "launched", **tmux_launch_identity(identity)}
+    for descriptor in held_descriptors:
+        os.close(descriptor)
+    return {"outcome": "launched", **tmux_launch_identity(identity)}
 
 
 def diagnostics() -> dict[str, Any]:
@@ -2914,6 +3257,43 @@ def read_capacity_source(arguments: list[str], environment: dict[str, str]) -> s
         return output.decode("utf-8")
     except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as error:
         raise HelperError("capacity source is unavailable") from error
+    finally:
+        selector.close()
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        if process.stdout is not None:
+            process.stdout.close()
+
+
+def read_bounded_command(arguments: list[str], limit: int) -> str:
+    try:
+        process = subprocess.Popen(arguments, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError as error:
+        raise HelperError("bounded inspection is unavailable") from error
+    output = bytearray()
+    deadline = time.monotonic() + 5
+    selector = selectors.DefaultSelector()
+    try:
+        if process.stdout is None:
+            raise HelperError("bounded inspection is unavailable")
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise HelperError("bounded inspection is unavailable")
+            chunk = os.read(process.stdout.fileno(), min(64 * 1024, limit + 1 - len(output)))
+            if not chunk:
+                break
+            output.extend(chunk)
+            if len(output) > limit:
+                raise HelperError("bounded inspection is unavailable")
+        process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        if process.returncode != 0:
+            raise HelperError("bounded inspection is unavailable")
+        return output.decode("utf-8").rstrip("\r\n")
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as error:
+        raise HelperError("bounded inspection is unavailable") from error
     finally:
         selector.close()
         if process.poll() is None:
@@ -3499,6 +3879,21 @@ def validate_routing(value: Any) -> dict[str, Any]:
     return result
 
 
+def validate_terminal_amp_authorization(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise HelperError("terminal Amp work authorization must be an object")
+    allowed = {"terminal_state", "report_sha256", "coordinator_authorization_sha256"}
+    reject_unknown(value, allowed, "terminal Amp work authorization")
+    terminal_state = required_string(value, "terminal_state", 32)
+    if terminal_state not in {"merged", "closed_terminal"}:
+        raise HelperError("terminal Amp work authorization has an unsupported state")
+    for key in ("report_sha256", "coordinator_authorization_sha256"):
+        digest = required_string(value, key, 64)
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise HelperError(f"terminal Amp work authorization {key} must be a lowercase SHA-256 value")
+    return copy.deepcopy(value)
+
+
 def reject_unknown(value: dict[str, Any], allowed: set[str], label: str) -> None:
     unknown = sorted(set(value) - allowed)
     if unknown:
@@ -3510,6 +3905,43 @@ def find_event(receipt: dict[str, Any], event_id: str) -> dict[str, Any] | None:
         if event.get("event_id") == event_id:
             return event
     return None
+
+
+def require_receipt_mutable(receipt: dict[str, Any]) -> None:
+    events = receipt.get("events")
+    if receipt.get("worker_detached") is not None or (
+        isinstance(events, list)
+        and any(isinstance(event, dict) and event.get("kind") == "worker_detached" for event in events)
+    ):
+        raise HelperError("detached receipt is sealed against further mutation")
+
+
+def require_launch_transport_allowed(store: ReceiptStore, delegation_id: str) -> None:
+    receipt = store.find(store.load_store(require_exists=True), delegation_id)
+    require_receipt_mutable(receipt)
+    if not valid_indeterminate_detach_candidate(receipt):
+        raise HelperError("launch transport is not authorized for the current receipt state")
+    origin_thread = receipt["binding"]["origin_thread"]
+    if origin_thread in store.lifecycle.load()["teardown_fences"]:
+        raise HelperError("launch transport is revoked by the durable origin fence")
+
+
+def execute_authorized_launch_transport(
+    store: ReceiptStore,
+    delegation_id: str,
+    execution_path: str,
+    argv: list[str],
+    environment: dict[str, str],
+) -> None:
+    with store.lifecycle.mutation_lock():
+        store_lock = (
+            contextlib.nullcontext()
+            if store.lifecycle.state_dir == store.state_dir
+            else store.mutation_lock()
+        )
+        with store_lock:
+            require_launch_transport_allowed(store, delegation_id)
+            os.execve(execution_path, argv, environment)
 
 
 def completed_launch_identity(receipt: dict[str, Any]) -> dict[str, str]:
@@ -3550,6 +3982,8 @@ def receipt_launch_intent(receipt: dict[str, Any]) -> dict[str, Any]:
 
 
 def worker_teardown_receipt_blocker(receipt: dict[str, Any]) -> str | None:
+    if valid_worker_detach_chain(receipt):
+        return None
     if receipt.get("input_state") in {"pending", "seen"}:
         return "unresolved_input"
     events = receipt.get("events", [])
@@ -3582,6 +4016,163 @@ def worker_teardown_receipt_blocker(receipt: dict[str, Any]) -> str | None:
     except HelperError:
         return "launch_unverified"
     return None
+
+
+def valid_worker_detach_chain(receipt: dict[str, Any]) -> bool:
+    events = receipt.get("events")
+    materialized = receipt.get("worker_detached")
+    if not isinstance(events, list) or not isinstance(materialized, dict):
+        return False
+    detached = [event for event in events if isinstance(event, dict) and event.get("kind") == "worker_detached"]
+    intents = [event for event in events if isinstance(event, dict) and event.get("kind") == "launch_intent"]
+    completions = [event for event in events if isinstance(event, dict) and event.get("kind") == "launch_completed"]
+    if len(detached) != 1 or len(intents) != 1 or completions:
+        return False
+    event = detached[0]
+    if events[-1] is not event or events.index(event) <= events.index(intents[0]):
+        return False
+    for key in ("event_id", "at", "absence_code"):
+        if materialized.get(key) != event.get(key):
+            return False
+    if event.get("absence_code") != "exact_launch_target_absent":
+        return False
+    if event.get("terminal_state") not in {"merged", "closed_terminal"}:
+        return False
+    for key in ("report_sha256", "coordinator_authorization_sha256"):
+        value = event.get(key)
+        if not isinstance(value, str) or len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            return False
+    prior = copy.deepcopy(receipt)
+    prior.pop("worker_detached", None)
+    prior["events"] = prior["events"][:-1]
+    return valid_indeterminate_detach_candidate(prior)
+
+
+def valid_indeterminate_detach_candidate(receipt: dict[str, Any]) -> bool:
+    events = receipt.get("events")
+    if not isinstance(events, list) or receipt.get("state") != "created" or receipt.get("report_message_id") != "":
+        return False
+    if any(key in receipt for key in (
+        "session_identity", "input_state", "input_message_id", "worker_detached",
+        "parked_at", "cleanup_eligible_at", "submission_frozen", "handoff_validation",
+    )):
+        return False
+    forbidden = {
+        "launch_completed", "session_acquired", "valid_report", "input_request", "input_seen",
+        "input_accepted", "delivered", "acknowledged", "park_intent", "park_failed",
+        "verified_parked", "worker_detached",
+    }
+    if any(not isinstance(event, dict) or event.get("kind") in forbidden for event in events):
+        return False
+    intents = [event for event in events if event.get("kind") == "launch_intent"]
+    return len(intents) == 1 and worker_teardown_receipt_blocker(receipt) == "launch_indeterminate"
+
+
+def worker_detach_result(origin_sha256: str, pair_sha256: str, outcome: str) -> dict[str, Any]:
+    return {
+        "action": "indeterminate_worker_detach",
+        "origin_thread_sha256": origin_sha256,
+        "pair_sha256": pair_sha256,
+        "outcome": outcome,
+        "absence_code": "exact_launch_target_absent",
+        "fence": "retained",
+    }
+
+
+def inspect_indeterminate_launch_absence(intent: dict[str, Any]) -> str:
+    session = intent.get("tmux_session")
+    window = intent.get("tmux_window")
+    claude_session_id = intent.get("claude_session_id")
+    if any(not isinstance(value, str) or not value for value in (session, window, claude_session_id)):
+        return "launch_identity_unavailable"
+    try:
+        output = read_bounded_command([
+            "tmux", "list-panes", "-a", "-F",
+            "#{session_name}\t#{window_name}\t#{pane_id}",
+        ], MAX_ABSENCE_OUTPUT_BYTES)
+    except HelperError:
+        return "tmux_inspection_unavailable"
+    rows = output.splitlines() if output else []
+    if len(rows) > MAX_ABSENCE_PANES:
+        return "tmux_inspection_ambiguous"
+    candidates: list[str] = []
+    for row in rows:
+        fields = row.split("\t")
+        if len(fields) != 3 or not fields[2].startswith("%"):
+            return "tmux_inspection_ambiguous"
+        if fields[0] == session and fields[1] == window:
+            candidates.append(fields[2])
+    if not candidates:
+        return inspect_indeterminate_process_absence(intent)
+    for pane_id in candidates:
+        try:
+            inspect_claude_identity(
+                pane_id,
+                claude_session_id,
+                intent["expected_argv_digest"],
+                intent["expected_launcher_identity"],
+                intent["expected_executable_object_identity"],
+                expected_launcher_argv0_digest=intent.get("expected_launcher_argv0_digest"),
+            )
+        except (HelperError, KeyError):
+            return "launch_identity_ambiguous_or_mismatched"
+        return "matching_live_process"
+    return inspect_indeterminate_process_absence(intent)
+
+
+def owner_process_ids() -> tuple[list[int], str | None]:
+    try:
+        output = read_bounded_command(
+            ["ps", "-U", str(os.geteuid()), "-o", "pid="], MAX_ABSENCE_OUTPUT_BYTES
+        )
+    except HelperError:
+        return [], "process_inspection_unavailable"
+    rows = output.splitlines() if output else []
+    if len(rows) > MAX_ABSENCE_PROCESSES:
+        return [], "process_inspection_ambiguous"
+    try:
+        process_ids = [int(row.strip()) for row in rows]
+    except ValueError:
+        return [], "process_inspection_ambiguous"
+    if any(pid <= 0 for pid in process_ids) or len(process_ids) != len(set(process_ids)):
+        return [], "process_inspection_ambiguous"
+    return process_ids, None
+
+
+def inspect_indeterminate_process_absence(intent: dict[str, Any]) -> str:
+    process_ids, blocker = owner_process_ids()
+    if blocker is not None:
+        return blocker
+    inaccessible: list[int] = []
+    for pid in process_ids:
+        try:
+            process_name, _, process_args, _ = exact_process_identity(pid)
+        except HelperError:
+            inaccessible.append(pid)
+            continue
+        session_positions = [index for index, value in enumerate(process_args) if value == "--session-id"]
+        matching_session = any(
+            index + 1 < len(process_args) and process_args[index + 1] == intent["claude_session_id"]
+            for index in session_positions
+        )
+        if not matching_session:
+            continue
+        try:
+            _, normalized_arguments = normalized_claude_arguments(
+                platform.system(), process_name, process_args, process_executable_path(pid)
+            )
+        except HelperError:
+            return "launch_identity_ambiguous_or_mismatched"
+        if normalized_argv_digest(normalized_arguments) != intent["expected_argv_digest"]:
+            return "launch_identity_ambiguous_or_mismatched"
+        return "matching_live_process"
+    if inaccessible:
+        current, current_blocker = owner_process_ids()
+        if current_blocker is not None:
+            return current_blocker
+        if any(pid in set(current) for pid in inaccessible):
+            return "process_inspection_unavailable"
+    return "exact_launch_target_absent"
 
 
 def worker_teardown_store_blocked(origin_thread: str, dry_run: bool) -> dict[str, Any]:
@@ -3737,6 +4328,10 @@ def parser() -> argparse.ArgumentParser:
     worker_teardown.add_argument("--dry-run", action="store_true")
     worker_teardown_release = lifecycle_commands.add_parser("worker-teardown-release")
     worker_teardown_release.add_argument("--origin-thread", required=True)
+    register_legacy = lifecycle_commands.add_parser("register-legacy-store")
+    register_legacy.add_argument("--origin-thread", required=True)
+    register_legacy.add_argument("--store-path", type=pathlib.Path, required=True)
+    lifecycle_commands.add_parser("detach-indeterminate-worker")
     commands.add_parser("diagnose")
     return root
 
@@ -3770,6 +4365,30 @@ def main() -> int:
         return 2 if result["outcome"] == "blocked" else 0
     if arguments.area == "lifecycle" and arguments.command == "worker-teardown-release":
         result = store.release_worker_teardown(arguments.origin_thread)
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 2 if result["outcome"] == "blocked" else 0
+    if arguments.area == "lifecycle" and arguments.command == "register-legacy-store":
+        try:
+            result = store.register_legacy_store(arguments.origin_thread, arguments.store_path)
+        except HelperError:
+            result = {
+                "action": "legacy_store_registration",
+                "origin_thread_sha256": hashlib.sha256(arguments.origin_thread.encode()).hexdigest(),
+                "outcome": "blocked",
+                "blocker": "registration_evidence_invalid_or_unavailable",
+            }
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 2 if result["outcome"] == "blocked" else 0
+    if arguments.area == "lifecycle" and arguments.command == "detach-indeterminate-worker":
+        try:
+            result = store.detach_indeterminate_worker(read_input())
+        except HelperError:
+            result = {
+                "action": "indeterminate_worker_detach",
+                "outcome": "blocked",
+                "blocker": "detach_proof_invalid_or_unavailable",
+                "fence": "unchanged_or_retained",
+            }
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         return 2 if result["outcome"] == "blocked" else 0
     if arguments.area == "diagnose":

@@ -350,7 +350,7 @@ def reject_exec(path, argv, environment):
 module.os.execve = reject_exec
 try:
     try:
-        module.execute_launch_transport(store, delegation_id, hashlib.sha256(raw).hexdigest(), "0" * 64)
+        module.execute_launch_transport_locked(store, delegation_id, hashlib.sha256(raw).hexdigest(), "0" * 64)
     except module.HelperError as error:
         assert "verified Claude executable copy changed before execution" in str(error), error
     else:
@@ -1330,6 +1330,603 @@ func TestWorkerTeardownMalformedStoreReturnsBoundedJSONBlocker(t *testing.T) {
 	}
 	if stderr != "" || strings.Contains(stdout, stateDir) || strings.Contains(stdout, "private-") || strings.Contains(stdout, "T-origin") || strings.Contains(stdout, "Traceback") {
 		t.Fatalf("malformed store leaked private detail or traceback: %s%s", stdout, stderr)
+	}
+}
+
+func TestExplicitLegacyRegistrationAndIndeterminateDetachPermitOnlyWorkerTeardown(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	legacyState := t.TempDir()
+	legacyState, err = filepath.EvalSymlinks(legacyState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree := t.TempDir()
+	artifact := filepath.Join(worktree, "private-artifact")
+	if err := os.WriteFile(artifact, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
+	writeExecutable(t, filepath.Join(binDir, "tmux"), `#!/bin/sh
+printf '%s\n' "$*" >> "$TMUX_LOG"
+if [ "$1" = list-panes ]; then exit 0; fi
+exit 99
+`)
+	writeExecutable(t, filepath.Join(binDir, "ps"), "#!/bin/sh\nexit 0\n")
+	environment := append(replaceEnvironment(os.Environ(), "HOME", home),
+		"PATH="+binDir+":"+os.Getenv("PATH"), "TMUX_LOG="+tmuxLog)
+	run := func(isolated bool, input map[string]any, args ...string) (string, string, error) {
+		payload, marshalErr := json.Marshal(input)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		commandArgs := []string{helper, "--state-dir", legacyState}
+		if isolated {
+			commandArgs = append(commandArgs, "--isolated-test-state")
+		}
+		command := exec.Command("python3", append(commandArgs, args...)...)
+		command.Env = append(environment, "AMUX_CLAUDE_DELEGATION_TESTING=1")
+		command.Stdin = bytes.NewReader(payload)
+		var stdout, stderr bytes.Buffer
+		command.Stdout = &stdout
+		command.Stderr = &stderr
+		runErr := command.Run()
+		return stdout.String(), stderr.String(), runErr
+	}
+
+	binding := testBinding("synthetic-indeterminate")
+	binding["workdir"] = worktree
+	stdout, stderr, err := run(true, map[string]any{
+		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	if err != nil || !strings.Contains(stdout, `"outcome":"recorded"`) {
+		t.Fatalf("create synthetic legacy receipt: %v: %s%s", err, stdout, stderr)
+	}
+	mutateTestReceipt(t, legacyState, func(receipt map[string]any) {
+		receipt["events"] = append(receipt["events"].([]any), map[string]any{
+			"event_id": "synthetic-launch", "kind": "launch_intent", "workflow": "read_only",
+			"claude_session_id": "550e8400-e29b-41d4-a716-446655440000",
+			"tmux_session":      "Synthetic", "tmux_window": "indeterminate",
+			"expected_argv_digest":                strings.Repeat("a", 64),
+			"expected_launcher_identity":          "file:10:20",
+			"expected_executable_object_identity": "object:10:20:30:" + strings.Repeat("b", 64),
+		})
+	})
+	if err := os.Remove(filepath.Join(legacyState, "lifecycle.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err = run(false, map[string]any{}, "lifecycle", "worker-teardown", "--origin-thread", "T-origin")
+	if err != nil || !strings.Contains(stdout, `"outcome":"ready"`) || !strings.Contains(stdout, `"pairs":[]`) {
+		t.Fatalf("unregistered synthetic store should be undiscoverable: %v: %s%s", err, stdout, stderr)
+	}
+	stdout, stderr, err = run(false, map[string]any{}, "lifecycle", "register-legacy-store",
+		"--origin-thread", "T-origin", "--store-path", legacyState)
+	if err != nil || !strings.Contains(stdout, `"outcome":"registered"`) {
+		t.Fatalf("register exact synthetic legacy store: %v: %s%s", err, stdout, stderr)
+	}
+	if strings.Contains(stdout+stderr, legacyState) || strings.Contains(stdout+stderr, "T-origin") || strings.Contains(stdout+stderr, "synthetic-indeterminate") {
+		t.Fatalf("legacy registration leaked private identity: %s%s", stdout, stderr)
+	}
+	stdout, stderr, err = run(false, map[string]any{}, "lifecycle", "register-legacy-store",
+		"--origin-thread", "T-origin", "--store-path", legacyState)
+	if err != nil || !strings.Contains(stdout, `"outcome":"duplicate"`) {
+		t.Fatalf("exact legacy registration replay was not idempotent: %v: %s%s", err, stdout, stderr)
+	}
+
+	stdout, stderr, err = run(false, map[string]any{}, "lifecycle", "worker-teardown", "--origin-thread", "T-origin")
+	if err == nil || !strings.Contains(stdout, `"blocker":"launch_indeterminate"`) {
+		t.Fatalf("ordinary paired teardown did not remain fail-closed: %v: %s%s", err, stdout, stderr)
+	}
+	detach := map[string]any{
+		"delegation_id": "synthetic-indeterminate",
+		"event_id":      "detach-operation-1",
+		"origin_thread": "T-origin",
+		"authorization": map[string]any{
+			"terminal_state":                   "merged",
+			"report_sha256":                    strings.Repeat("c", 64),
+			"coordinator_authorization_sha256": strings.Repeat("d", 64),
+		},
+	}
+	stdout, stderr, err = run(false, detach, "lifecycle", "detach-indeterminate-worker")
+	if err != nil || !strings.Contains(stdout, `"outcome":"detached"`) {
+		t.Fatalf("detach synthetic indeterminate receipt: %v: %s%s", err, stdout, stderr)
+	}
+	if strings.Contains(stdout+stderr, legacyState) || strings.Contains(stdout+stderr, "T-origin") || strings.Contains(stdout+stderr, "synthetic-indeterminate") {
+		t.Fatalf("detach leaked private identity: %s%s", stdout, stderr)
+	}
+	stdout, stderr, err = run(false, detach, "lifecycle", "detach-indeterminate-worker")
+	if err != nil || !strings.Contains(stdout, `"outcome":"duplicate"`) {
+		t.Fatalf("exact detach replay was not idempotent: %v: %s%s", err, stdout, stderr)
+	}
+
+	stdout, stderr, err = run(false, map[string]any{}, "lifecycle", "worker-teardown", "--origin-thread", "T-origin")
+	if err != nil || !strings.Contains(stdout, `"outcome":"ready"`) || !strings.Contains(stdout, `"state":"worker_detached"`) {
+		t.Fatalf("paired teardown did not permit detached Amp worker: %v: %s%s", err, stdout, stderr)
+	}
+	stored, err := os.ReadFile(filepath.Join(legacyState, "receipts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{`"kind":"launch_completed"`, `"kind":"session_acquired"`, `"kind":"valid_report"`, `"kind":"park_intent"`, `"kind":"verified_parked"`, `"cleanup_eligible_at"`} {
+		if bytes.Contains(stored, []byte(forbidden)) {
+			t.Fatalf("detach created prohibited transition %s: %s", forbidden, stored)
+		}
+	}
+	if !bytes.Contains(stored, []byte(`"kind":"worker_detached"`)) || !bytes.Contains(stored, []byte(`"origin_thread":"T-origin"`)) {
+		t.Fatalf("detach did not append evidence while retaining immutable origin: %s", stored)
+	}
+	if content, err := os.ReadFile(artifact); err != nil || string(content) != "preserve" {
+		t.Fatalf("detach removed private artifact or worktree: %v: %q", err, content)
+	}
+	log, err := os.ReadFile(tmuxLog)
+	if err != nil || strings.Contains(string(log), "kill-pane") || strings.Contains(string(log), "send-keys") {
+		t.Fatalf("detach issued a prohibited tmux mutation: %v: %s", err, log)
+	}
+}
+
+func TestLegacyRegistrationRejectsUnprovenOwnerPrivateEvidence(t *testing.T) {
+	t.Parallel()
+	newStore := func(t *testing.T) string {
+		t.Helper()
+		stateDir := t.TempDir()
+		resolved, err := filepath.EvalSymlinks(stateDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertHelperOutcome(t, resolved, "recorded", map[string]any{
+			"binding": testBinding("legacy-registration-fixture"),
+			"routing": map[string]any{"target": "machine_local_inbox"},
+		}, "receipt", "create")
+		return resolved
+	}
+	assertBlocked := func(t *testing.T, stateDir, path, origin string) {
+		t.Helper()
+		stdout, stderr, err := runHelper(t, stateDir, map[string]any{}, "lifecycle", "register-legacy-store",
+			"--origin-thread", origin, "--store-path", path)
+		if err == nil || !strings.Contains(stdout, `"blocker":"registration_evidence_invalid_or_unavailable"`) || stderr != "" {
+			t.Fatalf("unsafe registration was not privacy-safe blocked JSON: %v: %s%s", err, stdout, stderr)
+		}
+		if strings.Contains(stdout, path) || strings.Contains(stdout, origin) || strings.Contains(stdout, "legacy-registration-fixture") {
+			t.Fatalf("registration blocker leaked private evidence: %s", stdout)
+		}
+	}
+
+	t.Run("relative path", func(t *testing.T) {
+		stateDir := newStore(t)
+		assertBlocked(t, stateDir, "relative/store", "T-origin")
+	})
+	t.Run("non-canonical dot path", func(t *testing.T) {
+		stateDir := newStore(t)
+		assertBlocked(t, stateDir, stateDir+string(os.PathSeparator)+".", "T-origin")
+	})
+	t.Run("symlink path", func(t *testing.T) {
+		stateDir := newStore(t)
+		alias := filepath.Join(t.TempDir(), "store-alias")
+		if err := os.Symlink(stateDir, alias); err != nil {
+			t.Fatal(err)
+		}
+		assertBlocked(t, stateDir, alias, "T-origin")
+	})
+	t.Run("directory mode", func(t *testing.T) {
+		stateDir := newStore(t)
+		if err := os.Chmod(stateDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		assertBlocked(t, stateDir, stateDir, "T-origin")
+	})
+	t.Run("receipt mode", func(t *testing.T) {
+		stateDir := newStore(t)
+		if err := os.Chmod(filepath.Join(stateDir, "receipts.json"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		assertBlocked(t, stateDir, stateDir, "T-origin")
+	})
+	t.Run("receipt symlink", func(t *testing.T) {
+		stateDir := newStore(t)
+		receiptPath := filepath.Join(stateDir, "receipts.json")
+		target := filepath.Join(t.TempDir(), "receipts.json")
+		contents, err := os.ReadFile(receiptPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(receiptPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, receiptPath); err != nil {
+			t.Fatal(err)
+		}
+		assertBlocked(t, stateDir, stateDir, "T-origin")
+	})
+	t.Run("missing receipt", func(t *testing.T) {
+		stateDir, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertBlocked(t, stateDir, stateDir, "T-origin")
+	})
+	t.Run("malformed schema", func(t *testing.T) {
+		stateDir := newStore(t)
+		if err := os.WriteFile(filepath.Join(stateDir, "receipts.json"), []byte(`{"schema_version":99,"receipts":[]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		assertBlocked(t, stateDir, stateDir, "T-origin")
+	})
+	t.Run("origin mismatch", func(t *testing.T) {
+		stateDir := newStore(t)
+		assertBlocked(t, stateDir, stateDir, "T-other-origin")
+	})
+	t.Run("owner mismatch", func(t *testing.T) {
+		stateDir := newStore(t)
+		helper, err := filepath.Abs("claude_delegation.py")
+		if err != nil {
+			t.Fatal(err)
+		}
+		script := `import importlib.util, pathlib, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+actual = module.os.geteuid()
+module.os.geteuid = lambda: actual + 1
+try:
+    with module.locked_owner_private_store(pathlib.Path(sys.argv[2])):
+        pass
+except module.HelperError:
+    print("blocked")
+else:
+    raise AssertionError("owner mismatch accepted")
+`
+		output, err := exec.Command("python3", "-c", script, helper, stateDir).CombinedOutput()
+		if err != nil || string(output) != "blocked\n" {
+			t.Fatalf("owner mismatch descriptor validation: %v: %s", err, output)
+		}
+	})
+}
+
+func TestIndeterminateDetachFailsClosedOnAuthorizationIdentityAndConflictingReplay(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import hashlib, importlib.util, pathlib, sys, tempfile
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+intent = {
+    "event_id":"launch", "kind":"launch_intent", "workflow":"read_only",
+    "claude_session_id":"550e8400-e29b-41d4-a716-446655440000",
+    "tmux_session":"Synthetic", "tmux_window":"indeterminate",
+    "expected_argv_digest":"a" * 64, "expected_launcher_identity":"file:1:2",
+    "expected_executable_object_identity":"object:1:2:3:" + "b" * 64,
+}
+module.read_bounded_command = lambda command, limit: "Synthetic\tindeterminate\t%20"
+module.inspect_claude_identity = lambda *args, **kwargs: {"live": True}
+assert module.inspect_indeterminate_launch_absence(intent) == "matching_live_process"
+module.inspect_claude_identity = lambda *args, **kwargs: (_ for _ in ()).throw(module.HelperError("private mismatch"))
+assert module.inspect_indeterminate_launch_absence(intent) == "launch_identity_ambiguous_or_mismatched"
+module.read_bounded_command = lambda command, limit: "malformed-private-output"
+assert module.inspect_indeterminate_launch_absence(intent) == "tmux_inspection_ambiguous"
+module.read_bounded_command = lambda command, limit: (_ for _ in ()).throw(module.HelperError("private unavailable"))
+assert module.inspect_indeterminate_launch_absence(intent) == "tmux_inspection_unavailable"
+module.read_bounded_command = lambda command, limit: ""
+assert module.inspect_indeterminate_launch_absence(intent) == "exact_launch_target_absent"
+renamed = dict(intent)
+renamed["expected_argv_digest"] = module.normalized_argv_digest(["--session-id", intent["claude_session_id"]])
+module.read_bounded_command = lambda command, limit: (
+    "Synthetic\trenamed\t%20" if command[0] == "tmux" else "4242"
+)
+module.exact_process_identity = lambda pid: (
+    "claude", "stable", ["/synthetic/claude", "--session-id", intent["claude_session_id"]], "digest"
+)
+module.process_executable_path = lambda pid: pathlib.Path("/synthetic/claude")
+module.normalized_claude_arguments = lambda system, name, args, executable: ("direct", args[1:])
+renamed_result = module.inspect_indeterminate_launch_absence(renamed)
+assert renamed_result == "matching_live_process", renamed_result
+
+def fixture():
+    state = pathlib.Path(tempfile.mkdtemp()).resolve()
+    state.chmod(0o700)
+    store = module.ReceiptStore(state, state)
+    binding = {
+        "protocol_version":1, "delegation_id":"synthetic-detach", "nonce":"1" * 64,
+        "task_id":"task", "question_message_id":"question", "origin_thread":"T-synthetic",
+        "repository":"repository", "base":"2" * 40, "workdir":str(state),
+        "producer_role":"thinker", "authority":"read_only", "task_reference":"fixture",
+        "packet_digest":"3" * 64, "launch_policy_digest":"4" * 64,
+        "launch_command_digest":"5" * 64,
+    }
+    assert store.create({"binding":binding, "routing":{"target":"machine_local_inbox"}}) == "recorded"
+    data = store.load_store()
+    data["receipts"][0]["events"].append(dict(intent))
+    store.commit(data)
+    request = {
+        "delegation_id":"synthetic-detach", "event_id":"detach-stable", "origin_thread":"T-synthetic",
+        "authorization":{"terminal_state":"merged", "report_sha256":"6" * 64,
+                         "coordinator_authorization_sha256":"7" * 64},
+    }
+    return store, request
+
+for code in ["matching_live_process", "launch_identity_ambiguous_or_mismatched", "tmux_inspection_ambiguous", "tmux_inspection_unavailable"]:
+    store, request = fixture()
+    before = store.path.read_bytes()
+    module.inspect_indeterminate_launch_absence = lambda launch, code=code: code
+    result = store.detach_indeterminate_worker(request)
+    assert result["outcome"] == "blocked" and result["blocker"] == code, result
+    assert store.path.read_bytes() == before, code
+    assert store.lifecycle.load()["teardown_fences"]["T-synthetic"], code
+
+store, request = fixture()
+invalid = dict(request)
+invalid["authorization"] = dict(request["authorization"], terminal_state="ready")
+before = store.path.read_bytes()
+try:
+    store.detach_indeterminate_worker(invalid)
+except module.HelperError:
+    pass
+else:
+    raise AssertionError("non-terminal authorization accepted")
+assert store.path.read_bytes() == before
+
+store, request = fixture()
+data = store.load_store()
+data["receipts"][0]["state"] = "valid_report"
+data["receipts"][0]["report_message_id"] = "synthetic-report"
+data["receipts"][0]["events"].append({"event_id":"synthetic-report", "kind":"valid_report"})
+store.commit(data)
+before = store.path.read_bytes()
+try:
+    store.detach_indeterminate_worker(request)
+except module.HelperError:
+    pass
+else:
+    raise AssertionError("launch-indeterminate receipt with report state detached")
+assert store.path.read_bytes() == before
+
+store, request = fixture()
+module.inspect_indeterminate_launch_absence = lambda launch: "exact_launch_target_absent"
+assert store.detach_indeterminate_worker(request)["outcome"] == "detached"
+detached = store.path.read_bytes()
+conflict = dict(request)
+conflict["authorization"] = dict(request["authorization"], report_sha256="8" * 64)
+try:
+    store.detach_indeterminate_worker(conflict)
+except module.HelperError:
+    pass
+else:
+    raise AssertionError("conflicting event replay accepted")
+assert store.path.read_bytes() == detached
+assert store.detach_indeterminate_worker(request)["outcome"] == "duplicate"
+before = store.path.read_bytes()
+try:
+    store.route({"delegation_id":"synthetic-detach", "event_id":"post-detach-route",
+                 "routing":{"target":"machine_local_inbox", "recovery":"changed"}})
+except module.HelperError as error:
+    assert "sealed" in str(error), error
+else:
+    raise AssertionError("detached receipt accepted a routing mutation")
+assert store.path.read_bytes() == before
+assert module.valid_worker_detach_chain(store.load_store()["receipts"][0])
+
+oversized = pathlib.Path(tempfile.mkstemp()[1])
+oversized.write_bytes(b"x" * (module.MAX_STORE_BYTES + 1))
+descriptor = module.os.open(oversized, module.os.O_RDONLY)
+try:
+    try:
+        module.read_stable_descriptor(descriptor, module.MAX_STORE_BYTES, "synthetic oversized store")
+    except module.HelperError:
+        pass
+    else:
+        raise AssertionError("oversized descriptor evidence accepted")
+finally:
+    module.os.close(descriptor)
+
+legacy = pathlib.Path(tempfile.mkdtemp()).resolve()
+legacy.chmod(0o700)
+isolated = module.ReceiptStore(legacy, legacy)
+binding = fixture()[0].load_store()["receipts"][0]["binding"]
+binding = dict(binding, delegation_id="legacy-object", workdir=str(legacy))
+assert isolated.create({"binding":binding, "routing":{"target":"machine_local_inbox"}}) == "recorded"
+(legacy / "lifecycle.json").unlink()
+canonical = pathlib.Path(tempfile.mkdtemp()).resolve()
+canonical.chmod(0o700)
+registrar = module.ReceiptStore(legacy, canonical)
+assert registrar.register_legacy_store("T-synthetic", legacy)["outcome"] == "registered"
+moved = legacy.with_name(legacy.name + "-moved")
+legacy.rename(moved)
+legacy.mkdir(mode=0o700)
+for name in ("experimental.lock", "receipts.json"):
+    (legacy / name).write_bytes((moved / name).read_bytes())
+    (legacy / name).chmod(0o600)
+result = registrar.worker_teardown("T-synthetic", True)
+assert result["outcome"] == "blocked"
+assert result["blockers"] == [{"blocker":"receipt_store_invalid_or_unavailable"}]
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil || string(output) != "ok\n" {
+		t.Fatalf("indeterminate detach fail-closed fixture: %v: %s", err, output)
+	}
+}
+
+func TestDetachedReceiptIsSealedAndLaunchGateSerializesPreExecRace(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import importlib.util, os, pathlib, select, sys, tempfile, time
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+intent = {"event_id":"launch", "kind":"launch_intent", "workflow":"read_only",
+    "claude_session_id":"550e8400-e29b-41d4-a716-446655440000",
+    "tmux_session":"Synthetic", "tmux_window":"indeterminate",
+    "expected_argv_digest":"a" * 64, "expected_launcher_identity":"file:1:2",
+    "expected_executable_object_identity":"object:1:2:3:" + "b" * 64}
+def fixture(name):
+    state = pathlib.Path(tempfile.mkdtemp()).resolve(); state.chmod(0o700)
+    store = module.ReceiptStore(state, state)
+    binding = {"protocol_version":1, "delegation_id":name, "nonce":"1" * 64,
+        "task_id":"task", "question_message_id":"question", "origin_thread":"T-synthetic",
+        "repository":"repository", "base":"2" * 40, "workdir":str(state),
+        "producer_role":"thinker", "authority":"read_only", "task_reference":"fixture",
+        "packet_digest":"3" * 64, "launch_policy_digest":"4" * 64, "launch_command_digest":"5" * 64}
+    create = {"binding":binding, "routing":{"target":"machine_local_inbox"}}
+    assert store.create(create) == "recorded"
+    data = store.load_store(); data["receipts"][0]["events"].append(dict(intent)); store.commit(data)
+    request = {"delegation_id":name, "event_id":"detach-stable", "origin_thread":"T-synthetic",
+        "authorization":{"terminal_state":"merged", "report_sha256":"6" * 64,
+                         "coordinator_authorization_sha256":"7" * 64}}
+    return store, create, request
+module.inspect_indeterminate_launch_absence = lambda launch: "exact_launch_target_absent"
+store, create, detach = fixture("sealed")
+assert store.detach_indeterminate_worker(detach)["outcome"] == "detached"
+before = store.path.read_bytes()
+target = {key:"value" for key in ("origin_thread", "session", "window", "window_id", "pane_id", "workdir",
+    "current_command", "process_name", "process_identity", "process_command_digest")}; target["pane_pid"] = 1
+module.expected_launch_policy = lambda request: None
+launch = {"delegation_id":"sealed", "event_id":"second-launch", "workdir":str(store.state_dir),
+    "packet_file":str(store.state_dir / "packet"), "tmux_session":"Synthetic", "tmux_window":"second",
+    "claude_session_id":intent["claude_session_id"], "repository":"repository", "base":"2" * 40,
+    "expected_launch_policy_digest":"4" * 64}
+operations = [lambda: store.route({"delegation_id":"sealed", "event_id":"route", "routing":{"target":"machine_local_inbox"}}),
+    lambda: module.execute_launch(store, launch),
+    lambda: store.submit_message({"delegation_id":"sealed"}, "report"),
+    lambda: store.consume({"delegation_id":"sealed", "event_id":"consume", "message_id":"message"}),
+    lambda: store.acknowledge({"delegation_id":"sealed", "event_id":"ack", "message_id":"message"}),
+    lambda: store.accept_input({"delegation_id":"sealed", "event_id":"input", "message_id":"message"}),
+    lambda: store.park({"delegation_id":"sealed", "event_id":"park"}),
+    lambda: store.record_park_failure("sealed", "park", "failure"),
+    lambda: store.acquire_session({"delegation_id":"sealed", "event_id":"acquire", "pane_id":"%1",
+                                   "claude_session_id":intent["claude_session_id"]}),
+    lambda: store.notify_amp({"delegation_id":"sealed", "event_id":"notify", "message_id":"message", "target":target}),
+    lambda: module.execute_launch_transport(store, "sealed", "0" * 64, "0" * 64)]
+for operation in operations:
+    try: operation()
+    except module.HelperError as error: assert "sealed" in str(error), error
+    else: raise AssertionError("detached receipt mutation was accepted")
+    assert store.path.read_bytes() == before
+
+for terminal_state in ("launch_completed", "verified_parked"):
+    retained, _, _ = fixture("retained-" + terminal_state)
+    data = retained.load_store(); receipt = data["receipts"][0]
+    receipt["events"].append({"event_id":"completed", "kind":"launch_completed",
+                              "operation_event_id":"launch", "identity":{"synthetic":True}})
+    if terminal_state == "verified_parked":
+        receipt["state"] = "verified_parked"
+        receipt["events"].append({"event_id":"parked", "kind":"verified_parked",
+                                  "operation_event_id":"park"})
+    retained.commit(data); retained_before = retained.path.read_bytes(); executed = []
+    module.os.execve = lambda *arguments: executed.append(arguments)
+    try: module.execute_launch_transport(retained, "retained-" + terminal_state, "0" * 64, "0" * 64)
+    except module.HelperError as error: assert "not authorized" in str(error), error
+    else: raise AssertionError("retained transport executed after " + terminal_state)
+    assert not executed and retained.path.read_bytes() == retained_before
+
+fenced, _, _ = fixture("pre-fenced")
+with fenced.lifecycle.mutation_lock():
+    lifecycle = fenced.lifecycle.load()
+    lifecycle["teardown_fences"]["T-synthetic"] = {"operation_id":"fence", "created_at":module.utc_now()}
+    fenced.lifecycle.commit(lifecycle)
+fenced_before = fenced.path.read_bytes(); executed = []
+module.os.execve = lambda *arguments: executed.append(arguments)
+try:
+    with fenced.launch_gate("pre-fenced"):
+        module.execute_authorized_launch_transport(fenced, "pre-fenced", "/synthetic", ["synthetic"], {})
+except module.HelperError as error: assert "revoked" in str(error), error
+else: raise AssertionError("pre-existing origin fence permitted transport execution")
+assert not executed and fenced.path.read_bytes() == fenced_before
+
+writer_store, _, _ = fixture("fence-writer-race")
+writer_store.lifecycle = module.LifecycleRegistry(pathlib.Path(tempfile.mkdtemp()).resolve())
+preexec_read, preexec_write = os.pipe(); release_read, release_write = os.pipe()
+committed_read, committed_write = os.pipe(); transport_pid = os.fork()
+if transport_pid == 0:
+    try:
+        with writer_store.launch_gate("fence-writer-race"):
+            def pause_at_exec(*arguments):
+                os.write(preexec_write, b"1"); assert os.read(release_read, 1) == b"1"
+            module.os.execve = pause_at_exec
+            module.execute_authorized_launch_transport(
+                writer_store, "fence-writer-race", "/synthetic", ["synthetic"], {})
+    finally: os._exit(0)
+assert os.read(preexec_read, 1) == b"1"; writer_pid = os.fork()
+if writer_pid == 0:
+    try:
+        with writer_store.lifecycle.mutation_lock():
+            lifecycle = writer_store.lifecycle.load()
+            lifecycle["teardown_fences"]["T-synthetic"] = {"operation_id":"writer", "created_at":module.utc_now()}
+            writer_store.lifecycle.commit(lifecycle); os.write(committed_write, b"1")
+    finally: os._exit(0)
+assert select.select([committed_read], [], [], 0.3)[0] == []
+os.write(release_write, b"1")
+_, transport_status = os.waitpid(transport_pid, 0); assert os.WEXITSTATUS(transport_status) == 0
+assert os.read(committed_read, 1) == b"1"
+_, writer_status = os.waitpid(writer_pid, 0); assert os.WEXITSTATUS(writer_status) == 0
+
+race_store, _, race_detach = fixture("race")
+ready_read, ready_write = os.pipe(); continue_read, continue_write = os.pipe()
+marker = race_store.state_dir / "receipt-lock-acquired"; pid = os.fork()
+if pid == 0:
+    os.close(ready_read); os.close(continue_write)
+    try:
+        with race_store.launch_gate("race"):
+            os.write(ready_write, b"1"); assert os.read(continue_read, 1) == b"1"
+            with race_store.mutation_lock(): marker.write_text("acquired")
+    finally: os._exit(0)
+os.close(ready_write); os.close(continue_read); assert os.read(ready_read, 1) == b"1"
+race_before = race_store.path.read_bytes(); started = time.monotonic()
+blocked = race_store.detach_indeterminate_worker(race_detach); elapsed = time.monotonic() - started
+assert blocked["outcome"] == "blocked" and blocked["blocker"] == "launch_transport_active_or_indeterminate", blocked
+assert elapsed < 1.0 and race_store.path.read_bytes() == race_before, elapsed
+os.write(continue_write, b"1"); os.close(continue_write); _, status = os.waitpid(pid, 0)
+assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+assert marker.read_text() == "acquired"
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil || string(output) != "ok\n" {
+		t.Fatalf("detached sealing and launch gate fixture: %v\n%s", err, output)
+	}
+}
+
+func TestIndeterminateAbsenceInventoryRejectsRealOverLimitSubprocessOutput(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import importlib.util, os, pathlib, sys, tempfile
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+directory = pathlib.Path(tempfile.mkdtemp())
+for name in ("tmux", "ps"):
+    path = directory / name; path.write_text("#!/bin/sh\nhead -c 65537 /dev/zero | tr '\\000' x\n"); path.chmod(0o755)
+os.environ["PATH"] = str(directory) + os.pathsep + os.environ["PATH"]
+intent = {"claude_session_id":"550e8400-e29b-41d4-a716-446655440000",
+          "tmux_session":"Synthetic", "tmux_window":"indeterminate"}
+assert module.inspect_indeterminate_launch_absence(intent) == "tmux_inspection_unavailable"
+(directory / "tmux").write_text("#!/bin/sh\nexit 0\n"); (directory / "tmux").chmod(0o755)
+assert module.inspect_indeterminate_launch_absence(intent) == "process_inspection_unavailable"
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil || string(output) != "ok\n" {
+		t.Fatalf("bounded absence subprocess fixture: %v\n%s", err, output)
 	}
 }
 
@@ -3515,6 +4112,27 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
+	var panePIDPath string
+	for _, entry := range environment {
+		if strings.HasPrefix(entry, "PANE_PID_FILE=") {
+			panePIDPath = strings.TrimPrefix(entry, "PANE_PID_FILE=")
+		}
+	}
+	panePIDBytes, err := os.ReadFile(panePIDPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	panePID, err := strconv.Atoi(string(panePIDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(panePID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	mutateTestReceipt(t, stateDir, func(receipt map[string]any) {
+		events := receipt["events"].([]any)
+		receipt["events"] = events[:len(events)-1]
+	})
 	if err := os.WriteFile(transportPath, tamperedBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -3563,6 +4181,9 @@ esac
 		t.Fatalf("invalid-schema transport error = %v, stderr %q", err, stderr)
 	}
 	if err := os.WriteFile(transportPath, transportBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "receipts.json"), receiptBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var deliveredPacket struct {
