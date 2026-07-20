@@ -1819,25 +1819,41 @@ for operation in operations:
     except module.HelperError as error: assert "sealed" in str(error), error
     else: raise AssertionError("detached receipt mutation was accepted")
     assert store.path.read_bytes() == before
+
+for terminal_state in ("launch_completed", "verified_parked"):
+    retained, _, _ = fixture("retained-" + terminal_state)
+    data = retained.load_store(); receipt = data["receipts"][0]
+    receipt["events"].append({"event_id":"completed", "kind":"launch_completed",
+                              "operation_event_id":"launch", "identity":{"synthetic":True}})
+    if terminal_state == "verified_parked":
+        receipt["state"] = "verified_parked"
+        receipt["events"].append({"event_id":"parked", "kind":"verified_parked",
+                                  "operation_event_id":"park"})
+    retained.commit(data); retained_before = retained.path.read_bytes(); executed = []
+    module.os.execve = lambda *arguments: executed.append(arguments)
+    try: module.execute_launch_transport(retained, "retained-" + terminal_state, "0" * 64, "0" * 64)
+    except module.HelperError as error: assert "not authorized" in str(error), error
+    else: raise AssertionError("retained transport executed after " + terminal_state)
+    assert not executed and retained.path.read_bytes() == retained_before
+
 race_store, _, race_detach = fixture("race")
-ready_read, ready_write = os.pipe(); marker = race_store.state_dir / "synthetic-exec"; pid = os.fork()
+ready_read, ready_write = os.pipe(); continue_read, continue_write = os.pipe()
+marker = race_store.state_dir / "receipt-lock-acquired"; pid = os.fork()
 if pid == 0:
-    os.close(ready_read)
+    os.close(ready_read); os.close(continue_write)
     try:
         with race_store.launch_gate("race"):
-            os.write(ready_write, b"1"); time.sleep(0.2)
-            module.require_launch_transport_allowed(race_store, "race")
-            marker.write_text("executed")
-            os.execve(sys.executable, [sys.executable, "-c", "import time; time.sleep(0.3)"], os.environ)
+            os.write(ready_write, b"1"); assert os.read(continue_read, 1) == b"1"
+            with race_store.mutation_lock(): marker.write_text("acquired")
     finally: os._exit(0)
-os.close(ready_write); assert os.read(ready_read, 1) == b"1"; started = time.monotonic()
-assert race_store.detach_indeterminate_worker(race_detach)["outcome"] == "detached"
-elapsed = time.monotonic() - started; _, status = os.waitpid(pid, 0)
+os.close(ready_write); os.close(continue_read); assert os.read(ready_read, 1) == b"1"
+race_before = race_store.path.read_bytes(); started = time.monotonic()
+blocked = race_store.detach_indeterminate_worker(race_detach); elapsed = time.monotonic() - started
+assert blocked["outcome"] == "blocked" and blocked["blocker"] == "launch_transport_active_or_indeterminate", blocked
+assert elapsed < 1.0 and race_store.path.read_bytes() == race_before, elapsed
+os.write(continue_write, b"1"); os.close(continue_write); _, status = os.waitpid(pid, 0)
 assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
-assert marker.read_text() == "executed" and elapsed >= 0.4, elapsed
-try: module.require_launch_transport_allowed(race_store, "race")
-except module.HelperError as error: assert "sealed" in str(error), error
-else: raise AssertionError("post-detach transport was accepted")
+assert marker.read_text() == "acquired"
 print("ok")
 `
 	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
@@ -4072,6 +4088,10 @@ esac
 	if err := syscall.Kill(panePID, syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
+	mutateTestReceipt(t, stateDir, func(receipt map[string]any) {
+		events := receipt["events"].([]any)
+		receipt["events"] = events[:len(events)-1]
+	})
 	if err := os.WriteFile(transportPath, tamperedBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -4120,6 +4140,9 @@ esac
 		t.Fatalf("invalid-schema transport error = %v, stderr %q", err, stderr)
 	}
 	if err := os.WriteFile(transportPath, transportBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "receipts.json"), receiptBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var deliveredPacket struct {

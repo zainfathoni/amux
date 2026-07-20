@@ -57,6 +57,10 @@ class HelperError(Exception):
     pass
 
 
+class LaunchGateBusy(HelperError):
+    pass
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -223,7 +227,7 @@ class ReceiptStore:
             yield
 
     @contextlib.contextmanager
-    def launch_gate(self, delegation_id: str) -> Iterator[None]:
+    def launch_gate(self, delegation_id: str, timeout_seconds: float | None = None) -> Iterator[None]:
         protocol_id({"delegation_id": delegation_id}, "delegation_id")
         self.prepare()
         gate_dir = self.state_dir / "launch-gates"
@@ -245,7 +249,18 @@ class ReceiptStore:
                     or stat.S_IMODE(gate_stat.st_mode) != 0o600
                 ):
                     raise HelperError("launch gate is unavailable")
-                fcntl.flock(gate_file.fileno(), fcntl.LOCK_EX)
+                if timeout_seconds is None:
+                    fcntl.flock(gate_file.fileno(), fcntl.LOCK_EX)
+                else:
+                    deadline = time.monotonic() + timeout_seconds
+                    while True:
+                        try:
+                            fcntl.flock(gate_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except BlockingIOError as error:
+                            if time.monotonic() >= deadline:
+                                raise LaunchGateBusy("launch gate is busy") from error
+                            time.sleep(0.01)
                 os.set_inheritable(gate_file.fileno(), True)
             except OSError as error:
                 raise HelperError("launch gate is unavailable") from error
@@ -460,27 +475,37 @@ class ReceiptStore:
                 if not valid_indeterminate_detach_candidate(receipt):
                     raise HelperError("worker detach requires one unresolved launch-indeterminate receipt")
                 launch_intent = receipt_launch_intent(receipt)
-                with self.launch_gate(delegation_id):
-                    absence = inspect_indeterminate_launch_absence(launch_intent)
-                    if absence != "exact_launch_target_absent":
-                        return {
-                            "action": "indeterminate_worker_detach",
-                            "origin_thread_sha256": origin_sha256,
-                            "pair_sha256": pair_sha256,
-                            "outcome": "blocked",
-                            "blocker": absence,
-                            "fence": "retained",
+                try:
+                    with self.launch_gate(delegation_id, timeout_seconds=0.2):
+                        absence = inspect_indeterminate_launch_absence(launch_intent)
+                        if absence != "exact_launch_target_absent":
+                            return {
+                                "action": "indeterminate_worker_detach",
+                                "origin_thread_sha256": origin_sha256,
+                                "pair_sha256": pair_sha256,
+                                "outcome": "blocked",
+                                "blocker": absence,
+                                "fence": "retained",
+                            }
+                        timestamp = utc_now()
+                        event["at"] = timestamp
+                        receipt["worker_detached"] = {
+                            "event_id": event_id,
+                            "at": timestamp,
+                            "absence_code": event["absence_code"],
                         }
-                    timestamp = utc_now()
-                    event["at"] = timestamp
-                    receipt["worker_detached"] = {
-                        "event_id": event_id,
-                        "at": timestamp,
-                        "absence_code": event["absence_code"],
+                        receipt["events"].append(event)
+                        receipt["updated_at"] = timestamp
+                        self.commit(store)
+                except LaunchGateBusy:
+                    return {
+                        "action": "indeterminate_worker_detach",
+                        "origin_thread_sha256": origin_sha256,
+                        "pair_sha256": pair_sha256,
+                        "outcome": "blocked",
+                        "blocker": "launch_transport_active_or_indeterminate",
+                        "fence": "retained",
                     }
-                    receipt["events"].append(event)
-                    receipt["updated_at"] = timestamp
-                    self.commit(store)
         return worker_detach_result(origin_sha256, pair_sha256, "detached")
 
     def worker_teardown(self, origin_thread: str, dry_run: bool) -> dict[str, Any]:
@@ -3885,7 +3910,11 @@ def require_receipt_mutable(receipt: dict[str, Any]) -> None:
 def require_launch_transport_allowed(store: ReceiptStore, delegation_id: str) -> None:
     receipt = store.find(store.load_store(require_exists=True), delegation_id)
     require_receipt_mutable(receipt)
-    receipt_launch_intent(receipt)
+    if not valid_indeterminate_detach_candidate(receipt):
+        raise HelperError("launch transport is not authorized for the current receipt state")
+    origin_thread = receipt["binding"]["origin_thread"]
+    if origin_thread in store.lifecycle.load()["teardown_fences"]:
+        raise HelperError("launch transport is revoked by the durable origin fence")
 
 
 def completed_launch_identity(receipt: dict[str, Any]) -> dict[str, str]:
