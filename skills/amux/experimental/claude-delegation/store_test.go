@@ -15,6 +15,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestLinuxProcessIdentityRejectsAmbiguousSnapshots(t *testing.T) {
@@ -301,6 +302,7 @@ transport = {
     "argv": argv,
     "environment": {"PATH": "/usr/bin:/bin"},
     "expected_argv_digest": module.normalized_argv_digest(argv[1:]),
+    "expected_launcher_argv0_digest": module.launcher_argv0_digest(argv[0]),
     "expected_launcher_identity": launcher_identity,
     "expected_executable_object_identity": object_identity,
     "remove_environment": [],
@@ -456,6 +458,406 @@ print("ok")
 	}
 	if string(output) != "ok\n" {
 		t.Fatalf("Darwin probe executable output = %q", output)
+	}
+}
+
+func TestDarwinLaunchAcceptsTransportCopyOfVersionedClaudeExecutable(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin transport executes a private copy of the versioned Claude executable")
+	}
+	fixture := newLaunchFixture(t)
+	permitSealedRuntimeTempCleanup(t, fixture.stateDir)
+	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	enableAsyncClaudeLaunch(t, fixture.binDir, &fixture.environment)
+	claudeLink := filepath.Join(fixture.binDir, "claude")
+	versionedClaude := filepath.Join(fixture.binDir, "2.1.212")
+	if err := os.Rename(claudeLink, versionedClaude); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Base(versionedClaude), claudeLink); err != nil {
+		t.Fatal(err)
+	}
+	receiptPath := createPlannedLaunchReceipt(t, fixture)
+
+	started := time.Now()
+	stdout, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute")
+	if err != nil || !strings.Contains(stdout, `"outcome":"launched"`) {
+		t.Fatalf("versioned Darwin transport launch = %v: %s%s", err, stdout, stderr)
+	}
+	if elapsed := time.Since(started); elapsed < 1400*time.Millisecond {
+		t.Fatalf("Darwin launch completed before the stable startup window: %s", elapsed)
+	}
+	receipt, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(receipt, []byte(`"kind":"launch_completed"`)) {
+		t.Fatalf("verified Darwin transport launch did not record completion: %s", receipt)
+	}
+	var stored map[string]any
+	if err := json.Unmarshal(receipt, &stored); err != nil {
+		t.Fatal(err)
+	}
+	receiptValue := stored["receipts"].([]any)[0].(map[string]any)
+	events := receiptValue["events"].([]any)
+	launchIdentity := events[len(events)-1].(map[string]any)["identity"].(map[string]any)
+	if launchIdentity["process_name"] != "verified-claude" || launchIdentity["process_executable_object_identity"] == "" {
+		t.Fatalf("Darwin launch did not bind the private executable object: %#v", launchIdentity)
+	}
+	var launchIntent map[string]any
+	for _, value := range events {
+		event := value.(map[string]any)
+		if event["kind"] == "launch_intent" {
+			launchIntent = event
+			break
+		}
+	}
+	launcherPathDigest, ok := launchIntent["expected_launcher_argv0_digest"].(string)
+	if !ok || len(launcherPathDigest) != 64 {
+		t.Fatalf("Darwin launch intent did not bind the launcher path digest: %#v", launchIntent)
+	}
+
+	acquire := map[string]any{
+		"delegation_id": fixture.request["delegation_id"], "event_id": "acquire-versioned-transport",
+		"pane_id": "%20", "claude_session_id": fixture.request["claude_session_id"],
+	}
+	beforeAcquisition := append([]byte(nil), receipt...)
+	wrongSession := cloneJSONMap(t, acquire)
+	wrongSession["event_id"] = "acquire-wrong-session"
+	wrongSession["claude_session_id"] = "650e8400-e29b-41d4-a716-446655440000"
+	_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, wrongSession, "session", "acquire")
+	if err == nil || !strings.Contains(stderr, "expected Claude session") {
+		t.Fatalf("Darwin transport wrong-session acquisition = %v: %s", err, stderr)
+	}
+	wrongWorkdirEnvironment := append(append([]string(nil), fixture.environment...), "REPORTED_WORKDIR="+t.TempDir())
+	wrongWorkdir := cloneJSONMap(t, acquire)
+	wrongWorkdir["event_id"] = "acquire-wrong-workdir"
+	_, stderr, err = runHelperEnv(t, fixture.stateDir, wrongWorkdirEnvironment, wrongWorkdir, "session", "acquire")
+	if err == nil || !strings.Contains(stderr, "exact process and pane created by this receipt") {
+		t.Fatalf("Darwin transport wrong-workdir acquisition = %v: %s", err, stderr)
+	}
+	wrongCommandEnvironment := append(append([]string(nil), fixture.environment...), "REPORTED_START_COMMAND=other-command")
+	wrongCommand := cloneJSONMap(t, acquire)
+	wrongCommand["event_id"] = "acquire-wrong-launch-command"
+	_, stderr, err = runHelperEnv(t, fixture.stateDir, wrongCommandEnvironment, wrongCommand, "session", "acquire")
+	if err == nil || !strings.Contains(stderr, "exact process and pane created by this receipt") {
+		t.Fatalf("Darwin transport wrong-launch-command acquisition = %v: %s", err, stderr)
+	}
+	afterRejectedAcquisition, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterRejectedAcquisition, beforeAcquisition) {
+		t.Fatalf("rejected Darwin acquisition mutated the receipt:\nbefore: %s\nafter: %s", beforeAcquisition, afterRejectedAcquisition)
+	}
+	if err := json.Unmarshal(beforeAcquisition, &stored); err != nil {
+		t.Fatal(err)
+	}
+	receiptValue = stored["receipts"].([]any)[0].(map[string]any)
+	events = receiptValue["events"].([]any)
+	events[len(events)-1].(map[string]any)["identity"].(map[string]any)["process_identity"] = "changed-incarnation"
+	tamperedCompletion, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(receiptPath, tamperedCompletion, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	incarnationSubstitution := cloneJSONMap(t, acquire)
+	incarnationSubstitution["event_id"] = "acquire-process-incarnation-substitution"
+	_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, incarnationSubstitution, "session", "acquire")
+	if err == nil || !strings.Contains(stderr, "exact process and pane created by this receipt") {
+		t.Fatalf("Darwin process-incarnation substitution acquisition = %v: %s", err, stderr)
+	}
+	afterIncarnationRejection, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterIncarnationRejection, tamperedCompletion) {
+		t.Fatalf("rejected Darwin incarnation acquisition mutated the receipt")
+	}
+	if err := os.WriteFile(receiptPath, beforeAcquisition, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	originalLauncher := versionedClaude + ".original"
+	if err := os.Rename(versionedClaude, originalLauncher); err != nil {
+		t.Fatal(err)
+	}
+	launcherContent, err := os.ReadFile(originalLauncher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(versionedClaude, launcherContent, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	objectSubstitution := cloneJSONMap(t, acquire)
+	objectSubstitution["event_id"] = "acquire-launcher-object-substitution"
+	_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, objectSubstitution, "session", "acquire")
+	if err == nil || !strings.Contains(stderr, "immutable launch intent") {
+		t.Fatalf("Darwin transport launcher-object substitution = %v: %s", err, stderr)
+	}
+	if err := os.Remove(versionedClaude); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(originalLauncher, versionedClaude); err != nil {
+		t.Fatal(err)
+	}
+	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "recorded", acquire, "session", "acquire")
+
+	receipt, err = os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(receipt, &stored); err != nil {
+		t.Fatal(err)
+	}
+	receiptValue = stored["receipts"].([]any)[0].(map[string]any)
+	receiptValue["state"] = "acknowledged"
+	acknowledged, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(receiptPath, acknowledged, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(acknowledged, &stored); err != nil {
+		t.Fatal(err)
+	}
+	receiptValue = stored["receipts"].([]any)[0].(map[string]any)
+	receiptValue["session_identity"].(map[string]any)["process_identity"] = "changed-incarnation"
+	wrongParkingIdentity, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(receiptPath, wrongParkingIdentity, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, map[string]any{
+		"delegation_id": fixture.request["delegation_id"], "event_id": "park-incarnation-substitution",
+	}, "session", "park")
+	if err == nil || !strings.Contains(stderr, "incarnation identity changed") {
+		t.Fatalf("Darwin process-incarnation substitution parking = %v: %s", err, stderr)
+	}
+	if err := os.WriteFile(receiptPath, acknowledged, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(versionedClaude, []byte("changed launcher content"), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, map[string]any{
+		"delegation_id": fixture.request["delegation_id"], "event_id": "park-content-substitution",
+	}, "session", "park")
+	if err == nil || !strings.Contains(stderr, "launcher content does not match immutable launch intent") {
+		t.Fatalf("Darwin transport launcher-content substitution parking = %v: %s", err, stderr)
+	}
+	log, err := os.ReadFile(fixture.tmuxLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(log, []byte("kill-pane")) {
+		t.Fatalf("Darwin identity substitution killed the pane: %s", log)
+	}
+	finalReceipt, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(finalReceipt, []byte(`"kind":"verified_parked"`)) {
+		t.Fatalf("Darwin content substitution recorded false parking completion: %s", finalReceipt)
+	}
+}
+
+func TestDarwinTransportVersionedExecutableRejectsArgvSubstitutionWithoutCompletion(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin transport executes a private copy of the versioned Claude executable")
+	}
+	fixture := newLaunchFixture(t)
+	permitSealedRuntimeTempCleanup(t, fixture.stateDir)
+	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	enableAsyncClaudeLaunch(t, fixture.binDir, &fixture.environment)
+	claudeLink := filepath.Join(fixture.binDir, "claude")
+	versionedClaude := filepath.Join(fixture.binDir, "2.1.212")
+	if err := os.Rename(claudeLink, versionedClaude); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Base(versionedClaude), claudeLink); err != nil {
+		t.Fatal(err)
+	}
+	fixture.environment = append(fixture.environment, "SUBSTITUTE_ARGV=1")
+	receiptPath := createPlannedLaunchReceipt(t, fixture)
+	_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute")
+	if err == nil || !strings.Contains(stderr, "argv does not match immutable launch intent") {
+		t.Fatalf("Darwin transport argv substitution = %v: %s", err, stderr)
+	}
+	receipt, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(receipt, []byte(`"kind":"launch_intent"`)) || bytes.Contains(receipt, []byte(`"kind":"launch_completed"`)) {
+		t.Fatalf("Darwin argv substitution did not remain indeterminate: %s", receipt)
+	}
+	log, err := os.ReadFile(fixture.tmuxLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(log, []byte("kill-pane")) {
+		t.Fatalf("Darwin argv substitution killed the pane: %s", log)
+	}
+}
+
+func TestDarwinTransportRejectsLauncherPathSubstitutionsWithoutCompletionOrKill(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin transport preserves the planned launcher as argv[0]")
+	}
+	for _, test := range []struct {
+		name        string
+		alternate   string
+		wantStartup string
+	}{
+		{name: "verified process cannot fall through to direct Claude form", alternate: "claude", wantStartup: "launcher path does not match immutable launch intent"},
+		{name: "same-object hardlink cannot replace planned launcher path", alternate: "2.1.212-hardlink", wantStartup: "launcher path does not match immutable launch intent"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newLaunchFixture(t)
+			permitSealedRuntimeTempCleanup(t, fixture.stateDir)
+			if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			enableAsyncClaudeLaunch(t, fixture.binDir, &fixture.environment)
+			claudeLink := filepath.Join(fixture.binDir, "claude")
+			versionedClaude := filepath.Join(fixture.binDir, "2.1.212")
+			if err := os.Rename(claudeLink, versionedClaude); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Base(versionedClaude), claudeLink); err != nil {
+				t.Fatal(err)
+			}
+			alternate := filepath.Join(t.TempDir(), test.alternate)
+			if err := os.Link(versionedClaude, alternate); err != nil {
+				t.Fatal(err)
+			}
+			fixture.environment = append(fixture.environment, "SUBSTITUTE_ARGV0="+alternate)
+			receiptPath := createPlannedLaunchReceipt(t, fixture)
+			_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute")
+			if err == nil || !strings.Contains(stderr, test.wantStartup) {
+				t.Fatalf("Darwin launcher path substitution = %v: %s", err, stderr)
+			}
+			receipt, err := os.ReadFile(receiptPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(receipt, []byte(`"kind":"launch_intent"`)) || bytes.Contains(receipt, []byte(`"kind":"launch_completed"`)) {
+				t.Fatalf("Darwin launcher path substitution did not remain indeterminate: %s", receipt)
+			}
+			_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, map[string]any{
+				"delegation_id": fixture.request["delegation_id"], "event_id": "acquire-substituted-launcher",
+				"pane_id": "%20", "claude_session_id": fixture.request["claude_session_id"],
+			}, "session", "acquire")
+			if err == nil || !strings.Contains(stderr, "requires one completed receipt launch") {
+				t.Fatalf("Darwin substituted launcher acquisition = %v: %s", err, stderr)
+			}
+			afterAcquisition, err := os.ReadFile(receiptPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(afterAcquisition, receipt) {
+				t.Fatalf("rejected substituted-launcher acquisition mutated the receipt")
+			}
+			log, err := os.ReadFile(fixture.tmuxLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(log, []byte("kill-pane")) {
+				t.Fatalf("Darwin launcher path substitution killed the pane: %s", log)
+			}
+		})
+	}
+}
+
+func TestDarwinTransportFormRequiresExactShapeAndStableProcessSnapshot(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import hashlib, importlib.util, os, pathlib, sys, tempfile
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = pathlib.Path(tempfile.mkdtemp())
+launcher = root / "2.1.212"
+private = root / "verified-claude"
+launcher.write_bytes(b"synthetic executable")
+private.write_bytes(launcher.read_bytes())
+launcher.chmod(0o500)
+private.chmod(0o500)
+session_id = "550e8400-e29b-41d4-a716-446655440000"
+arguments = [str(launcher), "--session-id", session_id, "policy"]
+descriptor, _, launcher_identity, launcher_object = module.open_exact_verified_executable(launcher)
+os.close(descriptor)
+descriptor, _, _, private_object = module.open_exact_verified_executable(private)
+os.close(descriptor)
+
+assert module.normalized_claude_arguments("Darwin", "verified-claude", arguments, private) == ("darwin_transport", arguments[1:])
+alternate_direct = [str(root / "claude"), *arguments[1:]]
+assert module.normalized_claude_arguments("Darwin", "verified-claude", alternate_direct, private) == ("darwin_transport", alternate_direct[1:])
+for name, argv, executable in (
+    ("other", arguments, private),
+    ("verified-claude", arguments, root / "other"),
+    ("verified-claude", ["relative-launcher", *arguments[1:]], private),
+):
+    try:
+        module.normalized_claude_arguments("Darwin", name, argv, executable)
+    except module.HelperError:
+        pass
+    else:
+        raise AssertionError((name, argv, executable))
+
+module.platform.system = lambda: "Darwin"
+module.process_executable_path = lambda pid: private
+module.run_command = lambda command, environment=None, executable_fd=None: "Claude\tthinker\t@20\t%20\t4242\t" + str(root) + "\tverified-claude\tcommand"
+
+stable_snapshot = ("verified-claude", "100.000001", arguments, hashlib.sha256(b"stable").hexdigest())
+module.exact_process_identity = lambda pid: stable_snapshot
+try:
+    module.inspect_claude_identity(
+        "%20", session_id, module.normalized_argv_digest(arguments[1:]),
+        launcher_identity, launcher_object, None, None,
+        module.launcher_argv0_digest(arguments[0]),
+    )
+except module.HelperError as error:
+    assert "requires the planned private executable object identity" in str(error), error
+else:
+    raise AssertionError("Darwin transport without private executable identity was accepted")
+
+snapshots = iter([
+    ("verified-claude", "100.000001", arguments, hashlib.sha256(b"before").hexdigest()),
+    ("verified-claude", "100.000002", arguments, hashlib.sha256(b"after").hexdigest()),
+])
+module.exact_process_identity = lambda pid: next(snapshots)
+try:
+    module.inspect_claude_identity(
+        "%20", session_id, module.normalized_argv_digest(arguments[1:]),
+        launcher_identity, launcher_object, None, private_object,
+        module.launcher_argv0_digest(arguments[0]),
+    )
+except module.HelperError as error:
+    assert "changed during identity inspection" in str(error), error
+else:
+    raise AssertionError("hybrid Darwin process snapshot was accepted")
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil {
+		t.Fatalf("Darwin transport shape fixture: %v\n%s", err, output)
+	}
+	if string(output) != "ok\n" {
+		t.Fatalf("Darwin transport shape output = %q", output)
 	}
 }
 
@@ -3296,6 +3698,7 @@ func enableAsyncClaudeLaunch(t *testing.T, binDir string, environment *[]string)
 import (
   "fmt"
   "os"
+  "runtime"
   "syscall"
   "time"
 )
@@ -3335,14 +3738,20 @@ func main() {
     _ = output.Close()
   }
   if os.Getenv("STARTUP_EXIT") == "1" { return }
-  if os.Getenv("SUBSTITUTE_ARGV") == "1" && os.Getenv("SUBSTITUTE_REEXECED") == "" {
-    filtered := []string{os.Args[0]}
-    for index := 1; index < len(os.Args); index++ {
-      if os.Args[index] == "--disallowed-tools" && index + 1 < len(os.Args) { index++; continue }
-      filtered = append(filtered, os.Args[index])
+  if (os.Getenv("SUBSTITUTE_ARGV") == "1" || os.Getenv("SUBSTITUTE_ARGV0") != "") && os.Getenv("SUBSTITUTE_REEXECED") == "" {
+    filtered := append([]string(nil), os.Args...)
+    if os.Getenv("SUBSTITUTE_ARGV") == "1" {
+      filtered = []string{os.Args[0]}
+      for index := 1; index < len(os.Args); index++ {
+        if os.Args[index] == "--disallowed-tools" && index + 1 < len(os.Args) { index++; continue }
+        filtered = append(filtered, os.Args[index])
+      }
     }
+    if value := os.Getenv("SUBSTITUTE_ARGV0"); value != "" { filtered[0] = value }
     _ = os.Setenv("SUBSTITUTE_REEXECED", "1")
-    _ = syscall.Exec(os.Args[0], filtered, os.Environ())
+    executable := os.Args[0]
+    if runtime.GOOS == "darwin" { executable, _ = os.Executable() }
+    _ = syscall.Exec(executable, filtered, os.Environ())
     return
   }
   if path := os.Getenv("ARGV_LOG"); path != "" {
@@ -3392,7 +3801,8 @@ case "$1" in
     pane_pid=$(cat "$PANE_PID_FILE")
     kill -0 "$pane_pid"
     start_command=$(tail -n 1 "$TMUX_LOG" | sed -n 's/^.* -c [^ ]* //p')
-    printf 'Claude\tthinker\t@20\t%%20\t%s\t%s\tclaude\t%s\n' "$pane_pid" "$WORKDIR" "$start_command"
+    if [ -n "${REPORTED_START_COMMAND:-}" ]; then start_command=$REPORTED_START_COMMAND; fi
+    printf 'Claude\tthinker\t@20\t%%20\t%s\t%s\tclaude\t%s\n' "$pane_pid" "${REPORTED_WORKDIR:-$WORKDIR}" "$start_command"
     ;;
   kill-pane) pane_pid=$(cat "$PANE_PID_FILE"); kill "$pane_pid"; printf '%s\n' "$*" >> "$TMUX_LOG" ;;
   list-panes) test -s "$PANE_PID_FILE" && printf '%%20\n' ;;
