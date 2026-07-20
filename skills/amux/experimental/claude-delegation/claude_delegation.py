@@ -29,6 +29,7 @@ from typing import Any, Iterator
 
 SCHEMA_VERSION = 1
 PROTOCOL_VERSION = 1
+LIFECYCLE_SCHEMA_VERSION = 1
 MAX_STORE_BYTES = 4 * 1024 * 1024
 MAX_PACKET_BYTES = 256 * 1024
 MAX_LAUNCH_TRANSPORT_BYTES = 2 * 1024 * 1024
@@ -81,11 +82,83 @@ def read_input() -> dict[str, Any]:
     return value
 
 
-class ReceiptStore:
+class LifecycleRegistry:
     def __init__(self, state_dir: pathlib.Path):
+        self.state_dir = state_dir
+        self.path = state_dir / "lifecycle.json"
+        self.lock_path = state_dir / "experimental.lock"
+
+    def prepare(self) -> None:
+        self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(self.state_dir, 0o700)
+
+    @contextlib.contextmanager
+    def mutation_lock(self) -> Iterator[None]:
+        self.prepare()
+        descriptor = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        os.chmod(self.lock_path, 0o600)
+        with os.fdopen(descriptor, "r+") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            yield
+
+    def load(self) -> dict[str, Any]:
+        try:
+            raw = self.path.read_bytes()
+        except FileNotFoundError:
+            return {"schema_version": LIFECYCLE_SCHEMA_VERSION, "stores": [], "teardown_fences": {}}
+        except OSError as error:
+            raise HelperError("lifecycle registry is unavailable") from error
+        if len(raw) > MAX_STORE_BYTES:
+            raise HelperError("lifecycle registry exceeds the experimental size limit")
+        try:
+            registry = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise HelperError("invalid lifecycle registry") from error
+        if not isinstance(registry, dict) or registry.get("schema_version") != LIFECYCLE_SCHEMA_VERSION:
+            raise HelperError("unsupported or invalid lifecycle registry")
+        stores = registry.get("stores")
+        fences = registry.get("teardown_fences")
+        if (
+            not isinstance(stores, list)
+            or any(not isinstance(path, str) or not path for path in stores)
+            or len(stores) != len(set(stores))
+            or not isinstance(fences, dict)
+            or any(not isinstance(thread, str) or not isinstance(value, dict) for thread, value in fences.items())
+        ):
+            raise HelperError("invalid lifecycle registry")
+        return registry
+
+    def commit(self, registry: dict[str, Any]) -> None:
+        payload = (json.dumps(registry, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        if len(payload) > MAX_STORE_BYTES:
+            raise HelperError("lifecycle registry exceeds the experimental size limit")
+        self.prepare()
+        descriptor, temporary = tempfile.mkstemp(prefix="lifecycle.json.tmp.", dir=self.state_dir)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, self.path)
+            directory = os.open(self.state_dir, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
+class ReceiptStore:
+    def __init__(self, state_dir: pathlib.Path, lifecycle_state_dir: pathlib.Path | None = None):
         self.state_dir = state_dir
         self.path = state_dir / "receipts.json"
         self.lock_path = state_dir / "experimental.lock"
+        self.lifecycle = LifecycleRegistry(lifecycle_state_dir or state_dir)
 
     def prepare(self) -> None:
         self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -105,12 +178,14 @@ class ReceiptStore:
             raw = self.path.read_bytes()
         except FileNotFoundError:
             return {"schema_version": SCHEMA_VERSION, "receipts": []}
+        except OSError as error:
+            raise HelperError("receipt store is unavailable") from error
         if len(raw) > MAX_STORE_BYTES:
             raise HelperError("receipt store exceeds the experimental size limit")
         try:
             store = json.loads(raw)
-        except json.JSONDecodeError as error:
-            raise HelperError(f"invalid receipt store: {error.msg}") from error
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise HelperError("invalid receipt store") from error
         if not isinstance(store, dict) or store.get("schema_version") != SCHEMA_VERSION:
             raise HelperError("unsupported or invalid receipt store")
         receipts = store.get("receipts")
@@ -120,15 +195,24 @@ class ReceiptStore:
         for receipt in receipts:
             if not isinstance(receipt, dict):
                 raise HelperError("invalid receipt record")
-            delegation_id = receipt.get("binding", {}).get("delegation_id")
-            if not isinstance(delegation_id, str) or delegation_id in identities:
+            binding = receipt.get("binding")
+            if not isinstance(binding, dict):
+                raise HelperError("invalid receipt binding")
+            try:
+                binding = validate_binding(binding)
+            except HelperError as error:
+                raise HelperError("invalid receipt binding") from error
+            delegation_id = binding["delegation_id"]
+            if delegation_id in identities:
                 raise HelperError("invalid or duplicate receipt identity")
             events = receipt.get("events")
             if not isinstance(events, list):
                 raise HelperError("invalid receipt event history")
             event_ids: set[str] = set()
             for event in events:
-                event_id = event.get("event_id") if isinstance(event, dict) else None
+                if not isinstance(event, dict):
+                    raise HelperError("invalid receipt event history")
+                event_id = event.get("event_id")
                 if not isinstance(event_id, str) or not event_id or event_id in event_ids:
                     raise HelperError("invalid or duplicate receipt event identity")
                 event_ids.add(event_id)
@@ -169,48 +253,61 @@ class ReceiptStore:
     def create(self, request: dict[str, Any]) -> str:
         binding = validate_binding(request.get("binding"))
         routing = validate_routing(request.get("routing"))
-        with self.mutation_lock():
-            store = self.load_store()
+        with self.lifecycle.mutation_lock():
+            lifecycle = self.lifecycle.load()
+            if binding["origin_thread"] in lifecycle["teardown_fences"]:
+                raise HelperError("origin Amp worker has a durable teardown fence")
+            state_path = str(self.state_dir.resolve())
+            if state_path not in lifecycle["stores"]:
+                lifecycle["stores"].append(state_path)
+                lifecycle["stores"].sort()
+                self.lifecycle.commit(lifecycle)
+            store_lock = contextlib.nullcontext() if self.lifecycle.state_dir == self.state_dir else self.mutation_lock()
+            with store_lock:
+                return self.create_locked(binding, routing)
+
+    def create_locked(self, binding: dict[str, Any], routing: dict[str, Any]) -> str:
+        store = self.load_store()
+        for receipt in store["receipts"]:
+            if receipt["binding"]["delegation_id"] != binding["delegation_id"]:
+                continue
+            if receipt["binding"] != binding:
+                raise HelperError("delegation ID is already bound to a different immutable binding")
+            if receipt["events"][0]["routing"] != routing:
+                raise HelperError("delegation ID create event conflicts with its original routing")
+            return "duplicate"
+        lease = mutating_writer_lease(binding)
+        if lease is not None:
             for receipt in store["receipts"]:
-                if receipt["binding"]["delegation_id"] != binding["delegation_id"]:
-                    continue
-                if receipt["binding"] != binding:
-                    raise HelperError("delegation ID is already bound to a different immutable binding")
-                if receipt["events"][0]["routing"] != routing:
-                    raise HelperError("delegation ID create event conflicts with its original routing")
-                return "duplicate"
-            lease = mutating_writer_lease(binding)
-            if lease is not None:
-                for receipt in store["receipts"]:
-                    existing_lease = receipt_writer_lease(receipt)
-                    if (
-                        receipt.get("state") != "verified_parked"
-                        and existing_lease is not None
-                        and writer_leases_match(existing_lease, lease)
-                    ):
-                        raise HelperError("worktree already has an unresolved exclusive logical writer lease")
-            created_at = utc_now()
-            receipt = {
-                "binding": binding,
-                "routing": routing,
-                "state": "created",
-                "report_message_id": "",
-                "created_at": created_at,
-                "updated_at": created_at,
-                "events": [
-                    {
-                        "event_id": f"create:{binding['delegation_id']}",
-                        "kind": "created",
-                        "at": created_at,
-                        "routing": routing,
-                    }
-                ],
-            }
-            if lease is not None:
-                receipt["writer_lease"] = lease
-            store["receipts"].append(receipt)
-            self.commit(store)
-            return "recorded"
+                existing_lease = receipt_writer_lease(receipt)
+                if (
+                    receipt.get("state") != "verified_parked"
+                    and existing_lease is not None
+                    and writer_leases_match(existing_lease, lease)
+                ):
+                    raise HelperError("worktree already has an unresolved exclusive logical writer lease")
+        created_at = utc_now()
+        receipt = {
+            "binding": binding,
+            "routing": routing,
+            "state": "created",
+            "report_message_id": "",
+            "created_at": created_at,
+            "updated_at": created_at,
+            "events": [
+                {
+                    "event_id": f"create:{binding['delegation_id']}",
+                    "kind": "created",
+                    "at": created_at,
+                    "routing": routing,
+                }
+            ],
+        }
+        if lease is not None:
+            receipt["writer_lease"] = lease
+        store["receipts"].append(receipt)
+        self.commit(store)
+        return "recorded"
 
     def route(self, request: dict[str, Any]) -> str:
         delegation_id = protocol_id(request, "delegation_id")
@@ -231,6 +328,154 @@ class ReceiptStore:
             receipt["events"].append(event)
             self.commit(store)
             return "recorded"
+
+    def worker_teardown(self, origin_thread: str, dry_run: bool) -> dict[str, Any]:
+        required_string({"origin_thread": origin_thread}, "origin_thread", 256)
+        try:
+            if dry_run:
+                lifecycle = self.lifecycle.load()
+            else:
+                with self.lifecycle.mutation_lock():
+                    lifecycle = self.lifecycle.load()
+                    if origin_thread not in lifecycle["teardown_fences"]:
+                        lifecycle["teardown_fences"][origin_thread] = {
+                            "operation_id": hashlib.sha256(f"worker-teardown\0{origin_thread}".encode()).hexdigest(),
+                            "created_at": utc_now(),
+                        }
+                        self.lifecycle.commit(lifecycle)
+            state_paths = set(lifecycle["stores"])
+            state_paths.add(str(self.lifecycle.state_dir.resolve()))
+            receipts: list[tuple[ReceiptStore, dict[str, Any]]] = []
+            for state_path in sorted(state_paths):
+                owner = ReceiptStore(pathlib.Path(state_path), self.lifecycle.state_dir)
+                owner_store = owner.load_store()
+                receipts.extend(
+                    (owner, copy.deepcopy(receipt)) for receipt in owner_store["receipts"]
+                    if receipt["binding"].get("origin_thread") == origin_thread
+                )
+        except HelperError:
+            return worker_teardown_store_blocked(origin_thread, dry_run)
+        pairs: list[dict[str, str]] = []
+        blockers: list[dict[str, str]] = []
+        park_requests: list[tuple[ReceiptStore, dict[str, str]]] = []
+        for owner, receipt in receipts:
+            delegation_id = receipt["binding"]["delegation_id"]
+            pair_id = hashlib.sha256(delegation_id.encode()).hexdigest()
+            state = receipt.get("state")
+            public_state = (
+                state if state in {"created", "valid_report", "delivered", "acknowledged", "verified_parked"}
+                else "unknown"
+            )
+            pair = {"pair_sha256": pair_id, "state": public_state}
+            blocker = worker_teardown_receipt_blocker(receipt)
+            if blocker is not None:
+                pair["action"] = "block"
+                pair["blocker"] = blocker
+                pairs.append(pair)
+                blockers.append({"pair_sha256": pair_id, "blocker": blocker})
+                continue
+            if state == "verified_parked":
+                pair["action"] = "none"
+                pairs.append(pair)
+                continue
+            identity = receipt["session_identity"]
+            launch_intent = receipt_launch_intent(receipt)
+            try:
+                current = inspect_claude_identity(
+                    identity["pane_id"],
+                    identity["claude_session_id"],
+                    launch_intent["expected_argv_digest"],
+                    launch_intent["expected_launcher_identity"],
+                    launch_intent["expected_executable_object_identity"],
+                    identity["process_executable_identity"],
+                    identity.get("process_executable_object_identity"),
+                    launch_intent.get("expected_launcher_argv0_digest"),
+                )
+            except HelperError:
+                blocker = "identity_mismatch_or_unavailable"
+                pair["action"] = "block"
+                pair["blocker"] = blocker
+                pairs.append(pair)
+                blockers.append({"delegation_id": delegation_id, "blocker": blocker})
+                continue
+            if current != identity:
+                blocker = "identity_mismatch_or_unavailable"
+                pair["action"] = "block"
+                pair["blocker"] = blocker
+                pairs.append(pair)
+                blockers.append({"delegation_id": delegation_id, "blocker": blocker})
+                continue
+            pair["action"] = "park"
+            pairs.append(pair)
+            event_digest = hashlib.sha256(f"{origin_thread}\0{delegation_id}".encode()).hexdigest()
+            park_requests.append((owner, {
+                "delegation_id": delegation_id,
+                "event_id": f"worker-teardown-park-{event_digest}",
+            }))
+        if blockers:
+            return {
+                "action": "worker_teardown",
+                "origin_thread": origin_thread,
+                "outcome": "blocked",
+                "dry_run": dry_run,
+                "pairs": pairs,
+                "blockers": blockers,
+                "recovery": "resolve the reported paired lifecycle blocker before retrying worker teardown",
+            }
+        if not dry_run:
+            for owner, request in park_requests:
+                try:
+                    owner.park(request)
+                except HelperError:
+                    return {
+                        "action": "worker_teardown",
+                        "origin_thread": origin_thread,
+                        "outcome": "blocked",
+                        "dry_run": False,
+                        "pairs": pairs,
+                        "blockers": [{
+                            "pair_sha256": hashlib.sha256(request["delegation_id"].encode()).hexdigest(),
+                            "blocker": "park_indeterminate",
+                        }],
+                        "recovery": "inspect the durable park intent and use explicit session park recovery before retrying worker teardown",
+                    }
+        return {
+            "action": "worker_teardown",
+            "origin_thread": origin_thread,
+            "outcome": "ready" if dry_run or not park_requests else "cleaned",
+            "dry_run": dry_run,
+            "pairs": pairs,
+        }
+
+    def release_worker_teardown(self, origin_thread: str) -> dict[str, Any]:
+        required_string({"origin_thread": origin_thread}, "origin_thread", 256)
+        try:
+            with self.lifecycle.mutation_lock():
+                lifecycle = self.lifecycle.load()
+                state_paths = set(lifecycle["stores"])
+                state_paths.add(str(self.lifecycle.state_dir.resolve()))
+                for state_path in sorted(state_paths):
+                    owner = ReceiptStore(pathlib.Path(state_path), self.lifecycle.state_dir)
+                    for receipt in owner.load_store()["receipts"]:
+                        if receipt["binding"].get("origin_thread") != origin_thread:
+                            continue
+                        if worker_teardown_receipt_blocker(receipt) is not None or receipt.get("state") != "verified_parked":
+                            return {
+                                "action": "worker_teardown_release",
+                                "origin_thread": origin_thread,
+                                "outcome": "blocked",
+                                "blockers": [{"blocker": "paired_state_not_safely_parked"}],
+                            }
+                outcome = "released" if lifecycle["teardown_fences"].pop(origin_thread, None) is not None else "absent"
+                if outcome == "released":
+                    self.lifecycle.commit(lifecycle)
+        except HelperError:
+            return worker_teardown_store_blocked(origin_thread, False)
+        return {
+            "action": "worker_teardown_release",
+            "origin_thread": origin_thread,
+            "outcome": outcome,
+        }
 
     def submit_message(self, request: dict[str, Any], expected_kind: str) -> str:
         with self.mutation_lock():
@@ -3298,6 +3543,125 @@ def receipt_launch_intent(receipt: dict[str, Any]) -> dict[str, Any]:
     return copy.deepcopy(intent)
 
 
+def worker_teardown_receipt_blocker(receipt: dict[str, Any]) -> str | None:
+    if receipt.get("input_state") in {"pending", "seen"}:
+        return "unresolved_input"
+    events = receipt.get("events", [])
+    park_intents = [event for event in events if event.get("kind") == "park_intent"]
+    if park_intents and receipt.get("state") != "verified_parked":
+        return "park_indeterminate"
+    state = receipt.get("state")
+    if state == "verified_parked":
+        return None if valid_worker_lifecycle_chain(receipt, parked=True) else "receipt_unverified"
+    launch_intents = [event for event in events if event.get("kind") == "launch_intent"]
+    launch_results = [event for event in events if event.get("kind") == "launch_completed"]
+    if len(launch_intents) == 1 and not launch_results:
+        return "launch_indeterminate"
+    if len(launch_intents) != 1 or len(launch_results) != 1:
+        return "launch_unverified"
+    if state in {"valid_report", "delivered"}:
+        return "unacknowledged_report"
+    if state != "acknowledged":
+        return "active_or_unresolved"
+    if not valid_worker_lifecycle_chain(receipt, parked=False):
+        return "receipt_unverified"
+    identity = receipt.get("session_identity")
+    required_identity = {
+        "pane_id", "claude_session_id", "process_executable_identity",
+    }
+    if not isinstance(identity, dict) or any(not isinstance(identity.get(key), str) or not identity[key] for key in required_identity):
+        return "identity_unresolved"
+    try:
+        receipt_launch_intent(receipt)
+    except HelperError:
+        return "launch_unverified"
+    return None
+
+
+def worker_teardown_store_blocked(origin_thread: str, dry_run: bool) -> dict[str, Any]:
+    return {
+        "action": "worker_teardown",
+        "origin_thread": origin_thread,
+        "outcome": "blocked",
+        "dry_run": dry_run,
+        "pairs": [],
+        "blockers": [{"blocker": "receipt_store_invalid_or_unavailable"}],
+        "recovery": "repair the owner-private lifecycle registry or receipt store before retrying worker teardown",
+    }
+
+
+def valid_worker_lifecycle_chain(receipt: dict[str, Any], parked: bool) -> bool:
+    events = receipt.get("events")
+    if not isinstance(events, list) or any(not isinstance(event, dict) for event in events):
+        return False
+
+    def exactly_one(kind: str) -> tuple[int, dict[str, Any]] | None:
+        matches = [(index, event) for index, event in enumerate(events) if event.get("kind") == kind]
+        return matches[0] if len(matches) == 1 else None
+
+    launch_intent = exactly_one("launch_intent")
+    launch_completed = exactly_one("launch_completed")
+    acquired = exactly_one("session_acquired")
+    if launch_intent is None or launch_completed is None or acquired is None:
+        return False
+    if not (launch_intent[0] < launch_completed[0] < acquired[0]):
+        return False
+    if launch_completed[1].get("operation_event_id") != launch_intent[1].get("event_id"):
+        return False
+    identity = receipt.get("session_identity")
+    if (
+        not isinstance(identity, dict)
+        or launch_completed[1].get("identity") != identity
+        or acquired[1].get("identity") != identity
+    ):
+        return False
+
+    message_id = receipt.get("report_message_id")
+    reports = [
+        (index, event) for index, event in enumerate(events)
+        if event.get("kind") == "valid_report" and event.get("event_id") == message_id
+    ]
+    deliveries = [
+        (index, event) for index, event in enumerate(events)
+        if event.get("kind") == "delivered" and event.get("message_id") == message_id
+    ]
+    acknowledgements = [
+        (index, event) for index, event in enumerate(events)
+        if event.get("kind") == "acknowledged" and event.get("message_id") == message_id
+    ]
+    if len(reports) != 1 or len(deliveries) != 1 or len(acknowledgements) != 1:
+        return False
+    if not (acquired[0] < reports[0][0] < deliveries[0][0] < acknowledgements[0][0]):
+        return False
+    if not parked:
+        return receipt.get("state") == "acknowledged"
+
+    parked_results = [
+        (index, event) for index, event in enumerate(events)
+        if event.get("kind") == "verified_parked"
+    ]
+    if len(parked_results) != 1 or parked_results[0][0] <= acknowledgements[0][0]:
+        return False
+    operation_event_id = parked_results[0][1].get("operation_event_id")
+    matching_intents = [
+        (index, event) for index, event in enumerate(events)
+        if event.get("kind") == "park_intent" and event.get("event_id") == operation_event_id
+    ]
+    if (
+        len(matching_intents) != 1
+        or not (acknowledgements[0][0] < matching_intents[0][0] < parked_results[0][0])
+        or matching_intents[0][1].get("identity") != identity
+        or receipt.get("parked_at") != parked_results[0][1].get("at")
+    ):
+        return False
+    try:
+        parked_at = datetime.fromisoformat(receipt["parked_at"].replace("Z", "+00:00"))
+        cleanup_at = datetime.fromisoformat(receipt["cleanup_eligible_at"].replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError):
+        return False
+    return receipt.get("state") == "verified_parked" and cleanup_at - parked_at >= timedelta(days=30)
+
+
 def event_without_time(event: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in event.items() if key != "at"}
 
@@ -3309,6 +3673,7 @@ def default_state_dir() -> pathlib.Path:
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     root.add_argument("--state-dir", type=pathlib.Path, default=default_state_dir())
+    root.add_argument("--isolated-test-state", action="store_true", help=argparse.SUPPRESS)
     commands = root.add_subparsers(dest="area", required=True)
     receipt = commands.add_parser("receipt")
     receipt_commands = receipt.add_subparsers(dest="command", required=True)
@@ -3359,13 +3724,27 @@ def parser() -> argparse.ArgumentParser:
     mutation_commands = mutation.add_subparsers(dest="command", required=True)
     mutation_commands.add_parser("prepare")
     mutation_commands.add_parser("validate-handoff")
+    lifecycle = commands.add_parser("lifecycle")
+    lifecycle_commands = lifecycle.add_subparsers(dest="command", required=True)
+    worker_teardown = lifecycle_commands.add_parser("worker-teardown")
+    worker_teardown.add_argument("--origin-thread", required=True)
+    worker_teardown.add_argument("--dry-run", action="store_true")
+    worker_teardown_release = lifecycle_commands.add_parser("worker-teardown-release")
+    worker_teardown_release.add_argument("--origin-thread", required=True)
     commands.add_parser("diagnose")
     return root
 
 
 def main() -> int:
     arguments = parser().parse_args()
-    store = ReceiptStore(arguments.state_dir.expanduser().resolve())
+    state_dir = arguments.state_dir.expanduser().resolve()
+    if arguments.isolated_test_state:
+        if os.environ.get("AMUX_CLAUDE_DELEGATION_TESTING") != "1":
+            raise HelperError("isolated test state is unavailable outside the test harness")
+        lifecycle_state_dir = state_dir
+    else:
+        lifecycle_state_dir = default_state_dir().expanduser().resolve()
+    store = ReceiptStore(state_dir, lifecycle_state_dir)
     if arguments.area == "mcp" and arguments.command == "serve":
         return serve_mcp(store, arguments.delegation_id)
     if arguments.area == "launch" and arguments.command == "transport":
@@ -3379,6 +3758,14 @@ def main() -> int:
     if arguments.area == "amp" and arguments.command == "inspect":
         print(json.dumps(inspect_amp_target(arguments.pane, arguments.origin_thread), sort_keys=True, separators=(",", ":")))
         return 0
+    if arguments.area == "lifecycle" and arguments.command == "worker-teardown":
+        result = store.worker_teardown(arguments.origin_thread, arguments.dry_run)
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 2 if result["outcome"] == "blocked" else 0
+    if arguments.area == "lifecycle" and arguments.command == "worker-teardown-release":
+        result = store.release_worker_teardown(arguments.origin_thread)
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 2 if result["outcome"] == "blocked" else 0
     if arguments.area == "diagnose":
         output: Any = diagnostics()
     elif arguments.area == "receipt" and arguments.command == "show":

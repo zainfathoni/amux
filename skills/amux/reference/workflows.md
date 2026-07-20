@@ -212,11 +212,15 @@ Report one aggregate table with mode, workspace, canonical identity, local targe
 ## Teardown a worker
 
 ```sh
+python3 "$HELPER" lifecycle worker-teardown --origin-thread <thread-id> --dry-run
 amux --dry-run teardown --current
+python3 "$HELPER" lifecycle worker-teardown --origin-thread <thread-id>
 amux teardown --current
 ```
 
-Use `--thread <id>` when current identity is unavailable. Teardown is worker-only and fails closed on ambiguous identity. It archives the verified remote thread, removes worker and shelf configuration, and stops the verified local client; an already absent verified local process is a benign skip.
+Set `HELPER` to the installed skill's `experimental/claude-delegation/claude_delegation.py`. Use `--thread <id>` for `amux` when current identity is unavailable. Run paired Claude lifecycle preflight before `amux teardown`, even when no delegation is expected. Both dry-runs must succeed before mutation. The paired execution durably fences the origin against new receipt creation, inspects the canonical lifecycle registry and every registered private receipt store, and may park only an acknowledged, terminal-safe receipt whose complete append-only event chain, exact immutable origin binding, and current Claude identity verify. It never removes artifacts, worktrees, receipts, reports, or group history. Any active, unacknowledged, unresolved, mismatched, missing, or indeterminate pair blocks with non-content recovery evidence. Stop without archiving, removing, or stopping the Amp worker.
+
+After paired execution succeeds, invoke `amux teardown` immediately while the durable origin fence remains. Teardown is worker-only and fails closed on ambiguous Amp identity. It archives the verified remote thread, removes worker and shelf configuration, and stops the verified local client; an already absent verified local process is a benign skip. The worker teardown remains the final action. If Amp teardown fails and the worker must resume, preserve evidence and use `lifecycle worker-teardown-release --origin-thread <thread-id>` only as an explicit recovery action after every bound pair still validates as `verified_parked`; never release by timeout, name, or inference.
 
 ## Finish a merged worker
 
@@ -230,11 +234,12 @@ Finish is worker-only post-merge orchestration. It never removes a runner implic
    ```
 
    An unreadable list or any configured runner match blocks finish. Only for a matched runner, use `amux --json runner doctor --workdir <worker-worktree>` to collect evidence; do not unpin/remove it or unlock its worktree. An empty list is the normal owner-free case. Then inspect tmux/process metadata for an unexpected `amp --no-tui` process using that workdir; ambiguous or positive ownership blocks, while a clean inspection may proceed.
-3. Update the designated main worktree with `git pull --ff-only`. Remove the clean worker worktree without force.
-4. Preserve squash-merge safety. Try `git branch -d <branch>` only after merge verification. If it refuses because the PR was squash-merged, do not use `-D` automatically; verify the PR head, remote state, and absence of unique/unpushed work, then require explicit authorization for force deletion. Delete a remote branch only when its merged PR proves it safe and the user authorized shared mutation.
-5. Do not tag or release unless separately and explicitly requested. Finish does not imply either.
-6. Follow the originating report protocol exactly. For a work-group worker, confirm the durable authorization, submit `merged` with the same report ID/binding/payload, and let amux verify the callback lease and send only its wake-up token. If durable reporting or notification fails, do not guess another pane and do not teardown; the report remains inspectable and the worker remains alive. For a legacy non-group assignment, follow its explicit callback format after re-verifying the immutable pane/session/window/process identity.
-7. After durable merged reporting and the coordinator's explicit finish direction, run worker teardown as the final action:
+3. Run the paired Claude lifecycle dry-run and execution from **Teardown a worker** before any worktree, branch, report, or Amp worker mutation. A blocker preserves all lifecycle evidence and stops finish. Successful execution parks every safe pair and leaves the durable origin fence active.
+4. Update the designated main worktree with `git pull --ff-only`. Remove the clean worker worktree without force.
+5. Preserve squash-merge safety. Try `git branch -d <branch>` only after merge verification. If it refuses because the PR was squash-merged, do not use `-D` automatically; verify the PR head, remote state, and absence of unique/unpushed work, then require explicit authorization for force deletion. Delete a remote branch only when its merged PR proves it safe and the user authorized shared mutation.
+6. Do not tag or release unless separately and explicitly requested. Finish does not imply either.
+7. Follow the originating report protocol exactly. For a work-group worker, confirm the durable authorization, submit `merged` with the same report ID/binding/payload, and let amux verify the callback lease and send only its wake-up token. If durable reporting or notification fails, do not guess another pane and do not teardown; the report remains inspectable and the worker remains alive. For a legacy non-group assignment, follow its explicit callback format after re-verifying the immutable pane/session/window/process identity.
+8. After durable merged reporting and the coordinator's explicit finish direction, rerun `lifecycle worker-teardown --origin-thread <thread-id>` to revalidate all registered stores and the durable fence. Only after paired success, run worker teardown as the final action:
 
    ```sh
    amux teardown --thread <thread-id>

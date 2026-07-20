@@ -32,7 +32,7 @@ Amp creates one dedicated linked worktree and branch at the intended baseline. S
 }
 ```
 
-Preparation rejects a primary or dirty worktree, detached/ambiguous branch, repository mismatch, shared writable state, ambiguous ownership, or any handoff other than one clean local commit. Create the receipt with `producer_role:mutating_delegate`, `authority:exclusive_writer`, the returned baseline commit/branch and ownership values, the capacity decision digest, and the common correlation/launch digests. Exact replay may return `duplicate`; conflicting baseline or ownership reuse fails closed.
+Preparation rejects a primary or dirty worktree, detached/ambiguous branch, repository mismatch, shared writable state, ambiguous ownership, or any handoff other than one clean local commit. Create the receipt with `producer_role:mutating_delegate`, `authority:exclusive_writer`, the returned baseline commit/branch and ownership values, the capacity decision digest, the common correlation/launch digests, and `origin_thread` equal to the canonical identity of the Amp worker that explicitly owns the delegation. Never infer that lifecycle owner from worktree, branch, names, PID, issue number, tmux placement, or Claude session ID. Exact replay may return `duplicate`; conflicting baseline or ownership reuse fails closed.
 
 Completion: the private receipt immutably binds the clean dedicated worktree, branch, baseline, exclusive writer, Amp integration owner, one-commit handoff, and capacity decision before launch.
 

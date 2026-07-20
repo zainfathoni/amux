@@ -800,7 +800,8 @@ func TestMutatingReceiptRejectsThinkerReportWithoutFreezingOrDelivery(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command("python3", helper, "--state-dir", stateDir, "mcp", "serve", "--delegation-id", "mutation-kind")
+	command := exec.Command("python3", helper, "--state-dir", stateDir, "--isolated-test-state", "mcp", "serve", "--delegation-id", "mutation-kind")
+	command.Env = append(os.Environ(), "AMUX_CLAUDE_DELEGATION_TESTING=1")
 	command.Stdin = &input
 	output, err := command.CombinedOutput()
 	if err != nil || !strings.Contains(string(output), `"isError":true`) || !strings.Contains(string(output), "kind is invalid") {

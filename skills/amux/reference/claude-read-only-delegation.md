@@ -24,7 +24,7 @@ Completion: diagnostics are disclosed, the worktree/packet are private and exact
 
 ## 2. Create the receipt
 
-Submit `receipt create` with the contract's complete immutable binding and routing such as `{"target":"machine_local_inbox"}`. The origin thread is immutable provenance; target and recovery routing are mutable. Exact create replay must return `duplicate`; never change an identity to work around a conflict.
+Submit `receipt create` with the contract's complete immutable binding and routing such as `{"target":"machine_local_inbox"}`. Bind `origin_thread` to the canonical thread identity of the Amp worker that explicitly owns this delegation; never derive or repair it from names, cwd, PID, issue number, tmux placement, or Claude session ID. The origin thread is immutable provenance and lifecycle ownership; target and recovery routing are mutable. Exact create replay must return `duplicate`; never change an identity to work around a conflict.
 
 Completion: the owner-only receipt durably exists before tmux launch and `receipt show --delegation-id <id>` matches the intended binding and route.
 
