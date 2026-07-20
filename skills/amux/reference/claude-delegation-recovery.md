@@ -26,6 +26,10 @@ Do not search for a convenient Amp pane or weaken identity checks. Recover the r
 
 Consume the current valid report before acknowledging that same message, and resolve or explicitly supersede any input request. Keep Claude active until acknowledgement. If exact incarnation re-verification fails, do not kill a pane by name, PID, workdir, or session ID alone. Preserve the acknowledged receipt and inspect whether tmux, process, workdir, launch command, or incarnation changed. If `park_intent` is durable without a result, retry the same event with `"recover":true`; only exact matching identity or confirmed exact-pane absence may complete it. Do not automatically park or clean up.
 
+## Paired worker teardown blocked
+
+Treat every paired worker teardown blocker as authoritative: preserve the Amp worker, Claude pane, private artifacts/worktree, receipt, report, group history, canonical lifecycle registry, and durable origin fence. Use the returned non-content blocker code to inspect the existing branch above: consume and acknowledge reports deliberately, resolve input, repair an unavailable owner-private registered store, or recover the exact durable park intent. Never adopt a legacy or unrelated pane, rewrite the origin binding, issue a new launch after indeterminate intent, or infer ownership from names, cwd, PID, issue number, tmux placement, or Claude session ID. Retry paired teardown only after the durable state is safe; run Amp worker teardown last. If Amp teardown itself fails and the worker must resume, explicitly run `lifecycle worker-teardown-release` only after every registered pair still validates as safely parked. Never release the fence automatically or merely to bypass a blocker.
+
 ## Capacity or usage interruption
 
 Record the factual `unavailable` or `untested` capability and pause. Capacity diagnostics are implementation inputs, not permission to select Claude autonomously, exceed a reserve, or claim a useful result.

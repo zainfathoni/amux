@@ -940,6 +940,399 @@ func TestReceiptBindingIsImmutableWhileRoutingCanChange(t *testing.T) {
 	}
 }
 
+func TestWorkerTeardownLifecycleScopesPairsByImmutableOriginThread(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	unrelated := testBinding("delegation-unrelated")
+	unrelated["origin_thread"] = "T-unrelated"
+	assertHelperOutcome(t, stateDir, "recorded", map[string]any{
+		"binding": unrelated, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+
+	stdout, stderr, err := runHelper(t, stateDir, map[string]any{},
+		"lifecycle", "worker-teardown", "--origin-thread", "T-origin", "--dry-run")
+	if err != nil {
+		t.Fatalf("dry-run unrelated worker teardown: %v: %s", err, stderr)
+	}
+	var result struct {
+		Action             string `json:"action"`
+		OriginThreadSHA256 string `json:"origin_thread_sha256"`
+		Outcome            string `json:"outcome"`
+		DryRun             bool   `json:"dry_run"`
+		Pairs              []any  `json:"pairs"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("decode worker teardown dry-run: %v\n%s", err, stdout)
+	}
+	wantOriginDigest := fmt.Sprintf("%x", sha256.Sum256([]byte("T-origin")))
+	if result.Action != "worker_teardown" || result.OriginThreadSHA256 != wantOriginDigest || result.Outcome != "ready" || !result.DryRun || len(result.Pairs) != 0 {
+		t.Fatalf("worker teardown dry-run = %#v, want ready no-pair result", result)
+	}
+	if strings.Contains(stdout+stderr, "T-origin") || strings.Contains(stdout+stderr, "delegation-unrelated") {
+		t.Fatalf("worker teardown dry-run leaked raw lifecycle identity: %s%s", stdout, stderr)
+	}
+
+	stored, err := os.ReadFile(filepath.Join(stateDir, "receipts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(stored, []byte(`"origin_thread":"T-unrelated"`)) {
+		t.Fatalf("unrelated durable pair was changed: %s", stored)
+	}
+}
+
+func TestWorkerTeardownLifecycleParksOnlyExactAcknowledgedPair(t *testing.T) {
+	stateDir := t.TempDir()
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "tmux.log")
+	identityUnavailable := filepath.Join(t.TempDir(), "identity-unavailable")
+	sessionID := "850e8400-e29b-41d4-a716-446655440000"
+	arguments := []string{"--session-id", sessionID, "policy"}
+	panePID, executable := startProcessFixture(t, "claude", arguments...)
+	launcherIdentity := testExecutableIdentity(t, executable)
+	objectIdentity := testExecutableObjectIdentity(t, executable)
+	startCommand := "exec claude --session-id " + sessionID + " policy"
+	writeExecutable(t, filepath.Join(binDir, "tmux"), `#!/bin/sh
+set -eu
+case "$1" in
+  display-message)
+    test ! -e "$IDENTITY_UNAVAILABLE"
+    printf 'Claude\tthinker\t%s\t%%40\t%s\t%s\tclaude\t%s\n' "$CLAUDE_WINDOW_ID" "$PANE_PID" "$TARGET_WORKDIR" "$START_COMMAND"
+    ;;
+  list-panes) exit 0 ;;
+  kill-pane) printf '%s\n' "$*" >> "$TMUX_LOG" ;;
+  *) exit 2 ;;
+esac
+`)
+	writeExecutable(t, filepath.Join(binDir, "ps"), `#!/bin/sh
+set -eu
+case "$*" in
+  *lstart=*) printf '%s\n' 'Fri Jul 17 12:01:00 2026' ;;
+  *comm=*) printf '%s\n' "$PROCESS_EXECUTABLE" ;;
+  *command=*) printf 'claude --session-id %s policy\n' "$CLAUDE_SESSION_ID" ;;
+  *) exit 2 ;;
+esac
+`)
+	environment := append(os.Environ(),
+		"PATH="+binDir+":"+os.Getenv("PATH"), "TMUX_LOG="+logPath,
+		"TARGET_WORKDIR="+stateDir, "START_COMMAND="+startCommand,
+		"CLAUDE_SESSION_ID="+sessionID, "PROCESS_EXECUTABLE="+executable,
+		"IDENTITY_UNAVAILABLE="+identityUnavailable, "CLAUDE_WINDOW_ID=@40",
+		fmt.Sprintf("PANE_PID=%d", panePID),
+	)
+	binding := testBinding("private-identity-mismatch-sentinel")
+	binding["workdir"] = stateDir
+	binding["launch_command_digest"] = fmt.Sprintf("%x", sha256.Sum256([]byte(startCommand)))
+	assertHelperOutcomeEnv(t, stateDir, environment, "recorded", map[string]any{
+		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	identity := inspectTestClaudeIdentity(t, environment, "%40", sessionID, nulDigest(arguments), launcherIdentity, objectIdentity)
+	recordTestLaunch(t, stateDir, binding["delegation_id"].(string), identity, nulDigest(arguments), launcherIdentity, objectIdentity)
+	assertHelperOutcomeEnv(t, stateDir, environment, "recorded", map[string]any{
+		"delegation_id": binding["delegation_id"], "event_id": "acquire-worker-teardown",
+		"pane_id": "%40", "claude_session_id": sessionID,
+	}, "session", "acquire")
+	report := testMessage(binding, "report-worker-teardown", "thinker_report", map[string]any{
+		"accepted_role": true, "accepted_exclusions": true, "status": "complete",
+		"verdict": "Synthetic lifecycle fixture.", "rationale": "The full durable chain authorizes exact parking.",
+		"evidence": []any{}, "assumptions": []any{}, "unsupported_claims": []any{}, "blockers": []any{},
+		"verification": []any{"synthetic exact identity"}, "changed_artifacts": []any{}, "references": []any{},
+	})
+	assertHelperOutcomeEnv(t, stateDir, environment, "recorded", report, "report", "submit")
+	assertHelperOutcomeEnv(t, stateDir, environment, "recorded", map[string]any{
+		"delegation_id": binding["delegation_id"], "event_id": "deliver-worker-teardown", "message_id": "report-worker-teardown",
+	}, "inbox", "consume")
+	assertHelperOutcomeEnv(t, stateDir, environment, "recorded", map[string]any{
+		"delegation_id": binding["delegation_id"], "event_id": "ack-worker-teardown", "message_id": "report-worker-teardown",
+	}, "report", "acknowledge")
+	acknowledgedReceipt, err := os.ReadFile(filepath.Join(stateDir, "receipts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, unsafeEnvironment := range map[string][]string{
+		"mismatched pane": replaceEnvironment(environment, "CLAUDE_WINDOW_ID", "@41"),
+		"missing pane":    environment,
+	} {
+		if name == "missing pane" {
+			if err := os.WriteFile(identityUnavailable, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		stdout, stderr, err := runHelperEnv(t, stateDir, unsafeEnvironment, map[string]any{},
+			"lifecycle", "worker-teardown", "--origin-thread", "T-origin")
+		if err == nil || !strings.Contains(stdout, `"blocker":"identity_mismatch_or_unavailable"`) {
+			t.Fatalf("%s worker teardown was not blocked: %v: %s%s", name, err, stdout, stderr)
+		}
+		if strings.Contains(stdout+stderr, "private-identity-mismatch-sentinel") || strings.Contains(stdout+stderr, "T-origin") {
+			t.Fatalf("%s worker teardown leaked raw lifecycle identity: %s%s", name, stdout, stderr)
+		}
+		if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+			t.Fatalf("%s worker teardown killed a pane: %v", name, err)
+		}
+		currentReceipt, err := os.ReadFile(filepath.Join(stateDir, "receipts.json"))
+		if err != nil || !bytes.Equal(currentReceipt, acknowledgedReceipt) {
+			t.Fatalf("%s worker teardown changed durable state: %v", name, err)
+		}
+		if name == "missing pane" {
+			if err := os.Remove(identityUnavailable); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	stdout, stderr, err := runHelperEnv(t, stateDir, environment, map[string]any{},
+		"lifecycle", "worker-teardown", "--origin-thread", "T-origin", "--dry-run")
+	if err != nil || !strings.Contains(stdout, `"action":"park"`) || !strings.Contains(stdout, `"outcome":"ready"`) {
+		t.Fatalf("worker teardown dry-run did not plan exact pair parking: %v: %s%s", err, stdout, stderr)
+	}
+	if strings.Contains(stdout+stderr, "private-identity-mismatch-sentinel") || strings.Contains(stdout+stderr, "T-origin") {
+		t.Fatalf("worker teardown dry-run leaked raw lifecycle identity: %s%s", stdout, stderr)
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("worker teardown dry-run killed a pane: %v", err)
+	}
+
+	stdout, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{},
+		"lifecycle", "worker-teardown", "--origin-thread", "T-origin")
+	if err != nil || !strings.Contains(stdout, `"action":"park"`) || !strings.Contains(stdout, `"outcome":"cleaned"`) {
+		t.Fatalf("worker teardown did not clean exact pair: %v: %s%s", err, stdout, stderr)
+	}
+	if strings.Contains(stdout+stderr, "private-identity-mismatch-sentinel") || strings.Contains(stdout+stderr, "T-origin") {
+		t.Fatalf("worker teardown cleanup leaked raw lifecycle identity: %s%s", stdout, stderr)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil || strings.Count(string(log), "kill-pane -t %40") != 1 {
+		t.Fatalf("worker teardown exact kill count: %v: %s", err, log)
+	}
+
+	stdout, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{},
+		"lifecycle", "worker-teardown", "--origin-thread", "T-origin")
+	if err != nil || !strings.Contains(stdout, `"action":"none"`) || !strings.Contains(stdout, `"state":"verified_parked"`) {
+		t.Fatalf("worker teardown replay was not idempotent: %v: %s%s", err, stdout, stderr)
+	}
+	log, err = os.ReadFile(logPath)
+	if err != nil || strings.Count(string(log), "kill-pane -t %40") != 1 {
+		t.Fatalf("worker teardown replay repeated kill: %v: %s", err, log)
+	}
+
+	lateBinding := testBinding("late-after-cleanup")
+	_, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{
+		"binding": lateBinding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	if err == nil || !strings.Contains(stderr, "durable teardown fence") {
+		t.Fatalf("durable teardown fence permitted a late pair: %v: %s", err, stderr)
+	}
+	stdout, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{},
+		"lifecycle", "worker-teardown-release", "--origin-thread", "T-origin")
+	if err != nil || !strings.Contains(stdout, `"outcome":"released"`) {
+		t.Fatalf("explicit safe fence release failed: %v: %s%s", err, stdout, stderr)
+	}
+	if strings.Contains(stdout+stderr, "T-origin") {
+		t.Fatalf("worker teardown release leaked raw origin thread: %s%s", stdout, stderr)
+	}
+	assertHelperOutcomeEnv(t, stateDir, environment, "recorded", map[string]any{
+		"binding": lateBinding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+}
+
+func TestWorkerTeardownLifecycleBlocksUnsafeStatesWithPrivacySafeJSON(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		blocker string
+		mutate  func(map[string]any)
+	}{
+		{
+			name: "active without verified launch", blocker: "launch_unverified",
+			mutate: func(map[string]any) {},
+		},
+		{
+			name: "indeterminate launch", blocker: "launch_indeterminate",
+			mutate: func(receipt map[string]any) {
+				receipt["events"] = append(receipt["events"].([]any), testLaunchIntentEvent())
+			},
+		},
+		{
+			name: "unacknowledged report", blocker: "unacknowledged_report",
+			mutate: func(receipt map[string]any) {
+				receipt["state"] = "delivered"
+				receipt["events"] = append(receipt["events"].([]any), testLaunchIntentEvent(), testLaunchCompletedEvent())
+				receipt["private_test_content"] = "private-report-sentinel"
+			},
+		},
+		{
+			name: "unresolved input", blocker: "unresolved_input",
+			mutate: func(receipt map[string]any) {
+				receipt["input_state"] = "seen"
+				receipt["private_test_content"] = "private-input-sentinel"
+			},
+		},
+		{
+			name: "indeterminate park", blocker: "park_indeterminate",
+			mutate: func(receipt map[string]any) {
+				receipt["state"] = "acknowledged"
+				receipt["events"] = append(receipt["events"].([]any), testLaunchIntentEvent(), testLaunchCompletedEvent(), map[string]any{
+					"event_id": "park-intent", "kind": "park_intent", "identity": map[string]any{"pane_id": "%private"},
+				})
+			},
+		},
+		{
+			name: "forged acknowledged materialized state", blocker: "receipt_unverified",
+			mutate: func(receipt map[string]any) {
+				receipt["state"] = "acknowledged"
+				receipt["session_identity"] = testLaunchCompletedEvent()["identity"]
+				receipt["events"] = append(receipt["events"].([]any), testLaunchIntentEvent(), testLaunchCompletedEvent(), map[string]any{
+					"event_id": "acquire-forged", "kind": "session_acquired", "identity": receipt["session_identity"],
+				})
+			},
+		},
+		{
+			name: "forged parked materialized state", blocker: "receipt_unverified",
+			mutate: func(receipt map[string]any) {
+				receipt["state"] = "verified_parked"
+				receipt["parked_at"] = "2026-07-17T12:00:00Z"
+				receipt["cleanup_eligible_at"] = "2026-08-16T12:00:00Z"
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			workdir := t.TempDir()
+			evidence := filepath.Join(workdir, "lifecycle-evidence")
+			if err := os.WriteFile(evidence, []byte("preserve"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			binding := testBinding("private-delegation-sentinel")
+			binding["workdir"] = workdir
+			assertHelperOutcome(t, stateDir, "recorded", map[string]any{
+				"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+			}, "receipt", "create")
+			mutateTestReceipt(t, stateDir, test.mutate)
+			before, err := os.ReadFile(filepath.Join(stateDir, "receipts.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			stdout, stderr, err := runHelper(t, stateDir, map[string]any{},
+				"lifecycle", "worker-teardown", "--origin-thread", "T-origin")
+			if err == nil || !strings.Contains(stdout, `"outcome":"blocked"`) || !strings.Contains(stdout, `"blocker":"`+test.blocker+`"`) {
+				t.Fatalf("unsafe worker teardown result = %v: %s%s", err, stdout, stderr)
+			}
+			if strings.Contains(stdout+stderr, "private-") || strings.Contains(stdout+stderr, "T-origin") || strings.Contains(stdout+stderr, "--session-id") {
+				t.Fatalf("unsafe worker teardown leaked content or argv: %s%s", stdout, stderr)
+			}
+			after, err := os.ReadFile(filepath.Join(stateDir, "receipts.json"))
+			if err != nil || !bytes.Equal(after, before) {
+				t.Fatalf("unsafe worker teardown changed receipt: %v", err)
+			}
+			if content, err := os.ReadFile(evidence); err != nil || string(content) != "preserve" {
+				t.Fatalf("unsafe worker teardown deleted lifecycle evidence: %v: %q", err, content)
+			}
+		})
+	}
+}
+
+func TestCanonicalLifecycleRegistryFindsAlternateStoresAndFencesOrigin(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	firstState := t.TempDir()
+	secondState := t.TempDir()
+	binDir := t.TempDir()
+	tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
+	writeExecutable(t, filepath.Join(binDir, "tmux"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TMUX_LOG\"\nexit 99\n")
+	environment := append(replaceEnvironment(os.Environ(), "HOME", home),
+		"PATH="+binDir+":"+os.Getenv("PATH"), "TMUX_LOG="+tmuxLog)
+	run := func(stateDir string, input map[string]any, args ...string) (string, string, error) {
+		payload, err := json.Marshal(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		commandArgs := []string{helper}
+		if stateDir != "" {
+			commandArgs = append(commandArgs, "--state-dir", stateDir)
+		}
+		command := exec.Command("python3", append(commandArgs, args...)...)
+		command.Env = environment
+		command.Stdin = bytes.NewReader(payload)
+		var stdout, stderr bytes.Buffer
+		command.Stdout = &stdout
+		command.Stderr = &stderr
+		err = command.Run()
+		return stdout.String(), stderr.String(), err
+	}
+	binding := testBinding("alternate-store-pair")
+	stdout, stderr, err := run(firstState, map[string]any{
+		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	if err != nil || !strings.Contains(stdout, `"outcome":"recorded"`) {
+		t.Fatalf("create alternate-store pair: %v: %s%s", err, stdout, stderr)
+	}
+
+	stdout, stderr, err = run("", map[string]any{}, "lifecycle", "worker-teardown", "--origin-thread", "T-origin")
+	if err == nil || !strings.Contains(stdout, `"outcome":"blocked"`) || !strings.Contains(stdout, `"blocker":"launch_unverified"`) {
+		t.Fatalf("canonical teardown missed alternate-store pair: %v: %s%s", err, stdout, stderr)
+	}
+	if strings.Contains(stdout+stderr, firstState) || strings.Contains(stdout+stderr, "alternate-store-pair") || strings.Contains(stdout+stderr, "T-origin") {
+		t.Fatalf("canonical teardown leaked store, delegation, or thread identity: %s%s", stdout, stderr)
+	}
+	if err := os.Remove(filepath.Join(firstState, "receipts.json")); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err = run("", map[string]any{}, "lifecycle", "worker-teardown", "--origin-thread", "T-origin")
+	if err == nil || !strings.Contains(stdout, `"blocker":"receipt_store_invalid_or_unavailable"`) {
+		t.Fatalf("missing registered store did not block teardown: %v: %s%s", err, stdout, stderr)
+	}
+	if strings.Contains(stdout+stderr, firstState) || strings.Contains(stdout+stderr, "alternate-store-pair") || strings.Contains(stdout+stderr, "T-origin") {
+		t.Fatalf("missing registered store leaked lifecycle identity: %s%s", stdout, stderr)
+	}
+	if _, err := os.Stat(tmuxLog); !os.IsNotExist(err) {
+		t.Fatalf("missing registered store attempted tmux mutation: %v", err)
+	}
+	lifecyclePath := filepath.Join(home, "Library", "Application Support", "amux", "experimental", "claude-delegation", "lifecycle.json")
+	lifecycleEvidence, err := os.ReadFile(lifecyclePath)
+	if err != nil || !bytes.Contains(lifecycleEvidence, []byte(`"T-origin"`)) {
+		t.Fatalf("missing registered store did not preserve durable fence evidence: %v: %s", err, lifecycleEvidence)
+	}
+
+	secondBinding := testBinding("late-pair")
+	stdout, stderr, err = run(secondState, map[string]any{
+		"binding": secondBinding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	if err == nil || !strings.Contains(stderr, "durable teardown fence") {
+		t.Fatalf("origin fence permitted late pair: %v: %s%s", err, stdout, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(secondState, "receipts.json")); !os.IsNotExist(err) {
+		t.Fatalf("rejected late pair wrote a receipt: %v", err)
+	}
+}
+
+func TestWorkerTeardownMalformedStoreReturnsBoundedJSONBlocker(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	binding := testBinding("malformed-private-identity")
+	assertHelperOutcome(t, stateDir, "recorded", map[string]any{
+		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	mutateTestReceipt(t, stateDir, func(receipt map[string]any) {
+		receipt["binding"] = []any{"private-path-sentinel", stateDir}
+	})
+
+	stdout, stderr, err := runHelper(t, stateDir, map[string]any{},
+		"lifecycle", "worker-teardown", "--origin-thread", "T-origin")
+	if err == nil || !strings.Contains(stdout, `"blocker":"receipt_store_invalid_or_unavailable"`) {
+		t.Fatalf("malformed store did not return JSON blocker: %v: %s%s", err, stdout, stderr)
+	}
+	if stderr != "" || strings.Contains(stdout, stateDir) || strings.Contains(stdout, "private-") || strings.Contains(stdout, "T-origin") || strings.Contains(stdout, "Traceback") {
+		t.Fatalf("malformed store leaked private detail or traceback: %s%s", stdout, stderr)
+	}
+}
+
 func TestReportLifecycleRequiresExplicitOrderedTransitions(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
@@ -1108,6 +1501,7 @@ func TestConcurrentWritersShareOnePrivateLockDomainWithoutLosingEvents(t *testin
 	for path, want := range map[string]os.FileMode{
 		stateDir:                                     0o700,
 		filepath.Join(stateDir, "receipts.json"):     0o600,
+		filepath.Join(stateDir, "lifecycle.json"):    0o600,
 		filepath.Join(stateDir, "experimental.lock"): 0o600,
 	} {
 		info, err := os.Stat(path)
@@ -1160,7 +1554,8 @@ func TestMCPServerExposesOnlySchemaLimitedSemanticSubmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command("python3", helper, "--state-dir", stateDir, "mcp", "serve", "--delegation-id", binding["delegation_id"].(string))
+	command := exec.Command("python3", helper, "--state-dir", stateDir, "--isolated-test-state", "mcp", "serve", "--delegation-id", binding["delegation_id"].(string))
+	command.Env = append(os.Environ(), "AMUX_CLAUDE_DELEGATION_TESTING=1")
 	command.Stdin = &input
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -3545,6 +3940,45 @@ func recordTestLaunch(t *testing.T, stateDir, delegationID string, identity map[
 	}
 }
 
+func mutateTestReceipt(t *testing.T, stateDir string, mutate func(map[string]any)) {
+	t.Helper()
+	path := filepath.Join(stateDir, "receipts.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var store map[string]any
+	if err := json.Unmarshal(data, &store); err != nil {
+		t.Fatal(err)
+	}
+	mutate(store["receipts"].([]any)[0].(map[string]any))
+	updated, err := json.Marshal(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, updated, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testLaunchIntentEvent() map[string]any {
+	return map[string]any{
+		"event_id": "launch-fixture", "kind": "launch_intent",
+		"expected_argv_digest":                strings.Repeat("e", 64),
+		"expected_launcher_identity":          "file:1:2",
+		"expected_executable_object_identity": "object:1:2:3:digest",
+	}
+}
+
+func testLaunchCompletedEvent() map[string]any {
+	return map[string]any{
+		"event_id": "launch-completed-fixture", "kind": "launch_completed",
+		"operation_event_id": "launch-fixture", "identity": map[string]any{
+			"session": "Claude", "window": "thinker", "window_id": "@private", "pane_id": "%private",
+		},
+	}
+}
+
 func inspectTestClaudeIdentity(t *testing.T, environment []string, paneID, sessionID, argvDigest, launcherIdentity, objectIdentity string) map[string]any {
 	t.Helper()
 	helper, err := filepath.Abs("claude_delegation.py")
@@ -3608,6 +4042,13 @@ func replaceEnvironment(environment []string, key, value string) []string {
 	return append(result, prefix+value)
 }
 
+func environmentOrCurrent(environment []string) []string {
+	if environment == nil {
+		return os.Environ()
+	}
+	return environment
+}
+
 func assertHelperOutcome(t *testing.T, stateDir, want string, input map[string]any, args ...string) {
 	t.Helper()
 	stdout, stderr, err := runHelper(t, stateDir, input, args...)
@@ -3650,10 +4091,8 @@ func runHelperEnv(t *testing.T, stateDir string, environment []string, input map
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command("python3", append([]string{helper, "--state-dir", stateDir}, args...)...)
-	if environment != nil {
-		command.Env = environment
-	}
+	command := exec.Command("python3", append([]string{helper, "--state-dir", stateDir, "--isolated-test-state"}, args...)...)
+	command.Env = append(environmentOrCurrent(environment), "AMUX_CLAUDE_DELEGATION_TESTING=1")
 	command.Stdin = bytes.NewReader(payload)
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
@@ -3672,9 +4111,9 @@ func runHelperEnvWithStackLimit(t *testing.T, stateDir string, environment []str
 	if err != nil {
 		t.Fatal(err)
 	}
-	arguments := append([]string{"python3", helper, "--state-dir", stateDir}, args...)
+	arguments := append([]string{"python3", helper, "--state-dir", stateDir, "--isolated-test-state"}, args...)
 	command := exec.Command("/bin/sh", append([]string{"-c", `ulimit -s 256; exec "$@"`, "sh"}, arguments...)...)
-	command.Env = environment
+	command.Env = append(environmentOrCurrent(environment), "AMUX_CLAUDE_DELEGATION_TESTING=1")
 	command.Stdin = bytes.NewReader(payload)
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout

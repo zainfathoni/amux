@@ -518,6 +518,55 @@ func TestHealthAndFinishPreserveModeSafety(t *testing.T) {
 	}
 }
 
+func TestClaudePairTeardownIsFailClosedAndRunsBeforeWorkerTeardown(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
+	contract := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-delegation-contract.md"))
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	recovery := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-delegation-recovery.md"))
+
+	for _, required := range []string{
+		"lifecycle worker-teardown --origin-thread <thread-id> --dry-run",
+		"lifecycle worker-teardown --origin-thread <thread-id>",
+		"active, unacknowledged, unresolved, mismatched, missing, or indeterminate",
+		"before `amux teardown`",
+		"worker teardown remains the final action",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("worker lifecycle workflow is missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		"exact immutable origin-thread binding",
+		"never becomes an Amp worker, runner, group member, or generic CLI resource",
+		"non-content action and blocker codes",
+		"origin-thread SHA-256",
+		"missing or unreadable registered directory or `receipts.json` blocks",
+		"30-day cleanup eligibility",
+	} {
+		if !strings.Contains(contract, required) {
+			t.Errorf("Claude lifecycle contract is missing %q", required)
+		}
+	}
+	if !strings.Contains(recovery, "paired worker teardown") || !strings.Contains(recovery, "preserve the Amp worker") {
+		t.Error("Claude recovery does not preserve worker and evidence on paired teardown blockers")
+	}
+	if !strings.Contains(skill, "paired Claude lifecycle preflight") {
+		t.Error("SKILL.md does not route teardown through paired Claude lifecycle preflight")
+	}
+	pairAdmission := strings.Index(workflow, "Run the paired Claude lifecycle dry-run and execution")
+	worktreeRemoval := strings.Index(workflow, "Remove the clean worker worktree")
+	finalRevalidation := strings.Index(workflow, "rerun `lifecycle worker-teardown")
+	finalTeardown := strings.LastIndex(workflow, "amux teardown --thread <thread-id>")
+	if pairAdmission < 0 || worktreeRemoval < 0 || pairAdmission > worktreeRemoval {
+		t.Error("finish does not admit paired Claude lifecycle before worktree removal")
+	}
+	if finalRevalidation < 0 || finalTeardown < 0 || finalRevalidation > finalTeardown {
+		t.Error("finish does not revalidate the durable pair fence before final worker teardown")
+	}
+}
+
 func TestPublicSkillDocsDoNotExposeFakeOrRemovedCommands(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
