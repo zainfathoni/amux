@@ -12,6 +12,22 @@ Website: [amux.zainf.dev](https://amux.zainf.dev) · Skill guide: [amux.zainf.de
 
 Requirements: Amp CLI and tmux. Building from source also requires the Go version in `go.mod`.
 
+### Shell installer
+
+Install the latest Linux or macOS release at the canonical self-updating path, `~/.local/bin/amux`:
+
+```sh
+curl -fsSL https://amux.zainf.dev/install.sh | sh
+```
+
+The installer detects arm64/amd64, downloads the matching GitHub release archive and published checksum, verifies SHA-256, and atomically replaces the canonical binary without touching an existing installation on failure. It reports any PATH setup or shadowing and prints the exact `amux install doctor` command to run next.
+
+For automation that needs a pinned release, set a published tag:
+
+```sh
+curl -fsSL https://amux.zainf.dev/install.sh | AMUX_VERSION=v0.2.1 sh
+```
+
 ### Homebrew
 
 ```sh
@@ -21,9 +37,9 @@ brew upgrade amux
 
 Homebrew owns that installation. `amux update` deliberately refuses Homebrew, mise, asdf, Nix, and system-package paths.
 
-### Manual release
+### Manual release fallback
 
-Release archives are available for Linux and macOS on amd64 and arm64. Verify the checksum, then install the matching binary at the canonical self-updating path:
+If the shell installer cannot be used, release archives are available for Linux and macOS on amd64 and arm64. Select the matching archive, verify its separately published checksum, then install the binary at the canonical self-updating path. For example, on Linux amd64:
 
 ```sh
 curl -LO https://github.com/zainfathoni/amux/releases/latest/download/amux-linux-amd64.tar.gz
@@ -36,8 +52,8 @@ install -D -m 0755 amux-linux-amd64/amux ~/.local/bin/amux
 Keep `~/.local/bin` early on `PATH`. Then:
 
 ```sh
-amux update
 amux install doctor
+amux update
 amux --json install doctor
 ```
 

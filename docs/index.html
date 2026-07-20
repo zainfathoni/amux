@@ -814,7 +814,7 @@
                 canonical workdir, and both inside same-named tmux workspaces — with explicit side effects safe to hand to agents.
               </p>
               <div class="hero-actions">
-                <a class="button-primary" href="#install">Install with Homebrew</a>
+                <a class="button-primary" href="#install">Install amux</a>
                 <a class="button-secondary" href="https://github.com/zainfathoni/amux">View on GitHub</a>
               </div>
             </div>
@@ -939,20 +939,21 @@
             <div>
               <h2 id="install-title">A binary, Amp CLI,<br />and tmux.</h2>
               <p class="install-copy">
-                No daemon, no database. Start with <code>--dry-run</code>, keep what works. Release archives ship for Linux and macOS, amd64 and arm64.
+                No daemon, no database. The installer verifies the published checksum and atomically installs the Linux or macOS arm64/amd64 release at <code>~/.local/bin/amux</code>.
               </p>
               <p class="install-links">
-                Prefer manual installs?
-                <a href="https://github.com/zainfathoni/amux#manual-release">Release archive instructions</a> ·
+                Other options:
+                <a href="https://github.com/zainfathoni/amux#homebrew">Homebrew</a> ·
+                <a href="https://github.com/zainfathoni/amux#manual-release-fallback">manual release fallback</a> ·
                 <a href="https://github.com/zainfathoni/amux#source">build from source</a>
               </p>
             </div>
             <div class="terminal install-terminal" aria-label="amux install commands">
               <div class="terminal-bar">install</div>
-              <pre><code><span class="prompt">$</span> brew install zainfathoni/tap/amux
+              <pre><code><span class="prompt">$</span> curl -fsSL https://amux.zainf.dev/install.sh | sh
 
-<span class="comment"># safely preview restoring both modes in a workspace</span>
-<span class="prompt">$</span> amux --dry-run launch --workspace product</code></pre>
+<span class="comment"># verify PATH selection and installation health</span>
+<span class="prompt">$</span> ~/.local/bin/amux install doctor</code></pre>
             </div>
           </div>
         </section>
