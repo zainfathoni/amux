@@ -173,8 +173,8 @@ func TestCompletionGeneratesShellScripts(t *testing.T) {
 			shell: "bash",
 			want: []string{
 				"complete -F _amux_complete amux",
-				"worker spawn shelve unshelve teardown group callback report install migrate-config completion update version path help",
-				"--config-dir --json --dry-run --help -h --version",
+				"list launch park restart remove doctor reconcile worker runner workspace workspaces",
+				"--config-dir --json --dry-run --attach --no-attach --terminal-launcher --help -h --version",
 				"list pin unpin launch park restart remove spawn shelve unshelve teardown doctor reconcile",
 				"compgen -W \"doctor\"",
 				"compgen -W \"declare add remove coordinator list show reconcile\"",

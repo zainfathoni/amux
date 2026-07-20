@@ -79,6 +79,203 @@ func TestExecuteProvidesContextualHelpAndStableSelectorFlags(t *testing.T) {
 	}
 }
 
+func TestCompletionRootSurfaceMatchesAuthoritativeHelp(t *testing.T) {
+	var help bytes.Buffer
+	if err := (app{stdout: &help}).execute([]string{"help"}); err != nil {
+		t.Fatal(err)
+	}
+	commands, flags := rootHelpSurface(help.String())
+	if len(commands) == 0 || len(flags) == 0 {
+		t.Fatalf("failed to read root help surface:\n%s", help.String())
+	}
+
+	for _, shell := range []string{"bash", "zsh", "fish"} {
+		t.Run(shell, func(t *testing.T) {
+			var completion bytes.Buffer
+			if err := (app{stdout: &completion}).execute([]string{"completion", shell}); err != nil {
+				t.Fatal(err)
+			}
+			output := completion.String()
+			bashWords := map[string]bool{}
+			zshCommands := map[string]bool{}
+			if shell == "bash" {
+				bashWords = bashRootCompletionWords(output)
+			} else if shell == "zsh" {
+				zshCommands = zshRootCompletionCommands(output)
+			}
+			for _, command := range commands {
+				found := false
+				switch shell {
+				case "zsh":
+					found = zshCommands[command]
+				case "fish":
+					found = completionLineContains(output, "__fish_use_subcommand", "-a '"+command+"'")
+				default:
+					found = bashWords[command]
+				}
+				if !found {
+					t.Errorf("%s root completion is missing help command %q", shell, command)
+				}
+			}
+			for _, flag := range flags {
+				found := false
+				if shell == "fish" {
+					if strings.HasPrefix(flag, "--") {
+						found = completionLineContains(output, "__fish_use_subcommand", "-l '"+strings.TrimPrefix(flag, "--")+"'")
+					} else {
+						found = completionLineContains(output, "__fish_use_subcommand", "-s '"+strings.TrimPrefix(flag, "-")+"'")
+					}
+				} else if shell == "bash" {
+					found = bashWords[flag]
+				} else {
+					found = strings.Contains(output, "  '"+flag+"[")
+				}
+				if !found {
+					t.Errorf("%s root completion is missing help global flag %q", shell, flag)
+				}
+			}
+		})
+	}
+}
+
+func TestCompletionPreservesRunnerAndWorkspaceLeaves(t *testing.T) {
+	tests := map[string][]string{
+		"bash": {
+			`compgen -W "maintenance list pin unpin launch park restart remove doctor reconcile"`,
+			`pin) COMPREPLY=( $(compgen -W "--workspace --workdir --current -w -d"`,
+			`unpin) COMPREPLY=( $(compgen -W "--workdir --current -d"`,
+			`compgen -W "install remove run"`,
+			`compgen -W "--update-owner"`,
+			`compgen -W "--scheduled"`,
+			`compgen -W "--mode -m"`,
+		},
+		"zsh": {
+			"runner_commands=(", "runner_maintenance_commands=(", "workspace_commands=(",
+			`pin) _arguments '--workspace[workspace]:workspace:' '--workdir[working directory]:directory:_directories' '--current[current runner]'`,
+			`unpin) _arguments '--workdir[working directory]:directory:_directories' '--current[current runner]'`,
+			`_arguments '--update-owner[update owner]:owner:(self external)'`,
+			`_arguments '--scheduled[scheduled invocation]'`,
+			`'--mode[client mode]:mode:(worker runner)'`,
+		},
+		"fish": {
+			"test (__fish_amux_root_command) = runner; and test -z (__fish_amux_runner_leaf)' -a 'maintenance'",
+			"test (__fish_amux_runner_leaf) = pin' -r -l 'workdir'",
+			"test (__fish_amux_runner_leaf) = unpin' -r -l 'workdir'",
+			"test -z (__fish_amux_runner_maintenance_command)' -a 'install'",
+			"test (__fish_amux_runner_maintenance_command) = install' -r -l 'update-owner'",
+			"test (__fish_amux_runner_maintenance_command) = run' -f -l 'scheduled'",
+			"test (__fish_amux_root_command) = workspaces' -r -f -a 'worker runner' -l 'mode' -d 'Client mode'",
+			"test (__fish_amux_workspace_leaf) = list' -r -f -a 'worker runner' -l 'mode' -d 'Client mode'",
+		},
+	}
+
+	for shell, wants := range tests {
+		t.Run(shell, func(t *testing.T) {
+			var completion bytes.Buffer
+			if err := (app{stdout: &completion}).execute([]string{"completion", shell}); err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range wants {
+				if !strings.Contains(completion.String(), want) {
+					t.Errorf("%s completion is missing runner/workspace contract %q", shell, want)
+				}
+			}
+		})
+	}
+}
+
+func rootHelpSurface(help string) (commands, flags []string) {
+	section := ""
+	for _, line := range strings.Split(help, "\n") {
+		switch line {
+		case "Global flags:":
+			section = "flags"
+			continue
+		case "Commands:":
+			section = "commands"
+			continue
+		}
+		if !strings.HasPrefix(line, "  ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		switch section {
+		case "commands":
+			commands = append(commands, fields[0])
+		case "flags":
+			for _, field := range fields {
+				flag := strings.TrimSuffix(field, ",")
+				if strings.HasPrefix(flag, "-") {
+					flags = append(flags, flag)
+					continue
+				}
+				break
+			}
+		}
+	}
+	return commands, flags
+}
+
+func bashRootCompletionWords(completion string) map[string]bool {
+	words := map[string]bool{}
+	for _, line := range strings.Split(completion, "\n") {
+		if !strings.Contains(line, "COMPREPLY") || !strings.Contains(line, "--config-dir") {
+			continue
+		}
+		start := strings.Index(line, `compgen -W "`)
+		if start == -1 {
+			continue
+		}
+		value := line[start+len(`compgen -W "`):]
+		end := strings.Index(value, `"`)
+		if end == -1 {
+			continue
+		}
+		for _, word := range strings.Fields(value[:end]) {
+			words[word] = true
+		}
+	}
+	return words
+}
+
+func zshRootCompletionCommands(completion string) map[string]bool {
+	commands := map[string]bool{}
+	inCommands := false
+	for _, line := range strings.Split(completion, "\n") {
+		switch line {
+		case "commands=(":
+			inCommands = true
+			continue
+		case ")":
+			if inCommands {
+				return commands
+			}
+		}
+		if !inCommands {
+			continue
+		}
+		entry := strings.Trim(strings.TrimSpace(line), `"`)
+		name, _, found := strings.Cut(entry, ":")
+		if found {
+			commands[name] = true
+		}
+	}
+	return commands
+}
+
+func completionLineContains(completion string, values ...string) bool {
+	for _, line := range strings.Split(completion, "\n") {
+		found := true
+		for _, value := range values {
+			found = found && strings.Contains(line, value)
+		}
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
 func TestWorkerSpawnHelpDocumentsIssueTitleOwnership(t *testing.T) {
 	var stdout bytes.Buffer
 	if err := (app{stdout: &stdout}).execute([]string{"help", "worker", "spawn"}); err != nil {
