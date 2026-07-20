@@ -187,7 +187,7 @@ func TestInstallerPATHMessages(t *testing.T) {
 
 type installerFixture struct {
 	root, home, bin, assets, log, archiveName, binary string
-	env                                             []string
+	env                                               []string
 }
 
 func newInstallerFixture(t *testing.T, unameS, unameM, archiveName string) *installerFixture {

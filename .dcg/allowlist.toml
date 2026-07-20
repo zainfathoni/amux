@@ -1,0 +1,20 @@
+# The installer only assigns work_dir from mktemp -d and cleans that exact
+# private directory from its exit trap.
+[[allow]]
+exact_command = 'rm -rf "$work_dir" || true'
+reason = "Remove only the installer-owned temporary directory during cleanup"
+
+# These files are always beneath work_dir, which is created by mktemp -d.
+[[allow]]
+exact_command = "sha256sum \"$archive\" >\"$digest_output\" || fail 'sha256sum failed'"
+reason = "Write checksum-tool output only inside the installer-owned temporary directory"
+
+[[allow]]
+exact_command = "shasum -a 256 \"$archive\" >\"$digest_output\" || fail 'shasum failed'"
+reason = "Write checksum-tool output only inside the installer-owned temporary directory"
+
+# install_tmp is created inside ~/.local/bin so this rename is the intended
+# same-directory atomic replacement of the canonical install_path.
+[[allow]]
+exact_command = 'mv -f "$install_tmp" "$install_path" || fail "could not atomically replace $install_path; the existing installation was not changed"'
+reason = "Atomically replace the canonical binary with its verified same-directory staged file"
