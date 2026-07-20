@@ -1390,11 +1390,13 @@ exit 99
 	mutateTestReceipt(t, legacyState, func(receipt map[string]any) {
 		receipt["events"] = append(receipt["events"].([]any), map[string]any{
 			"event_id": "synthetic-launch", "kind": "launch_intent", "workflow": "read_only",
+			"request_digest":    strings.Repeat("e", 64),
 			"claude_session_id": "550e8400-e29b-41d4-a716-446655440000",
 			"tmux_session":      "Synthetic", "tmux_window": "indeterminate",
-			"expected_argv_digest":                strings.Repeat("a", 64),
-			"expected_launcher_identity":          "file:10:20",
-			"expected_executable_object_identity": "object:10:20:30:" + strings.Repeat("b", 64),
+			"packet_digest":         strings.Repeat("b", 64),
+			"launch_policy_digest":  strings.Repeat("c", 64),
+			"launch_command_digest": strings.Repeat("d", 64),
+			"at":                    "2026-07-20T12:00:00Z",
 		})
 	})
 	if err := os.Remove(filepath.Join(legacyState, "lifecycle.json")); err != nil {
@@ -1427,6 +1429,7 @@ exit 99
 		"delegation_id": "synthetic-indeterminate",
 		"event_id":      "detach-operation-1",
 		"origin_thread": "T-origin",
+		"compatibility": "pre_identity_launch_intent_v1",
 		"authorization": map[string]any{
 			"terminal_state":                   "merged",
 			"report_sha256":                    strings.Repeat("c", 64),
@@ -1467,6 +1470,211 @@ exit 99
 	log, err := os.ReadFile(tmuxLog)
 	if err != nil || strings.Contains(string(log), "kill-pane") || strings.Contains(string(log), "send-keys") {
 		t.Fatalf("detach issued a prohibited tmux mutation: %v: %s", err, log)
+	}
+}
+
+func TestPreIdentityLaunchIntentDetachRequiresExplicitSyntheticCompatibilityProof(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import copy, importlib.util, pathlib, sys, tempfile
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+legacy_intent = {
+    "event_id":"synthetic-launch", "kind":"launch_intent", "workflow":"read_only",
+    "request_digest":"8" * 64,
+    "claude_session_id":"550e8400-e29b-41d4-a716-446655440000",
+    "tmux_session":"Synthetic", "tmux_window":"indeterminate",
+    "packet_digest":"3" * 64, "launch_policy_digest":"4" * 64,
+    "launch_command_digest":"5" * 64, "at":"2026-07-20T12:00:00Z",
+}
+
+def fixture(intent=legacy_intent, name="synthetic-pre-identity"):
+    state = pathlib.Path(tempfile.mkdtemp()).resolve(); state.chmod(0o700)
+    store = module.ReceiptStore(state, state)
+    binding = {
+        "protocol_version":1, "delegation_id":name, "nonce":"1" * 64,
+        "task_id":"task", "question_message_id":"question", "origin_thread":"T-synthetic",
+        "repository":"repository", "base":"2" * 40, "workdir":str(state),
+        "producer_role":"thinker", "authority":"read_only", "task_reference":"fixture",
+        "packet_digest":"3" * 64, "launch_policy_digest":"4" * 64,
+        "launch_command_digest":"5" * 64,
+    }
+    assert store.create({"binding":binding, "routing":{"target":"machine_local_inbox"}}) == "recorded"
+    data = store.load_store(); data["receipts"][0]["events"].append(copy.deepcopy(intent)); store.commit(data)
+    request = {
+        "delegation_id":name, "event_id":"detach-pre-identity", "origin_thread":"T-synthetic",
+        "compatibility":"pre_identity_launch_intent_v1",
+        "authorization":{"terminal_state":"merged", "report_sha256":"6" * 64,
+                         "coordinator_authorization_sha256":"7" * 64},
+    }
+    return store, request
+
+# The compatibility selector is mandatory and is rejected for modern or mixed evidence.
+store, request = fixture()
+without_compatibility = dict(request); without_compatibility.pop("compatibility")
+before = store.path.read_bytes()
+try:
+    store.detach_indeterminate_worker(without_compatibility)
+except module.HelperError:
+    pass
+else:
+    raise AssertionError("pre-identity launch intent detached without explicit compatibility")
+assert store.path.read_bytes() == before
+
+modern = dict(legacy_intent, expected_argv_digest="a" * 64,
+              expected_launcher_identity="file:1:2",
+              expected_executable_object_identity="object:1:2:3:" + "b" * 64)
+store, request = fixture(modern, "synthetic-modern")
+before = store.path.read_bytes()
+try:
+    store.detach_indeterminate_worker(request)
+except module.HelperError:
+    pass
+else:
+    raise AssertionError("modern launch intent accepted legacy compatibility")
+assert store.path.read_bytes() == before
+
+mixed = dict(legacy_intent, expected_argv_digest="a" * 64)
+store, request = fixture(mixed, "synthetic-mixed")
+before = store.path.read_bytes()
+try:
+    store.detach_indeterminate_worker(request)
+except module.HelperError:
+    pass
+else:
+    raise AssertionError("mixed modern and pre-identity evidence detached")
+assert store.path.read_bytes() == before
+
+substituted = dict(legacy_intent, packet_digest="9" * 64)
+store, request = fixture(substituted, "synthetic-substituted")
+before = store.path.read_bytes()
+try:
+    store.detach_indeterminate_worker(request)
+except module.HelperError:
+    pass
+else:
+    raise AssertionError("legacy intent substituted immutable evidence")
+assert store.path.read_bytes() == before
+
+malformed_timestamp = dict(legacy_intent, at="not-a-timestamp")
+store, request = fixture(malformed_timestamp, "synthetic-malformed-timestamp")
+before = store.path.read_bytes()
+try:
+    store.detach_indeterminate_worker(request)
+except module.HelperError:
+    pass
+else:
+    raise AssertionError("legacy intent with malformed timestamp detached")
+assert store.path.read_bytes() == before
+
+# Legacy absence never infers argv or executable identity.
+def inspect(tmux, ps="", identities=None):
+    module.read_bounded_command = lambda command, limit: tmux if command[0] == "tmux" else ps
+    identities = identities or {}
+    module.exact_process_identity = lambda pid: identities[pid]
+    return module.inspect_pre_identity_launch_absence(legacy_intent)
+
+assert inspect("Synthetic\tindeterminate\t%41") == "matching_legacy_target"
+assert inspect("", "101", {101:("unrelated", "stable", ["/synthetic/tool", "--session-id", legacy_intent["claude_session_id"]], "digest")}) == "matching_legacy_session"
+assert inspect("malformed") == "tmux_inspection_ambiguous"
+assert inspect("Synthetic\tother\t%invalid") == "tmux_inspection_ambiguous"
+assert inspect("\tother\t%41") == "tmux_inspection_ambiguous"
+assert inspect("Synthetic\tother\t%41\nSynthetic\tother\t%41") == "tmux_inspection_ambiguous"
+assert inspect("Synthetic\tfirst\t%41\nSynthetic\tsecond\t%41") == "tmux_inspection_ambiguous"
+assert inspect("\n".join(f"S\tw{i}\t%{i}" for i in range(module.MAX_ABSENCE_PANES + 1))) == "tmux_inspection_ambiguous"
+module.read_bounded_command = lambda command, limit: "" if command[0] == "tmux" else "not-a-pid"
+assert module.inspect_pre_identity_launch_absence(legacy_intent) == "process_inspection_ambiguous"
+module.read_bounded_command = lambda command, limit: (
+    "" if command[0] == "tmux" else "\n".join(str(i + 1) for i in range(module.MAX_ABSENCE_PROCESSES + 1))
+)
+assert module.inspect_pre_identity_launch_absence(legacy_intent) == "process_inspection_ambiguous"
+module.read_bounded_command = lambda command, limit: (
+    "" if command[0] == "tmux" else (_ for _ in ()).throw(module.HelperError("synthetic limit"))
+)
+assert module.inspect_pre_identity_launch_absence(legacy_intent) == "process_inspection_unavailable"
+module.read_bounded_command = lambda command, limit: (_ for _ in ()).throw(module.HelperError("synthetic limit"))
+assert module.inspect_pre_identity_launch_absence(legacy_intent) == "tmux_inspection_unavailable"
+module.read_bounded_command = lambda command, limit: "" if command[0] == "tmux" else "101"
+module.exact_process_identity = lambda pid: (_ for _ in ()).throw(module.HelperError("synthetic inaccessible"))
+assert module.inspect_pre_identity_launch_absence(legacy_intent) == "process_inspection_unavailable"
+
+for code in ["matching_legacy_target", "matching_legacy_session", "tmux_inspection_ambiguous",
+             "tmux_inspection_unavailable", "process_inspection_ambiguous", "process_inspection_unavailable"]:
+    store, request = fixture(name="blocked-" + code.replace("_", "-"))
+    before = store.path.read_bytes()
+    module.inspect_pre_identity_launch_absence = lambda intent, code=code: code
+    result = store.detach_indeterminate_worker(request)
+    assert result["outcome"] == "blocked" and result["blocker"] == code, result
+    assert store.path.read_bytes() == before, code
+    assert store.lifecycle.load()["teardown_fences"]["T-synthetic"], code
+
+# Exact synthetic absence appends only the bound terminal detach proof and seals transport.
+store, request = fixture()
+prior = copy.deepcopy(store.load_store()["receipts"][0])
+module.inspect_pre_identity_launch_absence = lambda intent: "legacy_target_and_session_absent"
+result = store.detach_indeterminate_worker(request)
+assert result["outcome"] == "detached" and result["compatibility"] == "pre_identity_launch_intent_v1", result
+receipt = store.load_store()["receipts"][0]
+assert receipt["events"][:-1] == prior["events"]
+assert receipt["binding"] == prior["binding"] and receipt["state"] == prior["state"]
+event = receipt["events"][-1]
+assert event["kind"] == "worker_detached" and event["absence_code"] == "legacy_target_and_session_absent"
+assert event["compatibility"] == "pre_identity_launch_intent_v1"
+for forbidden in ["launch_completed", "session_acquired", "valid_report", "park_intent", "verified_parked"]:
+    assert not any(candidate.get("kind") == forbidden for candidate in receipt["events"]), forbidden
+assert "cleanup_eligible_at" not in receipt and module.valid_worker_detach_chain(receipt)
+assert store.worker_teardown("T-synthetic", True)["pairs"] == [{
+    "pair_sha256":module.hashlib.sha256(b"synthetic-pre-identity").hexdigest(),
+    "state":"worker_detached", "action":"none",
+}]
+try:
+    module.require_launch_transport_allowed(store, "synthetic-pre-identity")
+except module.HelperError:
+    pass
+else:
+    raise AssertionError("direct launch transport remained authorized after legacy detach")
+assert store.detach_indeterminate_worker(request)["outcome"] == "duplicate"
+
+def assert_invalid_detach_proof(mutate, name):
+    store, request = fixture(name=name)
+    module.inspect_pre_identity_launch_absence = lambda intent: "legacy_target_and_session_absent"
+    assert store.detach_indeterminate_worker(request)["outcome"] == "detached"
+    data = store.load_store(); receipt = data["receipts"][0]; mutate(receipt); store.commit(data)
+    assert not module.valid_worker_detach_chain(receipt), name
+    before = store.path.read_bytes()
+    try:
+        store.detach_indeterminate_worker(request)
+    except module.HelperError:
+        pass
+    else:
+        raise AssertionError("malformed detach proof accepted as exact replay: " + name)
+    assert store.path.read_bytes() == before, name
+    teardown = store.worker_teardown("T-synthetic", True)
+    assert teardown["outcome"] == "blocked", (name, teardown)
+
+assert_invalid_detach_proof(
+    lambda receipt: (receipt["events"][-1].pop("at"), receipt["worker_detached"].pop("at")),
+    "proof-missing-timestamp",
+)
+assert_invalid_detach_proof(
+    lambda receipt: receipt["events"][-1].update({"unknown":"synthetic"}),
+    "proof-extra-event-field",
+)
+assert_invalid_detach_proof(
+    lambda receipt: receipt["worker_detached"].update({"unknown":"synthetic"}),
+    "proof-extra-materialized-field",
+)
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil || string(output) != "ok\n" {
+		t.Fatalf("pre-identity detach compatibility fixture: %v: %s", err, output)
 	}
 }
 

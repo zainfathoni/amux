@@ -40,6 +40,7 @@ MAX_TMUX_COMMAND_BYTES = 8 * 1024
 MAX_ABSENCE_PANES = 256
 MAX_ABSENCE_PROCESSES = 2048
 MAX_ABSENCE_OUTPUT_BYTES = 64 * 1024
+PRE_IDENTITY_LAUNCH_INTENT_COMPATIBILITY = "pre_identity_launch_intent_v1"
 EXEC_BUDGET_MARGIN_BYTES = 32 * 1024
 STARTUP_TIMEOUT_SECONDS = 4.0
 STARTUP_STABILITY_SECONDS = 1.5
@@ -432,22 +433,32 @@ class ReceiptStore:
         delegation_id = protocol_id(request, "delegation_id")
         event_id = protocol_id(request, "event_id")
         origin_thread = required_string(request, "origin_thread", 256)
+        compatibility = request.get("compatibility")
+        if compatibility is not None and compatibility != PRE_IDENTITY_LAUNCH_INTENT_COMPATIBILITY:
+            raise HelperError("indeterminate worker detach compatibility is unsupported")
         authorization = validate_terminal_amp_authorization(request.get("authorization"))
         reject_unknown(
             request,
-            {"delegation_id", "event_id", "origin_thread", "authorization"},
+            {"delegation_id", "event_id", "origin_thread", "authorization", "compatibility"},
             "indeterminate worker detach",
         )
         pair_sha256 = hashlib.sha256(delegation_id.encode()).hexdigest()
         origin_sha256 = hashlib.sha256(origin_thread.encode()).hexdigest()
+        absence_code = (
+            "legacy_target_and_session_absent"
+            if compatibility == PRE_IDENTITY_LAUNCH_INTENT_COMPATIBILITY
+            else "exact_launch_target_absent"
+        )
         event = {
             "event_id": event_id,
             "kind": "worker_detached",
             "terminal_state": authorization["terminal_state"],
             "report_sha256": authorization["report_sha256"],
             "coordinator_authorization_sha256": authorization["coordinator_authorization_sha256"],
-            "absence_code": "exact_launch_target_absent",
+            "absence_code": absence_code,
         }
+        if compatibility is not None:
+            event["compatibility"] = compatibility
         with self.lifecycle.mutation_lock():
             lifecycle = self.lifecycle.load()
             state_path = str(self.state_dir.resolve())
@@ -471,17 +482,24 @@ class ReceiptStore:
                 replay = find_event(receipt, event_id)
                 if replay is not None:
                     if event_without_time(replay) == event and valid_worker_detach_chain(receipt):
-                        return worker_detach_result(origin_sha256, pair_sha256, "duplicate")
+                        return worker_detach_result(
+                            origin_sha256, pair_sha256, "duplicate", absence_code, compatibility
+                        )
                     raise HelperError("event ID is already bound to a conflicting event")
                 if any(existing.get("kind") == "worker_detached" for existing in receipt["events"]):
                     raise HelperError("receipt already has a different worker detach operation")
                 if not valid_indeterminate_detach_candidate(receipt):
                     raise HelperError("worker detach requires one unresolved launch-indeterminate receipt")
-                launch_intent = receipt_launch_intent(receipt)
+                if compatibility == PRE_IDENTITY_LAUNCH_INTENT_COMPATIBILITY:
+                    launch_intent = pre_identity_launch_intent(receipt)
+                    inspect_absence = inspect_pre_identity_launch_absence
+                else:
+                    launch_intent = receipt_launch_intent(receipt)
+                    inspect_absence = inspect_indeterminate_launch_absence
                 try:
                     with self.launch_gate(delegation_id, timeout_seconds=0.2):
-                        absence = inspect_indeterminate_launch_absence(launch_intent)
-                        if absence != "exact_launch_target_absent":
+                        absence = inspect_absence(launch_intent)
+                        if absence != absence_code:
                             return {
                                 "action": "indeterminate_worker_detach",
                                 "origin_thread_sha256": origin_sha256,
@@ -497,6 +515,8 @@ class ReceiptStore:
                             "at": timestamp,
                             "absence_code": event["absence_code"],
                         }
+                        if compatibility is not None:
+                            receipt["worker_detached"]["compatibility"] = compatibility
                         receipt["events"].append(event)
                         receipt["updated_at"] = timestamp
                         self.commit(store)
@@ -509,7 +529,7 @@ class ReceiptStore:
                         "blocker": "launch_transport_active_or_indeterminate",
                         "fence": "retained",
                     }
-        return worker_detach_result(origin_sha256, pair_sha256, "detached")
+        return worker_detach_result(origin_sha256, pair_sha256, "detached", absence_code, compatibility)
 
     def worker_teardown(self, origin_thread: str, dry_run: bool) -> dict[str, Any]:
         required_string({"origin_thread": origin_thread}, "origin_thread", 256)
@@ -3981,6 +4001,41 @@ def receipt_launch_intent(receipt: dict[str, Any]) -> dict[str, Any]:
     return copy.deepcopy(intent)
 
 
+def pre_identity_launch_intent(receipt: dict[str, Any]) -> dict[str, Any]:
+    intents = [event for event in receipt["events"] if event.get("kind") == "launch_intent"]
+    if len(intents) != 1:
+        raise HelperError("legacy detach requires one immutable launch intent")
+    intent = intents[0]
+    fields = {
+        "event_id", "kind", "workflow", "request_digest", "claude_session_id", "tmux_session",
+        "tmux_window", "packet_digest", "launch_policy_digest", "launch_command_digest", "at",
+    }
+    if set(intent) != fields:
+        raise HelperError("launch intent is not the recognized pre-identity shape")
+    protocol_id(intent, "event_id")
+    protocol_id(intent, "claude_session_id")
+    if intent.get("workflow") not in {"read_only", "mutating"}:
+        raise HelperError("legacy launch intent workflow is invalid")
+    for key in ("tmux_session", "tmux_window"):
+        required_string(intent, key, 256)
+    if not bounded_utc_timestamp(intent.get("at")):
+        raise HelperError("legacy launch intent timestamp is invalid")
+    for key in ("request_digest", "packet_digest", "launch_policy_digest", "launch_command_digest"):
+        digest = required_string(intent, key, 64)
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise HelperError(f"legacy launch intent {key} must be a lowercase SHA-256 value")
+    binding = receipt.get("binding")
+    if not isinstance(binding, dict) or any(
+        binding.get(key) != intent[key]
+        for key in ("packet_digest", "launch_policy_digest", "launch_command_digest")
+    ):
+        raise HelperError("legacy launch intent substituted immutable receipt evidence")
+    expected_role = "mutating_delegate" if intent["workflow"] == "mutating" else "thinker"
+    if binding.get("producer_role") != expected_role:
+        raise HelperError("legacy launch intent workflow does not match immutable receipt authority")
+    return copy.deepcopy(intent)
+
+
 def worker_teardown_receipt_blocker(receipt: dict[str, Any]) -> str | None:
     if valid_worker_detach_chain(receipt):
         return None
@@ -4031,10 +4086,31 @@ def valid_worker_detach_chain(receipt: dict[str, Any]) -> bool:
     event = detached[0]
     if events[-1] is not event or events.index(event) <= events.index(intents[0]):
         return False
-    for key in ("event_id", "at", "absence_code"):
-        if materialized.get(key) != event.get(key):
+    compatibility = event.get("compatibility")
+    if compatibility is None:
+        event_fields = {
+            "event_id", "kind", "terminal_state", "report_sha256",
+            "coordinator_authorization_sha256", "absence_code", "at",
+        }
+        materialized_fields = {"event_id", "at", "absence_code"}
+        if event.get("absence_code") != "exact_launch_target_absent":
             return False
-    if event.get("absence_code") != "exact_launch_target_absent":
+    else:
+        event_fields = {
+            "event_id", "kind", "terminal_state", "report_sha256",
+            "coordinator_authorization_sha256", "absence_code", "at", "compatibility",
+        }
+        materialized_fields = {"event_id", "at", "absence_code", "compatibility"}
+        if (
+            compatibility != PRE_IDENTITY_LAUNCH_INTENT_COMPATIBILITY
+            or event.get("absence_code") != "legacy_target_and_session_absent"
+        ):
+            return False
+    if set(event) != event_fields or set(materialized) != materialized_fields:
+        return False
+    if not bounded_utc_timestamp(event.get("at")):
+        return False
+    if materialized != {key: event[key] for key in materialized_fields}:
         return False
     if event.get("terminal_state") not in {"merged", "closed_terminal"}:
         return False
@@ -4045,7 +4121,16 @@ def valid_worker_detach_chain(receipt: dict[str, Any]) -> bool:
     prior = copy.deepcopy(receipt)
     prior.pop("worker_detached", None)
     prior["events"] = prior["events"][:-1]
-    return valid_indeterminate_detach_candidate(prior)
+    if not valid_indeterminate_detach_candidate(prior):
+        return False
+    try:
+        if compatibility == PRE_IDENTITY_LAUNCH_INTENT_COMPATIBILITY:
+            pre_identity_launch_intent(prior)
+        else:
+            receipt_launch_intent(prior)
+    except HelperError:
+        return False
+    return True
 
 
 def valid_indeterminate_detach_candidate(receipt: dict[str, Any]) -> bool:
@@ -4068,15 +4153,82 @@ def valid_indeterminate_detach_candidate(receipt: dict[str, Any]) -> bool:
     return len(intents) == 1 and worker_teardown_receipt_blocker(receipt) == "launch_indeterminate"
 
 
-def worker_detach_result(origin_sha256: str, pair_sha256: str, outcome: str) -> dict[str, Any]:
-    return {
+def worker_detach_result(
+    origin_sha256: str,
+    pair_sha256: str,
+    outcome: str,
+    absence_code: str = "exact_launch_target_absent",
+    compatibility: str | None = None,
+) -> dict[str, Any]:
+    result = {
         "action": "indeterminate_worker_detach",
         "origin_thread_sha256": origin_sha256,
         "pair_sha256": pair_sha256,
         "outcome": outcome,
-        "absence_code": "exact_launch_target_absent",
+        "absence_code": absence_code,
         "fence": "retained",
     }
+    if compatibility is not None:
+        result["compatibility"] = compatibility
+    return result
+
+
+def inspect_pre_identity_launch_absence(intent: dict[str, Any]) -> str:
+    session = intent["tmux_session"]
+    window = intent["tmux_window"]
+    claude_session_id = intent["claude_session_id"]
+    try:
+        output = read_bounded_command([
+            "tmux", "list-panes", "-a", "-F",
+            "#{session_name}\t#{window_name}\t#{pane_id}",
+        ], MAX_ABSENCE_OUTPUT_BYTES)
+    except HelperError:
+        return "tmux_inspection_unavailable"
+    rows = output.splitlines() if output else []
+    if len(rows) > MAX_ABSENCE_PANES:
+        return "tmux_inspection_ambiguous"
+    pane_ids: set[str] = set()
+    for row in rows:
+        fields = row.split("\t")
+        if (
+            len(fields) != 3
+            or not fields[0]
+            or not fields[1]
+            or len(fields[2]) < 2
+            or fields[2][0] != "%"
+            or not fields[2][1:].isdigit()
+            or fields[2] in pane_ids
+        ):
+            return "tmux_inspection_ambiguous"
+        pane_ids.add(fields[2])
+        if fields[0] == session and fields[1] == window:
+            return "matching_legacy_target"
+
+    process_ids, blocker = owner_process_ids()
+    if blocker is not None:
+        return blocker
+    inaccessible: list[int] = []
+    for pid in process_ids:
+        try:
+            _, _, process_args, _ = exact_process_identity(pid)
+        except HelperError:
+            inaccessible.append(pid)
+            continue
+        if any(
+            index + 1 < len(process_args)
+            and value == "--session-id"
+            and process_args[index + 1] == claude_session_id
+            for index, value in enumerate(process_args)
+        ):
+            return "matching_legacy_session"
+    if inaccessible:
+        current, current_blocker = owner_process_ids()
+        if current_blocker is not None:
+            return current_blocker
+        current_processes = set(current)
+        if any(pid in current_processes for pid in inaccessible):
+            return "process_inspection_unavailable"
+    return "legacy_target_and_session_absent"
 
 
 def inspect_indeterminate_launch_absence(intent: dict[str, Any]) -> str:
