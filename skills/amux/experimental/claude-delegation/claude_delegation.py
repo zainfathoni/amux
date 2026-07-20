@@ -1704,6 +1704,29 @@ def decode_tmux_command_argument(value: str) -> str:
     return "".join(output)
 
 
+def encode_tmux_command_argument(value: str) -> str:
+    output = ['"']
+    replacements = {
+        "\\": "\\\\", '"': '\\"', "$": "\\$", "\x1b": "\\e", "\r": "\\r",
+        "\n": "\\n", "\t": "\\t",
+    }
+    for character in value:
+        if character in replacements:
+            output.append(replacements[character])
+        elif ord(character) < 32 or ord(character) == 127:
+            output.append(f"\\{ord(character):03o}")
+        else:
+            output.append(character)
+    output.append('"')
+    return "".join(output)
+
+
+def tmux_single_line_format(variable: str) -> str:
+    if not variable or any(character not in "abcdefghijklmnopqrstuvwxyz_" for character in variable):
+        raise HelperError("retirement tmux format variable is invalid")
+    return f"#{{s/\r/\\\\r/:#{{s/\n/\\\\n/:#{{q:{variable}}}}}}}"
+
+
 class TmuxControlConnection:
     def __init__(
         self, session: str, command_prefix: list[str] | None = None
@@ -1798,7 +1821,8 @@ class TmuxControlConnection:
         if self.process is None or self.process.stdin is None or self.process.poll() is not None:
             raise HelperError("retirement tmux control connection disappeared")
         try:
-            self.process.stdin.write((shlex.join(arguments) + "\n").encode())
+            command = " ".join(encode_tmux_command_argument(argument) for argument in arguments)
+            self.process.stdin.write((command + "\n").encode())
             self.process.stdin.flush()
         except (BrokenPipeError, OSError) as error:
             raise HelperError("retirement tmux control connection disappeared") from error
@@ -4817,7 +4841,8 @@ def stop_exact_retirement_target(identity: dict[str, Any]) -> None:
         values: list[str] = []
         for format_value in formats:
             response = control.command([
-                "display-message", "-p", "-t", identity["pane_id"], f"#{{qa:{format_value}}}",
+                "display-message", "-p", "-t", identity["pane_id"],
+                tmux_single_line_format(format_value),
             ])
             if len(response) != 1:
                 raise HelperError("retirement tmux control snapshot is ambiguous")

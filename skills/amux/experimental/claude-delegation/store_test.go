@@ -2169,8 +2169,8 @@ class FakeControl:
     def command(self, args):
         self.commands.append(args)
         if args[0] == "kill-pane": return []
-        assert args[-1].startswith("#{qa:") and args[-1].endswith("}"), args
-        return [json.dumps(control_values["#{" + args[-1][5:-1] + "}"])]
+        formats = {module.tmux_single_line_format(key[2:-1]): value for key,value in control_values.items()}
+        return [json.dumps(formats[args[-1]])]
 module.TmuxControlConnection = FakeControl
 def inspect_retained(*args, **kwargs):
     assert kwargs["tmux_fields"] == [control_values[key] for key in
@@ -2249,7 +2249,8 @@ prefix = ["tmux", "-f", "/dev/null", "-S", socket]
 subprocess.run(prefix + ["new-session", "-d", "-s", "Synthetic"], check=True)
 connection = module.TmuxControlConnection("Synthetic", prefix)
 connection.__enter__()
-original_pane = connection.command(["display-message", "-p", "-t", "%0", "#{qa:pane_id}"])
+original_pane = connection.command([
+    "display-message", "-p", "-t", "%0", module.tmux_single_line_format("pane_id")])
 assert len(original_pane) == 1 and module.decode_tmux_command_argument(original_pane[0]) == "%0", original_pane
 subprocess.run(prefix + ["kill-server"], check=True)
 subprocess.run(prefix + ["new-session", "-d", "-s", "Synthetic"], check=True)
@@ -2318,7 +2319,7 @@ for payload in (
     else:
         raise AssertionError("mismatched tmux control frame was accepted")
 
-# tmux's documented qa format is reversible and keeps LF/CR out of newline-delimited output.
+# tmux's documented q format plus LF/CR substitution is reversible and single-line.
 assert module.decode_tmux_command_argument(r'"trusted\\057work"') == r"trusted\057work"
 assert module.decode_tmux_command_argument(r'"line\n%end 10 7 1"') == "line\n%end 10 7 1"
 assert module.decode_tmux_command_argument(r'"line\r%error 10 7 1"') == "line\r%error 10 7 1"
