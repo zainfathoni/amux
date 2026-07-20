@@ -13,11 +13,13 @@ import (
 var publicSkillFiles = []string{
 	"README.md",
 	filepath.Join("skills", "amux", "SKILL.md"),
+	filepath.Join("skills", "amux", "reference", "pi-spark-orb-executor.md"),
 	filepath.Join("skills", "amux", "reference", "commands.md"),
 	filepath.Join("skills", "amux", "reference", "trigger-phrases.md"),
 	filepath.Join("skills", "amux", "reference", "workflows.md"),
 	filepath.Join("skills", "amux", "reference", "troubleshooting.md"),
 	filepath.Join("skills", "amux", "reference", "amp-invocation-policy.md"),
+	filepath.Join("skills", "amux", "reference", "claude-opus-orb-executor.md"),
 	filepath.Join("docs", "index.html"),
 	filepath.Join("docs", "skill", "index.html"),
 	filepath.Join("docs", "og-image.svg"),
@@ -31,8 +33,8 @@ func TestTriggerChecklistMatchesSkillActivationAndRouting(t *testing.T) {
 
 	triggerPattern := regexp.MustCompile(`(?m)^\| \x60([^\x60]+)\x60 \|`)
 	matches := triggerPattern.FindAllStringSubmatch(checklist, -1)
-	if len(matches) != 21 {
-		t.Fatalf("trigger checklist has %d routes, want 21", len(matches))
+	if len(matches) != 23 {
+		t.Fatalf("trigger checklist has %d routes, want 23", len(matches))
 	}
 	for _, match := range matches {
 		trigger := match[1]
@@ -51,6 +53,8 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 		"workflows.md",
 		"troubleshooting.md",
 		"trigger-phrases.md",
+		"claude-opus-orb-executor.md",
+		"pi-spark-orb-executor.md",
 		"claude-read-only-delegation.md",
 		"claude-mutating-delegation.md",
 		"claude-delegation-contract.md",
@@ -63,6 +67,118 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(root, "skills", "amux", "reference", name)); err != nil {
 			t.Errorf("reference/%s is missing: %v", name, err)
 		}
+	}
+}
+
+func TestExperimentalPiSparkOrbRecipeStaysProviderSpecificAndFailClosed(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
+	triggers := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md"))
+	recipe := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "pi-spark-orb-executor.md"))
+
+	if !strings.Contains(skill, "Run Pi on Spark in an Amp Orb") || !strings.Contains(triggers, "Run Pi on Spark in an Amp Orb") {
+		t.Error("Pi/Spark trigger is missing from skill routing or trigger checklist")
+	}
+	if !strings.Contains(skill, "reference/pi-spark-orb-executor.md") || !strings.Contains(triggers, "pi-spark-orb-executor.md") {
+		t.Error("Pi/Spark reference is missing from skill routing or trigger checklist")
+	}
+	for _, required := range []string{
+		"openai-codex/gpt-5.3-codex-spark",
+		"OPENAI_API_KEY",
+		"CODEX_API_KEY",
+		"credential_environment_preflight",
+		"https://registry.npmjs.org/",
+		"env -i PATH=",
+		"TRUSTED_SYSTEM_PATH=/usr/local/bin:/usr/bin:/bin",
+		"TMPDIR=\"$EXPERIMENT_TMP\"",
+		"--cache=\"$NPM_CACHE\"",
+		"PI_VERSION=0.80.10",
+		".version' \"$EXPERIMENT/package-metadata.json\")\" = \"$PI_VERSION",
+		"--ignore-scripts",
+		"owner-operated Codex OAuth",
+		"auth_type=oauth",
+		"auth_mode=0600",
+		"--mode json",
+		"without `--print` or `-p`",
+		"RUN=probe",
+		"RUN_DIR=$RUNS/$RUN",
+		"SPARK_PROBE_OK",
+		"| join(\"\")) == \"SPARK_PROBE_OK\"",
+		"--no-session",
+		"--no-tools",
+		"--no-extensions",
+		"--no-skills",
+		"--no-prompt-templates",
+		"--no-themes",
+		"--no-context-files",
+		"--no-approve",
+		"timeout --signal=TERM",
+		"agent_settled",
+		"jq -Rce 'fromjson",
+		"([.[] | select(.type == \"agent_end\")] | length) == 1",
+		".stopReason == \"stop\"",
+		"mkfifo -m 600",
+		"STDOUT_READER_PID=$!",
+		"STDERR_READER_PID=$!",
+		"wait \"$STDOUT_READER_PID\"",
+		"wait \"$STDERR_READER_PID\"",
+		"rm -- \"$STDOUT_FIFO\" \"$STDERR_FIFO\"",
+		"set(value) != {\"openai-codex\"}",
+		"auth state is not exactly empty after logout",
+		"if os.path.lexists(path):",
+		"type == \"string\" and startswith(\"sha512-\")",
+		"type == \"array\" and length == 1",
+		"65536",
+		"16384",
+		"Do not send the full event stream or raw stderr",
+		"no retry or fallback",
+		"native Amp messaging",
+		"Local removal never proves provider-side token revocation",
+		"stat -c '%d:%i'",
+		"useful versus discarded findings",
+		"setup/coordination cost",
+	} {
+		if !strings.Contains(recipe, required) {
+			t.Errorf("Pi/Spark recipe is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"T-019f", "/Users/", "CLAUDE_CODE_OAUTH_TOKEN", "Gas City adoption"} {
+		if strings.Contains(recipe, forbidden) {
+			t.Errorf("Pi/Spark recipe contains forbidden unrelated/private marker %q", forbidden)
+		}
+	}
+	for _, forbidden := range []string{"> >(", "2> >(", "SYSTEM_PATH=$PATH"} {
+		if strings.Contains(recipe, forbidden) {
+			t.Errorf("Pi/Spark recipe contains unsafe executable marker %q", forbidden)
+		}
+	}
+	if count := strings.Count(recipe, `TERM="${TERM:-xterm-256color}"`); count != 2 {
+		t.Errorf("Pi/Spark recipe passes TERM %d times, want login and logout only", count)
+	}
+	runStart := strings.Index(recipe, "RESULT=$RUN_DIR/result.txt")
+	if runStart < 0 {
+		t.Fatal("Pi/Spark run block is missing its result binding")
+	}
+	runBlock := recipe[runStart:]
+	ordered := []string{
+		"credential_environment_preflight",
+		"mkfifo -m 600",
+		"STDOUT_READER_PID=$!",
+		"STDERR_READER_PID=$!",
+		"wait \"$STDOUT_READER_PID\"",
+		"wait \"$STDERR_READER_PID\"",
+		"rm -- \"$STDOUT_FIFO\" \"$STDERR_FIFO\"",
+		"STDOUT_BYTES=$(wc -c",
+		"jq -Rce 'fromjson",
+	}
+	last := -1
+	for _, marker := range ordered {
+		at := strings.Index(runBlock, marker)
+		if at <= last {
+			t.Errorf("Pi/Spark capture invariant missing or out of order: %q", marker)
+		}
+		last = at
 	}
 }
 
@@ -221,6 +337,260 @@ func TestExperimentalClaudeDelegationReferencesStayNarrowAndConsistent(t *testin
 		if !strings.Contains(mutating, required) {
 			t.Errorf("experimental mutating Claude contract is missing %q", required)
 		}
+	}
+}
+
+func TestClaudeOpusOrbExecutorRecipeStaysProviderSpecificAndBounded(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	recipe := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-opus-orb-executor.md"))
+
+	for _, required := range []string{
+		"CLAUDE_CODE_OAUTH_TOKEN",
+		"ANTHROPIC_AUTH_TOKEN",
+		"ANTHROPIC_API_KEY",
+		"CLAUDE_CODE_USE_ANTHROPIC_AWS",
+		"CLAUDE_CODE_USE_MANTLE",
+		"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+		"loggedIn: true",
+		"authMethod: oauth_token",
+		"apiProvider: firstParty",
+		"claude-opus-4-8",
+		"CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+		"CLAUDE_CODE_MAX_OUTPUT_TOKENS=64",
+		"CLAUDE_CODE_SKIP_PROMPT_HISTORY=1",
+		"CLAUDE_CODE_SAFE_MODE=1",
+		"ulimit -f 64",
+		"cd -- \"$WORK_DIR\"",
+		`--tools ""`,
+		"--safe-mode",
+		"--disable-slash-commands",
+		"--strict-mcp-config",
+		`--mcp-config '{"mcpServers":{}}'`,
+		"--permission-mode dontAsk",
+		"--no-session-persistence",
+		"--fallback-model",
+		"modelUsage",
+		"send_message_to_thread",
+		"upload_thread_file",
+		"nominal pricing telemetry",
+		"do **not** prove API-key billing",
+		"provider-neutral task state",
+		"does not remove or revoke the Amp project secret",
+		`if models != {"claude-opus-4-8"}`,
+		"if safe != expected",
+		"READ_ONLY_ARGS=(",
+		`--allowedTools "Read,Grep,Glob"`,
+		"permission_denials",
+		"is_error",
+		"config_session_persistence",
+		"repository_changed",
+	} {
+		if !strings.Contains(recipe, required) {
+			t.Errorf("Claude Opus Orb executor recipe is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"/Users/",
+		"/home/",
+		"sk-ant-",
+		"T-019f",
+		"amux claude",
+		"claude-fable-5",
+		"--prompt-suggestions",
+	} {
+		if strings.Contains(recipe, forbidden) {
+			t.Errorf("Claude Opus Orb executor recipe contains forbidden marker %q", forbidden)
+		}
+	}
+	invocationStart := strings.Index(recipe, "exec timeout --signal=TERM --kill-after=5s 120s")
+	if invocationStart < 0 {
+		t.Fatal("Claude Opus Orb executor invocation fence is missing")
+	}
+	invocationEnd := strings.Index(recipe[invocationStart:], ") >\"$STDOUT_FILE\"")
+	if invocationEnd < 0 {
+		t.Fatal("Claude Opus Orb executor invocation fence is unterminated")
+	}
+	invocation := recipe[invocationStart : invocationStart+invocationEnd]
+	if strings.Contains(invocation, "--fallback-model") {
+		t.Error("Claude Opus Orb executor invocation enables a fallback model")
+	}
+	if !strings.Contains(invocation, `"${TOOL_ARGS[@]}"`) {
+		t.Error("Claude Opus Orb executor invocation does not select one complete tool profile")
+	}
+
+	authStart := strings.Index(recipe, `AUTH_STDOUT="$RUN_ROOT/auth.json"`)
+	authEnd := strings.Index(recipe, `) >"$AUTH_STDOUT" 2>"$AUTH_STDERR"`)
+	if authStart < 0 || authEnd <= authStart {
+		t.Fatal("Claude Opus Orb executor auth command is missing")
+	}
+	authCommand := recipe[authStart:authEnd]
+	for _, required := range []string{`cd -- "$WORK_DIR"`, "CLAUDE_CODE_SAFE_MODE=1", `"$CLAUDE" auth status`} {
+		if !strings.Contains(authCommand, required) {
+			t.Errorf("Claude Opus Orb executor auth command is missing %q", required)
+		}
+	}
+
+	profileStart := strings.Index(recipe, `NO_TOOL_ARGS=(--tools "" --disallowedTools "*")`)
+	profileEnd := strings.Index(recipe, `TOOL_ARGS=("${NO_TOOL_ARGS[@]}")`)
+	if profileStart < 0 || profileEnd <= profileStart {
+		t.Fatal("Claude Opus Orb executor tool profiles are missing")
+	}
+	profiles := recipe[profileStart:profileEnd]
+	readStart := strings.Index(profiles, "READ_ONLY_ARGS=(")
+	if readStart < 0 {
+		t.Fatal("Claude Opus Orb executor read-only profile is missing")
+	}
+	readProfile := profiles[readStart:]
+	if strings.Contains(readProfile, `--disallowedTools "*"`) {
+		t.Error("Claude Opus Orb executor read-only profile is overridden by deny-all")
+	}
+	for _, denied := range []string{"Bash", "Edit", "Write", "NotebookEdit", "Agent", "WebFetch", "WebSearch", "mcp__*"} {
+		if !strings.Contains(readProfile, denied) {
+			t.Errorf("Claude Opus Orb executor read-only profile does not deny %q", denied)
+		}
+	}
+
+	for index, match := range regexp.MustCompile("(?s)```sh\\n(.*?)\\n```").FindAllStringSubmatch(recipe, -1) {
+		command := exec.Command("bash", "-n", "-c", match[1])
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Errorf("Claude Opus Orb executor shell fence %d is invalid: %v\n%s", index+1, err, output)
+		}
+	}
+
+	validatorRegionStart := strings.Index(recipe, "<!-- claude-opus-result-validator:start -->")
+	validatorRegionEnd := strings.Index(recipe, "<!-- claude-opus-result-validator:end -->")
+	if validatorRegionStart < 0 || validatorRegionEnd <= validatorRegionStart {
+		t.Fatal("Claude Opus Orb executor result validator markers are missing")
+	}
+	validatorRegion := recipe[validatorRegionStart:validatorRegionEnd]
+	pythonStartMarker := `<<'PY'` + "\n"
+	pythonStart := strings.Index(validatorRegion, pythonStartMarker)
+	if pythonStart < 0 {
+		t.Fatal("Claude Opus Orb executor result validator Python start is missing")
+	}
+	pythonStart += len(pythonStartMarker)
+	pythonEnd := strings.Index(validatorRegion[pythonStart:], "\nPY\n")
+	if pythonEnd < 0 {
+		t.Fatal("Claude Opus Orb executor result validator Python end is missing")
+	}
+	validator := validatorRegion[pythonStart : pythonStart+pythonEnd]
+	validModelMetadata := `{"inputTokens":2,"outputTokens":3,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"webSearchRequests":0,"costUSD":0.1,"contextWindow":1000,"maxOutputTokens":64}`
+	validResult := `{"type":"result","subtype":"success","is_error":false,"result":"MARKER","num_turns":1,"permission_denials":[],"usage":{"input_tokens":2,"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"modelUsage":{"claude-opus-4-8":` + validModelMetadata + `},"total_cost_usd":0.1,"duration_ms":10,"duration_api_ms":9}`
+	tests := []struct {
+		name        string
+		result      string
+		status      string
+		stdoutBytes string
+		stderrBytes string
+		wantSuccess bool
+	}{
+		{name: "valid", result: validResult, status: "0", stdoutBytes: "1024", stderrBytes: "0", wantSuccess: true},
+		{name: "nonzero status", result: validResult, status: "1", stdoutBytes: "1024", stderrBytes: "0"},
+		{name: "stdout overflow", result: validResult, status: "0", stdoutBytes: "65537", stderrBytes: "0"},
+		{name: "stderr", result: validResult, status: "0", stdoutBytes: "1024", stderrBytes: "1"},
+		{name: "error result", result: strings.Replace(validResult, `"is_error":false`, `"is_error":true`, 1), status: "0", stdoutBytes: "1024", stderrBytes: "0"},
+		{name: "turn type", result: strings.Replace(validResult, `"num_turns":1`, `"num_turns":"1"`, 1), status: "0", stdoutBytes: "1024", stderrBytes: "0"},
+		{name: "permission denial", result: strings.Replace(validResult, `"permission_denials":[]`, `"permission_denials":["Read"]`, 1), status: "0", stdoutBytes: "1024", stderrBytes: "0"},
+		{name: "auxiliary model", result: strings.Replace(validResult, `"claude-opus-4-8":{`, `"claude-haiku-4-5":{},"claude-opus-4-8":{`, 1), status: "0", stdoutBytes: "1024", stderrBytes: "0"},
+		{name: "empty model metadata", result: strings.Replace(validResult, validModelMetadata, `{}`, 1), status: "0", stdoutBytes: "1024", stderrBytes: "0"},
+		{name: "missing model metadata", result: strings.Replace(validResult, `,"maxOutputTokens":64`, ``, 1), status: "0", stdoutBytes: "1024", stderrBytes: "0"},
+		{name: "usage type", result: strings.Replace(validResult, `"input_tokens":2`, `"input_tokens":"2"`, 1), status: "0", stdoutBytes: "1024", stderrBytes: "0"},
+		{name: "cost type", result: strings.Replace(validResult, `"total_cost_usd":0.1`, `"total_cost_usd":"0.1"`, 1), status: "0", stdoutBytes: "1024", stderrBytes: "0"},
+	}
+	for _, test := range tests {
+		t.Run("validator "+test.name, func(t *testing.T) {
+			fixture := filepath.Join(t.TempDir(), "result.json")
+			if err := os.WriteFile(fixture, []byte(test.result), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			command := exec.Command("python3", "-c", validator, fixture, test.status, test.stdoutBytes, test.stderrBytes, "1", "MARKER")
+			err := command.Run()
+			if test.wantSuccess && err != nil {
+				t.Errorf("valid result rejected: %v", err)
+			}
+			if !test.wantSuccess && err == nil {
+				t.Error("invalid result accepted")
+			}
+		})
+	}
+
+	persistenceRegionStart := strings.Index(recipe, "<!-- claude-opus-persistence-validator:start -->")
+	persistenceRegionEnd := strings.Index(recipe, "<!-- claude-opus-persistence-validator:end -->")
+	if persistenceRegionStart < 0 || persistenceRegionEnd <= persistenceRegionStart {
+		t.Fatal("Claude Opus Orb executor persistence validator markers are missing")
+	}
+	persistenceRegion := recipe[persistenceRegionStart:persistenceRegionEnd]
+	persistenceMatch := regexp.MustCompile("(?s)```sh\\n(.*?)\\n```").FindStringSubmatch(persistenceRegion)
+	if len(persistenceMatch) != 2 {
+		t.Fatal("Claude Opus Orb executor persistence validator shell is missing")
+	}
+	persistenceValidator := persistenceMatch[1]
+	persistenceTests := []struct {
+		name         string
+		createConfig bool
+		setup        func(t *testing.T, workdir, configdir string)
+		wantSuccess  bool
+	}{
+		{name: "empty", createConfig: true, wantSuccess: true},
+		{name: "missing config"},
+		{name: "work entry", createConfig: true, setup: func(t *testing.T, workdir, _ string) {
+			if err := os.WriteFile(filepath.Join(workdir, "unexpected"), []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "forbidden config", createConfig: true, setup: func(t *testing.T, _, configdir string) {
+			directory := filepath.Join(configdir, "sessions")
+			if err := os.Mkdir(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(directory, "state.json"), []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "config overflow", createConfig: true, setup: func(t *testing.T, _, configdir string) {
+			if err := os.WriteFile(filepath.Join(configdir, "oversized.json"), make([]byte, 262145), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, test := range persistenceTests {
+		t.Run("persistence "+test.name, func(t *testing.T) {
+			root := t.TempDir()
+			workdir := filepath.Join(root, "work")
+			configdir := filepath.Join(root, "config")
+			if err := os.Mkdir(workdir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if test.createConfig {
+				if err := os.Mkdir(configdir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.setup != nil {
+				test.setup(t, workdir, configdir)
+			}
+			command := exec.Command("bash", "-c", persistenceValidator)
+			command.Env = append(os.Environ(),
+				"TOOL_PROFILE=no-tool",
+				"RUN_ROOT="+root,
+				"WORK_DIR="+workdir,
+				"CONFIG_DIR="+configdir,
+			)
+			err := command.Run()
+			if test.wantSuccess && err != nil {
+				t.Errorf("valid persistence state rejected: %v", err)
+			}
+			if !test.wantSuccess && err == nil {
+				t.Error("invalid persistence state accepted")
+			}
+		})
+	}
+
+	reportAt := strings.Index(recipe, "send_message_to_thread")
+	cleanupAt := strings.Index(recipe, `rm -f -- "$AUTH_STDOUT"`)
+	if reportAt < 0 || cleanupAt < 0 || reportAt >= cleanupAt {
+		t.Error("Claude Opus Orb executor does not order native report before cleanup")
 	}
 }
 
