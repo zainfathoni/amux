@@ -1357,6 +1357,7 @@ printf '%s\n' "$*" >> "$TMUX_LOG"
 if [ "$1" = list-panes ]; then exit 0; fi
 exit 99
 `)
+	writeExecutable(t, filepath.Join(binDir, "ps"), "#!/bin/sh\nexit 0\n")
 	environment := append(replaceEnvironment(os.Environ(), "HOME", home),
 		"PATH="+binDir+":"+os.Getenv("PATH"), "TMUX_LOG="+tmuxLog)
 	run := func(isolated bool, input map[string]any, args ...string) (string, string, error) {
