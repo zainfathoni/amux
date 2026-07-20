@@ -2738,34 +2738,65 @@ esac
 `)
 	writeExecutable(t, filepath.Join(binDir, "tmux"), "#!/bin/sh\nprintf '%s\\n' 'tmux 3.7b'\n")
 	writeExecutable(t, filepath.Join(binDir, "codexbar"), `#!/bin/sh
-printf '%s\n' '[{"provider":"claude","source":"web","usage":{"primary":{"usedPercent":12,"windowMinutes":300,"resetsAt":"2026-07-17T15:00:00Z"},"secondary":{"usedPercent":34,"windowMinutes":10080,"resetsAt":"2026-07-24T00:00:00Z"},"extraRateWindows":[]}}]'
+printf '%s\n' '[{"provider":"claude","source":"web","usage":{"primary":{"usedPercent":12,"windowMinutes":300,"resetsAt":"2026-07-20T15:00:00Z"},"secondary":{"usedPercent":34,"windowMinutes":10080,"resetsAt":"2026-07-24T00:00:00Z"},"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]'
 `)
 	environment := append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"))
 	stdout, stderr, err := runHelperEnv(t, stateDir, environment, map[string]any{}, "diagnose")
 	if err != nil {
 		t.Fatalf("diagnose: %v: %s", err, stderr)
 	}
-	for _, required := range []string{`"status":"supported"`, `"status":"unavailable"`, `"status":"untested"`, `"automatic_interactive_input"`, `"strict_mcp_runtime"`, `"provider":"claude"`, `"source":"web"`, `"source_version":1`, `"schema_version":1`, `"window_minutes":300`, `"window_minutes":10080`} {
+	for _, required := range []string{`"status":"supported"`, `"status":"unavailable"`, `"status":"untested"`, `"automatic_interactive_input"`, `"strict_mcp_runtime"`, `"capacity source payload has no supported versioned contract"`} {
 		if !strings.Contains(stdout, required) {
 			t.Errorf("diagnostics missing %q:\n%s", required, stdout)
 		}
 	}
-	for _, forbidden := range []string{"accountEmail", "accountOrganization", "transcript", "prompt"} {
+	for _, forbidden := range []string{"accountEmail", "accountOrganization", "transcript", "prompt", `"source":"web"`, `"used_percent"`, `"window_minutes"`, `"source_version"`, `"schema_version"`} {
 		if strings.Contains(stdout, forbidden) {
 			t.Errorf("diagnostics leaked forbidden field %q", forbidden)
 		}
 	}
-	writeExecutable(t, filepath.Join(binDir, "codexbar"), `#!/bin/sh
-printf '%s\n' '[{"provider":"claude","source":"unknown","source":"web","usage":{"primary":{"usedPercent":12,"windowMinutes":300,"resetsAt":"2026-07-17T15:00:00Z"},"secondary":{"usedPercent":34,"windowMinutes":10080,"resetsAt":"2026-07-24T00:00:00Z"},"extraRateWindows":[]}}]'
-`)
-	stdout, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{}, "diagnose")
-	if err != nil {
-		t.Fatalf("diagnose duplicate capacity fields: %v: %s", err, stderr)
+	malformed := []string{
+		`[{"provider":"claude","source":"private-sentinel","source":"web","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
+		`[{"provider":"claude","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
+		`[{"provider":"claude","source":"claude","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
+		`[{"provider":"claude","source":"web","extra":"unsupported","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
+		`[{"provider":"claude","source":"web","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z","extra":"unsupported"}}]`,
+		`[{"provider":"claude","source":"web","usage":{"primary":{"usedPercent":12,"windowMinutes":300,"resetsAt":"2026-07-20T15:00:00Z","extra":"unsupported"},"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
+		`[{"provider":"claude","source":"web","sourceVersion":1,"schemaVersion":1,"usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
 	}
-	diagnostic := decodeJSONMap(t, stdout)
-	capacity, ok := diagnostic["capacity"].(map[string]any)
-	if !ok || capacity["status"] != "unavailable" || strings.Contains(stdout, `"source":"web"`) {
-		t.Fatalf("duplicated diagnostic capacity was accepted: %s", stdout)
+	for index, payload := range malformed {
+		writeExecutable(t, filepath.Join(binDir, "codexbar"), "#!/bin/sh\nprintf '%s\\n' '"+payload+"'\n")
+		stdout, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{}, "diagnose")
+		if err != nil {
+			t.Fatalf("diagnose malformed capacity shape %d: %v: %s", index, err, stderr)
+		}
+		diagnostic := decodeJSONMap(t, stdout)
+		capacity, ok := diagnostic["capacity"].(map[string]any)
+		if !ok || capacity["status"] != "unavailable" || strings.Contains(stdout, "private-sentinel") {
+			t.Fatalf("malformed diagnostic capacity %d was accepted or leaked: %s", index, stdout)
+		}
+	}
+
+	writeExecutable(t, filepath.Join(binDir, "codexbar"), "#!/bin/sh\nprintf '%s\\n' 'private-stderr-sentinel' >&2\nexit 1\n")
+	stdout, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{}, "diagnose")
+	if err != nil || strings.Contains(stdout+stderr, "private-stderr-sentinel") || !strings.Contains(stdout, `"status":"unavailable"`) {
+		t.Fatalf("diagnostic command failure leaked stderr: %v: %s%s", err, stdout, stderr)
+	}
+
+	tooManyExtraWindows := strings.Repeat(`{"id":"id","title":"title","window":{"usedPercent":1,"windowMinutes":1,"resetsAt":"2026-07-20T12:01:00Z"}},`, 33)
+	tooManyExtraWindows = strings.TrimSuffix(tooManyExtraWindows, ",")
+	boundedMalformed := []string{
+		"printf '\\377'",
+		"python3 -c 'print(\"x\" * 262145)'",
+		"python3 -c 'print(\"[\" * 1100 + \"0\" + \"]\" * 1100)'",
+		"printf '%s\\n' '" + `[{"provider":"claude","source":"web","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[` + tooManyExtraWindows + `],"updatedAt":"2026-07-20T12:00:00Z"}}]` + "'",
+	}
+	for index, command := range boundedMalformed {
+		writeExecutable(t, filepath.Join(binDir, "codexbar"), "#!/bin/sh\n"+command+"\n")
+		stdout, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{}, "diagnose")
+		if err != nil || len(stdout) > 4096 || !strings.Contains(stdout, `"status":"unavailable"`) {
+			t.Fatalf("unbounded malformed diagnostic %d: %v: %s%s", index, err, stdout, stderr)
+		}
 	}
 }
 
