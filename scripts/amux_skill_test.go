@@ -559,6 +559,7 @@ func TestClaudePairTeardownIsFailClosedAndRunsBeforeWorkerTeardown(t *testing.T)
 		"register-legacy-store --origin-thread <thread-id> --store-path <exact-private-store>",
 		"detach-indeterminate-worker",
 		"retire-live-indeterminate-pair",
+		"historical_modern_read_only_launch_intent_v1",
 		"state:pair_retired",
 		"terminal Amp work authorization",
 		"durable origin fence",
