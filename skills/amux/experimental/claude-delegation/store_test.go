@@ -2240,7 +2240,7 @@ func TestRetirementControlConnectionNeverReconnectsToReplacementTmuxServer(t *te
 		_ = exec.Command("tmux", "-f", "/dev/null", "-S", socket, "kill-server").Run()
 		_ = os.Remove(socket)
 	})
-	script := `import importlib.util, pathlib, subprocess, sys
+	script := `import importlib.util, pathlib, subprocess, sys, time
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
 module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
@@ -2253,7 +2253,13 @@ original_pane = connection.command([
     "display-message", "-p", "-t", "%0", module.tmux_single_line_format("pane_id")])
 assert len(original_pane) == 1 and module.decode_tmux_command_argument(original_pane[0]) == "%0", original_pane
 subprocess.run(prefix + ["kill-server"], check=True)
-subprocess.run(prefix + ["new-session", "-d", "-s", "Synthetic"], check=True)
+deadline = time.monotonic() + 2
+while True:
+    replacement = subprocess.run(prefix + ["new-session", "-d", "-s", "Synthetic"],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if replacement.returncode == 0: break
+    if time.monotonic() >= deadline: raise RuntimeError(replacement.stderr.decode())
+    time.sleep(0.01)
 replacement_before = subprocess.check_output(prefix + ["list-panes", "-a", "-F", "#{pane_id}"], text=True).strip()
 assert replacement_before == "%0", replacement_before
 try:
