@@ -2215,23 +2215,26 @@ func TestRetirementControlConnectionNeverReconnectsToReplacementTmuxServer(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	socket := fmt.Sprintf("amux-203-retirement-%d", time.Now().UnixNano())
+	socket := filepath.Join(
+		"/tmp", fmt.Sprintf("amux203-%d-%d.sock", os.Getpid(), time.Now().UnixNano()),
+	)
 	t.Cleanup(func() {
-		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+		_ = exec.Command("tmux", "-f", "/dev/null", "-S", socket, "kill-server").Run()
+		_ = os.Remove(socket)
 	})
 	script := `import importlib.util, pathlib, subprocess, sys
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
 module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 socket = sys.argv[2]
-prefix = ["tmux", "-L", socket]
-subprocess.run(prefix + ["new-session", "-d", "-s", "Synthetic", "sleep 30"], check=True)
+prefix = ["tmux", "-f", "/dev/null", "-S", socket]
+subprocess.run(prefix + ["new-session", "-d", "-s", "Synthetic"], check=True)
 connection = module.TmuxControlConnection("Synthetic", prefix)
 connection.__enter__()
 original_pane = connection.command(["display-message", "-p", "-t", "%0", "#{pane_id}"])
 assert original_pane == ["%0"], original_pane
 subprocess.run(prefix + ["kill-server"], check=True)
-subprocess.run(prefix + ["new-session", "-d", "-s", "Synthetic", "sleep 30"], check=True)
+subprocess.run(prefix + ["new-session", "-d", "-s", "Synthetic"], check=True)
 replacement_before = subprocess.check_output(prefix + ["list-panes", "-a", "-F", "#{pane_id}"], text=True).strip()
 assert replacement_before == "%0", replacement_before
 try:
