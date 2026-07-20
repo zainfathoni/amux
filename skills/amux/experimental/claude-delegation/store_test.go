@@ -302,6 +302,7 @@ transport = {
     "argv": argv,
     "environment": {"PATH": "/usr/bin:/bin"},
     "expected_argv_digest": module.normalized_argv_digest(argv[1:]),
+    "expected_launcher_argv0_digest": module.launcher_argv0_digest(argv[0]),
     "expected_launcher_identity": launcher_identity,
     "expected_executable_object_identity": object_identity,
     "remove_environment": [],
@@ -505,6 +506,18 @@ func TestDarwinLaunchAcceptsTransportCopyOfVersionedClaudeExecutable(t *testing.
 	if launchIdentity["process_name"] != "verified-claude" || launchIdentity["process_executable_object_identity"] == "" {
 		t.Fatalf("Darwin launch did not bind the private executable object: %#v", launchIdentity)
 	}
+	var launchIntent map[string]any
+	for _, value := range events {
+		event := value.(map[string]any)
+		if event["kind"] == "launch_intent" {
+			launchIntent = event
+			break
+		}
+	}
+	launcherPathDigest, ok := launchIntent["expected_launcher_argv0_digest"].(string)
+	if !ok || len(launcherPathDigest) != 64 {
+		t.Fatalf("Darwin launch intent did not bind the launcher path digest: %#v", launchIntent)
+	}
 
 	acquire := map[string]any{
 		"delegation_id": fixture.request["delegation_id"], "event_id": "acquire-versioned-transport",
@@ -696,6 +709,75 @@ func TestDarwinTransportVersionedExecutableRejectsArgvSubstitutionWithoutComplet
 	}
 }
 
+func TestDarwinTransportRejectsLauncherPathSubstitutionsWithoutCompletionOrKill(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin transport preserves the planned launcher as argv[0]")
+	}
+	for _, test := range []struct {
+		name        string
+		alternate   string
+		wantStartup string
+	}{
+		{name: "verified process cannot fall through to direct Claude form", alternate: "claude", wantStartup: "launcher path does not match immutable launch intent"},
+		{name: "same-object hardlink cannot replace planned launcher path", alternate: "2.1.212-hardlink", wantStartup: "launcher path does not match immutable launch intent"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newLaunchFixture(t)
+			permitSealedRuntimeTempCleanup(t, fixture.stateDir)
+			if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			enableAsyncClaudeLaunch(t, fixture.binDir, &fixture.environment)
+			claudeLink := filepath.Join(fixture.binDir, "claude")
+			versionedClaude := filepath.Join(fixture.binDir, "2.1.212")
+			if err := os.Rename(claudeLink, versionedClaude); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Base(versionedClaude), claudeLink); err != nil {
+				t.Fatal(err)
+			}
+			alternate := filepath.Join(t.TempDir(), test.alternate)
+			if err := os.Link(versionedClaude, alternate); err != nil {
+				t.Fatal(err)
+			}
+			fixture.environment = append(fixture.environment, "SUBSTITUTE_ARGV0="+alternate)
+			receiptPath := createPlannedLaunchReceipt(t, fixture)
+			_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute")
+			if err == nil || !strings.Contains(stderr, test.wantStartup) {
+				t.Fatalf("Darwin launcher path substitution = %v: %s", err, stderr)
+			}
+			receipt, err := os.ReadFile(receiptPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(receipt, []byte(`"kind":"launch_intent"`)) || bytes.Contains(receipt, []byte(`"kind":"launch_completed"`)) {
+				t.Fatalf("Darwin launcher path substitution did not remain indeterminate: %s", receipt)
+			}
+			_, stderr, err = runHelperEnv(t, fixture.stateDir, fixture.environment, map[string]any{
+				"delegation_id": fixture.request["delegation_id"], "event_id": "acquire-substituted-launcher",
+				"pane_id": "%20", "claude_session_id": fixture.request["claude_session_id"],
+			}, "session", "acquire")
+			if err == nil || !strings.Contains(stderr, "requires one completed receipt launch") {
+				t.Fatalf("Darwin substituted launcher acquisition = %v: %s", err, stderr)
+			}
+			afterAcquisition, err := os.ReadFile(receiptPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(afterAcquisition, receipt) {
+				t.Fatalf("rejected substituted-launcher acquisition mutated the receipt")
+			}
+			log, err := os.ReadFile(fixture.tmuxLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(log, []byte("kill-pane")) {
+				t.Fatalf("Darwin launcher path substitution killed the pane: %s", log)
+			}
+		})
+	}
+}
+
 func TestDarwinTransportFormRequiresExactShapeAndStableProcessSnapshot(t *testing.T) {
 	t.Parallel()
 	helper, err := filepath.Abs("claude_delegation.py")
@@ -722,6 +804,8 @@ descriptor, _, _, private_object = module.open_exact_verified_executable(private
 os.close(descriptor)
 
 assert module.normalized_claude_arguments("Darwin", "verified-claude", arguments, private) == ("darwin_transport", arguments[1:])
+alternate_direct = [str(root / "claude"), *arguments[1:]]
+assert module.normalized_claude_arguments("Darwin", "verified-claude", alternate_direct, private) == ("darwin_transport", alternate_direct[1:])
 for name, argv, executable in (
     ("other", arguments, private),
     ("verified-claude", arguments, root / "other"),
@@ -734,18 +818,33 @@ for name, argv, executable in (
     else:
         raise AssertionError((name, argv, executable))
 
+module.platform.system = lambda: "Darwin"
+module.process_executable_path = lambda pid: private
+module.run_command = lambda command, environment=None, executable_fd=None: "Claude\tthinker\t@20\t%20\t4242\t" + str(root) + "\tverified-claude\tcommand"
+
+stable_snapshot = ("verified-claude", "100.000001", arguments, hashlib.sha256(b"stable").hexdigest())
+module.exact_process_identity = lambda pid: stable_snapshot
+try:
+    module.inspect_claude_identity(
+        "%20", session_id, module.normalized_argv_digest(arguments[1:]),
+        launcher_identity, launcher_object, None, None,
+        module.launcher_argv0_digest(arguments[0]),
+    )
+except module.HelperError as error:
+    assert "requires the planned private executable object identity" in str(error), error
+else:
+    raise AssertionError("Darwin transport without private executable identity was accepted")
+
 snapshots = iter([
     ("verified-claude", "100.000001", arguments, hashlib.sha256(b"before").hexdigest()),
     ("verified-claude", "100.000002", arguments, hashlib.sha256(b"after").hexdigest()),
 ])
-module.platform.system = lambda: "Darwin"
 module.exact_process_identity = lambda pid: next(snapshots)
-module.process_executable_path = lambda pid: private
-module.run_command = lambda command, environment=None, executable_fd=None: "Claude\tthinker\t@20\t%20\t4242\t" + str(root) + "\tverified-claude\tcommand"
 try:
     module.inspect_claude_identity(
         "%20", session_id, module.normalized_argv_digest(arguments[1:]),
         launcher_identity, launcher_object, None, private_object,
+        module.launcher_argv0_digest(arguments[0]),
     )
 except module.HelperError as error:
     assert "changed during identity inspection" in str(error), error
@@ -3639,12 +3738,16 @@ func main() {
     _ = output.Close()
   }
   if os.Getenv("STARTUP_EXIT") == "1" { return }
-  if os.Getenv("SUBSTITUTE_ARGV") == "1" && os.Getenv("SUBSTITUTE_REEXECED") == "" {
-    filtered := []string{os.Args[0]}
-    for index := 1; index < len(os.Args); index++ {
-      if os.Args[index] == "--disallowed-tools" && index + 1 < len(os.Args) { index++; continue }
-      filtered = append(filtered, os.Args[index])
+  if (os.Getenv("SUBSTITUTE_ARGV") == "1" || os.Getenv("SUBSTITUTE_ARGV0") != "") && os.Getenv("SUBSTITUTE_REEXECED") == "" {
+    filtered := append([]string(nil), os.Args...)
+    if os.Getenv("SUBSTITUTE_ARGV") == "1" {
+      filtered = []string{os.Args[0]}
+      for index := 1; index < len(os.Args); index++ {
+        if os.Args[index] == "--disallowed-tools" && index + 1 < len(os.Args) { index++; continue }
+        filtered = append(filtered, os.Args[index])
+      }
     }
+    if value := os.Getenv("SUBSTITUTE_ARGV0"); value != "" { filtered[0] = value }
     _ = os.Setenv("SUBSTITUTE_REEXECED", "1")
     executable := os.Args[0]
     if runtime.GOOS == "darwin" { executable, _ = os.Executable() }

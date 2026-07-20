@@ -417,6 +417,7 @@ class ReceiptStore:
                 launch_intent["expected_executable_object_identity"],
                 identity["process_executable_identity"],
                 identity.get("process_executable_object_identity"),
+                launch_intent.get("expected_launcher_argv0_digest"),
             )
             if current != identity:
                 raise HelperError("Claude pane, process, workdir, or incarnation identity changed")
@@ -501,6 +502,7 @@ class ReceiptStore:
             launch_intent["expected_executable_object_identity"],
             launch_identity["process_executable_identity"],
             launch_identity.get("process_executable_object_identity"),
+            launch_intent.get("expected_launcher_argv0_digest"),
         )
         with self.mutation_lock():
             store = self.load_store()
@@ -1350,23 +1352,30 @@ def normalized_argv_digest(arguments: list[str]) -> str:
     return hashlib.sha256(b"\0".join(os.fsencode(argument) for argument in arguments)).hexdigest()
 
 
+def launcher_argv0_digest(argument: str) -> str:
+    return hashlib.sha256(os.fsencode(argument)).hexdigest()
+
+
 def normalized_claude_arguments(
     system: str,
     process_name: str,
     process_args: list[str],
     process_executable: pathlib.Path | None = None,
 ) -> tuple[str, list[str]]:
+    private_process = process_name == "verified-claude"
+    private_executable = process_executable is not None and process_executable.name == "verified-claude"
+    if private_process or private_executable:
+        if (
+            system == "Darwin"
+            and private_process
+            and private_executable
+            and process_args
+            and pathlib.Path(process_args[0]).is_absolute()
+        ):
+            return "darwin_transport", process_args[1:]
+        raise HelperError("pane process is not a supported Claude executable form")
     if process_args and pathlib.Path(process_args[0]).name == "claude":
         return "direct", process_args[1:]
-    if (
-        system == "Darwin"
-        and process_name == "verified-claude"
-        and process_executable is not None
-        and process_executable.name == "verified-claude"
-        and process_args
-        and pathlib.Path(process_args[0]).is_absolute()
-    ):
-        return "darwin_transport", process_args[1:]
     if system == "Linux" and process_name in {"node", "bun"} and len(process_args) > 2:
         script = pathlib.PurePath(process_args[1])
         descriptor_script = len(script.parts) >= 3 and script.parts[-2] == "fd" and script.name.isdigit()
@@ -1462,6 +1471,7 @@ def inspect_claude_identity(
     expected_executable_object_identity: str,
     expected_process_executable_identity: str | None = None,
     expected_process_executable_object_identity: str | None = None,
+    expected_launcher_argv0_digest: str | None = None,
 ) -> dict[str, Any]:
     if not pane_id.startswith("%") or len(pane_id) < 2:
         raise HelperError("Claude identity requires an exact tmux pane ID")
@@ -1532,6 +1542,13 @@ def inspect_claude_identity(
             raise HelperError("Claude process executable content does not match immutable launch intent")
         launcher_identity = expected_launcher_identity
     elif executable_form == "darwin_transport":
+        if expected_process_executable_object_identity is None:
+            raise HelperError("Claude transport requires the planned private executable object identity")
+        if (
+            expected_launcher_argv0_digest is None
+            or launcher_argv0_digest(process_args[0]) != expected_launcher_argv0_digest
+        ):
+            raise HelperError("Claude transport launcher path does not match immutable launch intent")
         try:
             process_descriptor, _, process_launcher_identity, process_executable_object_identity = (
                 open_exact_verified_executable(process_executable)
@@ -1545,11 +1562,8 @@ def inspect_claude_identity(
             raise HelperError("Claude transport executable identity is unavailable") from error
         if (
             process_launcher_identity != executable_identity
-            or (
-                expected_process_executable_object_identity is not None
-                and process_executable_object_identity
-                != expected_process_executable_object_identity
-            )
+            or process_executable_object_identity
+            != expected_process_executable_object_identity
             or executable_content_identity(process_executable_object_identity)
             != executable_content_identity(expected_executable_object_identity)
         ):
@@ -1619,6 +1633,7 @@ def wait_for_claude_startup(
     expected_launcher_identity: str,
     expected_executable_object_identity: str,
     expected_process_executable_object_identity: str | None = None,
+    expected_launcher_argv0_digest: str | None = None,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
     last_error = "startup identity unavailable"
@@ -1633,6 +1648,7 @@ def wait_for_claude_startup(
                 expected_launcher_identity,
                 expected_executable_object_identity,
                 expected_process_executable_object_identity=expected_process_executable_object_identity,
+                expected_launcher_argv0_digest=expected_launcher_argv0_digest,
             )
             if current == candidate:
                 if time.monotonic() - candidate_since >= STARTUP_STABILITY_SECONDS:
@@ -2056,11 +2072,13 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
     argv.append(packet_text)
     validate_exec_budget(argv, environment, system)
     expected_argv_digest = normalized_argv_digest(argv[1:])
+    expected_launcher_argv0_digest = launcher_argv0_digest(argv[0])
     transport_path = private_launch_transport_path(store, request["delegation_id"])
     transport = {
         "argv": argv,
         "environment": environment,
         "expected_argv_digest": expected_argv_digest,
+        "expected_launcher_argv0_digest": expected_launcher_argv0_digest,
         "expected_launcher_identity": launcher_identity,
         "expected_executable_object_identity": executable_object_identity,
         "remove_environment": removed_environment,
@@ -2122,6 +2140,7 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         "transport": transport,
         "transport_bytes": transport_bytes,
         "expected_argv_digest": expected_argv_digest,
+        "expected_launcher_argv0_digest": expected_launcher_argv0_digest,
         "expected_launcher_identity": launcher_identity,
         "expected_executable_object_identity": executable_object_identity,
         "workdir_identity": workdir_identity,
@@ -2188,7 +2207,8 @@ def execute_launch_transport(
     reject_unknown(
         transport,
         {
-            "argv", "environment", "expected_argv_digest", "expected_launcher_identity",
+            "argv", "environment", "expected_argv_digest", "expected_launcher_argv0_digest",
+            "expected_launcher_identity",
             "expected_executable_object_identity", "remove_environment", "workdir", "workdir_identity",
             "packet_identity", "packet_path", "packet_digest", "darwin_executable_path",
         },
@@ -2216,6 +2236,8 @@ def execute_launch_transport(
     expected_argv_digest = transport.get("expected_argv_digest")
     if expected_argv_digest != normalized_argv_digest(argv[1:]):
         raise HelperError("private launch transport argv digest is invalid")
+    if transport.get("expected_launcher_argv0_digest") != launcher_argv0_digest(argv[0]):
+        raise HelperError("private launch transport launcher path digest is invalid")
     packet_path = transport.get("packet_path")
     packet_identity = transport.get("packet_identity")
     packet_digest = transport.get("packet_digest")
@@ -2307,6 +2329,7 @@ def plan_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
         "launch_policy_digest": components["launch_policy_digest"],
         "launch_command_digest": components["launch_command_digest"],
         "expected_argv_digest": components["expected_argv_digest"],
+        "expected_launcher_argv0_digest": components["expected_launcher_argv0_digest"],
         "expected_launcher_identity": components["expected_launcher_identity"],
         "capabilities": {
             "initial_interactive_input": "supported",
@@ -2374,6 +2397,7 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
         "launch_policy_digest": components["launch_policy_digest"],
         "launch_command_digest": components["launch_command_digest"],
         "expected_argv_digest": components["expected_argv_digest"],
+        "expected_launcher_argv0_digest": components["expected_launcher_argv0_digest"],
         "expected_launcher_identity": components["expected_launcher_identity"],
         "expected_executable_object_identity": components["expected_executable_object_identity"],
         "packet_identity": components["packet_identity"],
@@ -2510,6 +2534,7 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
                 components["expected_launcher_identity"],
                 components["expected_executable_object_identity"],
                 darwin_executable_object_identity,
+                components["expected_launcher_argv0_digest"],
             )
         finally:
             if darwin_container_descriptor is not None and darwin_executable_descriptor is not None:
