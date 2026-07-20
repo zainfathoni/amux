@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -2225,6 +2226,192 @@ func TestLaunchPolicyDigestCanFinalizeSelfContainedPacketBeforePlan(t *testing.T
 	assertHelperOutcome(t, fixture.stateDir, "recorded", report, "report", "submit")
 }
 
+func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
+	fixture := newLaunchFixture(t)
+	enableAsyncClaudeLaunch(t, fixture.binDir, &fixture.environment)
+
+	defaultStdout, defaultStderr, err := runHelper(t, fixture.stateDir, map[string]any{"workflow": "read_only"}, "launch", "policy-digest")
+	if err != nil {
+		t.Fatalf("default policy digest: %v: %s", err, defaultStderr)
+	}
+	defaultPolicy := decodeJSONMap(t, defaultStdout)
+	explicitStdout, explicitStderr, err := runHelper(t, fixture.stateDir, map[string]any{
+		"workflow": "read_only", "model": "claude-fable-5",
+	}, "launch", "policy-digest")
+	if err != nil {
+		t.Fatalf("explicit policy digest: %v: %s", err, explicitStderr)
+	}
+	explicitPolicy := decodeJSONMap(t, explicitStdout)
+	if explicitPolicy["model"] != "claude-fable-5" {
+		t.Fatalf("explicit policy model = %#v", explicitPolicy["model"])
+	}
+	if explicitPolicy["launch_policy_digest"] == defaultPolicy["launch_policy_digest"] {
+		t.Fatal("explicit model did not change launch policy digest")
+	}
+
+	for _, test := range []struct {
+		name  string
+		model any
+	}{
+		{name: "wrong type", model: 5},
+		{name: "malformed", model: "claude-fable-5 --danger"},
+		{name: "unknown", model: "claude-unknown-5"},
+		{name: "empty", model: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := cloneJSONMap(t, fixture.request)
+			request["model"] = test.model
+			before, readErr := os.ReadDir(fixture.stateDir)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			for _, command := range []string{"plan", "execute"} {
+				_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, request, "launch", command)
+				if err == nil || !strings.Contains(stderr, "model") || len(stderr) > 1024 {
+					t.Fatalf("%s error = %v, stderr %q", command, err, stderr)
+				}
+			}
+			after, readErr := os.ReadDir(fixture.stateDir)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("rejected model mutated private state: before %#v after %#v", before, after)
+			}
+			if log, readErr := os.ReadFile(fixture.tmuxLog); readErr == nil && len(log) != 0 {
+				t.Fatalf("rejected model invoked tmux: %s", log)
+			} else if readErr != nil && !os.IsNotExist(readErr) {
+				t.Fatal(readErr)
+			}
+		})
+	}
+	if _, stderr, err := runHelper(t, fixture.stateDir, map[string]any{
+		"workflow": "read_only", "model": "claude-unknown-5",
+	}, "launch", "policy-digest"); err == nil || !strings.Contains(stderr, "exact approved read-only model") {
+		t.Fatalf("invalid policy-digest model error = %v, stderr %q", err, stderr)
+	}
+	mutatingRequest := cloneJSONMap(t, fixture.request)
+	mutatingRequest["workflow"] = "mutating"
+	mutatingRequest["model"] = "claude-fable-5"
+	if _, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, mutatingRequest, "launch", "plan"); err == nil || !strings.Contains(stderr, "unknown fields") || !strings.Contains(stderr, "model") {
+		t.Fatalf("mutating launch model error = %v, stderr %q", err, stderr)
+	}
+	mutatingBinding := testBinding("mutating-model-rejected")
+	mutatingBinding["producer_role"] = "mutating_delegate"
+	mutatingBinding["model"] = "claude-fable-5"
+	if _, stderr, err := runHelper(t, t.TempDir(), map[string]any{
+		"binding": mutatingBinding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create"); err == nil || !strings.Contains(stderr, "unknown fields: model") {
+		t.Fatalf("mutating binding model error = %v, stderr %q", err, stderr)
+	}
+
+	request := cloneJSONMap(t, fixture.request)
+	request["model"] = "claude-fable-5"
+	request["expected_launch_policy_digest"] = explicitPolicy["launch_policy_digest"]
+	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, request, "launch", "plan")
+	if err != nil {
+		t.Fatalf("explicit model launch plan: %v: %s", err, stderr)
+	}
+	plan := decodeJSONMap(t, stdout)
+	if plan["model"] != "claude-fable-5" || plan["launch_policy_digest"] != explicitPolicy["launch_policy_digest"] {
+		t.Fatalf("explicit model plan = %#v", plan)
+	}
+	binding := testBinding(request["delegation_id"].(string))
+	binding["workdir"] = request["workdir"]
+	binding["base"] = request["base"]
+	binding["packet_digest"] = plan["packet_digest"]
+	binding["launch_policy_digest"] = plan["launch_policy_digest"]
+	binding["launch_command_digest"] = plan["launch_command_digest"]
+	binding["model"] = "claude-fable-5"
+	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "recorded", map[string]any{
+		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	receiptPath := filepath.Join(fixture.stateDir, "receipts.json")
+	beforeReceipt, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeState, err := os.Stat(fixture.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(fixture.stateDir, "experimental.lock")
+	beforeLock, err := os.Stat(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	omitted := cloneJSONMap(t, request)
+	delete(omitted, "model")
+	omitted["expected_launch_policy_digest"] = defaultPolicy["launch_policy_digest"]
+	if _, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, omitted, "launch", "execute"); err == nil || !strings.Contains(stderr, "model selection does not match immutable receipt binding") {
+		t.Fatalf("omitted-after-plan error = %v, stderr %q", err, stderr)
+	}
+	afterReceipt, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterReceipt, beforeReceipt) {
+		t.Fatal("omitted-after-plan changed durable receipt bytes")
+	}
+	if log, readErr := os.ReadFile(fixture.tmuxLog); readErr == nil && len(log) != 0 {
+		t.Fatalf("omitted-after-plan invoked tmux: %s", log)
+	} else if readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatal(readErr)
+	}
+	changed := cloneJSONMap(t, request)
+	changed["model"] = "claude-unknown-5"
+	if _, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, changed, "launch", "execute"); err == nil || !strings.Contains(stderr, "exact approved read-only model") {
+		t.Fatalf("changed-after-plan error = %v, stderr %q", err, stderr)
+	}
+	afterChanged, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterChanged, beforeReceipt) {
+		t.Fatal("changed-after-plan changed durable receipt bytes")
+	}
+	afterState, err := os.Stat(fixture.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterLock, err := os.Stat(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeState.Mode() != afterState.Mode() || !beforeState.ModTime().Equal(afterState.ModTime()) ||
+		beforeLock.Mode() != afterLock.Mode() || beforeLock.Size() != afterLock.Size() || !beforeLock.ModTime().Equal(afterLock.ModTime()) {
+		t.Fatalf("model mismatch changed state or lock metadata: state %v -> %v, lock %v -> %v", beforeState, afterState, beforeLock, afterLock)
+	}
+	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "launched", request, "launch", "execute")
+	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "duplicate", request, "launch", "execute")
+	runtimeKey := fmt.Sprintf("%x", sha256.Sum256([]byte(request["delegation_id"].(string))))
+	transportBytes, err := os.ReadFile(filepath.Join(fixture.stateDir, "runtime", runtimeKey, "launch.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var transport struct {
+		Argv []string `json:"argv"`
+	}
+	if err := json.Unmarshal(transportBytes, &transport); err != nil {
+		t.Fatal(err)
+	}
+	arguments := make([][]byte, len(transport.Argv))
+	for index, argument := range transport.Argv {
+		arguments[index] = []byte(argument)
+	}
+	assertExactArgValue(t, arguments, "--model", "claude-fable-5")
+	finalReceipt, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(finalReceipt, []byte(`"model":"claude-fable-5"`)) || !bytes.Contains(finalReceipt, []byte(plan["expected_argv_digest"].(string))) {
+		t.Fatalf("receipt does not bind model command identity: %s", finalReceipt)
+	}
+}
+
 type launchFixture struct {
 	stateDir            string
 	binDir              string
@@ -2506,6 +2693,11 @@ esac
 		t.Fatalf("fake Claude argv is not NUL-delimited: %q", argvBytes)
 	}
 	encodedArgs = encodedArgs[:len(encodedArgs)-1]
+	for _, argument := range encodedArgs {
+		if string(argument) == "--model" {
+			t.Fatalf("omitted model changed default Claude argv: %q", encodedArgs)
+		}
+	}
 	if got := string(encodedArgs[len(encodedArgs)-1]); got != packet {
 		t.Fatalf("multiline packet argv changed:\ngot:  %q\nwant: %q", got, packet)
 	}
@@ -2732,7 +2924,7 @@ func TestDiagnosticsClassifySupportedUnavailableAndUntestedCapabilities(t *testi
 	writeExecutable(t, filepath.Join(binDir, "claude"), `#!/bin/sh
 case "$1" in
   --version) printf '%s\n' '2.1.212 (Claude Code)' ;;
-  --help) printf '%s\n' '--allowed-tools --disable-slash-commands --disallowed-tools --mcp-config --no-chrome --permission-mode --prompt-suggestions --session-id --setting-sources --settings --strict-mcp-config --tools' ;;
+  --help) printf '%s\n' '--allowed-tools --disable-slash-commands --disallowed-tools --mcp-config --model --no-chrome --permission-mode --prompt-suggestions --session-id --setting-sources --settings --strict-mcp-config --tools' ;;
   *) exit 2 ;;
 esac
 `)
@@ -2745,7 +2937,7 @@ printf '%s\n' '[{"provider":"claude","source":"web","usage":{"primary":{"usedPer
 	if err != nil {
 		t.Fatalf("diagnose: %v: %s", err, stderr)
 	}
-	for _, required := range []string{`"status":"supported"`, `"status":"unavailable"`, `"status":"untested"`, `"automatic_interactive_input"`, `"strict_mcp_runtime"`, `"capacity source payload has no supported versioned contract"`} {
+	for _, required := range []string{`"status":"supported"`, `"status":"unavailable"`, `"status":"untested"`, `"automatic_interactive_input"`, `"strict_mcp_runtime"`, `"model_selection"`, `installed Claude CLI exposes --model; model provisioning and availability are not observed`, `"capacity source payload has no supported versioned contract"`} {
 		if !strings.Contains(stdout, required) {
 			t.Errorf("diagnostics missing %q:\n%s", required, stdout)
 		}
@@ -2775,6 +2967,23 @@ printf '%s\n' '[{"provider":"claude","source":"web","usage":{"primary":{"usedPer
 		if !ok || capacity["status"] != "unavailable" || strings.Contains(stdout, "private-sentinel") {
 			t.Fatalf("malformed diagnostic capacity %d was accepted or leaked: %s", index, stdout)
 		}
+	}
+	writeExecutable(t, filepath.Join(binDir, "claude"), `#!/bin/sh
+case "$1" in
+  --version) printf '%s\n' '2.1.212 (Claude Code)' ;;
+  --help) printf '%s\n' '--allowed-tools --disable-slash-commands --disallowed-tools --mcp-config --model-context --no-chrome --permission-mode --prompt-suggestions --session-id --setting-sources --settings --strict-mcp-config --tools' ;;
+  *) exit 2 ;;
+esac
+`)
+	stdout, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{}, "diagnose")
+	if err != nil {
+		t.Fatalf("diagnose with model prefix option: %v: %s", err, stderr)
+	}
+	diagnostic := decodeJSONMap(t, stdout)
+	capabilities := diagnostic["capabilities"].(map[string]any)
+	modelSelection := capabilities["model_selection"].(map[string]any)
+	if modelSelection["status"] != "unavailable" || modelSelection["reason"] != "installed Claude CLI does not expose --model" {
+		t.Fatalf("prefix option model selection diagnostic = %#v", modelSelection)
 	}
 
 	writeExecutable(t, filepath.Join(binDir, "codexbar"), "#!/bin/sh\nprintf '%s\\n' 'private-stderr-sentinel' >&2\nexit 1\n")
@@ -3104,7 +3313,7 @@ func main() {
   }
   if len(os.Args) > 1 && os.Args[1] == "--version" { fmt.Println("2.1.212 (Claude Code)"); return }
   if len(os.Args) > 1 && os.Args[1] == "--help" {
-    fmt.Println("--allowed-tools --disable-slash-commands --disallowed-tools --mcp-config --no-chrome --permission-mode --prompt-suggestions --session-id --setting-sources --settings --strict-mcp-config --tools")
+    fmt.Println("--allowed-tools --disable-slash-commands --disallowed-tools --mcp-config --model --no-chrome --permission-mode --prompt-suggestions --session-id --setting-sources --settings --strict-mcp-config --tools")
     if path := os.Getenv("DISAPPEAR_AFTER_CHECK"); path != "" { if _, err := os.Stat(path); err == nil { _ = os.Remove(path); _ = os.Remove(os.Getenv("TMUX_SESSION")) } }
     if path := os.Getenv("DIRTY_AFTER_PREFLIGHT"); path != "" { if _, err := os.Stat(path); err == nil { _ = os.Remove(path); _ = os.WriteFile(os.Getenv("DIRTY_STATE"), nil, 0600) } }
     if path := os.Getenv("REPLACE_AFTER_PREFLIGHT"); path != "" { if _, err := os.Stat(path); err == nil {
