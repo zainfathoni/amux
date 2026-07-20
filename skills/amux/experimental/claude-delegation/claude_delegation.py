@@ -596,13 +596,17 @@ class ReceiptStore:
                 if not valid_live_retirement_candidate(receipt, authorization, compatibility):
                     raise HelperError("retirement requires the exact live report-bearing launch-indeterminate chain")
                 launch_intent = modern_read_only_retirement_launch_intent(receipt, compatibility)
+                expected_private_executable_path = retirement_private_executable_path(
+                    self, delegation_id, compatibility
+                )
                 try:
                     with self.launch_gate(delegation_id, timeout_seconds=0.2):
                         if existing is None:
                             if recover:
                                 raise HelperError("retirement recovery requires a durable retirement intent")
                             identity = inspect_live_indeterminate_target(
-                                launch_intent, receipt["binding"], self, delegation_id
+                                launch_intent, receipt["binding"], self, delegation_id,
+                                compatibility, expected_private_executable_path,
                             )
                             if not valid_retirement_identity(identity, launch_intent, receipt["binding"]):
                                 raise HelperError("retirement target does not match complete launch identity")
@@ -622,13 +626,16 @@ class ReceiptStore:
                             receipt["updated_at"] = retirement_intent["at"]
                             self.commit(store)
                             current = inspect_live_indeterminate_target(
-                                launch_intent, receipt["binding"], self, delegation_id
+                                launch_intent, receipt["binding"], self, delegation_id,
+                                compatibility, expected_private_executable_path,
                             )
                             if current != identity:
                                 return pair_retirement_blocked(
                                     origin_sha256, pair_sha256, "retirement_identity_changed"
                                 )
-                            stop_exact_retirement_target(identity)
+                            stop_exact_retirement_target(
+                                identity, expected_private_executable_path, compatibility
+                            )
                         else:
                             if not recover:
                                 raise HelperError("retirement outcome is indeterminate; explicit recovery is required")
@@ -640,7 +647,8 @@ class ReceiptStore:
                             if absence != "exact_retirement_target_absent":
                                 try:
                                     current = inspect_live_indeterminate_target(
-                                        launch_intent, receipt["binding"], self, delegation_id
+                                        launch_intent, receipt["binding"], self, delegation_id,
+                                        compatibility, expected_private_executable_path,
                                     )
                                 except HelperError:
                                     return pair_retirement_blocked(origin_sha256, pair_sha256, absence)
@@ -648,7 +656,9 @@ class ReceiptStore:
                                     return pair_retirement_blocked(
                                         origin_sha256, pair_sha256, "retirement_identity_changed"
                                     )
-                                stop_exact_retirement_target(identity)
+                                stop_exact_retirement_target(
+                                    identity, expected_private_executable_path, compatibility
+                                )
                         absence = confirm_retirement_target_absent(identity)
                         if absence != "exact_retirement_target_absent":
                             return pair_retirement_blocked(origin_sha256, pair_sha256, absence)
@@ -4809,12 +4819,30 @@ def valid_retirement_identity(
     )
 
 
+def retirement_private_executable_path(
+    store: ReceiptStore, delegation_id: str, compatibility: str | None
+) -> pathlib.Path | None:
+    system = platform.system()
+    if compatibility == HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY and system != "Darwin":
+        raise HelperError("historical modern retirement compatibility requires Darwin")
+    if system != "Darwin":
+        return None
+    return private_launch_transport_path(store, delegation_id).with_name("verified-claude")
+
+
 def inspect_live_indeterminate_target(
     launch_intent: dict[str, Any],
     binding: dict[str, Any],
     store: ReceiptStore,
     delegation_id: str,
+    compatibility: str | None = None,
+    expected_private_executable_path: pathlib.Path | None = None,
 ) -> dict[str, Any]:
+    if compatibility not in (None, HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY):
+        raise HelperError("retirement inspection compatibility is unsupported")
+    if compatibility == HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY:
+        if platform.system() != "Darwin" or expected_private_executable_path is None:
+            raise HelperError("historical modern retirement requires the exact Darwin private route")
     try:
         output = read_bounded_command([
             "tmux", "list-panes", "-a", "-F",
@@ -4846,9 +4874,10 @@ def inspect_live_indeterminate_target(
         raise HelperError("retirement requires one exact live launch target")
     session_id, window_id, pane_id = candidates[0]
     expected_process_object: str | None = None
-    expected_process_path: pathlib.Path | None = None
+    expected_process_path = expected_private_executable_path
     if platform.system() == "Darwin":
-        expected_process_path = private_launch_transport_path(store, delegation_id).with_name("verified-claude")
+        if expected_process_path is None:
+            expected_process_path = retirement_private_executable_path(store, delegation_id, compatibility)
         try:
             descriptor, _, _, expected_process_object = open_exact_verified_executable(
                 expected_process_path
@@ -4865,7 +4894,9 @@ def inspect_live_indeterminate_target(
         expected_process_executable_object_identity=expected_process_object,
         expected_launcher_argv0_digest=launch_intent.get("expected_launcher_argv0_digest"),
         include_process_executable_object_identity=True,
-        allow_missing_launcher_argv0_digest="expected_launcher_argv0_digest" not in launch_intent,
+        allow_missing_launcher_argv0_digest=(
+            compatibility == HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY
+        ),
     )
     if identity.get("window_id") != window_id:
         raise HelperError("retirement tmux target changed during inspection")
@@ -4884,7 +4915,18 @@ def inspect_live_indeterminate_target(
     return identity
 
 
-def stop_exact_retirement_target(identity: dict[str, Any]) -> None:
+def stop_exact_retirement_target(
+    identity: dict[str, Any],
+    expected_private_executable_path: pathlib.Path | None = None,
+    compatibility: str | None = None,
+) -> None:
+    if compatibility not in (None, HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY):
+        raise HelperError("retirement stop compatibility is unsupported")
+    if platform.system() == "Darwin" and expected_private_executable_path is None:
+        raise HelperError("Darwin retirement stop requires the exact private executable route")
+    if compatibility == HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY:
+        if platform.system() != "Darwin" or expected_private_executable_path is None:
+            raise HelperError("historical modern retirement stop requires Darwin private authority")
     formats = [
         "session_name", "session_id", "window_name", "window_id", "pane_id", "pane_pid",
         "pane_current_path", "pane_current_command", "pane_start_command",
@@ -4914,9 +4956,15 @@ def stop_exact_retirement_target(identity: dict[str, Any]) -> None:
             tmux_fields=tmux_fields,
             include_process_executable_object_identity=True,
             allow_missing_launcher_argv0_digest=(
-                "expected_launcher_argv0_digest" not in identity
+                compatibility == HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY
             ),
         )
+        if (
+            expected_private_executable_path is not None
+            and process_executable_path(current["pane_pid"])
+            != expected_private_executable_path
+        ):
+            raise HelperError("retirement process changed its exact private executable route")
         current["session_id"] = values[1]
         current["process_start_identity"] = process_start_identity_from_process_identity(
             current["process_identity"]

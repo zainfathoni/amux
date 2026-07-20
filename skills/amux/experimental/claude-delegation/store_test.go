@@ -2048,7 +2048,7 @@ def fixture(name="synthetic-live"):
 
 stops = []
 module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
-module.stop_exact_retirement_target = lambda bound: stops.append(copy.deepcopy(bound))
+module.stop_exact_retirement_target = lambda bound, *args: stops.append(copy.deepcopy(bound))
 module.confirm_retirement_target_absent = lambda bound: "exact_retirement_target_absent"
 store, current_identity, request = fixture()
 result = store.retire_live_indeterminate_pair(request)
@@ -2062,14 +2062,31 @@ assert store.worker_teardown("T-synthetic", True)["pairs"] == [{
     "pair_sha256":hashlib.sha256(b"synthetic-live").hexdigest(), "state":"pair_retired", "action":"none"}]
 assert store.retire_live_indeterminate_pair(request)["outcome"] == "duplicate" and len(stops) == 1
 
-# The explicit historical-modern selector accepts only the modern read-only shape missing launcher argv0.
+# The historical-modern authority is Darwin-only and cannot admit Linux executable forms.
 compatibility = "historical_modern_read_only_launch_intent_v1"
+module.platform.system = lambda: "Linux"
+for executable_form in ("direct", "node", "bun"):
+    blocked, current_identity, candidate = fixture("blocked-linux-" + executable_form)
+    data = blocked.load_store(); data["receipts"][0]["events"][1].pop("expected_launcher_argv0_digest")
+    blocked.commit(data); current_identity.pop("expected_launcher_argv0_digest")
+    current_identity["process_name"] = executable_form; candidate["compatibility"] = compatibility
+    stops.clear(); inspections = []
+    module.inspect_live_indeterminate_target = lambda *args: (inspections.append(args), copy.deepcopy(current_identity))[1]
+    module.stop_exact_retirement_target = lambda *args, **kwargs: stops.append(args)
+    try: outcome = blocked.retire_live_indeterminate_pair(candidate)
+    except module.HelperError: outcome = {"outcome":"blocked"}
+    receipt = blocked.load_store()["receipts"][0]
+    assert outcome["outcome"] == "blocked" and not inspections and not stops, executable_form
+    assert "retirement_intent" not in receipt and "pair_retired" not in receipt, executable_form
+module.platform.system = lambda: "Darwin"
+
+# The explicit historical-modern selector accepts only the modern read-only shape missing launcher argv0.
 historical, current_identity, request = fixture("synthetic-historical-modern")
 data = historical.load_store(); historical_intent = data["receipts"][0]["events"][1]
 historical_intent.pop("expected_launcher_argv0_digest"); historical.commit(data)
 current_identity.pop("expected_launcher_argv0_digest"); request["compatibility"] = compatibility; stops.clear()
 module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
-module.stop_exact_retirement_target = lambda bound: stops.append(copy.deepcopy(bound))
+module.stop_exact_retirement_target = lambda bound, *args: stops.append(copy.deepcopy(bound))
 result = historical.retire_live_indeterminate_pair(request)
 assert result["outcome"] == "retired" and result["compatibility"] == compatibility, result
 assert len(stops) == 1 and stops[0] == current_identity
@@ -2087,7 +2104,7 @@ data = blocked.load_store(); data["receipts"][0]["events"][1].pop("expected_laun
 blocked.commit(data); current_identity.pop("expected_launcher_argv0_digest")
 current_identity["normalized_argv_digest"] = "9" * 64; candidate["compatibility"] = compatibility
 stops.clear(); module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
-module.stop_exact_retirement_target = lambda bound: stops.append(bound)
+module.stop_exact_retirement_target = lambda bound, *args: stops.append(bound)
 try: outcome = blocked.retire_live_indeterminate_pair(candidate)
 except module.HelperError: outcome = {"outcome":"blocked"}
 assert outcome["outcome"] == "blocked" and not stops
@@ -2106,7 +2123,7 @@ for name, selector, mutate in [
     data = blocked.load_store(); mutate(data["receipts"][0]["events"][1]); blocked.commit(data)
     if selector is not None: candidate["compatibility"] = selector
     stops.clear(); module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
-    module.stop_exact_retirement_target = lambda bound: stops.append(bound)
+    module.stop_exact_retirement_target = lambda bound, *args: stops.append(bound)
     try: outcome = blocked.retire_live_indeterminate_pair(candidate)
     except module.HelperError: outcome = {"outcome":"blocked"}
     assert outcome["outcome"] == "blocked" and not stops, name
@@ -2121,7 +2138,7 @@ launch.clear(); launch.update({"event_id":"launch", "kind":"launch_intent", "wor
     "launch_command_digest":"5" * 64, "at":"2026-07-20T12:00:00Z"})
 blocked.commit(data); candidate["compatibility"] = compatibility; stops.clear()
 module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
-module.stop_exact_retirement_target = lambda bound: stops.append(bound)
+module.stop_exact_retirement_target = lambda bound, *args: stops.append(bound)
 try: outcome = blocked.retire_live_indeterminate_pair(candidate)
 except module.HelperError: outcome = {"outcome":"blocked"}
 assert outcome["outcome"] == "blocked" and not stops
@@ -2132,7 +2149,7 @@ data = historical.load_store(); data["receipts"][0]["events"][1].pop("expected_l
 historical.commit(data); current_identity.pop("expected_launcher_argv0_digest")
 request["compatibility"] = compatibility
 module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
-module.stop_exact_retirement_target = lambda bound: (_ for _ in ()).throw(RuntimeError("synthetic interruption"))
+module.stop_exact_retirement_target = lambda bound, *args: (_ for _ in ()).throw(RuntimeError("synthetic interruption"))
 try: historical.retire_live_indeterminate_pair(request)
 except RuntimeError: pass
 else: raise AssertionError("synthetic historical interruption was not exposed")
@@ -2140,7 +2157,7 @@ interrupted = historical.load_store(); durable = interrupted["receipts"][0]["ret
 assert durable["compatibility"] == compatibility
 assert "expected_launcher_argv0_digest" not in durable["identity"]
 without_selector = dict(request, recover=True); without_selector.pop("compatibility"); stops.clear()
-module.stop_exact_retirement_target = lambda bound: stops.append(bound)
+module.stop_exact_retirement_target = lambda bound, *args: stops.append(bound)
 try: historical.retire_live_indeterminate_pair(without_selector)
 except module.HelperError: pass
 else: raise AssertionError("historical recovery omitted its durable compatibility selector")
@@ -2158,7 +2175,7 @@ assert historical.load_store() == sealed
 
 # Durable intent precedes mutation; recovery observes exact evidence and never blindly repeats a stop after absence.
 store, current_identity, request = fixture("synthetic-interrupted")
-module.stop_exact_retirement_target = lambda bound: (_ for _ in ()).throw(RuntimeError("synthetic interruption"))
+module.stop_exact_retirement_target = lambda bound, *args: (_ for _ in ()).throw(RuntimeError("synthetic interruption"))
 try: store.retire_live_indeterminate_pair(request)
 except RuntimeError: pass
 else: raise AssertionError("synthetic interruption was not exposed")
@@ -2166,7 +2183,7 @@ receipt = store.load_store()["receipts"][0]
 assert receipt["events"][-1]["kind"] == "retirement_intent" and not module.valid_pair_retirement_chain(receipt)
 recover = dict(request, recover=True); stops.clear()
 module.inspect_live_indeterminate_target = lambda *args: (_ for _ in ()).throw(module.HelperError("absent"))
-module.stop_exact_retirement_target = lambda bound: stops.append(bound)
+module.stop_exact_retirement_target = lambda bound, *args: stops.append(bound)
 module.confirm_retirement_target_absent = lambda bound: "exact_retirement_target_absent"
 assert store.retire_live_indeterminate_pair(recover)["outcome"] == "retired" and not stops
 
@@ -2182,18 +2199,18 @@ for name, mutate in [
     blocked, current_identity, candidate = fixture("blocked-" + name); data = blocked.load_store(); rec = data["receipts"][0]
     mutate(current_identity, rec, candidate); blocked.commit(data); stops.clear()
     module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
-    module.stop_exact_retirement_target = lambda bound: stops.append(bound)
+    module.stop_exact_retirement_target = lambda bound, *args: stops.append(bound)
     try: outcome = blocked.retire_live_indeterminate_pair(candidate)
     except module.HelperError: outcome = {"outcome":"blocked"}
     assert outcome["outcome"] == "blocked" and not stops, name
 
 blocked, current_identity, candidate = fixture("blocked-materialized-intent"); stops.clear()
 module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
-module.stop_exact_retirement_target = lambda bound: (_ for _ in ()).throw(RuntimeError("synthetic interruption"))
+module.stop_exact_retirement_target = lambda bound, *args: (_ for _ in ()).throw(RuntimeError("synthetic interruption"))
 try: blocked.retire_live_indeterminate_pair(candidate)
 except RuntimeError: pass
 data = blocked.load_store(); data["receipts"][0]["retirement_intent"]["identity"]["pane_id"] = "%99"
-blocked.commit(data); module.stop_exact_retirement_target = lambda bound: stops.append(bound)
+blocked.commit(data); module.stop_exact_retirement_target = lambda bound, *args: stops.append(bound)
 try: blocked.retire_live_indeterminate_pair(dict(candidate, recover=True))
 except module.HelperError: pass
 else: raise AssertionError("mismatched materialized retirement intent recovered")
@@ -2204,7 +2221,7 @@ for name, field, replacement in [("wrong-pane", "pane_id", "%99"),
     blocked, current_identity, candidate = fixture("blocked-" + name); changed = dict(current_identity)
     changed[field] = replacement; observations = [current_identity, changed]; stops.clear()
     module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(observations.pop(0))
-    module.stop_exact_retirement_target = lambda bound: stops.append(bound)
+    module.stop_exact_retirement_target = lambda bound, *args: stops.append(bound)
     outcome = blocked.retire_live_indeterminate_pair(candidate)
     assert outcome["outcome"] == "blocked" and outcome["blocker"] == "retirement_identity_changed"
     assert not stops, name
@@ -2266,6 +2283,7 @@ module.process_executable_path = lambda pid: alternate
 try: real_inspect_live_indeterminate_target(intent, binding, darwin_store, "synthetic-darwin")
 except module.HelperError: pass
 else: raise AssertionError("equal-content alternate Darwin executable route was accepted")
+module.process_executable_path = lambda pid: private_path
 
 # Final snapshot, external process verification, and kill all use one retained control connection.
 control_instances = []
@@ -2294,7 +2312,7 @@ def inspect_retained(*args, **kwargs):
         {"session_id", "process_start_identity", "expected_launcher_identity",
          "expected_executable_object_identity", "expected_launcher_argv0_digest"}}
 module.inspect_claude_identity = inspect_retained
-real_stop_exact_retirement_target(darwin_identity)
+real_stop_exact_retirement_target(darwin_identity, private_path)
 assert len(control_instances) == 1 and control_instances[0].commands[-2] == ["kill-pane", "-t", "%23"]
 
 # Historical-modern final revalidation keeps the same retained connection and all non-argv0 identity.
@@ -2306,8 +2324,40 @@ def inspect_historical_retained(*args, **kwargs):
         {"session_id", "process_start_identity", "expected_launcher_identity",
          "expected_executable_object_identity"}}
 module.inspect_claude_identity = inspect_historical_retained
-real_stop_exact_retirement_target(historical_darwin_identity)
+real_stop_exact_retirement_target(historical_darwin_identity, private_path, compatibility)
 assert len(control_instances) == 2 and control_instances[1].commands[-2] == ["kill-pane", "-t", "%23"]
+module.inspect_claude_identity = inspect_retained
+
+# A same-object hardlink route change only at final revalidation cannot kill or seal either schema.
+for route_name, active_compatibility in (("current", None), ("historical", compatibility)):
+    blocked, active_identity, candidate = fixture("blocked-final-route-" + route_name)
+    if active_compatibility is not None:
+        data = blocked.load_store(); data["receipts"][0]["events"][1].pop("expected_launcher_argv0_digest")
+        blocked.commit(data); active_identity.pop("expected_launcher_argv0_digest")
+        candidate["compatibility"] = active_compatibility
+    expected_route = module.retirement_private_executable_path(
+        blocked, candidate["delegation_id"], active_compatibility)
+    expected_route.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    expected_route.write_bytes(b"same synthetic executable"); expected_route.chmod(0o500)
+    hardlink = expected_route.with_name("verified-claude-hardlink"); module.os.link(expected_route, hardlink)
+    module.process_executable_path = lambda pid, hardlink=hardlink: hardlink
+    module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(active_identity)
+    control_values["#{pane_current_path}"] = active_identity["workdir"]
+    def inspect_final_route_change(*args, **kwargs):
+        assert kwargs["allow_missing_launcher_argv0_digest"] is (active_compatibility is not None)
+        return {key:value for key,value in active_identity.items() if key not in
+            {"session_id", "process_start_identity", "expected_launcher_identity",
+             "expected_executable_object_identity", "expected_launcher_argv0_digest"}}
+    module.inspect_claude_identity = inspect_final_route_change
+    module.stop_exact_retirement_target = real_stop_exact_retirement_target
+    before = len(control_instances)
+    try: blocked.retire_live_indeterminate_pair(candidate)
+    except module.HelperError: pass
+    else: raise AssertionError("same-object alternate private route retired the pair")
+    receipt = blocked.load_store()["receipts"][0]
+    assert "retirement_intent" in receipt and "pair_retired" not in receipt
+    assert all(command[0] != "kill-pane" for command in control_instances[before].commands)
+module.process_executable_path = lambda pid: private_path
 module.inspect_claude_identity = inspect_retained
 
 # Complete queued fake frames cannot satisfy a fresh per-command token and never authorize kill.
@@ -2320,7 +2370,7 @@ class PrequeuedControl(FakeControl):
     def command_sequence(self, commands):
         raise AssertionError("queued fake snapshot reached kill sequence")
 module.TmuxControlConnection = PrequeuedControl
-try: real_stop_exact_retirement_target(darwin_identity)
+try: real_stop_exact_retirement_target(darwin_identity, private_path)
 except module.HelperError: pass
 else: raise AssertionError("wrong-token queued frame was accepted")
 assert all(command[0] != "kill-pane" for command in control_instances[-1].commands)
@@ -2332,7 +2382,7 @@ for injected in ([], ["retirement-kill:" + "0" * 64]):
             self.commands.extend(commands)
             return [[], injected]
     module.TmuxControlConnection = InjectedKillControl
-    try: real_stop_exact_retirement_target(darwin_identity)
+    try: real_stop_exact_retirement_target(darwin_identity, private_path)
     except module.HelperError: pass
     else: raise AssertionError("injected kill response was accepted")
 module.TmuxControlConnection = FakeControl
@@ -2348,7 +2398,7 @@ module.inspect_claude_identity = inspect_encoded_cwd
 for encoded_cwd in (r"trusted\057work", "line\n%end 10 7 1", "line\r%error 10 7 1"):
     control_values["#{pane_current_path}"] = encoded_cwd
     before = len(control_instances)
-    try: real_stop_exact_retirement_target(darwin_identity)
+    try: real_stop_exact_retirement_target(darwin_identity, private_path)
     except module.HelperError: pass
     else: raise AssertionError("ambiguous encoded cwd reached exact kill")
     assert all(command[0] != "kill-pane" for command in control_instances[before].commands)
