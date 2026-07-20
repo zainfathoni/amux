@@ -74,17 +74,18 @@
   --workdir &lt;dedicated-worktree&gt; \
   --mode medium \
   --title-prefix '#110' \
+  --group amux-110 \
   --message-file &lt;assignment&gt; \
   --idempotency-key issue-110</code></pre>
-          <p>Every accepted issue gets the <code>amux-agent-first</code> label, one narrow assignment, dedicated branch/worktree, semantic issue-unprefixed window, focused Oracle diff review, and explicit callback/finish protocol. Medium is mandatory unless the user explicitly requests another mode; complexity never raises it automatically.</p>
+          <p>Every accepted issue gets the <code>amux-agent-first</code> label, one narrow assignment, dedicated branch/worktree, semantic issue-unprefixed window, focused Oracle diff review, and explicit callback/finish protocol. For Amux issue work, the durable group/Amp label is <code>amux-&lt;issue-number&gt;</code> and each report ID is <code>amux-&lt;issue-number&gt;-worker-&lt;ordinal&gt;</code>. Other repositories use the equivalent lowercase, group-safe repository slug. This workflow convention does not restrict generic group IDs or migrate legacy <code>issue-*</code> and purpose-specific groups. Medium is mandatory unless the user explicitly requests another mode; complexity never raises it automatically.</p>
 
           <h2 id="coordination">Durable issue-worker coordination</h2>
           <p>The coordinator first inspects native issue dependencies and active overlap, then creates worktrees from fresh <code>origin/main</code>. It declares a durable group, registers the exact verified coordinator pane, and spawns with <code>--group</code> so only the authoritative receiving thread is attached.</p>
-          <pre><code>amux callback register --group &lt;group&gt; --thread &lt;coordinator&gt; --pane &lt;pane&gt;
+          <pre><code>amux callback register --group amux-135 --thread &lt;coordinator&gt; --pane &lt;pane&gt;
 amux spawn --mode medium --workspace &lt;workspace&gt; --window &lt;semantic-window&gt; \
   --workdir &lt;fresh-worktree&gt; --title-prefix '#135' \
-  --group &lt;group&gt; --message-file &lt;assignment&gt; --idempotency-key issue-135
-amux report submit --report-id &lt;stable-id&gt; --group &lt;group&gt; \
+  --group amux-135 --message-file &lt;assignment&gt; --idempotency-key issue-135
+amux report submit --report-id amux-135-worker-1 --group amux-135 \
   --thread &lt;worker&gt; --status ready --issue '#135' --pr &lt;url&gt; \
   --summary implementation-tests-review-pr-ci-complete</code></pre>
           <p>A report is persisted before the short wake-up token. Notification and acknowledgement are not finish authorization. The coordinator independently verifies PR head/scope/mergeability/closing issue, worktree and CI, then verifies post-merge CI before recording explicit durable authorization. The child progresses the same report to terminal <code>merged</code>; <code>/amux finish</code> performs safe Git/worktree cleanup and teardown last. Group/report history survives.</p>
