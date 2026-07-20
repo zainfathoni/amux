@@ -222,6 +222,35 @@ class ReceiptStore:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             yield
 
+    @contextlib.contextmanager
+    def launch_gate(self, delegation_id: str) -> Iterator[None]:
+        protocol_id({"delegation_id": delegation_id}, "delegation_id")
+        self.prepare()
+        gate_dir = self.state_dir / "launch-gates"
+        gate_path = gate_dir / hashlib.sha256(delegation_id.encode()).hexdigest()
+        try:
+            gate_dir.mkdir(mode=0o700, exist_ok=True)
+            os.chmod(gate_dir, 0o700)
+            descriptor = os.open(
+                gate_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600
+            )
+        except OSError as error:
+            raise HelperError("launch gate is unavailable") from error
+        with os.fdopen(descriptor, "r+") as gate_file:
+            try:
+                gate_stat = os.fstat(gate_file.fileno())
+                if (
+                    not stat.S_ISREG(gate_stat.st_mode)
+                    or gate_stat.st_uid != os.geteuid()
+                    or stat.S_IMODE(gate_stat.st_mode) != 0o600
+                ):
+                    raise HelperError("launch gate is unavailable")
+                fcntl.flock(gate_file.fileno(), fcntl.LOCK_EX)
+                os.set_inheritable(gate_file.fileno(), True)
+            except OSError as error:
+                raise HelperError("launch gate is unavailable") from error
+            yield
+
     def load_store(self, require_exists: bool = False) -> dict[str, Any]:
         try:
             raw = self.path.read_bytes()
@@ -287,6 +316,7 @@ class ReceiptStore:
         for receipt in store["receipts"]:
             if receipt["binding"]["delegation_id"] != binding["delegation_id"]:
                 continue
+            require_receipt_mutable(receipt)
             if receipt["binding"] != binding:
                 raise HelperError("delegation ID is already bound to a different immutable binding")
             if receipt["events"][0]["routing"] != routing:
@@ -332,6 +362,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             event = {"event_id": event_id, "kind": "routing_changed", "routing": routing}
             replay = find_event(receipt, event_id)
             if replay is not None:
@@ -429,26 +460,27 @@ class ReceiptStore:
                 if not valid_indeterminate_detach_candidate(receipt):
                     raise HelperError("worker detach requires one unresolved launch-indeterminate receipt")
                 launch_intent = receipt_launch_intent(receipt)
-                absence = inspect_indeterminate_launch_absence(launch_intent)
-                if absence != "exact_launch_target_absent":
-                    return {
-                        "action": "indeterminate_worker_detach",
-                        "origin_thread_sha256": origin_sha256,
-                        "pair_sha256": pair_sha256,
-                        "outcome": "blocked",
-                        "blocker": absence,
-                        "fence": "retained",
+                with self.launch_gate(delegation_id):
+                    absence = inspect_indeterminate_launch_absence(launch_intent)
+                    if absence != "exact_launch_target_absent":
+                        return {
+                            "action": "indeterminate_worker_detach",
+                            "origin_thread_sha256": origin_sha256,
+                            "pair_sha256": pair_sha256,
+                            "outcome": "blocked",
+                            "blocker": absence,
+                            "fence": "retained",
+                        }
+                    timestamp = utc_now()
+                    event["at"] = timestamp
+                    receipt["worker_detached"] = {
+                        "event_id": event_id,
+                        "at": timestamp,
+                        "absence_code": event["absence_code"],
                     }
-                timestamp = utc_now()
-                event["at"] = timestamp
-                receipt["worker_detached"] = {
-                    "event_id": event_id,
-                    "at": timestamp,
-                    "absence_code": event["absence_code"],
-                }
-                receipt["events"].append(event)
-                receipt["updated_at"] = timestamp
-                self.commit(store)
+                    receipt["events"].append(event)
+                    receipt["updated_at"] = timestamp
+                    self.commit(store)
         return worker_detach_result(origin_sha256, pair_sha256, "detached")
 
     def worker_teardown(self, origin_thread: str, dry_run: bool) -> dict[str, Any]:
@@ -622,6 +654,7 @@ class ReceiptStore:
             store = self.load_store()
             delegation_id = protocol_id(request, "delegation_id")
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             if expected_kind == "report":
                 expected_kind = "mutating_report" if receipt["binding"]["producer_role"] == "mutating_delegate" else "thinker_report"
             envelope = validate_envelope(request, expected_kind)
@@ -677,6 +710,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             source = find_event(receipt, message_id)
             if source is None or source.get("kind") not in {"valid_report", "input_request"}:
                 raise HelperError("inbox message was not found")
@@ -713,6 +747,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             event = {"event_id": event_id, "kind": "acknowledged", "message_id": message_id}
             replay = find_event(receipt, event_id)
             if replay is not None:
@@ -736,6 +771,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             event = {"event_id": event_id, "kind": "input_accepted", "message_id": message_id}
             replay = find_event(receipt, event_id)
             if replay is not None:
@@ -763,6 +799,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             replay = find_event(receipt, event_id)
             if replay is None:
                 if receipt["state"] != "acknowledged":
@@ -823,6 +860,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             replay = find_event(receipt, result_id)
             if replay is not None:
                 if event_without_time(replay) == result_event:
@@ -846,6 +884,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             replay = find_event(receipt, failure_id)
             if replay is not None:
                 if replay.get("kind") != "park_failed" or replay.get("operation_event_id") != event_id:
@@ -866,6 +905,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             launch_identity = completed_launch_identity(receipt)
             launch_intent = receipt_launch_intent(receipt)
             replay = find_event(receipt, event_id)
@@ -892,6 +932,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             launch_identity = completed_launch_identity(receipt)
             current_intent = receipt_launch_intent(receipt)
             if current_intent != launch_intent:
@@ -933,6 +974,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             source = find_event(receipt, message_id)
             if source is None or source.get("kind") != "valid_report":
                 raise HelperError("notification requires a durably persisted valid report")
@@ -991,6 +1033,7 @@ class ReceiptStore:
         with self.mutation_lock():
             store = self.load_store()
             receipt = self.find(store, delegation_id)
+            require_receipt_mutable(receipt)
             replay = find_event(receipt, result_id)
             if replay is not None:
                 if event_without_time(replay) != result_event:
@@ -2691,6 +2734,14 @@ def write_private_json(path: pathlib.Path, value: Any) -> None:
 def execute_launch_transport(
     store: ReceiptStore, delegation_id: str, expected_digest: str, tmux_environment_digest: str
 ) -> None:
+    with store.launch_gate(delegation_id):
+        require_launch_transport_allowed(store, delegation_id)
+        execute_launch_transport_locked(store, delegation_id, expected_digest, tmux_environment_digest)
+
+
+def execute_launch_transport_locked(
+    store: ReceiptStore, delegation_id: str, expected_digest: str, tmux_environment_digest: str
+) -> None:
     protocol_id({"delegation_id": delegation_id}, "delegation_id")
     for value, label in (
         (expected_digest, "transport_sha256"),
@@ -2818,6 +2869,7 @@ def execute_launch_transport(
             if transport.get("darwin_executable_path") is not None:
                 raise HelperError("private launch transport Darwin executable route is invalid")
             execution_path = descriptor_path(executable_descriptor)
+        require_launch_transport_allowed(store, delegation_id)
         os.execve(execution_path, argv, environment)
     except OSError as error:
         raise HelperError("private launch transport could not execute Claude") from error
@@ -2867,6 +2919,7 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
         raise HelperError("model selection does not match immutable receipt binding")
     with store.mutation_lock():
         receipt = store.find(store.load_store(), delegation_id)
+        require_receipt_mutable(receipt)
         if receipt["binding"].get("model") != request_data.get("model"):
             raise HelperError("model selection does not match immutable receipt binding")
         replay = find_event(receipt, event_id)
@@ -2914,6 +2967,7 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
     with store.mutation_lock():
         receipt_store = store.load_store()
         receipt = store.find(receipt_store, delegation_id)
+        require_receipt_mutable(receipt)
         if receipt["binding"].get("model") != request_data.get("model"):
             raise HelperError("model selection does not match immutable receipt binding")
         for key in ("packet_digest", "launch_policy_digest", "launch_command_digest"):
@@ -3169,6 +3223,43 @@ def read_capacity_source(arguments: list[str], environment: dict[str, str]) -> s
         return output.decode("utf-8")
     except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as error:
         raise HelperError("capacity source is unavailable") from error
+    finally:
+        selector.close()
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        if process.stdout is not None:
+            process.stdout.close()
+
+
+def read_bounded_command(arguments: list[str], limit: int) -> str:
+    try:
+        process = subprocess.Popen(arguments, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError as error:
+        raise HelperError("bounded inspection is unavailable") from error
+    output = bytearray()
+    deadline = time.monotonic() + 5
+    selector = selectors.DefaultSelector()
+    try:
+        if process.stdout is None:
+            raise HelperError("bounded inspection is unavailable")
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise HelperError("bounded inspection is unavailable")
+            chunk = os.read(process.stdout.fileno(), min(64 * 1024, limit + 1 - len(output)))
+            if not chunk:
+                break
+            output.extend(chunk)
+            if len(output) > limit:
+                raise HelperError("bounded inspection is unavailable")
+        process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        if process.returncode != 0:
+            raise HelperError("bounded inspection is unavailable")
+        return output.decode("utf-8").rstrip("\r\n")
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as error:
+        raise HelperError("bounded inspection is unavailable") from error
     finally:
         selector.close()
         if process.poll() is None:
@@ -3782,6 +3873,21 @@ def find_event(receipt: dict[str, Any], event_id: str) -> dict[str, Any] | None:
     return None
 
 
+def require_receipt_mutable(receipt: dict[str, Any]) -> None:
+    events = receipt.get("events")
+    if receipt.get("worker_detached") is not None or (
+        isinstance(events, list)
+        and any(isinstance(event, dict) and event.get("kind") == "worker_detached" for event in events)
+    ):
+        raise HelperError("detached receipt is sealed against further mutation")
+
+
+def require_launch_transport_allowed(store: ReceiptStore, delegation_id: str) -> None:
+    receipt = store.find(store.load_store(require_exists=True), delegation_id)
+    require_receipt_mutable(receipt)
+    receipt_launch_intent(receipt)
+
+
 def completed_launch_identity(receipt: dict[str, Any]) -> dict[str, str]:
     completed = [event for event in receipt["events"] if event.get("kind") == "launch_completed"]
     if len(completed) != 1 or not isinstance(completed[0].get("identity"), dict):
@@ -3924,14 +4030,12 @@ def inspect_indeterminate_launch_absence(intent: dict[str, Any]) -> str:
     if any(not isinstance(value, str) or not value for value in (session, window, claude_session_id)):
         return "launch_identity_unavailable"
     try:
-        output = run_command([
+        output = read_bounded_command([
             "tmux", "list-panes", "-a", "-F",
             "#{session_name}\t#{window_name}\t#{pane_id}",
-        ])
+        ], MAX_ABSENCE_OUTPUT_BYTES)
     except HelperError:
         return "tmux_inspection_unavailable"
-    if len(output.encode()) > MAX_ABSENCE_OUTPUT_BYTES:
-        return "tmux_inspection_ambiguous"
     rows = output.splitlines() if output else []
     if len(rows) > MAX_ABSENCE_PANES:
         return "tmux_inspection_ambiguous"
@@ -3962,11 +4066,11 @@ def inspect_indeterminate_launch_absence(intent: dict[str, Any]) -> str:
 
 def owner_process_ids() -> tuple[list[int], str | None]:
     try:
-        output = run_command(["ps", "-U", str(os.geteuid()), "-o", "pid="])
+        output = read_bounded_command(
+            ["ps", "-U", str(os.geteuid()), "-o", "pid="], MAX_ABSENCE_OUTPUT_BYTES
+        )
     except HelperError:
         return [], "process_inspection_unavailable"
-    if len(output.encode()) > MAX_ABSENCE_OUTPUT_BYTES:
-        return [], "process_inspection_ambiguous"
     rows = output.splitlines() if output else []
     if len(rows) > MAX_ABSENCE_PROCESSES:
         return [], "process_inspection_ambiguous"

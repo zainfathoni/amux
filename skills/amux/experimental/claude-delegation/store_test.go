@@ -350,7 +350,7 @@ def reject_exec(path, argv, environment):
 module.os.execve = reject_exec
 try:
     try:
-        module.execute_launch_transport(store, delegation_id, hashlib.sha256(raw).hexdigest(), "0" * 64)
+        module.execute_launch_transport_locked(store, delegation_id, hashlib.sha256(raw).hexdigest(), "0" * 64)
     except module.HelperError as error:
         assert "verified Claude executable copy changed before execution" in str(error), error
     else:
@@ -1611,20 +1611,20 @@ intent = {
     "expected_argv_digest":"a" * 64, "expected_launcher_identity":"file:1:2",
     "expected_executable_object_identity":"object:1:2:3:" + "b" * 64,
 }
-module.run_command = lambda command, environment=None, executable_fd=None: "Synthetic\tindeterminate\t%20"
+module.read_bounded_command = lambda command, limit: "Synthetic\tindeterminate\t%20"
 module.inspect_claude_identity = lambda *args, **kwargs: {"live": True}
 assert module.inspect_indeterminate_launch_absence(intent) == "matching_live_process"
 module.inspect_claude_identity = lambda *args, **kwargs: (_ for _ in ()).throw(module.HelperError("private mismatch"))
 assert module.inspect_indeterminate_launch_absence(intent) == "launch_identity_ambiguous_or_mismatched"
-module.run_command = lambda command, environment=None, executable_fd=None: "malformed-private-output"
+module.read_bounded_command = lambda command, limit: "malformed-private-output"
 assert module.inspect_indeterminate_launch_absence(intent) == "tmux_inspection_ambiguous"
-module.run_command = lambda command, environment=None, executable_fd=None: (_ for _ in ()).throw(module.HelperError("private unavailable"))
+module.read_bounded_command = lambda command, limit: (_ for _ in ()).throw(module.HelperError("private unavailable"))
 assert module.inspect_indeterminate_launch_absence(intent) == "tmux_inspection_unavailable"
-module.run_command = lambda command, environment=None, executable_fd=None: ""
+module.read_bounded_command = lambda command, limit: ""
 assert module.inspect_indeterminate_launch_absence(intent) == "exact_launch_target_absent"
 renamed = dict(intent)
 renamed["expected_argv_digest"] = module.normalized_argv_digest(["--session-id", intent["claude_session_id"]])
-module.run_command = lambda command, environment=None, executable_fd=None: (
+module.read_bounded_command = lambda command, limit: (
     "Synthetic\trenamed\t%20" if command[0] == "tmux" else "4242"
 )
 module.exact_process_identity = lambda pid: (
@@ -1708,9 +1708,16 @@ else:
     raise AssertionError("conflicting event replay accepted")
 assert store.path.read_bytes() == detached
 assert store.detach_indeterminate_worker(request)["outcome"] == "duplicate"
-assert store.route({"delegation_id":"synthetic-detach", "event_id":"post-detach-route",
-                    "routing":{"target":"machine_local_inbox", "recovery":"changed"}}) == "recorded"
-assert module.worker_teardown_receipt_blocker(store.load_store()["receipts"][0]) is not None
+before = store.path.read_bytes()
+try:
+    store.route({"delegation_id":"synthetic-detach", "event_id":"post-detach-route",
+                 "routing":{"target":"machine_local_inbox", "recovery":"changed"}})
+except module.HelperError as error:
+    assert "sealed" in str(error), error
+else:
+    raise AssertionError("detached receipt accepted a routing mutation")
+assert store.path.read_bytes() == before
+assert module.valid_worker_detach_chain(store.load_store()["receipts"][0])
 
 oversized = pathlib.Path(tempfile.mkstemp()[1])
 oversized.write_bytes(b"x" * (module.MAX_STORE_BYTES + 1))
@@ -1750,6 +1757,119 @@ print("ok")
 	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
 	if err != nil || string(output) != "ok\n" {
 		t.Fatalf("indeterminate detach fail-closed fixture: %v: %s", err, output)
+	}
+}
+
+func TestDetachedReceiptIsSealedAndLaunchGateSerializesPreExecRace(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import importlib.util, os, pathlib, sys, tempfile, time
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+intent = {"event_id":"launch", "kind":"launch_intent", "workflow":"read_only",
+    "claude_session_id":"550e8400-e29b-41d4-a716-446655440000",
+    "tmux_session":"Synthetic", "tmux_window":"indeterminate",
+    "expected_argv_digest":"a" * 64, "expected_launcher_identity":"file:1:2",
+    "expected_executable_object_identity":"object:1:2:3:" + "b" * 64}
+def fixture(name):
+    state = pathlib.Path(tempfile.mkdtemp()).resolve(); state.chmod(0o700)
+    store = module.ReceiptStore(state, state)
+    binding = {"protocol_version":1, "delegation_id":name, "nonce":"1" * 64,
+        "task_id":"task", "question_message_id":"question", "origin_thread":"T-synthetic",
+        "repository":"repository", "base":"2" * 40, "workdir":str(state),
+        "producer_role":"thinker", "authority":"read_only", "task_reference":"fixture",
+        "packet_digest":"3" * 64, "launch_policy_digest":"4" * 64, "launch_command_digest":"5" * 64}
+    create = {"binding":binding, "routing":{"target":"machine_local_inbox"}}
+    assert store.create(create) == "recorded"
+    data = store.load_store(); data["receipts"][0]["events"].append(dict(intent)); store.commit(data)
+    request = {"delegation_id":name, "event_id":"detach-stable", "origin_thread":"T-synthetic",
+        "authorization":{"terminal_state":"merged", "report_sha256":"6" * 64,
+                         "coordinator_authorization_sha256":"7" * 64}}
+    return store, create, request
+module.inspect_indeterminate_launch_absence = lambda launch: "exact_launch_target_absent"
+store, create, detach = fixture("sealed")
+assert store.detach_indeterminate_worker(detach)["outcome"] == "detached"
+before = store.path.read_bytes()
+target = {key:"value" for key in ("origin_thread", "session", "window", "window_id", "pane_id", "workdir",
+    "current_command", "process_name", "process_identity", "process_command_digest")}; target["pane_pid"] = 1
+module.expected_launch_policy = lambda request: None
+launch = {"delegation_id":"sealed", "event_id":"second-launch", "workdir":str(store.state_dir),
+    "packet_file":str(store.state_dir / "packet"), "tmux_session":"Synthetic", "tmux_window":"second",
+    "claude_session_id":intent["claude_session_id"], "repository":"repository", "base":"2" * 40,
+    "expected_launch_policy_digest":"4" * 64}
+operations = [lambda: store.route({"delegation_id":"sealed", "event_id":"route", "routing":{"target":"machine_local_inbox"}}),
+    lambda: module.execute_launch(store, launch),
+    lambda: store.submit_message({"delegation_id":"sealed"}, "report"),
+    lambda: store.consume({"delegation_id":"sealed", "event_id":"consume", "message_id":"message"}),
+    lambda: store.acknowledge({"delegation_id":"sealed", "event_id":"ack", "message_id":"message"}),
+    lambda: store.accept_input({"delegation_id":"sealed", "event_id":"input", "message_id":"message"}),
+    lambda: store.park({"delegation_id":"sealed", "event_id":"park"}),
+    lambda: store.record_park_failure("sealed", "park", "failure"),
+    lambda: store.acquire_session({"delegation_id":"sealed", "event_id":"acquire", "pane_id":"%1",
+                                   "claude_session_id":intent["claude_session_id"]}),
+    lambda: store.notify_amp({"delegation_id":"sealed", "event_id":"notify", "message_id":"message", "target":target}),
+    lambda: module.execute_launch_transport(store, "sealed", "0" * 64, "0" * 64)]
+for operation in operations:
+    try: operation()
+    except module.HelperError as error: assert "sealed" in str(error), error
+    else: raise AssertionError("detached receipt mutation was accepted")
+    assert store.path.read_bytes() == before
+race_store, _, race_detach = fixture("race")
+ready_read, ready_write = os.pipe(); marker = race_store.state_dir / "synthetic-exec"; pid = os.fork()
+if pid == 0:
+    os.close(ready_read)
+    try:
+        with race_store.launch_gate("race"):
+            os.write(ready_write, b"1"); time.sleep(0.2)
+            module.require_launch_transport_allowed(race_store, "race")
+            marker.write_text("executed")
+            os.execve(sys.executable, [sys.executable, "-c", "import time; time.sleep(0.3)"], os.environ)
+    finally: os._exit(0)
+os.close(ready_write); assert os.read(ready_read, 1) == b"1"; started = time.monotonic()
+assert race_store.detach_indeterminate_worker(race_detach)["outcome"] == "detached"
+elapsed = time.monotonic() - started; _, status = os.waitpid(pid, 0)
+assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+assert marker.read_text() == "executed" and elapsed >= 0.4, elapsed
+try: module.require_launch_transport_allowed(race_store, "race")
+except module.HelperError as error: assert "sealed" in str(error), error
+else: raise AssertionError("post-detach transport was accepted")
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil || string(output) != "ok\n" {
+		t.Fatalf("detached sealing and launch gate fixture: %v\n%s", err, output)
+	}
+}
+
+func TestIndeterminateAbsenceInventoryRejectsRealOverLimitSubprocessOutput(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import importlib.util, os, pathlib, sys, tempfile
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+directory = pathlib.Path(tempfile.mkdtemp())
+for name in ("tmux", "ps"):
+    path = directory / name; path.write_text("#!/bin/sh\nhead -c 65537 /dev/zero | tr '\\000' x\n"); path.chmod(0o755)
+os.environ["PATH"] = str(directory) + os.pathsep + os.environ["PATH"]
+intent = {"claude_session_id":"550e8400-e29b-41d4-a716-446655440000",
+          "tmux_session":"Synthetic", "tmux_window":"indeterminate"}
+assert module.inspect_indeterminate_launch_absence(intent) == "tmux_inspection_unavailable"
+(directory / "tmux").write_text("#!/bin/sh\nexit 0\n"); (directory / "tmux").chmod(0o755)
+assert module.inspect_indeterminate_launch_absence(intent) == "process_inspection_unavailable"
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil || string(output) != "ok\n" {
+		t.Fatalf("bounded absence subprocess fixture: %v\n%s", err, output)
 	}
 }
 
@@ -3933,6 +4053,23 @@ esac
 	tamperedArgv[len(tamperedArgv)-1] = "substituted packet"
 	tamperedBytes, err := json.Marshal(tamperedTransport)
 	if err != nil {
+		t.Fatal(err)
+	}
+	var panePIDPath string
+	for _, entry := range environment {
+		if strings.HasPrefix(entry, "PANE_PID_FILE=") {
+			panePIDPath = strings.TrimPrefix(entry, "PANE_PID_FILE=")
+		}
+	}
+	panePIDBytes, err := os.ReadFile(panePIDPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	panePID, err := strconv.Atoi(string(panePIDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(panePID, syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(transportPath, tamperedBytes, 0o600); err != nil {
