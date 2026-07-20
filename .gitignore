@@ -9,6 +9,10 @@
 *.out
 /coverage.txt
 
+# Python bytecode
+__pycache__/
+*.py[cod]
+
 # Local/editor files
 .DS_Store
 .idea/
