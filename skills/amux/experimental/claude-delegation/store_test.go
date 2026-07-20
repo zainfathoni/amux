@@ -1333,6 +1333,425 @@ func TestWorkerTeardownMalformedStoreReturnsBoundedJSONBlocker(t *testing.T) {
 	}
 }
 
+func TestExplicitLegacyRegistrationAndIndeterminateDetachPermitOnlyWorkerTeardown(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	legacyState := t.TempDir()
+	legacyState, err = filepath.EvalSymlinks(legacyState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree := t.TempDir()
+	artifact := filepath.Join(worktree, "private-artifact")
+	if err := os.WriteFile(artifact, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
+	writeExecutable(t, filepath.Join(binDir, "tmux"), `#!/bin/sh
+printf '%s\n' "$*" >> "$TMUX_LOG"
+if [ "$1" = list-panes ]; then exit 0; fi
+exit 99
+`)
+	environment := append(replaceEnvironment(os.Environ(), "HOME", home),
+		"PATH="+binDir+":"+os.Getenv("PATH"), "TMUX_LOG="+tmuxLog)
+	run := func(isolated bool, input map[string]any, args ...string) (string, string, error) {
+		payload, marshalErr := json.Marshal(input)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		commandArgs := []string{helper, "--state-dir", legacyState}
+		if isolated {
+			commandArgs = append(commandArgs, "--isolated-test-state")
+		}
+		command := exec.Command("python3", append(commandArgs, args...)...)
+		command.Env = append(environment, "AMUX_CLAUDE_DELEGATION_TESTING=1")
+		command.Stdin = bytes.NewReader(payload)
+		var stdout, stderr bytes.Buffer
+		command.Stdout = &stdout
+		command.Stderr = &stderr
+		runErr := command.Run()
+		return stdout.String(), stderr.String(), runErr
+	}
+
+	binding := testBinding("synthetic-indeterminate")
+	binding["workdir"] = worktree
+	stdout, stderr, err := run(true, map[string]any{
+		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+	}, "receipt", "create")
+	if err != nil || !strings.Contains(stdout, `"outcome":"recorded"`) {
+		t.Fatalf("create synthetic legacy receipt: %v: %s%s", err, stdout, stderr)
+	}
+	mutateTestReceipt(t, legacyState, func(receipt map[string]any) {
+		receipt["events"] = append(receipt["events"].([]any), map[string]any{
+			"event_id": "synthetic-launch", "kind": "launch_intent", "workflow": "read_only",
+			"claude_session_id": "550e8400-e29b-41d4-a716-446655440000",
+			"tmux_session":      "Synthetic", "tmux_window": "indeterminate",
+			"expected_argv_digest":                strings.Repeat("a", 64),
+			"expected_launcher_identity":          "file:10:20",
+			"expected_executable_object_identity": "object:10:20:30:" + strings.Repeat("b", 64),
+		})
+	})
+	if err := os.Remove(filepath.Join(legacyState, "lifecycle.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err = run(false, map[string]any{}, "lifecycle", "worker-teardown", "--origin-thread", "T-origin")
+	if err != nil || !strings.Contains(stdout, `"outcome":"ready"`) || !strings.Contains(stdout, `"pairs":[]`) {
+		t.Fatalf("unregistered synthetic store should be undiscoverable: %v: %s%s", err, stdout, stderr)
+	}
+	stdout, stderr, err = run(false, map[string]any{}, "lifecycle", "register-legacy-store",
+		"--origin-thread", "T-origin", "--store-path", legacyState)
+	if err != nil || !strings.Contains(stdout, `"outcome":"registered"`) {
+		t.Fatalf("register exact synthetic legacy store: %v: %s%s", err, stdout, stderr)
+	}
+	if strings.Contains(stdout+stderr, legacyState) || strings.Contains(stdout+stderr, "T-origin") || strings.Contains(stdout+stderr, "synthetic-indeterminate") {
+		t.Fatalf("legacy registration leaked private identity: %s%s", stdout, stderr)
+	}
+	stdout, stderr, err = run(false, map[string]any{}, "lifecycle", "register-legacy-store",
+		"--origin-thread", "T-origin", "--store-path", legacyState)
+	if err != nil || !strings.Contains(stdout, `"outcome":"duplicate"`) {
+		t.Fatalf("exact legacy registration replay was not idempotent: %v: %s%s", err, stdout, stderr)
+	}
+
+	stdout, stderr, err = run(false, map[string]any{}, "lifecycle", "worker-teardown", "--origin-thread", "T-origin")
+	if err == nil || !strings.Contains(stdout, `"blocker":"launch_indeterminate"`) {
+		t.Fatalf("ordinary paired teardown did not remain fail-closed: %v: %s%s", err, stdout, stderr)
+	}
+	detach := map[string]any{
+		"delegation_id": "synthetic-indeterminate",
+		"event_id":      "detach-operation-1",
+		"origin_thread": "T-origin",
+		"authorization": map[string]any{
+			"terminal_state":                   "merged",
+			"report_sha256":                    strings.Repeat("c", 64),
+			"coordinator_authorization_sha256": strings.Repeat("d", 64),
+		},
+	}
+	stdout, stderr, err = run(false, detach, "lifecycle", "detach-indeterminate-worker")
+	if err != nil || !strings.Contains(stdout, `"outcome":"detached"`) {
+		t.Fatalf("detach synthetic indeterminate receipt: %v: %s%s", err, stdout, stderr)
+	}
+	if strings.Contains(stdout+stderr, legacyState) || strings.Contains(stdout+stderr, "T-origin") || strings.Contains(stdout+stderr, "synthetic-indeterminate") {
+		t.Fatalf("detach leaked private identity: %s%s", stdout, stderr)
+	}
+	stdout, stderr, err = run(false, detach, "lifecycle", "detach-indeterminate-worker")
+	if err != nil || !strings.Contains(stdout, `"outcome":"duplicate"`) {
+		t.Fatalf("exact detach replay was not idempotent: %v: %s%s", err, stdout, stderr)
+	}
+
+	stdout, stderr, err = run(false, map[string]any{}, "lifecycle", "worker-teardown", "--origin-thread", "T-origin")
+	if err != nil || !strings.Contains(stdout, `"outcome":"ready"`) || !strings.Contains(stdout, `"state":"worker_detached"`) {
+		t.Fatalf("paired teardown did not permit detached Amp worker: %v: %s%s", err, stdout, stderr)
+	}
+	stored, err := os.ReadFile(filepath.Join(legacyState, "receipts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{`"kind":"launch_completed"`, `"kind":"session_acquired"`, `"kind":"valid_report"`, `"kind":"park_intent"`, `"kind":"verified_parked"`, `"cleanup_eligible_at"`} {
+		if bytes.Contains(stored, []byte(forbidden)) {
+			t.Fatalf("detach created prohibited transition %s: %s", forbidden, stored)
+		}
+	}
+	if !bytes.Contains(stored, []byte(`"kind":"worker_detached"`)) || !bytes.Contains(stored, []byte(`"origin_thread":"T-origin"`)) {
+		t.Fatalf("detach did not append evidence while retaining immutable origin: %s", stored)
+	}
+	if content, err := os.ReadFile(artifact); err != nil || string(content) != "preserve" {
+		t.Fatalf("detach removed private artifact or worktree: %v: %q", err, content)
+	}
+	log, err := os.ReadFile(tmuxLog)
+	if err != nil || strings.Contains(string(log), "kill-pane") || strings.Contains(string(log), "send-keys") {
+		t.Fatalf("detach issued a prohibited tmux mutation: %v: %s", err, log)
+	}
+}
+
+func TestLegacyRegistrationRejectsUnprovenOwnerPrivateEvidence(t *testing.T) {
+	t.Parallel()
+	newStore := func(t *testing.T) string {
+		t.Helper()
+		stateDir := t.TempDir()
+		resolved, err := filepath.EvalSymlinks(stateDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertHelperOutcome(t, resolved, "recorded", map[string]any{
+			"binding": testBinding("legacy-registration-fixture"),
+			"routing": map[string]any{"target": "machine_local_inbox"},
+		}, "receipt", "create")
+		return resolved
+	}
+	assertBlocked := func(t *testing.T, stateDir, path, origin string) {
+		t.Helper()
+		stdout, stderr, err := runHelper(t, stateDir, map[string]any{}, "lifecycle", "register-legacy-store",
+			"--origin-thread", origin, "--store-path", path)
+		if err == nil || !strings.Contains(stdout, `"blocker":"registration_evidence_invalid_or_unavailable"`) || stderr != "" {
+			t.Fatalf("unsafe registration was not privacy-safe blocked JSON: %v: %s%s", err, stdout, stderr)
+		}
+		if strings.Contains(stdout, path) || strings.Contains(stdout, origin) || strings.Contains(stdout, "legacy-registration-fixture") {
+			t.Fatalf("registration blocker leaked private evidence: %s", stdout)
+		}
+	}
+
+	t.Run("relative path", func(t *testing.T) {
+		stateDir := newStore(t)
+		assertBlocked(t, stateDir, "relative/store", "T-origin")
+	})
+	t.Run("non-canonical dot path", func(t *testing.T) {
+		stateDir := newStore(t)
+		assertBlocked(t, stateDir, stateDir+string(os.PathSeparator)+".", "T-origin")
+	})
+	t.Run("symlink path", func(t *testing.T) {
+		stateDir := newStore(t)
+		alias := filepath.Join(t.TempDir(), "store-alias")
+		if err := os.Symlink(stateDir, alias); err != nil {
+			t.Fatal(err)
+		}
+		assertBlocked(t, stateDir, alias, "T-origin")
+	})
+	t.Run("directory mode", func(t *testing.T) {
+		stateDir := newStore(t)
+		if err := os.Chmod(stateDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		assertBlocked(t, stateDir, stateDir, "T-origin")
+	})
+	t.Run("receipt mode", func(t *testing.T) {
+		stateDir := newStore(t)
+		if err := os.Chmod(filepath.Join(stateDir, "receipts.json"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		assertBlocked(t, stateDir, stateDir, "T-origin")
+	})
+	t.Run("receipt symlink", func(t *testing.T) {
+		stateDir := newStore(t)
+		receiptPath := filepath.Join(stateDir, "receipts.json")
+		target := filepath.Join(t.TempDir(), "receipts.json")
+		contents, err := os.ReadFile(receiptPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(receiptPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, receiptPath); err != nil {
+			t.Fatal(err)
+		}
+		assertBlocked(t, stateDir, stateDir, "T-origin")
+	})
+	t.Run("missing receipt", func(t *testing.T) {
+		stateDir, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertBlocked(t, stateDir, stateDir, "T-origin")
+	})
+	t.Run("malformed schema", func(t *testing.T) {
+		stateDir := newStore(t)
+		if err := os.WriteFile(filepath.Join(stateDir, "receipts.json"), []byte(`{"schema_version":99,"receipts":[]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		assertBlocked(t, stateDir, stateDir, "T-origin")
+	})
+	t.Run("origin mismatch", func(t *testing.T) {
+		stateDir := newStore(t)
+		assertBlocked(t, stateDir, stateDir, "T-other-origin")
+	})
+	t.Run("owner mismatch", func(t *testing.T) {
+		stateDir := newStore(t)
+		helper, err := filepath.Abs("claude_delegation.py")
+		if err != nil {
+			t.Fatal(err)
+		}
+		script := `import importlib.util, pathlib, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+actual = module.os.geteuid()
+module.os.geteuid = lambda: actual + 1
+try:
+    with module.locked_owner_private_store(pathlib.Path(sys.argv[2])):
+        pass
+except module.HelperError:
+    print("blocked")
+else:
+    raise AssertionError("owner mismatch accepted")
+`
+		output, err := exec.Command("python3", "-c", script, helper, stateDir).CombinedOutput()
+		if err != nil || string(output) != "blocked\n" {
+			t.Fatalf("owner mismatch descriptor validation: %v: %s", err, output)
+		}
+	})
+}
+
+func TestIndeterminateDetachFailsClosedOnAuthorizationIdentityAndConflictingReplay(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import hashlib, importlib.util, pathlib, sys, tempfile
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+intent = {
+    "event_id":"launch", "kind":"launch_intent", "workflow":"read_only",
+    "claude_session_id":"550e8400-e29b-41d4-a716-446655440000",
+    "tmux_session":"Synthetic", "tmux_window":"indeterminate",
+    "expected_argv_digest":"a" * 64, "expected_launcher_identity":"file:1:2",
+    "expected_executable_object_identity":"object:1:2:3:" + "b" * 64,
+}
+module.run_command = lambda command, environment=None, executable_fd=None: "Synthetic\tindeterminate\t%20"
+module.inspect_claude_identity = lambda *args, **kwargs: {"live": True}
+assert module.inspect_indeterminate_launch_absence(intent) == "matching_live_process"
+module.inspect_claude_identity = lambda *args, **kwargs: (_ for _ in ()).throw(module.HelperError("private mismatch"))
+assert module.inspect_indeterminate_launch_absence(intent) == "launch_identity_ambiguous_or_mismatched"
+module.run_command = lambda command, environment=None, executable_fd=None: "malformed-private-output"
+assert module.inspect_indeterminate_launch_absence(intent) == "tmux_inspection_ambiguous"
+module.run_command = lambda command, environment=None, executable_fd=None: (_ for _ in ()).throw(module.HelperError("private unavailable"))
+assert module.inspect_indeterminate_launch_absence(intent) == "tmux_inspection_unavailable"
+module.run_command = lambda command, environment=None, executable_fd=None: ""
+assert module.inspect_indeterminate_launch_absence(intent) == "exact_launch_target_absent"
+renamed = dict(intent)
+renamed["expected_argv_digest"] = module.normalized_argv_digest(["--session-id", intent["claude_session_id"]])
+module.run_command = lambda command, environment=None, executable_fd=None: (
+    "Synthetic\trenamed\t%20" if command[0] == "tmux" else "4242"
+)
+module.exact_process_identity = lambda pid: (
+    "claude", "stable", ["/synthetic/claude", "--session-id", intent["claude_session_id"]], "digest"
+)
+module.process_executable_path = lambda pid: pathlib.Path("/synthetic/claude")
+module.normalized_claude_arguments = lambda system, name, args, executable: ("direct", args[1:])
+renamed_result = module.inspect_indeterminate_launch_absence(renamed)
+assert renamed_result == "matching_live_process", renamed_result
+
+def fixture():
+    state = pathlib.Path(tempfile.mkdtemp()).resolve()
+    state.chmod(0o700)
+    store = module.ReceiptStore(state, state)
+    binding = {
+        "protocol_version":1, "delegation_id":"synthetic-detach", "nonce":"1" * 64,
+        "task_id":"task", "question_message_id":"question", "origin_thread":"T-synthetic",
+        "repository":"repository", "base":"2" * 40, "workdir":str(state),
+        "producer_role":"thinker", "authority":"read_only", "task_reference":"fixture",
+        "packet_digest":"3" * 64, "launch_policy_digest":"4" * 64,
+        "launch_command_digest":"5" * 64,
+    }
+    assert store.create({"binding":binding, "routing":{"target":"machine_local_inbox"}}) == "recorded"
+    data = store.load_store()
+    data["receipts"][0]["events"].append(dict(intent))
+    store.commit(data)
+    request = {
+        "delegation_id":"synthetic-detach", "event_id":"detach-stable", "origin_thread":"T-synthetic",
+        "authorization":{"terminal_state":"merged", "report_sha256":"6" * 64,
+                         "coordinator_authorization_sha256":"7" * 64},
+    }
+    return store, request
+
+for code in ["matching_live_process", "launch_identity_ambiguous_or_mismatched", "tmux_inspection_ambiguous", "tmux_inspection_unavailable"]:
+    store, request = fixture()
+    before = store.path.read_bytes()
+    module.inspect_indeterminate_launch_absence = lambda launch, code=code: code
+    result = store.detach_indeterminate_worker(request)
+    assert result["outcome"] == "blocked" and result["blocker"] == code, result
+    assert store.path.read_bytes() == before, code
+    assert store.lifecycle.load()["teardown_fences"]["T-synthetic"], code
+
+store, request = fixture()
+invalid = dict(request)
+invalid["authorization"] = dict(request["authorization"], terminal_state="ready")
+before = store.path.read_bytes()
+try:
+    store.detach_indeterminate_worker(invalid)
+except module.HelperError:
+    pass
+else:
+    raise AssertionError("non-terminal authorization accepted")
+assert store.path.read_bytes() == before
+
+store, request = fixture()
+data = store.load_store()
+data["receipts"][0]["state"] = "valid_report"
+data["receipts"][0]["report_message_id"] = "synthetic-report"
+data["receipts"][0]["events"].append({"event_id":"synthetic-report", "kind":"valid_report"})
+store.commit(data)
+before = store.path.read_bytes()
+try:
+    store.detach_indeterminate_worker(request)
+except module.HelperError:
+    pass
+else:
+    raise AssertionError("launch-indeterminate receipt with report state detached")
+assert store.path.read_bytes() == before
+
+store, request = fixture()
+module.inspect_indeterminate_launch_absence = lambda launch: "exact_launch_target_absent"
+assert store.detach_indeterminate_worker(request)["outcome"] == "detached"
+detached = store.path.read_bytes()
+conflict = dict(request)
+conflict["authorization"] = dict(request["authorization"], report_sha256="8" * 64)
+try:
+    store.detach_indeterminate_worker(conflict)
+except module.HelperError:
+    pass
+else:
+    raise AssertionError("conflicting event replay accepted")
+assert store.path.read_bytes() == detached
+assert store.detach_indeterminate_worker(request)["outcome"] == "duplicate"
+assert store.route({"delegation_id":"synthetic-detach", "event_id":"post-detach-route",
+                    "routing":{"target":"machine_local_inbox", "recovery":"changed"}}) == "recorded"
+assert module.worker_teardown_receipt_blocker(store.load_store()["receipts"][0]) is not None
+
+oversized = pathlib.Path(tempfile.mkstemp()[1])
+oversized.write_bytes(b"x" * (module.MAX_STORE_BYTES + 1))
+descriptor = module.os.open(oversized, module.os.O_RDONLY)
+try:
+    try:
+        module.read_stable_descriptor(descriptor, module.MAX_STORE_BYTES, "synthetic oversized store")
+    except module.HelperError:
+        pass
+    else:
+        raise AssertionError("oversized descriptor evidence accepted")
+finally:
+    module.os.close(descriptor)
+
+legacy = pathlib.Path(tempfile.mkdtemp()).resolve()
+legacy.chmod(0o700)
+isolated = module.ReceiptStore(legacy, legacy)
+binding = fixture()[0].load_store()["receipts"][0]["binding"]
+binding = dict(binding, delegation_id="legacy-object", workdir=str(legacy))
+assert isolated.create({"binding":binding, "routing":{"target":"machine_local_inbox"}}) == "recorded"
+(legacy / "lifecycle.json").unlink()
+canonical = pathlib.Path(tempfile.mkdtemp()).resolve()
+canonical.chmod(0o700)
+registrar = module.ReceiptStore(legacy, canonical)
+assert registrar.register_legacy_store("T-synthetic", legacy)["outcome"] == "registered"
+moved = legacy.with_name(legacy.name + "-moved")
+legacy.rename(moved)
+legacy.mkdir(mode=0o700)
+for name in ("experimental.lock", "receipts.json"):
+    (legacy / name).write_bytes((moved / name).read_bytes())
+    (legacy / name).chmod(0o600)
+result = registrar.worker_teardown("T-synthetic", True)
+assert result["outcome"] == "blocked"
+assert result["blockers"] == [{"blocker":"receipt_store_invalid_or_unavailable"}]
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil || string(output) != "ok\n" {
+		t.Fatalf("indeterminate detach fail-closed fixture: %v: %s", err, output)
+	}
+}
+
 func TestReportLifecycleRequiresExplicitOrderedTransitions(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()

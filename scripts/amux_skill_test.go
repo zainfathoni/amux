@@ -31,8 +31,8 @@ func TestTriggerChecklistMatchesSkillActivationAndRouting(t *testing.T) {
 
 	triggerPattern := regexp.MustCompile(`(?m)^\| \x60([^\x60]+)\x60 \|`)
 	matches := triggerPattern.FindAllStringSubmatch(checklist, -1)
-	if len(matches) != 20 {
-		t.Fatalf("trigger checklist has %d routes, want 20", len(matches))
+	if len(matches) != 21 {
+		t.Fatalf("trigger checklist has %d routes, want 21", len(matches))
 	}
 	for _, match := range matches {
 		trigger := match[1]
@@ -554,6 +554,20 @@ func TestClaudePairTeardownIsFailClosedAndRunsBeforeWorkerTeardown(t *testing.T)
 	}
 	if !strings.Contains(skill, "paired Claude lifecycle preflight") {
 		t.Error("SKILL.md does not route teardown through paired Claude lifecycle preflight")
+	}
+	for _, required := range []string{
+		"register-legacy-store --origin-thread <thread-id> --store-path <exact-private-store>",
+		"detach-indeterminate-worker",
+		"terminal Amp work authorization",
+		"durable origin fence",
+		"must not continue to worktree removal",
+	} {
+		if !strings.Contains(recovery+workflow+contract, required) {
+			t.Errorf("indeterminate detach progressive disclosure is missing %q", required)
+		}
+	}
+	if !strings.Contains(skill, "Recover indeterminate Claude worker evidence") || !strings.Contains(readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md")), "Recover indeterminate Claude worker evidence") {
+		t.Error("indeterminate recovery trigger is not routed at both skill tiers")
 	}
 	pairAdmission := strings.Index(workflow, "Run the paired Claude lifecycle dry-run and execution")
 	worktreeRemoval := strings.Index(workflow, "Remove the clean worker worktree")
