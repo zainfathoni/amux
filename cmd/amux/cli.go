@@ -266,11 +266,11 @@ func (a app) execute(args []string) error {
 		a.stderr = io.Discard
 	}
 
-	wantsJSON := jsonRequested(args)
+	wantsJSON := globalFlagRequested(args, "--json", "-j")
 	parsed, err := parseInvocation(args)
 	if err != nil {
 		err = result.Request(err)
-		return a.finishInvocation(invocation{Options: cliOptions{JSON: wantsJSON}, Path: guessedCommandPath(args)}, nil, err)
+		return a.finishInvocation(invocation{Options: cliOptions{JSON: wantsJSON, DryRun: globalFlagRequested(args, "--dry-run", "-n")}, Path: guessedCommandPath(args)}, nil, err)
 	}
 	envelope, err := a.dispatch(parsed)
 	if err == nil {
@@ -1191,7 +1191,7 @@ func (a app) printCommandHelp(command *commandSpec) {
 	}
 }
 
-func jsonRequested(args []string) bool {
+func globalFlagRequested(args []string, long, short string) bool {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
@@ -1201,7 +1201,7 @@ func jsonRequested(args []string) bool {
 			i++
 			continue
 		}
-		if arg == "--json" || arg == "-j" {
+		if arg == long || arg == short {
 			return true
 		}
 	}

@@ -526,6 +526,38 @@ func TestExecuteJSONRejectionStillWritesExactlyOneDocument(t *testing.T) {
 	}
 }
 
+func TestExecuteJSONParseErrorsPreserveDryRun(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "reported command", args: []string{"--json", "--dry-run", "worker", "park"}},
+		{name: "between command words", args: []string{"--json", "worker", "--dry-run", "park"}},
+		{name: "after command", args: []string{"worker", "park", "--json", "--dry-run"}},
+		{name: "short flags", args: []string{"-j", "-n", "worker", "park"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			err := (app{stdout: &stdout}).execute(test.args)
+			if err == nil || result.ExitCode(err) != result.ExitRejected {
+				t.Fatalf("parse error = %v, exit=%d", err, result.ExitCode(err))
+			}
+
+			decoder := json.NewDecoder(&stdout)
+			var envelope result.Envelope
+			if err := decoder.Decode(&envelope); err != nil {
+				t.Fatal(err)
+			}
+			if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+				t.Fatalf("JSON stdout contains more than one document: %v", err)
+			}
+			if envelope.Command != "worker park" || !envelope.DryRun || len(envelope.Failed) != 1 || envelope.Failed[0].Error.Kind != result.ErrorRequest {
+				t.Fatalf("JSON rejection envelope = %+v", envelope)
+			}
+		})
+	}
+}
+
 func TestExecuteErrorOutputDistinguishesJSONFlagsFromOptionValues(t *testing.T) {
 	t.Run("true trailing global emits JSON", func(t *testing.T) {
 		var stdout bytes.Buffer
@@ -554,6 +586,40 @@ func TestExecuteErrorOutputDistinguishesJSONFlagsFromOptionValues(t *testing.T) 
 		}
 		if stdout.Len() != 0 {
 			t.Fatalf("non-global --json produced output %q", stdout.String())
+		}
+	})
+
+	t.Run("workspace value does not enable dry-run", func(t *testing.T) {
+		var stdout bytes.Buffer
+		err := (app{stdout: &stdout}).execute([]string{"worker", "list", "--workspace", "--dry-run", "--attach", "--no-attach", "--json"})
+		if err == nil || result.ExitCode(err) != result.ExitRejected {
+			t.Fatalf("error = %v, exit=%d", err, result.ExitCode(err))
+		}
+		var envelope result.Envelope
+		if err := json.NewDecoder(&stdout).Decode(&envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.DryRun {
+			t.Fatalf("option value enabled dry-run: %+v", envelope)
+		}
+	})
+
+	t.Run("token after terminator does not enable dry-run", func(t *testing.T) {
+		var stdout bytes.Buffer
+		err := (app{stdout: &stdout}).execute([]string{"--json", "worker", "park", "--", "--dry-run"})
+		if err == nil || result.ExitCode(err) != result.ExitRejected {
+			t.Fatalf("error = %v, exit=%d", err, result.ExitCode(err))
+		}
+		decoder := json.NewDecoder(&stdout)
+		var envelope result.Envelope
+		if err := decoder.Decode(&envelope); err != nil {
+			t.Fatal(err)
+		}
+		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			t.Fatalf("JSON stdout contains more than one document: %v", err)
+		}
+		if envelope.DryRun {
+			t.Fatalf("token after terminator enabled dry-run: %+v", envelope)
 		}
 	})
 }
