@@ -1032,8 +1032,8 @@ func resolveSpawnGroupNaming(dir config.Directory, s selectors, slug string) (*r
 		return nil, errors.New("automatic group naming requires both --work-item-id and --worker-ordinal")
 	}
 	ordinal, err := strconv.Atoi(s.WorkerOrdinal)
-	if err != nil || ordinal < 1 || ordinal > 9999 || strconv.Itoa(ordinal) != s.WorkerOrdinal {
-		return nil, errors.New("worker ordinal must be a canonical positive integer from 1 through 9999")
+	if err != nil || ordinal < 1 || strconv.Itoa(ordinal) != s.WorkerOrdinal {
+		return nil, errors.New("worker ordinal must be a canonical positive integer")
 	}
 	repository, err := verifiedRepositoryIdentity(s.Workdir)
 	if err != nil {

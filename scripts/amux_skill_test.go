@@ -300,8 +300,8 @@ func TestInvocationPolicyIsProgressivelyDisclosedWithoutChangingClaudeRoutes(t *
 			t.Errorf("workflows.md:%d automatic spawn does not bind shared MODE: %s", lineNumber, strings.TrimSpace(line))
 		}
 	})
-	if spawnCommands != 7 {
-		t.Errorf("automatic spawn command coverage=%d, want 7", spawnCommands)
+	if spawnCommands != 8 {
+		t.Errorf("automatic spawn command coverage=%d, want 8", spawnCommands)
 	}
 }
 
@@ -743,6 +743,23 @@ func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
 	for _, inconsistent := range []string{"--group amux-135", "--group <group>", "CALLBACK<TAB><group><TAB><stable-report-id>", "AMUX_REPORT group=<group> report=<stable-report-id>"} {
 		if strings.Contains(workflow, inconsistent) {
 			t.Errorf("coordinator workflow contains inconsistent durable issue placeholder %q", inconsistent)
+		}
+	}
+	durableStart := strings.Index(workflow, "## Coordinate a durable issue work group")
+	if durableStart < 0 {
+		t.Fatal("durable coordination workflow is missing")
+	}
+	durable := workflow[durableStart:]
+	namingPreflight := strings.Index(durable, "--workdir <verified-repository-checkout>")
+	groupDeclaration := strings.Index(durable, "amux --json group declare")
+	callbackRegistration := strings.Index(durable, "amux --json callback register")
+	worktreeCreation := strings.Index(durable, "git worktree add -b")
+	if namingPreflight < 0 || groupDeclaration < 0 || callbackRegistration < 0 || worktreeCreation < 0 || namingPreflight > groupDeclaration || namingPreflight > callbackRegistration || namingPreflight > worktreeCreation {
+		t.Errorf("durable naming preflight must precede group declaration, callback registration, and worktree creation: naming=%d group=%d callback=%d worktree=%d", namingPreflight, groupDeclaration, callbackRegistration, worktreeCreation)
+	}
+	for _, required := range []string{"Treat this result as immutable coordination input", "No thread, worktree, group, callback, label, or report mutation may precede this step", "final dry-run to reproduce byte-for-byte"} {
+		if !strings.Contains(durable, required) {
+			t.Errorf("durable naming ordering contract is missing %q", required)
 		}
 	}
 

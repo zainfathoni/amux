@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -231,6 +232,24 @@ func TestWorkerSpawnExplicitGroupOverridesAutomaticNaming(t *testing.T) {
 	got := executeWorkerJSON(t, "--json", "--dry-run", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "legacy", "--workdir", workdir, "--group", "explicit-group", "--work-item-id", "#invalid", "--worker-ordinal", "invalid", "--message", "hello", "--idempotency-key", "explicit-wins")
 	if len(got.Planned) != 2 || got.Planned[1].Group == nil || got.Planned[1].Group.ID != "explicit-group" || got.Planned[0].GroupNaming != nil {
 		t.Fatalf("explicit override = %+v", got)
+	}
+}
+
+func TestWorkerSpawnAutomaticNamingOrdinalBoundaries(t *testing.T) {
+	dir := t.TempDir()
+	workdir := testGitRepository(t, "https://github.com/owner/project.git")
+	writeGroupNamingConfig(t, dir, "github.com/owner/project", "bta")
+	args := []string{"--json", "--dry-run", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "addons", "--workdir", workdir, "--work-item-id", "975", "--worker-ordinal", "10000", "--message", "hello", "--idempotency-key", "ordinal-boundary"}
+	got := executeWorkerJSON(t, args...)
+	if len(got.Planned) != 3 || got.Planned[0].GroupNaming == nil || got.Planned[0].GroupNaming.ReportID != "bta-975-addons-worker-10000" {
+		t.Fatalf("ordinal above former ceiling = %+v", got)
+	}
+
+	maxInt := int(^uint(0) >> 1)
+	overflow := new(big.Int).Add(big.NewInt(int64(maxInt)), big.NewInt(1)).String()
+	args[optionValueIndex(t, args, "--worker-ordinal")] = overflow
+	if err := executeWorkerJSONError(t, args...); err == nil || !strings.Contains(err.Error(), "canonical positive integer") {
+		t.Fatalf("host-int overflow ordinal error = %v", err)
 	}
 }
 
