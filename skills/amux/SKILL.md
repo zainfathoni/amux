@@ -45,6 +45,54 @@ Do not edit `workers.tsv`, `runners.tsv`, or `shelves.tsv` directly when the CLI
 - **/amux sprawl #12 #34 ...**: load [`reference/workflows.md`](reference/workflows.md); worker-only issue orchestration with dependency inspection before side effects.
 - **/amux finish**: load [`reference/workflows.md`](reference/workflows.md); verify merge and runner ownership, clean Git/worktree state safely, then teardown the worker last.
 
+## Workflow Orchestration
+
+For a scheduled coordinator deadline wake-up, this diagram is the source of truth. The firing is only a wake-up; load [`reference/workflows.md`](reference/workflows.md#7-coordinator-owned-deadline-queue) and use durable group and `amux report pending/history` state to make every decision.
+
+```diagram
+┌──────────────────────┐
+│ Schedule wakes thread│
+└──────────┬───────────┘
+           ▼
+┌────────────────────────────┐
+│ Load /amux; inspect group, │
+│ pending, history, identity │
+└──────────┬─────────────────┘
+           ▼
+┌────────────────────────────┐ no   ┌───────────────────────────┐
+│ Exact active generation and│─────▶│ No steering; reconcile the│
+│ member binding still match?│      │ nearest schedule or clear │
+└──────────┬─────────────────┘      └───────────────────────────┘
+           │ yes
+           ▼
+┌────────────────────────────┐ yes  ┌───────────────────────────┐
+│ Required stage satisfied or│─────▶│ No steering; reconcile the│
+│ acknowledged before expiry?│      │ nearest schedule or clear │
+└──────────┬─────────────────┘      └───────────────────────────┘
+           │ no
+           ▼
+┌────────────────────────────┐ no   ┌───────────────────────────┐
+│ Deadline expired?          │─────▶│ Re-arm this nearest active│
+└──────────┬─────────────────┘      │ deadline once             │
+           │ yes                     └───────────────────────────┘
+           ▼
+┌────────────────────────────┐ yes  ┌───────────────────────────┐
+│ Stop attempt already       │─────▶│ Reconcile next unhandled  │
+│ recorded for generation?   │      │ generation, or clear      │
+└──────────┬─────────────────┘      └───────────────────────────┘
+           │ no
+           ▼
+┌────────────────────────────┐
+│ Record one attempt; send one│
+│ bounded stop instruction   │
+└──────────┬─────────────────┘
+           ▼
+┌────────────────────────────┐
+│ Reconcile next unhandled   │
+│ generation, or clear       │
+└────────────────────────────┘
+```
+
 ## Load only the needed reference
 
 - Exact routes, selectors, output, side effects, installation, and maintenance: [`reference/commands.md`](reference/commands.md).
