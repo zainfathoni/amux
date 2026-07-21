@@ -2545,6 +2545,357 @@ func TestTextContainsComposerMessage(t *testing.T) {
 	}
 }
 
+func TestTextComposerEqualsMultilineMessage(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		pane    string
+		message string
+		want    bool
+	}{
+		{name: "complete normalized message", pane: "╭ composer ─╮\n│ first │\n│ second │\n╰────────────╯\n", message: "first\nsecond", want: true},
+		{name: "single terminal line ending", pane: "╭ composer ─╮\n│ first │\n│ second │\n╰────────────╯\n", message: "first\r\nsecond\r\n", want: true},
+		{name: "literal frame characters", pane: "╭ composer ─╮\n│ corners ╭ ╰ ╮ ╯ ─ │ │\n│ second │\n╰────────────╯\n", message: "corners ╭ ╰ ╮ ╯ ─ │\nsecond", want: true},
+		{name: "partial message", pane: "╭ composer ─╮\n│ first │\n╰────────────╯\n", message: "first\nsecond"},
+		{name: "residual prefix plus complete message", pane: "╭ composer ─╮\n│ first │\n│ first │\n│ second │\n╰────────────╯\n", message: "first\nsecond"},
+		{name: "deleted blank line", pane: "╭ composer ─╮\n│ first │\n│ second │\n╰────────────╯\n", message: "first\n\nsecond"},
+		{name: "collapsed repeated spaces", pane: "╭ composer ─╮\n│ first item │\n│ second │\n╰────────────╯\n", message: "first  item\nsecond"},
+		{name: "two terminal line endings", pane: "╭ composer ─╮\n│ first │\n│ second │\n╰────────────╯\n", message: "first\nsecond\n\n"},
+		{name: "lost literal box character", pane: "╭ composer ─╮\n│ first marker │\n│ second │\n╰────────────╯\n", message: "first │ marker\nsecond"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, available := textComposerEqualsMessage(test.pane, test.message)
+			if got != test.want || !available {
+				t.Fatalf("composer match = (%t, %t), want (%t, true)", got, available, test.want)
+			}
+		})
+	}
+}
+
+func TestSubmitInitialMultilineMessageAcceptsLiteralFrameCharacters(t *testing.T) {
+	bin := t.TempDir()
+	pasted := filepath.Join(bin, "pasted")
+	entered := filepath.Join(bin, "entered")
+	message := "corners ╭ ╰ ╮ ╯ ─ │\nsecond"
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = load-buffer ]; then cat >/dev/null; exit 0; fi
+if [ "$1" = paste-buffer ]; then touch "`+pasted+`"; exit 0; fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then touch "`+entered+`"; exit 0; fi
+if [ "$1" = capture-pane ]; then
+  if [ -e "`+entered+`" ]; then printf ' ┃ corners ╭ ╰ ╮ ╯ ─ │\n ┃ second\n╭ composer ─╮\n│           │\n╰────────────╯\n';
+  elif [ -e "`+pasted+`" ]; then printf '╭ composer ─╮\n│ corners ╭ ╰ ╮ ╯ ─ │ │\n│ second │\n╰────────────╯\n';
+  else printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; fi
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	got, err := submitInitialMessage(tmux.Runner{}, "%1", message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.status != config.OperationSubmissionTransitioned {
+		t.Fatalf("submission status = %q, want %q", got.status, config.OperationSubmissionTransitioned)
+	}
+	if _, statErr := os.Stat(entered); statErr != nil {
+		t.Fatalf("Enter was not attempted for exact literal frame content: %v", statErr)
+	}
+}
+
+func TestLegacyMessageMatchingPreservesMultilineContent(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		stored  string
+		message string
+		want    bool
+	}{
+		{name: "exact CRLF normalized", stored: "first\n\nsecond", message: "first\r\n\r\nsecond", want: true},
+		{name: "single terminal line ending", stored: "first\nsecond", message: "first\nsecond\n", want: true},
+		{name: "deleted blank line", stored: "first\nsecond", message: "first\n\nsecond"},
+		{name: "collapsed repeated spaces", stored: "first item\nsecond", message: "first  item\nsecond"},
+		{name: "two terminal line endings", stored: "first\nsecond", message: "first\nsecond\n\n"},
+		{name: "lost literal box character", stored: "first marker\nsecond", message: "first │ marker\nsecond"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := jsonValueContainsMessage(test.stored, test.message); got != test.want {
+				t.Fatalf("legacy match = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestSubmitInitialMultilineMessageNeverEntersAlteredContent(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		pane    string
+		message string
+	}{
+		{name: "deleted blank line", pane: "╭ composer ─╮\n│ first │\n│ second │\n╰────────────╯\n", message: "first\n\nsecond"},
+		{name: "collapsed repeated spaces", pane: "╭ composer ─╮\n│ first item │\n│ second │\n╰────────────╯\n", message: "first  item\nsecond"},
+		{name: "two terminal line endings", pane: "╭ composer ─╮\n│ first │\n│ second │\n╰────────────╯\n", message: "first\nsecond\n\n"},
+		{name: "lost literal box character", pane: "╭ composer ─╮\n│ first marker │\n│ second │\n╰────────────╯\n", message: "first │ marker\nsecond"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bin := t.TempDir()
+			pasted := filepath.Join(bin, "pasted")
+			entered := filepath.Join(bin, "entered")
+			writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = load-buffer ]; then cat >/dev/null; exit 0; fi
+if [ "$1" = paste-buffer ]; then touch "`+pasted+`"; exit 0; fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then touch "`+entered+`"; exit 0; fi
+if [ "$1" = send-keys ] && [ "$4" = C-u ]; then exit 0; fi
+if [ "$1" = capture-pane ]; then
+  if [ -e "`+pasted+`" ]; then printf '%s' `+shellSingleQuote(test.pane)+`; else printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; fi
+  exit 0
+fi
+exit 2
+`)
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+			got, err := submitInitialMessage(tmux.Runner{}, "%1", test.message)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.status != config.OperationSubmissionInputNotVisible {
+				t.Fatalf("submission status = %q, want %q", got.status, config.OperationSubmissionInputNotVisible)
+			}
+			if _, statErr := os.Stat(entered); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("Enter was attempted for altered content: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestSubmitInitialMultilineMessageClassifiesBoundedComposerOutcomes(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		afterEnter string
+		want       config.OperationSubmissionStatus
+	}{
+		{name: "typed only", afterEnter: "printf '╭ composer ─╮\\n│ first │\\n│ second │\\n╰────────────╯\\n'", want: config.OperationSubmissionTypedOnly},
+		{name: "capture unknown", afterEnter: "exit 1", want: config.OperationSubmissionCaptureUnknown},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bin := t.TempDir()
+			pasted := filepath.Join(bin, "pasted")
+			entered := filepath.Join(bin, "entered")
+			writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = load-buffer ]; then cat >/dev/null; exit 0; fi
+if [ "$1" = paste-buffer ]; then touch "`+pasted+`"; exit 0; fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then touch "`+entered+`"; exit 0; fi
+if [ "$1" = capture-pane ]; then
+  if [ -e "`+entered+`" ]; then `+test.afterEnter+`; exit $?; fi
+  if [ -e "`+pasted+`" ]; then printf '╭ composer ─╮\n│ first │\n│ second │\n╰────────────╯\n'; else printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; fi
+  exit 0
+fi
+exit 2
+`)
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+			got, err := submitInitialMessage(tmux.Runner{}, "%1", "first\nsecond")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.status != test.want {
+				t.Fatalf("submission status = %q, want %q", got.status, test.want)
+			}
+		})
+	}
+}
+
+func TestSubmitInitialMultilineMessageDoesNotPressEnterWhenPasteVisibilityIsUnknown(t *testing.T) {
+	bin := t.TempDir()
+	pasted := filepath.Join(bin, "pasted")
+	entered := filepath.Join(bin, "entered")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = load-buffer ]; then cat >/dev/null; exit 0; fi
+if [ "$1" = paste-buffer ]; then touch "`+pasted+`"; exit 0; fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then touch "`+entered+`"; exit 0; fi
+if [ "$1" = capture-pane ]; then
+  if [ -e "`+pasted+`" ]; then exit 1; fi
+  printf '╭ composer ─╮\n│           │\n╰────────────╯\n'
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	got, err := submitInitialMessage(tmux.Runner{}, "%1", "first\nsecond")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.status != config.OperationSubmissionInputVisibilityUnknown {
+		t.Fatalf("submission status = %q, want %q", got.status, config.OperationSubmissionInputVisibilityUnknown)
+	}
+	if _, statErr := os.Stat(entered); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Enter was attempted without visible multiline input: %v", statErr)
+	}
+}
+
+func TestSubmitInitialMultilineMessageRejectsResidualPrefixAfterRetry(t *testing.T) {
+	bin := t.TempDir()
+	pasteCount := filepath.Join(bin, "paste-count")
+	entered := filepath.Join(bin, "entered")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = load-buffer ]; then cat >/dev/null; exit 0; fi
+if [ "$1" = paste-buffer ]; then
+  count=0; if [ -f "`+pasteCount+`" ]; then count=$(cat "`+pasteCount+`"); fi
+  count=$((count + 1)); printf '%s\n' "$count" > "`+pasteCount+`"; exit 0
+fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then touch "`+entered+`"; exit 0; fi
+if [ "$1" = send-keys ] && [ "$4" = C-u ]; then exit 0; fi
+if [ "$1" = capture-pane ]; then
+  count=0; if [ -f "`+pasteCount+`" ]; then count=$(cat "`+pasteCount+`"); fi
+  if [ "$count" -eq 1 ]; then printf '╭ composer ─╮\n│ first │\n╰────────────╯\n';
+  elif [ "$count" -eq 2 ]; then printf '╭ composer ─╮\n│ first │\n│ first │\n│ second │\n╰────────────╯\n';
+  else printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; fi
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	got, err := submitInitialMessage(tmux.Runner{}, "%1", "first\nsecond")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.status != config.OperationSubmissionInputNotVisible {
+		t.Fatalf("submission status = %q, want %q", got.status, config.OperationSubmissionInputNotVisible)
+	}
+	if _, statErr := os.Stat(entered); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Enter was attempted with residual composer input: %v", statErr)
+	}
+}
+
+func TestSubmitInitialMultilineMessageTreatsIntermittentCaptureLossAsUnknown(t *testing.T) {
+	bin := t.TempDir()
+	pasted := filepath.Join(bin, "pasted")
+	captureCount := filepath.Join(bin, "capture-count")
+	entered := filepath.Join(bin, "entered")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = load-buffer ]; then cat >/dev/null; exit 0; fi
+if [ "$1" = paste-buffer ]; then touch "`+pasted+`"; exit 0; fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then touch "`+entered+`"; exit 0; fi
+if [ "$1" = capture-pane ]; then
+  if [ ! -e "`+pasted+`" ]; then printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; exit 0; fi
+  count=0; if [ -f "`+captureCount+`" ]; then count=$(cat "`+captureCount+`"); fi
+  count=$((count + 1)); printf '%s\n' "$count" > "`+captureCount+`"
+  if [ "$count" -eq 1 ]; then printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; exit 0; fi
+  exit 1
+fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	got, err := submitInitialMessage(tmux.Runner{}, "%1", "first\nsecond")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.status != config.OperationSubmissionInputVisibilityUnknown {
+		t.Fatalf("submission status = %q, want %q", got.status, config.OperationSubmissionInputVisibilityUnknown)
+	}
+	if _, statErr := os.Stat(entered); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Enter was attempted after capture became unavailable: %v", statErr)
+	}
+}
+
+func TestSubmitInitialMultilineMessageRechecksExactContentImmediatelyBeforeEnter(t *testing.T) {
+	for _, finalComposer := range []string{
+		"╭ composer ─╮\n│ first │\n╰────────────╯\n",
+		"╭ composer ─╮\n│           │\n╰────────────╯\n",
+	} {
+		bin := t.TempDir()
+		pasted := filepath.Join(bin, "pasted")
+		captureCount := filepath.Join(bin, "capture-count")
+		entered := filepath.Join(bin, "entered")
+		writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = load-buffer ]; then cat >/dev/null; exit 0; fi
+if [ "$1" = paste-buffer ]; then touch "`+pasted+`"; exit 0; fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then touch "`+entered+`"; exit 0; fi
+if [ "$1" = capture-pane ]; then
+  if [ ! -e "`+pasted+`" ]; then printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; exit 0; fi
+  count=0; if [ -f "`+captureCount+`" ]; then count=$(cat "`+captureCount+`"); fi
+  count=$((count + 1)); printf '%s\n' "$count" > "`+captureCount+`"
+  if [ "$count" -eq 1 ]; then printf '╭ composer ─╮\n│ first │\n│ second │\n╰────────────╯\n'; else printf '%s' `+shellSingleQuote(finalComposer)+`; fi
+  exit 0
+fi
+exit 2
+`)
+		t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+		got, err := submitInitialMessage(tmux.Runner{}, "%1", "first\nsecond")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.status != config.OperationSubmissionInputNotVisible {
+			t.Fatalf("submission status = %q, want %q", got.status, config.OperationSubmissionInputNotVisible)
+		}
+		if _, statErr := os.Stat(entered); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("Enter was attempted after final composer changed: %v", statErr)
+		}
+	}
+}
+
+func TestSubmitInitialSingleLineMessageRetainsEverAvailableCaptureEvidence(t *testing.T) {
+	bin := t.TempDir()
+	readyCaptures := filepath.Join(bin, "ready-captures")
+	typed := filepath.Join(bin, "typed")
+	entered := filepath.Join(bin, "entered")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = send-keys ] && [ "$4" = -l ]; then touch "`+typed+`"; exit 0; fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then touch "`+entered+`"; exit 0; fi
+if [ "$1" = capture-pane ]; then
+  if [ -e "`+entered+`" ]; then printf ' ┃ hello\n╭ composer ─╮\n│           │\n╰────────────╯\n'; exit 0; fi
+  if [ -e "`+typed+`" ]; then printf '╭ composer ─╮\n│ hello │\n╰────────────╯\n'; exit 0; fi
+  count=0; if [ -f "`+readyCaptures+`" ]; then count=$(cat "`+readyCaptures+`"); fi
+  count=$((count + 1)); printf '%s\n' "$count" > "`+readyCaptures+`"
+  if [ "$count" -eq 1 ]; then printf 'starting Amp\n'; exit 0; fi
+  exit 1
+fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "20ms")
+
+	got, err := submitInitialMessage(tmux.Runner{}, "%1", "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.status != config.OperationSubmissionTransitioned {
+		t.Fatalf("submission status = %q, want %q", got.status, config.OperationSubmissionTransitioned)
+	}
+}
+
+func TestSubmitInitialMultilineMessageClassifiesUnavailableComposerCapture(t *testing.T) {
+	bin := t.TempDir()
+	pasted := filepath.Join(bin, "pasted")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = capture-pane ]; then exit 1; fi
+if [ "$1" = paste-buffer ]; then touch "`+pasted+`"; exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	got, err := submitInitialMessage(tmux.Runner{}, "%1", "first\nsecond")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.status != config.OperationSubmissionComposerCaptureUnknown {
+		t.Fatalf("submission status = %q, want %q", got.status, config.OperationSubmissionComposerCaptureUnknown)
+	}
+	if _, statErr := os.Stat(pasted); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("paste was attempted without composer visibility: %v", statErr)
+	}
+}
+
 func TestSpawnLongModeFlagCreatesThreadWithMode(t *testing.T) {
 	for _, mode := range []string{"medium", "custom-plugin-mode"} {
 		t.Run(mode, func(t *testing.T) {

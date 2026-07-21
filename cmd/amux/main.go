@@ -2165,11 +2165,11 @@ func (a app) spawn(opts options, args []string) error {
 	}
 
 	target := submissionTarget(runner, windowID)
-	submitted, err := submitInitialMessage(runner, target, initialMessage)
+	submission, err := submitInitialMessage(runner, target, initialMessage)
 	if err != nil {
 		return err
 	}
-	if !submitted {
+	if submission.status == config.OperationSubmissionCaptureUnknown {
 		fmt.Fprintf(a.stderr, "warning: initial message may not have been submitted; check tmux window %s/%s or send Enter manually\n", session, window)
 	}
 	delivery, err := verifyInitialMessageDelivery(runner, target, thread, initialMessage)
@@ -2265,72 +2265,122 @@ func validateSpawnMessage(name, value string) error {
 	return nil
 }
 
-func submitInitialMessage(runner tmux.Runner, target, message string) (bool, error) {
-	_, captureAvailable := waitForComposerReady(runner, target)
-	if !captureAvailable {
+type initialMessageSubmission struct {
+	status config.OperationSubmissionStatus
+}
+
+func submitInitialMessage(runner tmux.Runner, target, message string) (initialMessageSubmission, error) {
+	multiline := strings.ContainsAny(message, "\r\n")
+	ready, captureAvailable, captureEverAvailable := waitForComposerReady(runner, target)
+	if multiline && !ready {
+		if !captureAvailable {
+			return initialMessageSubmission{status: config.OperationSubmissionComposerCaptureUnknown}, nil
+		}
+		return initialMessageSubmission{status: config.OperationSubmissionComposerUnavailable}, nil
+	}
+	if !multiline && !captureEverAvailable {
 		if err := sendInitialMessageText(runner, target, message); err != nil {
-			return false, fmt.Errorf("send initial message: %w", err)
+			return initialMessageSubmission{}, fmt.Errorf("send initial message: %w", err)
 		}
 		if err := runner.SendEnter(target); err != nil {
-			return false, fmt.Errorf("submit initial message: %w", err)
+			return initialMessageSubmission{}, fmt.Errorf("submit initial message: %w", err)
 		}
-		return false, nil
+		return initialMessageSubmission{status: config.OperationSubmissionCaptureUnknown}, nil
 	}
 	if err := sendInitialMessageText(runner, target, message); err != nil {
-		return false, fmt.Errorf("send initial message: %w", err)
+		return initialMessageSubmission{}, fmt.Errorf("send initial message: %w", err)
 	}
-	if strings.ContainsAny(message, "\r\n") {
-		time.Sleep(spawnInputSettleDelay())
-		if err := runner.SendEnter(target); err != nil {
-			return false, fmt.Errorf("submit initial message: %w", err)
+	if multiline {
+		visible, available := waitForComposerMessageState(runner, target, message)
+		if !available {
+			return initialMessageSubmission{status: config.OperationSubmissionInputVisibilityUnknown}, nil
 		}
-		return true, nil
+		if !visible {
+			if err := runner.ClearLine(target); err != nil {
+				return initialMessageSubmission{}, fmt.Errorf("clear initial message: %w", err)
+			}
+			if err := sendInitialMessageText(runner, target, message); err != nil {
+				return initialMessageSubmission{}, fmt.Errorf("send initial message: %w", err)
+			}
+			visible, available = waitForComposerMessageState(runner, target, message)
+			if !available {
+				return initialMessageSubmission{status: config.OperationSubmissionInputVisibilityUnknown}, nil
+			}
+			if !visible {
+				if err := runner.ClearLine(target); err != nil {
+					return initialMessageSubmission{}, fmt.Errorf("clear unverified initial message: %w", err)
+				}
+				return initialMessageSubmission{status: config.OperationSubmissionInputNotVisible}, nil
+			}
+		}
+		time.Sleep(spawnInputSettleDelay())
+		visible, available = composerContainsMessage(runner, target, message)
+		if !available {
+			return initialMessageSubmission{status: config.OperationSubmissionInputVisibilityUnknown}, nil
+		}
+		if !visible {
+			return initialMessageSubmission{status: config.OperationSubmissionInputNotVisible}, nil
+		}
+		if err := runner.SendEnter(target); err != nil {
+			return initialMessageSubmission{}, fmt.Errorf("submit initial message: %w", err)
+		}
+		contains, available, visible := paneMessageState(runner, target, message)
+		switch {
+		case !available:
+			return initialMessageSubmission{status: config.OperationSubmissionCaptureUnknown}, nil
+		case contains:
+			return initialMessageSubmission{status: config.OperationSubmissionTypedOnly}, nil
+		case visible:
+			return initialMessageSubmission{status: config.OperationSubmissionTransitioned}, nil
+		default:
+			return initialMessageSubmission{status: config.OperationSubmissionEnterAttempted}, nil
+		}
 	}
 	if !waitForComposerMessage(runner, target, message) {
 		if err := runner.ClearLine(target); err != nil {
-			return false, fmt.Errorf("clear initial message: %w", err)
+			return initialMessageSubmission{}, fmt.Errorf("clear initial message: %w", err)
 		}
 		if err := sendInitialMessageText(runner, target, message); err != nil {
-			return false, fmt.Errorf("send initial message: %w", err)
+			return initialMessageSubmission{}, fmt.Errorf("send initial message: %w", err)
 		}
 		if !waitForComposerMessage(runner, target, message) {
 			time.Sleep(spawnInputSettleDelay())
 			if err := runner.SendEnter(target); err != nil {
-				return false, fmt.Errorf("submit initial message: %w", err)
+				return initialMessageSubmission{}, fmt.Errorf("submit initial message: %w", err)
 			}
-			return true, nil
+			return initialMessageSubmission{status: config.OperationSubmissionEnterAttempted}, nil
 		}
 	}
 	time.Sleep(spawnInputSettleDelay())
 	retypedAfterLostPrompt := false
 	for attempt := 0; attempt < 3; attempt++ {
 		if err := runner.SendEnter(target); err != nil {
-			return false, fmt.Errorf("submit initial message: %w", err)
+			return initialMessageSubmission{}, fmt.Errorf("submit initial message: %w", err)
 		}
 		time.Sleep(spawnPollInterval)
 		contains, available, visible := paneMessageState(runner, target, message)
 		if !available {
-			return false, nil
+			return initialMessageSubmission{status: config.OperationSubmissionCaptureUnknown}, nil
 		}
 		if contains {
 			continue
 		}
 		if visible {
-			return true, nil
+			return initialMessageSubmission{status: config.OperationSubmissionTransitioned}, nil
 		}
 		if retypedAfterLostPrompt {
-			return false, nil
+			return initialMessageSubmission{status: config.OperationSubmissionEnterAttempted}, nil
 		}
 		if err := sendInitialMessageText(runner, target, message); err != nil {
-			return false, fmt.Errorf("send initial message: %w", err)
+			return initialMessageSubmission{}, fmt.Errorf("send initial message: %w", err)
 		}
 		if !waitForComposerMessage(runner, target, message) {
-			return false, nil
+			return initialMessageSubmission{status: config.OperationSubmissionInputNotVisible}, nil
 		}
 		time.Sleep(spawnInputSettleDelay())
 		retypedAfterLostPrompt = true
 	}
-	return false, nil
+	return initialMessageSubmission{status: config.OperationSubmissionTypedOnly}, nil
 }
 
 func sendInitialMessageText(runner tmux.Runner, target, message string) error {
@@ -2340,30 +2390,35 @@ func sendInitialMessageText(runner tmux.Runner, target, message string) error {
 	return runner.SendLiteral(target, message)
 }
 
-func waitForComposerReady(runner tmux.Runner, target string) (bool, bool) {
+func waitForComposerReady(runner tmux.Runner, target string) (bool, bool, bool) {
 	deadline := time.Now().Add(spawnSubmitTimeout())
-	captureAvailable := false
+	everAvailable := false
 	for {
 		ready, available := composerReady(runner, target)
-		captureAvailable = captureAvailable || available
+		everAvailable = everAvailable || available
 		if ready {
-			return true, captureAvailable
+			return true, true, true
 		}
 		if !sleepUntilNextSpawnPoll(deadline) {
-			return false, captureAvailable
+			return false, available, everAvailable
 		}
 	}
 }
 
 func waitForComposerMessage(runner tmux.Runner, target, message string) bool {
+	visible, _ := waitForComposerMessageState(runner, target, message)
+	return visible
+}
+
+func waitForComposerMessageState(runner tmux.Runner, target, message string) (bool, bool) {
 	deadline := time.Now().Add(spawnSubmitTimeout())
 	for {
-		contains, _ := composerContainsMessage(runner, target, message)
+		contains, available := composerContainsMessage(runner, target, message)
 		if contains {
-			return true
+			return true, true
 		}
 		if !sleepUntilNextSpawnPoll(deadline) {
-			return false
+			return false, available
 		}
 	}
 }
@@ -2381,7 +2436,7 @@ func composerContainsMessage(runner tmux.Runner, target, message string) (bool, 
 	if err != nil {
 		return false, false
 	}
-	contains, available := textContainsComposerMessage(contents, message)
+	contains, available := composerTextMatchesMessage(contents, message)
 	return contains, available
 }
 
@@ -2390,8 +2445,60 @@ func paneMessageState(runner tmux.Runner, target, message string) (bool, bool, b
 	if err != nil {
 		return false, false, false
 	}
-	contains, available := textContainsComposerMessage(contents, message)
+	contains, available := composerTextMatchesMessage(contents, message)
 	return contains, available, containsCollapsedWhitespace(contents, message)
+}
+
+func composerTextMatchesMessage(contents, message string) (bool, bool) {
+	if strings.ContainsAny(message, "\r\n") {
+		return textComposerEqualsMessage(contents, message)
+	}
+	return textContainsComposerMessage(contents, message)
+}
+
+func textComposerEqualsMessage(contents, message string) (bool, bool) {
+	rows, available := bottomComposerFrameRows(contents)
+	if !available {
+		return false, false
+	}
+	var composerLines []string
+	for _, row := range rows {
+		body := strings.TrimSuffix(strings.TrimPrefix(row, "│"), "│")
+		if strings.HasPrefix(body, " ") {
+			body = body[1:]
+		}
+		body = strings.TrimRight(body, " ")
+		composerLines = append(composerLines, body)
+	}
+	return exactInitialMessageContent(strings.Join(composerLines, "\n"), message), true
+}
+
+func bottomComposerFrameRows(contents string) ([]string, bool) {
+	lines := strings.Split(strings.TrimRight(contents, "\r\n"), "\n")
+	if len(lines) < 2 {
+		return nil, false
+	}
+	end := len(lines) - 1
+	bottom := strings.TrimSpace(lines[end])
+	if !strings.HasPrefix(bottom, "╰") || !strings.HasSuffix(bottom, "╯") {
+		return nil, false
+	}
+	for start := end - 1; start >= 0; start-- {
+		top := strings.TrimSpace(lines[start])
+		if !strings.HasPrefix(top, "╭") || !strings.HasSuffix(top, "╮") {
+			continue
+		}
+		rows := make([]string, 0, end-start-1)
+		for _, line := range lines[start+1 : end] {
+			row := strings.TrimSpace(line)
+			if !strings.HasPrefix(row, "│") || !strings.HasSuffix(row, "│") {
+				return nil, false
+			}
+			rows = append(rows, row)
+		}
+		return rows, true
+	}
+	return nil, false
 }
 
 func textContainsComposerMessage(contents, message string) (bool, bool) {
@@ -2422,13 +2529,8 @@ func collapsePaneText(text string) string {
 }
 
 func hasComposerFrame(contents string) bool {
-	lines := strings.Split(contents, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.Contains(lines[i], "╭") {
-			return strings.Contains(strings.Join(lines[i:], "\n"), "╰")
-		}
-	}
-	return false
+	_, available := bottomComposerFrameRows(contents)
+	return available
 }
 
 type initialMessageDeliveryStatus string
@@ -2537,7 +2639,7 @@ func findDifferentThreadWithMessage(storedThread, message string) (string, error
 func jsonValueContainsMessage(value any, message string) bool {
 	switch v := value.(type) {
 	case string:
-		return containsCollapsedWhitespace(v, message)
+		return exactInitialMessageContent(v, message)
 	case []any:
 		for _, item := range v {
 			if jsonValueContainsMessage(item, message) {
@@ -2550,6 +2652,18 @@ func jsonValueContainsMessage(value any, message string) bool {
 				return true
 			}
 		}
+	}
+	return false
+}
+
+func exactInitialMessageContent(got, want string) bool {
+	got = strings.ReplaceAll(got, "\r\n", "\n")
+	want = strings.ReplaceAll(want, "\r\n", "\n")
+	if got == want {
+		return true
+	}
+	if strings.HasSuffix(want, "\n") && !strings.HasSuffix(strings.TrimSuffix(want, "\n"), "\n") {
+		return got == strings.TrimSuffix(want, "\n")
 	}
 	return false
 }

@@ -477,7 +477,7 @@ exit 2
 		t.Fatalf("delivery replay error = %v", err)
 	}
 	updated, found, loadErr := config.LoadOperation(filepath.Join(dir, config.OperationsFile), "delivery-started")
-	if loadErr != nil || !found || updated.State != config.OperationIndeterminate {
+	if loadErr != nil || !found || updated.State != config.OperationIndeterminate || updated.DeliveryStatus != config.OperationDeliveryUnknown {
 		t.Fatalf("delivery operation = %+v found=%t err=%v", updated, found, loadErr)
 	}
 	log, readErr := os.ReadFile(logPath)
@@ -740,7 +740,13 @@ if [ "$1" = paste-buffer ]; then
   count=$((count + 1)); printf '%s\n' "$count" > "`+pasteCountPath+`"; exit 0
 fi
 if [ "$1" = capture-pane ]; then
-  if [ -f "`+pasteCountPath+`" ]; then printf '╭ composer ─╮\n│ Paragraph A │\n│ Paragraph B │\n╰────────────╯\n'; else printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; fi
+  if [ -f "`+delivered+`" ]; then
+    printf ' ┃ Paragraph A\n ┃ Paragraph B\n ┃ Paragraph C\n ┃ Paragraph D\n ┃ Paragraph E\n ┃ Paragraph F\n ┃ Paragraph G\n╭ composer ─╮\n│           │\n╰────────────╯\n'
+  elif [ -f "`+pasteCountPath+`" ]; then
+    printf '╭ composer ─╮\n│ Paragraph A │\n│ │\n│ Paragraph B │\n│ │\n│ Paragraph C │\n│ │\n│ Paragraph D │\n│ │\n│ Paragraph E │\n│ │\n│ Paragraph F │\n│ │\n│ Paragraph G │\n╰────────────╯\n'
+  else
+    printf '╭ composer ─╮\n│           │\n╰────────────╯\n'
+  fi
   exit 0
 fi
 if [ "$1" = send-keys ] && [ "$4" = Enter ]; then touch "`+delivered+`"; exit 0; fi
@@ -765,8 +771,114 @@ exit 2
 		t.Fatalf("worker registry = %+v, err=%v", rows, err)
 	}
 	operation, found, err := config.LoadOperation(filepath.Join(dir, config.OperationsFile), "delayed-executing")
-	if err != nil || !found || operation.MessageSource != config.OperationMessageSourceFile {
-		t.Fatalf("spawn operation message source = %q, found=%t, err=%v", operation.MessageSource, found, err)
+	if err != nil || !found || operation.MessageSource != config.OperationMessageSourceFile || operation.SubmissionStatus != config.OperationSubmissionTransitioned || operation.DeliveryStatus != config.OperationDeliveryPersisted {
+		t.Fatalf("spawn operation = %+v, found=%t, err=%v", operation, found, err)
+	}
+}
+
+func TestWorkerSpawnDoesNotSubmitMultilineAssignmentThatNeverAppearsInComposer(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	bin := t.TempDir()
+	running := filepath.Join(bin, "running")
+	enterAttempted := filepath.Join(bin, "enter-attempted")
+	pasteCountPath := filepath.Join(bin, "paste-count")
+	messagePath := filepath.Join(bin, "assignment.md")
+	message := "Synthetic first paragraph.\n\nSynthetic second paragraph.\n"
+	if err := os.WriteFile(messagePath, []byte(message), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-synthetic-empty"}
+	start := teardownExpectedStartCommand(teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}, row)
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+if [ "$1 $2" = "threads new" ]; then echo T-synthetic-empty; exit 0; fi
+if [ "$1 $2" = "threads list" ]; then printf '%s\n' '[{"id":"T-synthetic-empty"}]'; exit 0; fi
+if [ "$1 $2 $3" = "threads export T-synthetic-empty" ]; then printf '%s\n' '{"id":"T-synthetic-empty","messages":[]}'; exit 0; fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then test -e "`+running+`"; exit $?; fi
+if [ "$1" = new-session ]; then touch "`+running+`"; exit 0; fi
+if [ "$1" = list-panes ]; then printf 'worker\t@1\t%s\n' `+shellSingleQuote(start)+`; exit 0; fi
+if [ "$1" = display-message ]; then echo %1; exit 0; fi
+if [ "$1" = load-buffer ]; then cat >/dev/null; exit 0; fi
+if [ "$1" = paste-buffer ]; then
+  count=0; if [ -f "`+pasteCountPath+`" ]; then count=$(cat "`+pasteCountPath+`"); fi
+  count=$((count + 1)); printf '%s\n' "$count" > "`+pasteCountPath+`"; exit 0
+fi
+if [ "$1" = capture-pane ]; then printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; exit 0; fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then touch "`+enterAttempted+`"; exit 0; fi
+if [ "$1" = send-keys ]; then exit 0; fi
+if [ "$1" = kill-window ]; then rm -f "`+running+`"; exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	err := executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message-file", messagePath, "--idempotency-key", "synthetic-silent-multiline-loss")
+	if err == nil {
+		t.Fatal("spawn succeeded, want silent multiline loss to fail closed")
+	}
+	if _, statErr := os.Stat(enterAttempted); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Enter was attempted before the complete multiline assignment was visible: %v", statErr)
+	}
+	if count, readErr := os.ReadFile(pasteCountPath); readErr != nil || strings.TrimSpace(string(count)) != "2" {
+		t.Fatalf("bounded multiline paste attempts = %q, err=%v", count, readErr)
+	}
+	operation, found, loadErr := config.LoadOperation(filepath.Join(dir, config.OperationsFile), "synthetic-silent-multiline-loss")
+	if loadErr != nil || !found || operation.State != config.OperationIndeterminate || operation.Phase != config.OperationPhaseDeliveryStarted || operation.SubmissionStatus != config.OperationSubmissionInputNotVisible || operation.DeliveryStatus != config.OperationDeliveryUnknown {
+		t.Fatalf("silent-loss operation = %+v, found=%t, err=%v", operation, found, loadErr)
+	}
+	for _, private := range []string{message, messagePath, workdir, row.Thread} {
+		if strings.Contains(operation.Error, private) {
+			t.Fatalf("durable diagnostic contains private input %q: %q", private, operation.Error)
+		}
+	}
+}
+
+func TestWorkerSpawnPersistsBoundedOutcomeWhenMultilinePasteCommandFails(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	bin := t.TempDir()
+	running := filepath.Join(bin, "running")
+	messagePath := filepath.Join(bin, "assignment.md")
+	message := "Synthetic first paragraph.\n\nSynthetic second paragraph.\n"
+	if err := os.WriteFile(messagePath, []byte(message), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-synthetic-submit-error"}
+	start := teardownExpectedStartCommand(teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}, row)
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+if [ "$1 $2" = "threads new" ]; then echo T-synthetic-submit-error; exit 0; fi
+if [ "$1 $2" = "threads list" ]; then printf '%s\n' '[{"id":"T-synthetic-submit-error"}]'; exit 0; fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then test -e "`+running+`"; exit $?; fi
+if [ "$1" = new-session ]; then touch "`+running+`"; exit 0; fi
+if [ "$1" = list-panes ]; then printf 'worker\t@1\t%s\n' `+shellSingleQuote(start)+`; exit 0; fi
+if [ "$1" = display-message ]; then echo %1; exit 0; fi
+if [ "$1" = capture-pane ]; then printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; exit 0; fi
+if [ "$1" = load-buffer ]; then cat >/dev/null; exit 42; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	err := executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message-file", messagePath, "--idempotency-key", "synthetic-submit-error")
+	if err == nil || !strings.Contains(err.Error(), "send initial message") {
+		t.Fatalf("submit command failure = %v", err)
+	}
+	operation, found, loadErr := config.LoadOperation(filepath.Join(dir, config.OperationsFile), "synthetic-submit-error")
+	if loadErr != nil || !found || operation.State != config.OperationIndeterminate || operation.Phase != config.OperationPhaseDeliveryStarted || operation.SubmissionStatus != config.OperationSubmissionError || operation.DeliveryStatus != config.OperationDeliveryUnknown {
+		t.Fatalf("submit-error operation = %+v, found=%t, err=%v", operation, found, loadErr)
+	}
+	for _, private := range []string{message, messagePath, workdir, row.Thread} {
+		if strings.Contains(operation.Error, private) {
+			t.Fatalf("durable submit-error diagnostic contains private input %q: %q", private, operation.Error)
+		}
 	}
 }
 
@@ -961,15 +1073,17 @@ func TestWorkerSpawnRecoversVerifiedProvisionedThreadFromIndeterminateWithoutRes
 	sum := sha256.Sum256([]byte(request))
 	now := time.Now().UTC()
 	record := config.OperationRecord{
-		Key:         "recover-indeterminate",
-		Kind:        "worker-spawn",
-		RequestHash: hex.EncodeToString(sum[:]),
-		State:       config.OperationIndeterminate,
-		Phase:       config.OperationPhaseDeliveryStarted,
-		Resource:    config.OperationResource{Kind: "worker", Thread: "T-provisioned"},
-		Error:       "initial assignment was not found in provisioned thread T-provisioned or one unambiguous fresh receiving thread; recovery: inspect thread T-provisioned and do not resubmit",
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		Key:              "recover-indeterminate",
+		Kind:             "worker-spawn",
+		RequestHash:      hex.EncodeToString(sum[:]),
+		SubmissionStatus: config.OperationSubmissionTransitioned,
+		DeliveryStatus:   config.OperationDeliveryMissing,
+		State:            config.OperationIndeterminate,
+		Phase:            config.OperationPhaseDeliveryStarted,
+		Resource:         config.OperationResource{Kind: "worker", Thread: "T-provisioned"},
+		Error:            "initial assignment delivery could not be verified; do not resubmit",
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 	if _, err := config.StoreOperation(filepath.Join(dir, config.OperationsFile), record); err != nil {
 		t.Fatal(err)
@@ -996,7 +1110,7 @@ exit 2
 		t.Fatalf("recovered spawn result = %+v", got)
 	}
 	completed, found, err := config.LoadOperation(filepath.Join(dir, config.OperationsFile), record.Key)
-	if err != nil || !found || completed.State != config.OperationSucceeded || completed.Resource.Thread != "T-provisioned" {
+	if err != nil || !found || completed.State != config.OperationSucceeded || completed.Resource.Thread != "T-provisioned" || completed.SubmissionStatus != config.OperationSubmissionTransitioned || completed.DeliveryStatus != config.OperationDeliveryPersisted {
 		t.Fatalf("recovered operation = %+v, found=%t, err=%v", completed, found, err)
 	}
 	rows, err := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
@@ -1114,16 +1228,18 @@ func TestWorkerSpawnReconcileAdoptsOneFreshAlternateWithoutResubmitting(t *testi
 	sum := sha256.Sum256([]byte(request))
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	record := config.OperationRecord{
-		Key:           "reconcile-alternate",
-		Kind:          "worker-spawn",
-		RequestHash:   hex.EncodeToString(sum[:]),
-		MessageSource: config.OperationMessageSourceFile,
-		State:         config.OperationIndeterminate,
-		Phase:         config.OperationPhaseDeliveryStarted,
-		Resource:      config.OperationResource{Kind: "worker", Thread: provisioned},
-		Error:         "initial assignment was not found in provisioned thread " + provisioned + " or one unambiguous fresh receiving thread; recovery: inspect thread " + provisioned + " and do not resubmit",
-		CreatedAt:     now,
-		UpdatedAt:     now.Add(3 * time.Second),
+		Key:              "reconcile-alternate",
+		Kind:             "worker-spawn",
+		RequestHash:      hex.EncodeToString(sum[:]),
+		MessageSource:    config.OperationMessageSourceFile,
+		SubmissionStatus: config.OperationSubmissionEnterAttempted,
+		DeliveryStatus:   config.OperationDeliveryMissing,
+		State:            config.OperationIndeterminate,
+		Phase:            config.OperationPhaseDeliveryStarted,
+		Resource:         config.OperationResource{Kind: "worker", Thread: provisioned},
+		Error:            "initial assignment delivery could not be verified; do not resubmit",
+		CreatedAt:        now,
+		UpdatedAt:        now.Add(3 * time.Second),
 	}
 	operationPath := filepath.Join(dir, config.OperationsFile)
 	if _, err := config.StoreOperation(operationPath, record); err != nil {
@@ -1161,7 +1277,7 @@ exit 2
 		t.Fatalf("alternate reconciliation result = %+v", got)
 	}
 	completed, found, err := config.LoadOperation(operationPath, record.Key)
-	if err != nil || !found || completed.State != config.OperationSucceeded || completed.Resource.Thread != receiver || completed.ThreadAdoption == nil || completed.ThreadAdoption.ProvisionedThread != provisioned {
+	if err != nil || !found || completed.State != config.OperationSucceeded || completed.Resource.Thread != receiver || completed.ThreadAdoption == nil || completed.ThreadAdoption.ProvisionedThread != provisioned || completed.SubmissionStatus != config.OperationSubmissionEnterAttempted || completed.DeliveryStatus != config.OperationDeliveryAlternateReceiver {
 		t.Fatalf("alternate reconciled operation = %+v found=%t err=%v", completed, found, err)
 	}
 	rows, err := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
@@ -2402,6 +2518,7 @@ func TestWorkerSpawnAdoptsSoleFreshActiveReceivingThread(t *testing.T) {
 	logPath := filepath.Join(bin, "calls.log")
 	running := filepath.Join(bin, "running")
 	delivered := filepath.Join(bin, "delivered")
+	pasted := filepath.Join(bin, "pasted")
 	identity := filepath.Join(bin, "identity")
 	messagePath := filepath.Join(dir, "assignment.md")
 	if err := os.WriteFile(messagePath, []byte("hello\n"), 0o600); err != nil {
@@ -2434,9 +2551,14 @@ if [ "$1" = list-panes ]; then
   exit 0
 fi
 if [ "$1" = display-message ]; then echo %1; exit 0; fi
-if [ "$1" = capture-pane ]; then printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; exit 0; fi
+if [ "$1" = capture-pane ]; then
+  if [ -e "`+delivered+`" ]; then printf ' ┃ hello\n╭ composer ─╮\n│           │\n╰────────────╯\n';
+  elif [ -e "`+pasted+`" ]; then printf '╭ composer ─╮\n│ hello │\n╰────────────╯\n';
+  else printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; fi
+  exit 0
+fi
 if [ "$1" = load-buffer ]; then cat >/dev/null; exit 0; fi
-if [ "$1" = paste-buffer ]; then exit 0; fi
+if [ "$1" = paste-buffer ]; then touch "`+pasted+`"; exit 0; fi
 if [ "$1" = send-keys ]; then if [ "$4" = Enter ]; then touch "`+delivered+`"; fi; exit 0; fi
 if [ "$1" = respawn-pane ]; then echo T-receiver > "`+identity+`"; exit 0; fi
 if [ "$1" = kill-window ]; then rm -f "`+running+`"; exit 0; fi
@@ -2457,7 +2579,7 @@ exit 2
 		t.Fatalf("adopted worker registry = %+v err=%v", rows, err)
 	}
 	record, found, err := config.LoadOperation(filepath.Join(dir, config.OperationsFile), "adopt-1")
-	if err != nil || !found || record.State != config.OperationSucceeded || record.Resource.Thread != "T-receiver" {
+	if err != nil || !found || record.State != config.OperationSucceeded || record.Resource.Thread != "T-receiver" || record.SubmissionStatus != config.OperationSubmissionTransitioned || record.DeliveryStatus != config.OperationDeliveryAlternateReceiver {
 		t.Fatalf("adopted operation = %+v found=%t err=%v", record, found, err)
 	}
 	memberships, err := config.LoadGroupsReadOnly(filepath.Join(dir, config.GroupsFile))

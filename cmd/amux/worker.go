@@ -863,7 +863,43 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 		deliveryRecord.UpdatedAt = time.Now().UTC()
 		if _, err = config.StoreOperation(dir.OperationsPath(), deliveryRecord); err == nil {
 			record = deliveryRecord
-			_, err = submitInitialMessage(tmux.Runner{}, submissionTarget(tmux.Runner{}, inspection.pane.WindowID), message)
+			var submission initialMessageSubmission
+			submission, err = submitInitialMessage(tmux.Runner{}, submissionTarget(tmux.Runner{}, inspection.pane.WindowID), message)
+			if err != nil {
+				record.SubmissionStatus = config.OperationSubmissionError
+				record.DeliveryStatus = config.OperationDeliveryUnknown
+			}
+			if err == nil {
+				record.SubmissionStatus = submission.status
+				var publicError string
+				switch submission.status {
+				case config.OperationSubmissionComposerUnavailable:
+					record.DeliveryStatus = config.OperationDeliveryUnknown
+					publicError = "multiline composer visibility was unavailable before input; Enter was not attempted"
+					record.Error = "multiline composer visibility unavailable before submission; Enter not attempted"
+				case config.OperationSubmissionComposerCaptureUnknown:
+					record.DeliveryStatus = config.OperationDeliveryUnknown
+					publicError = "multiline composer visibility could not be observed before input; Enter was not attempted"
+					record.Error = "multiline composer visibility unknown before submission; Enter not attempted"
+				case config.OperationSubmissionInputNotVisible:
+					record.DeliveryStatus = config.OperationDeliveryUnknown
+					publicError = "multiline input was not visible in the composer after bounded paste attempts; Enter was not attempted"
+					record.Error = "multiline input not visible before submission; Enter not attempted"
+				case config.OperationSubmissionInputVisibilityUnknown:
+					record.DeliveryStatus = config.OperationDeliveryUnknown
+					publicError = "multiline input visibility could not be observed after paste; Enter was not attempted"
+					record.Error = "multiline input visibility unknown before submission; Enter not attempted"
+				}
+				record.UpdatedAt = time.Now().UTC()
+				if publicError != "" {
+					record.State = config.OperationIndeterminate
+					if _, err = config.StoreOperation(dir.OperationsPath(), record); err == nil {
+						return env, result.Runtime(errors.New(publicError))
+					}
+				} else {
+					_, err = config.StoreOperation(dir.OperationsPath(), record)
+				}
+			}
 		}
 	}
 	if err == nil && record.Phase == config.OperationPhaseDeliveryStarted {
@@ -877,10 +913,27 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 			var authoritative string
 			provisionedRow := row
 			authoritative, err = resolveSpawnReceivingThread(row.Thread, message, workdir, preDeliveryThreads, operationAllowsTerminalLineEndingNormalization(record, messageSourceFromSelectors(in.Selectors)))
+			if err != nil {
+				record.DeliveryStatus = config.OperationDeliveryUnknown
+				if strings.HasPrefix(err.Error(), "initial assignment was not found in provisioned thread ") {
+					record.DeliveryStatus = config.OperationDeliveryMissing
+				}
+			} else if authoritative == row.Thread {
+				record.DeliveryStatus = config.OperationDeliveryPersisted
+			} else {
+				record.DeliveryStatus = config.OperationDeliveryAlternateReceiver
+			}
 			if err == nil && authoritative != row.Thread {
 				provisioned := row.Thread
 				var rows []config.Row
-				rows, err = config.LoadReadOnly(dir.WorkersPath())
+				record.UpdatedAt = time.Now().UTC()
+				_, err = config.StoreOperation(dir.OperationsPath(), record)
+				if err != nil {
+					err = fmt.Errorf("store alternate receiver delivery evidence: %w", err)
+				}
+				if err == nil {
+					rows, err = config.LoadReadOnly(dir.WorkersPath())
+				}
 				if err == nil {
 					for _, configured := range rows {
 						if configured.Thread == authoritative {
@@ -961,8 +1014,25 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 	if err != nil {
 		if record.Phase == config.OperationPhaseDeliveryStarted {
 			record.State = config.OperationIndeterminate
+			if record.DeliveryStatus == "" {
+				record.DeliveryStatus = config.OperationDeliveryUnknown
+			}
 		}
 		record.Error = err.Error()
+		if record.Phase == config.OperationPhaseDeliveryStarted {
+			switch record.SubmissionStatus {
+			case config.OperationSubmissionComposerUnavailable:
+				record.Error = "multiline composer visibility unavailable before submission; Enter not attempted"
+			case config.OperationSubmissionComposerCaptureUnknown:
+				record.Error = "multiline composer visibility unknown before submission; Enter not attempted"
+			case config.OperationSubmissionInputNotVisible:
+				record.Error = "multiline input not visible before submission; Enter not attempted"
+			case config.OperationSubmissionInputVisibilityUnknown:
+				record.Error = "multiline input visibility unknown before submission; Enter not attempted"
+			default:
+				record.Error = "initial assignment delivery could not be verified; do not resubmit"
+			}
+		}
 		record.UpdatedAt = time.Now().UTC()
 		_, _ = config.StoreOperation(dir.OperationsPath(), record)
 		return env, result.Runtime(err)
@@ -995,7 +1065,7 @@ func recoverableProvisionedVerificationFailure(operation config.OperationRecord)
 		operation.Phase == config.OperationPhaseDeliveryStarted &&
 		operation.Resource.Thread != "" &&
 		operation.ThreadAdoption == nil &&
-		operation.Error == want
+		(operation.DeliveryStatus == config.OperationDeliveryMissing || operation.DeliveryStatus == "" && operation.Error == want)
 	pendingAdoption := operation.State == config.OperationStarted &&
 		operation.Phase == config.OperationPhaseDeliveryStarted &&
 		operation.ThreadAdoption != nil &&

@@ -15,6 +15,8 @@ const OperationSchemaVersion = 1
 type OperationState string
 type OperationPhase string
 type OperationMessageSource string
+type OperationSubmissionStatus string
+type OperationDeliveryStatus string
 
 const (
 	OperationStarted       OperationState = "started"
@@ -39,6 +41,25 @@ const (
 	OperationMessageSourceStdin   OperationMessageSource = "stdin"
 )
 
+const (
+	OperationSubmissionComposerUnavailable    OperationSubmissionStatus = "composer_unavailable"
+	OperationSubmissionComposerCaptureUnknown OperationSubmissionStatus = "composer_capture_unknown"
+	OperationSubmissionInputNotVisible        OperationSubmissionStatus = "input_not_visible"
+	OperationSubmissionInputVisibilityUnknown OperationSubmissionStatus = "input_visibility_unknown"
+	OperationSubmissionEnterAttempted         OperationSubmissionStatus = "enter_attempted"
+	OperationSubmissionTypedOnly              OperationSubmissionStatus = "typed_only"
+	OperationSubmissionTransitioned           OperationSubmissionStatus = "composer_transitioned"
+	OperationSubmissionCaptureUnknown         OperationSubmissionStatus = "capture_unknown"
+	OperationSubmissionError                  OperationSubmissionStatus = "submission_error"
+)
+
+const (
+	OperationDeliveryPersisted         OperationDeliveryStatus = "persisted"
+	OperationDeliveryAlternateReceiver OperationDeliveryStatus = "alternate_receiver"
+	OperationDeliveryMissing           OperationDeliveryStatus = "missing"
+	OperationDeliveryUnknown           OperationDeliveryStatus = "unknown"
+)
+
 type OperationResource struct {
 	Kind    string `json:"kind"`
 	Thread  string `json:"thread,omitempty"`
@@ -51,18 +72,20 @@ type OperationThreadAdoption struct {
 }
 
 type OperationRecord struct {
-	SchemaVersion  int                      `json:"schema_version"`
-	Key            string                   `json:"key"`
-	Kind           string                   `json:"kind"`
-	RequestHash    string                   `json:"request_hash"`
-	MessageSource  OperationMessageSource   `json:"message_source,omitempty"`
-	State          OperationState           `json:"state"`
-	Phase          OperationPhase           `json:"phase,omitempty"`
-	Resource       OperationResource        `json:"resource"`
-	ThreadAdoption *OperationThreadAdoption `json:"thread_adoption,omitempty"`
-	Error          string                   `json:"error,omitempty"`
-	CreatedAt      time.Time                `json:"created_at"`
-	UpdatedAt      time.Time                `json:"updated_at"`
+	SchemaVersion    int                       `json:"schema_version"`
+	Key              string                    `json:"key"`
+	Kind             string                    `json:"kind"`
+	RequestHash      string                    `json:"request_hash"`
+	MessageSource    OperationMessageSource    `json:"message_source,omitempty"`
+	SubmissionStatus OperationSubmissionStatus `json:"submission_status,omitempty"`
+	DeliveryStatus   OperationDeliveryStatus   `json:"delivery_status,omitempty"`
+	State            OperationState            `json:"state"`
+	Phase            OperationPhase            `json:"phase,omitempty"`
+	Resource         OperationResource         `json:"resource"`
+	ThreadAdoption   *OperationThreadAdoption  `json:"thread_adoption,omitempty"`
+	Error            string                    `json:"error,omitempty"`
+	CreatedAt        time.Time                 `json:"created_at"`
+	UpdatedAt        time.Time                 `json:"updated_at"`
 }
 
 type operationFile struct {
@@ -151,11 +174,7 @@ func BeginOperationThreadAdoption(path, key, provisionedThread, receivingThread 
 		}
 		operation.ThreadAdoption = &OperationThreadAdoption{ProvisionedThread: provisionedThread, ReceivingThread: receivingThread}
 		operation.UpdatedAt = time.Now().UTC()
-		operations[i] = operation
-		if err := writeOperations(path, operations); err != nil {
-			return OperationRecord{}, err
-		}
-		return operation, nil
+		return writeOperationMutation(path, operations, i, operation)
 	}
 	return OperationRecord{}, fmt.Errorf("idempotency key %q was not found", key)
 }
@@ -184,7 +203,7 @@ func BeginIndeterminateWorkerSpawnThreadAdoption(path, key, provisionedThread, r
 			return OperationRecord{}, fmt.Errorf("idempotency key %q is bound to thread %s, not provisioned thread %s", key, operation.Resource.Thread, provisionedThread)
 		}
 		wantError := fmt.Sprintf("initial assignment was not found in provisioned thread %s or one unambiguous fresh receiving thread; recovery: inspect thread %s and do not resubmit", provisionedThread, provisionedThread)
-		if operation.Error != wantError {
+		if operation.DeliveryStatus != OperationDeliveryMissing && (operation.DeliveryStatus != "" || operation.Error != wantError) {
 			return OperationRecord{}, fmt.Errorf("idempotency key %q does not have the recoverable provisioned-thread verification failure", key)
 		}
 		if provisionedThread == receivingThread {
@@ -194,11 +213,7 @@ func BeginIndeterminateWorkerSpawnThreadAdoption(path, key, provisionedThread, r
 		operation.Error = ""
 		operation.ThreadAdoption = &OperationThreadAdoption{ProvisionedThread: provisionedThread, ReceivingThread: receivingThread}
 		operation.UpdatedAt = time.Now().UTC()
-		operations[i] = operation
-		if err := writeOperations(path, operations); err != nil {
-			return OperationRecord{}, err
-		}
-		return operation, nil
+		return writeOperationMutation(path, operations, i, operation)
 	}
 	return OperationRecord{}, fmt.Errorf("idempotency key %q was not found", key)
 }
@@ -221,12 +236,11 @@ func CompleteOperationThreadAdoption(path, key string) (OperationRecord, error) 
 		}
 		operation.Resource.Thread = adoption.ReceivingThread
 		operation.Phase = OperationPhaseMessageVerified
-		operation.UpdatedAt = time.Now().UTC()
-		operations[i] = operation
-		if err := writeOperations(path, operations); err != nil {
-			return OperationRecord{}, err
+		if operation.SubmissionStatus != "" {
+			operation.DeliveryStatus = OperationDeliveryAlternateReceiver
 		}
-		return operation, nil
+		operation.UpdatedAt = time.Now().UTC()
+		return writeOperationMutation(path, operations, i, operation)
 	}
 	return OperationRecord{}, fmt.Errorf("idempotency key %q was not found", key)
 }
@@ -251,20 +265,31 @@ func RecoverIndeterminateWorkerSpawn(path, key, provisionedThread string) (Opera
 			return OperationRecord{}, fmt.Errorf("idempotency key %q is bound to thread %s, not provisioned thread %s", key, operation.Resource.Thread, provisionedThread)
 		}
 		wantError := fmt.Sprintf("initial assignment was not found in provisioned thread %s or one unambiguous fresh receiving thread; recovery: inspect thread %s and do not resubmit", provisionedThread, provisionedThread)
-		if operation.Error != wantError {
+		if operation.DeliveryStatus != OperationDeliveryMissing && (operation.DeliveryStatus != "" || operation.Error != wantError) {
 			return OperationRecord{}, fmt.Errorf("idempotency key %q does not have the recoverable provisioned-thread verification failure", key)
 		}
 		operation.State = OperationStarted
 		operation.Phase = OperationPhaseMessageVerified
+		if operation.SubmissionStatus != "" {
+			operation.DeliveryStatus = OperationDeliveryPersisted
+		}
 		operation.Error = ""
 		operation.UpdatedAt = time.Now().UTC()
-		operations[i] = operation
-		if err := writeOperations(path, operations); err != nil {
-			return OperationRecord{}, err
-		}
-		return operation, nil
+		return writeOperationMutation(path, operations, i, operation)
 	}
 	return OperationRecord{}, fmt.Errorf("idempotency key %q was not found", key)
+}
+
+func writeOperationMutation(path string, operations []OperationRecord, index int, operation OperationRecord) (OperationRecord, error) {
+	canonical, err := canonicalOperation(operation)
+	if err != nil {
+		return OperationRecord{}, err
+	}
+	operations[index] = canonical
+	if err := writeOperations(path, operations); err != nil {
+		return OperationRecord{}, err
+	}
+	return canonical, nil
 }
 
 func operationTransitionAllowed(from, to OperationState) bool {
@@ -308,6 +333,46 @@ func canonicalOperation(operation OperationRecord) (OperationRecord, error) {
 		}
 	default:
 		return operation, fmt.Errorf("invalid operation message source %q", operation.MessageSource)
+	}
+	switch operation.SubmissionStatus {
+	case "":
+	case OperationSubmissionComposerUnavailable, OperationSubmissionComposerCaptureUnknown, OperationSubmissionInputNotVisible, OperationSubmissionInputVisibilityUnknown, OperationSubmissionEnterAttempted, OperationSubmissionTypedOnly, OperationSubmissionTransitioned, OperationSubmissionCaptureUnknown, OperationSubmissionError:
+		if operation.Kind != "worker-spawn" || operation.Phase != OperationPhaseDeliveryStarted && operation.Phase != OperationPhaseMessageVerified && operation.Phase != OperationPhaseConfigured && operation.Phase != OperationPhaseGroupIntent && operation.Phase != OperationPhaseGrouped {
+			return operation, errors.New("submission status is only valid after worker-spawn delivery starts")
+		}
+	default:
+		return operation, fmt.Errorf("invalid operation submission status %q", operation.SubmissionStatus)
+	}
+	switch operation.DeliveryStatus {
+	case "":
+	case OperationDeliveryPersisted, OperationDeliveryAlternateReceiver, OperationDeliveryMissing, OperationDeliveryUnknown:
+		if operation.Kind != "worker-spawn" || operation.Phase != OperationPhaseDeliveryStarted && operation.Phase != OperationPhaseMessageVerified && operation.Phase != OperationPhaseConfigured && operation.Phase != OperationPhaseGroupIntent && operation.Phase != OperationPhaseGrouped {
+			return operation, errors.New("delivery status is only valid after worker-spawn delivery starts")
+		}
+	default:
+		return operation, fmt.Errorf("invalid operation delivery status %q", operation.DeliveryStatus)
+	}
+	preSubmission := operation.SubmissionStatus == OperationSubmissionComposerUnavailable ||
+		operation.SubmissionStatus == OperationSubmissionComposerCaptureUnknown ||
+		operation.SubmissionStatus == OperationSubmissionInputNotVisible ||
+		operation.SubmissionStatus == OperationSubmissionInputVisibilityUnknown ||
+		operation.SubmissionStatus == OperationSubmissionError
+	enteredSubmission := operation.SubmissionStatus == OperationSubmissionEnterAttempted ||
+		operation.SubmissionStatus == OperationSubmissionTypedOnly ||
+		operation.SubmissionStatus == OperationSubmissionTransitioned ||
+		operation.SubmissionStatus == OperationSubmissionCaptureUnknown
+	if preSubmission && operation.DeliveryStatus != "" && operation.DeliveryStatus != OperationDeliveryUnknown {
+		return operation, errors.New("pre-submission status requires unknown delivery status")
+	}
+	if operation.DeliveryStatus == OperationDeliveryMissing || operation.DeliveryStatus == OperationDeliveryPersisted || operation.DeliveryStatus == OperationDeliveryAlternateReceiver {
+		if !enteredSubmission {
+			return operation, errors.New("delivery status requires submission evidence that Enter was attempted")
+		}
+	}
+	if operation.Phase == OperationPhaseMessageVerified || operation.Phase == OperationPhaseConfigured || operation.Phase == OperationPhaseGroupIntent || operation.Phase == OperationPhaseGrouped {
+		if operation.SubmissionStatus != "" && operation.DeliveryStatus != OperationDeliveryPersisted && operation.DeliveryStatus != OperationDeliveryAlternateReceiver {
+			return operation, errors.New("verified delivery phase requires persisted or alternate-receiver delivery status")
+		}
 	}
 	if operation.ThreadAdoption != nil {
 		if operation.Kind != "worker-spawn" || operation.Phase != OperationPhaseDeliveryStarted && operation.Phase != OperationPhaseMessageVerified && operation.Phase != OperationPhaseConfigured && operation.Phase != OperationPhaseGroupIntent && operation.Phase != OperationPhaseGrouped {
