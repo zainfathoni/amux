@@ -3765,7 +3765,10 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
     with store.mutation_lock():
         receipt_store = store.load_store()
         receipt = store.find(receipt_store, delegation_id)
-        if not valid_indeterminate_detach_candidate(receipt) or find_event(receipt, event_id) != intent:
+        if (
+            not valid_indeterminate_detach_candidate(receipt)
+            or receipt_launch_intent(receipt) != intent
+        ):
             raise HelperError("receipt changed while launch completion was being verified")
         receipt["events"].append(result)
         receipt["updated_at"] = result["at"]
@@ -4542,6 +4545,13 @@ def require_receipt_mutable(receipt: dict[str, Any]) -> None:
         )
     ):
         raise HelperError("terminal receipt is sealed against further mutation")
+    if isinstance(events, list) and any(
+        isinstance(event, dict)
+        and event.get("kind") == "launch_intent"
+        and "expected_argv_digest" in event
+        for event in events
+    ):
+        receipt_launch_intent(receipt)
 
 
 def require_launch_transport_allowed(store: ReceiptStore, delegation_id: str) -> None:

@@ -3045,6 +3045,22 @@ for terminal_state in ("launch_completed", "verified_parked"):
     else: raise AssertionError("retained transport executed after " + terminal_state)
     assert not executed and retained.path.read_bytes() == retained_before
 
+for name, model in (("fable", "claude-fable-5"), ("omitted", None)):
+    drifted, _, _ = fixture("model-drift-" + name)
+    data = drifted.load_store(); receipt = data["receipts"][0]
+    receipt["binding"]["model"] = "claude-opus-4-8"
+    if model is not None: receipt["events"][1]["model"] = model
+    drifted.commit(data); drifted_before = drifted.path.read_bytes(); executed = []
+    module.os.execve = lambda *arguments: executed.append(arguments)
+    try:
+        module.execute_authorized_launch_transport(
+            drifted, "model-drift-" + name, "/synthetic", ["synthetic"], {})
+    except module.HelperError as error:
+        assert "model differs" in str(error), error
+    else:
+        raise AssertionError("model-drifted receipt reached transport execve: " + name)
+    assert not executed and drifted.path.read_bytes() == drifted_before, name
+
 fenced, _, _ = fixture("pre-fenced")
 with fenced.lifecycle.mutation_lock():
     lifecycle = fenced.lifecycle.load()
@@ -5035,6 +5051,131 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 	if !bytes.Contains(finalReceipt, []byte(`"model":"claude-opus-4-8"`)) || !bytes.Contains(finalReceipt, []byte(plan["expected_argv_digest"].(string))) {
 		t.Fatalf("receipt does not bind model command identity: %s", finalReceipt)
 	}
+	launchLog, err := os.ReadFile(fixture.tmuxLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name  string
+		model any
+	}{
+		{name: "fable", model: "claude-fable-5"},
+		{name: "omitted", model: nil},
+	} {
+		var stored map[string]any
+		if err := json.Unmarshal(finalReceipt, &stored); err != nil {
+			t.Fatal(err)
+		}
+		receipt := stored["receipts"].([]any)[0].(map[string]any)
+		for _, candidate := range receipt["events"].([]any) {
+			event := candidate.(map[string]any)
+			if event["kind"] != "launch_intent" {
+				continue
+			}
+			if test.model == nil {
+				delete(event, "model")
+			} else {
+				event["model"] = test.model
+			}
+		}
+		drifted, err := json.Marshal(stored)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(receiptPath, drifted, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, request, "launch", "execute")
+		if err == nil || !strings.Contains(stderr, "launch intent model differs from immutable binding") {
+			t.Fatalf("%s model-drifted replay error = %v, stderr %q", test.name, err, stderr)
+		}
+		preserved, readErr := os.ReadFile(receiptPath)
+		if readErr != nil || !bytes.Equal(preserved, drifted) {
+			t.Fatalf("%s model-drifted replay changed receipt bytes: %v", test.name, readErr)
+		}
+		currentLog, readErr := os.ReadFile(fixture.tmuxLog)
+		if readErr != nil || !bytes.Equal(currentLog, launchLog) {
+			t.Fatalf("%s model-drifted replay mutated tmux: %v\n%s", test.name, readErr, currentLog)
+		}
+	}
+}
+
+func TestLaunchCompletionRejectsDurableModelDrift(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("experimental Claude launch requires an exact supported process identity")
+	}
+	for _, test := range []struct {
+		name       string
+		driftModel string
+	}{
+		{name: "fable", driftModel: "claude-fable-5"},
+		{name: "omitted", driftModel: "__omit__"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newLaunchFixture(t)
+			enableAsyncClaudeLaunch(t, fixture.binDir, &fixture.environment)
+			receiptPath := filepath.Join(fixture.stateDir, "receipts.json")
+			snapshotPath := filepath.Join(t.TempDir(), "drifted-receipt")
+			fixture.environment = append(fixture.environment,
+				"DRIFT_RECEIPT_PATH="+receiptPath,
+				"DRIFT_RECEIPT_MODEL="+test.driftModel,
+				"DRIFT_RECEIPT_SNAPSHOT="+snapshotPath,
+			)
+			if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			policyStdout, policyStderr, err := runHelper(t, fixture.stateDir, map[string]any{
+				"workflow": "read_only", "model": "claude-opus-4-8",
+			}, "launch", "policy-digest")
+			if err != nil {
+				t.Fatalf("Opus policy digest: %v: %s", err, policyStderr)
+			}
+			policy := decodeJSONMap(t, policyStdout)
+			fixture.request["model"] = "claude-opus-4-8"
+			fixture.request["expected_launch_policy_digest"] = policy["launch_policy_digest"]
+			planStdout, planStderr, err := runHelperEnv(
+				t, fixture.stateDir, fixture.environment, fixture.request, "launch", "plan",
+			)
+			if err != nil {
+				t.Fatalf("Opus launch plan: %v: %s", err, planStderr)
+			}
+			plan := decodeJSONMap(t, planStdout)
+			binding := testBinding(fixture.request["delegation_id"].(string))
+			binding["workdir"] = fixture.request["workdir"]
+			binding["base"] = fixture.request["base"]
+			binding["packet_digest"] = plan["packet_digest"]
+			binding["launch_policy_digest"] = plan["launch_policy_digest"]
+			binding["launch_command_digest"] = plan["launch_command_digest"]
+			binding["model"] = "claude-opus-4-8"
+			assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "recorded", map[string]any{
+				"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+			}, "receipt", "create")
+			_, stderr, err := runHelperEnv(
+				t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute",
+			)
+			if err == nil || !strings.Contains(stderr, "launch intent model differs from immutable binding") {
+				t.Fatalf("%s completion drift error = %v, stderr %q", test.name, err, stderr)
+			}
+			drifted, err := os.ReadFile(snapshotPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			preserved, err := os.ReadFile(receiptPath)
+			if err != nil || !bytes.Equal(preserved, drifted) {
+				t.Fatalf("%s completion drift changed receipt after rejection: %v", test.name, err)
+			}
+			if bytes.Contains(preserved, []byte(`"kind":"launch_completed"`)) {
+				t.Fatalf("%s completion drift appended launch_completed: %s", test.name, preserved)
+			}
+			log, err := os.ReadFile(fixture.tmuxLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Count(string(log), "new-window") != 1 || strings.Contains(string(log), "kill-pane") {
+				t.Fatalf("%s completion drift performed unexpected tmux mutation: %s", test.name, log)
+			}
+		})
+	}
 }
 
 type launchFixture struct {
@@ -6091,6 +6232,15 @@ case "$1" in
     test -s "$PANE_PID_FILE"
     pane_pid=$(cat "$PANE_PID_FILE")
     kill -0 "$pane_pid"
+    if [ -n "${DRIFT_RECEIPT_MODEL:-}" ] && [ ! -e "$DRIFT_RECEIPT_SNAPSHOT" ]; then
+      counter="$DRIFT_RECEIPT_SNAPSHOT.counter"
+      count=0
+      if [ -e "$counter" ]; then count=$(cat "$counter"); fi
+      count=$((count + 1)); printf '%s' "$count" > "$counter"
+      if [ "$count" -ge 10 ]; then
+        python3 -c 'import json,os,pathlib; p=pathlib.Path(os.environ["DRIFT_RECEIPT_PATH"]); d=json.loads(p.read_text()); e=next(x for x in d["receipts"][0]["events"] if x.get("kind")=="launch_intent"); m=os.environ["DRIFT_RECEIPT_MODEL"]; e.pop("model",None) if m=="__omit__" else e.__setitem__("model",m); b=json.dumps(d,separators=(",",":")).encode(); p.write_bytes(b); pathlib.Path(os.environ["DRIFT_RECEIPT_SNAPSHOT"]).write_bytes(b)'
+      fi
+    fi
     start_command=$(tail -n 1 "$TMUX_LOG" | sed -n 's/^.* -c [^ ]* //p')
     if [ -n "${REPORTED_START_COMMAND:-}" ]; then start_command=$REPORTED_START_COMMAND; fi
     printf 'Claude\tthinker\t@20\t%%20\t%s\t%s\tclaude\t%s\n' "$pane_pid" "${REPORTED_WORKDIR:-$WORKDIR}" "$start_command"
