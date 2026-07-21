@@ -280,6 +280,20 @@ class ReceiptStore:
                 raise HelperError("launch gate is unavailable") from error
             yield
 
+    @contextlib.contextmanager
+    def live_retirement_exclusion(self, delegation_id: str) -> Iterator[None]:
+        stack = contextlib.ExitStack()
+        try:
+            stack.enter_context(self.launch_gate(delegation_id, timeout_seconds=0.2))
+        except LaunchGateBusy:
+            # Callers already retain lifecycle and receipt locks plus a durable origin fence. A
+            # busy holder may be a legacy post-exec target or a pre-exec transport, but the latter
+            # cannot pass final authorization while these locks are held and will observe the fence
+            # after release. Callers must still prove one exact live target before intent or stop.
+            pass
+        with stack:
+            yield
+
     def load_store(self, require_exists: bool = False) -> dict[str, Any]:
         try:
             raw = self.path.read_bytes()
@@ -602,7 +616,7 @@ class ReceiptStore:
                     self, delegation_id, compatibility
                 )
                 try:
-                    with self.launch_gate(delegation_id, timeout_seconds=0.2):
+                    with self.live_retirement_exclusion(delegation_id):
                         if existing is None:
                             if recover:
                                 raise HelperError("retirement recovery requires a durable retirement intent")
@@ -771,7 +785,7 @@ class ReceiptStore:
                     self, delegation_id, compatibility
                 )
                 try:
-                    with self.launch_gate(delegation_id, timeout_seconds=0.2):
+                    with self.live_retirement_exclusion(delegation_id):
                         if existing is None:
                             if recover:
                                 raise HelperError("acquired retirement recovery requires a durable intent")

@@ -2114,12 +2114,93 @@ def assert_exec_releases_launch_gate(store, current_identity, request, retire):
             except ProcessLookupError: pass
             os.waitpid(child, 0)
 
+# A v0.2.25 target inherited the gate across successful exec. Exact post-exec durable evidence must
+# reclassify that busy gate without weakening the separate pre-exec launch-indeterminate blocker.
+def assert_legacy_exec_holder_does_not_block_retirement(store, current_identity, request, retire):
+    marker = store.state_dir / "legacy-transport-exec-complete"
+    gate_path = store.state_dir / "launch-gates" / hashlib.sha256(
+        request["delegation_id"].encode()).hexdigest()
+    gate_path.parent.mkdir(mode=0o700, exist_ok=True)
+    child = os.fork()
+    if child == 0:
+        try:
+            descriptor = os.open(gate_path, os.O_CREAT | os.O_RDWR, 0o600)
+            module.fcntl.flock(descriptor, module.fcntl.LOCK_EX)
+            os.set_inheritable(descriptor, True)
+            os.execve(sys.executable, [sys.executable, "-c",
+                "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text('exec'); time.sleep(30)",
+                str(marker)], dict(os.environ))
+        finally: os._exit(1)
+    reaped = False
+    try:
+        deadline = time.monotonic() + 3
+        while not marker.exists() and time.monotonic() < deadline: time.sleep(0.01)
+        assert marker.exists(), "legacy exec target did not start"
+        stops = []
+        module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+        def stop(bound, *args):
+            nonlocal reaped
+            stops.append(copy.deepcopy(bound)); os.kill(child, 15); os.waitpid(child, 0); reaped = True
+        module.stop_exact_retirement_target = stop
+        module.confirm_retirement_target_absent = lambda bound: "exact_retirement_target_absent"
+        outcome = retire(request)
+        assert outcome["outcome"] == "retired", outcome
+        assert stops == [current_identity]
+    finally:
+        if not reaped:
+            try: os.kill(child, 15)
+            except ProcessLookupError: pass
+            os.waitpid(child, 0)
+
 launched, current_identity, launched_request = acquired_fixture("acquired-after-transport-exec")
 assert_exec_releases_launch_gate(
     launched, current_identity, launched_request, launched.retire_live_acquired_no_report_pair)
 launched, current_identity, launched_request = fixture("report-after-transport-exec")
 assert_exec_releases_launch_gate(
     launched, current_identity, launched_request, launched.retire_live_indeterminate_pair)
+
+legacy, current_identity, legacy_request = acquired_fixture("acquired-after-legacy-transport-exec")
+assert_legacy_exec_holder_does_not_block_retirement(
+    legacy, current_identity, legacy_request, legacy.retire_live_acquired_no_report_pair)
+legacy, current_identity, legacy_request = fixture("report-after-legacy-transport-exec")
+assert_legacy_exec_holder_does_not_block_retirement(
+    legacy, current_identity, legacy_request, legacy.retire_live_indeterminate_pair)
+
+# A genuinely pre-exec holder may coexist with report candidate evidence, but cannot pass final
+# transport authorization or cause retirement to mutate without one exact inspected live target.
+preexec, _, preexec_request = fixture("report-with-preexec-gate-holder")
+preexec_before = preexec.path.read_bytes()
+ready_read, ready_write = os.pipe(); release_read, release_write = os.pipe()
+child = os.fork()
+if child == 0:
+    try:
+        with preexec.launch_gate(preexec_request["delegation_id"]):
+            os.write(ready_write, b"1"); os.read(release_read, 1)
+    finally: os._exit(0)
+os.close(ready_write); os.close(release_read); assert os.read(ready_read, 1) == b"1"
+try:
+    inspections = []; stops = []
+    module.inspect_live_indeterminate_target = lambda *args: (
+        inspections.append(args), (_ for _ in ()).throw(module.HelperError("no exact live target")))[1]
+    module.stop_exact_retirement_target = lambda *args: stops.append(args)
+    try: preexec.retire_live_indeterminate_pair(preexec_request)
+    except module.HelperError: pass
+    else: raise AssertionError("pre-exec holder without exact live target entered retirement")
+    assert len(inspections) == 1 and not stops and preexec.path.read_bytes() == preexec_before
+    assert "T-synthetic" in preexec.lifecycle.load()["teardown_fences"]
+finally:
+    os.write(release_write, b"1"); os.close(release_write)
+    _, status = os.waitpid(child, 0)
+assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+
+# Body exceptions release an acquired retirement gate instead of being mistaken for gate contention.
+unwound, _, _ = acquired_fixture("retirement-exclusion-unwind")
+try:
+    with unwound.live_retirement_exclusion("retirement-exclusion-unwind"):
+        raise RuntimeError("synthetic body failure")
+except RuntimeError: pass
+else: raise AssertionError("retirement exclusion swallowed a body failure")
+with unwound.launch_gate("retirement-exclusion-unwind", timeout_seconds=0.2): pass
 
 acquired, current_identity, acquired_request = acquired_fixture()
 original = copy.deepcopy(acquired.load_store()["receipts"][0]); stops = []
@@ -2361,16 +2442,18 @@ assert outcome["outcome"] == "blocked" and outcome["blocker"] == "retirement_abs
 receipt = blocked.load_store()["receipts"][0]
 assert len(stops) == 1 and "acquired_retirement_intent" in receipt and "acquired_pair_retired" not in receipt
 
-# A busy launch transport and mutated durable retirement evidence cannot authorize a stop or terminal proof.
-blocked, current_identity, candidate = acquired_fixture("acquired-transport-race")
+# Exact completion/acquisition allows retirement to rely on fence/lock exclusion despite a busy gate.
+blocked, current_identity, candidate = acquired_fixture("acquired-legacy-gate-holder")
 class BusyGate:
     def __enter__(self): raise module.LaunchGateBusy()
     def __exit__(self, *args): pass
 blocked.launch_gate = lambda *args, **kwargs: BusyGate(); stops = []
-module.stop_exact_retirement_target = lambda *args: stops.append(args)
+module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+module.stop_exact_retirement_target = lambda bound, *args: stops.append(copy.deepcopy(bound))
+module.confirm_retirement_target_absent = lambda bound: "exact_retirement_target_absent"
 outcome = blocked.retire_live_acquired_no_report_pair(candidate)
-assert outcome["outcome"] == "blocked" and outcome["blocker"] == "launch_transport_active_or_indeterminate"
-assert not stops and "acquired_retirement_intent" not in blocked.load_store()["receipts"][0]
+assert outcome["outcome"] == "retired" and stops == [current_identity]
+assert "acquired_pair_retired" in blocked.load_store()["receipts"][0]
 
 blocked, current_identity, candidate = acquired_fixture("acquired-mutated-intent")
 module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
