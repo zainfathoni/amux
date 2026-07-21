@@ -94,8 +94,14 @@ func TestExperimentalPiSparkOrbRecipeStaysProviderSpecificAndFailClosed(t *testi
 		"TMPDIR=\"$EXPERIMENT_TMP\"",
 		"--cache=\"$NPM_CACHE\"",
 		"PI_VERSION=0.80.10",
-		".version' \"$EXPERIMENT/package-metadata.json\")\" = \"$PI_VERSION",
+		".version' \"$PACKAGE_METADATA\")\" = \"$PI_VERSION",
 		"--ignore-scripts",
+		"Runtime acceptance is not established by this recipe or its static repository tests",
+		"owner-operated OAuth, fresh trusted before/after quota observations",
+		"run_setup()",
+		"--connect-timeout 10 --max-time 110 --max-filesize",
+		"setup step failed or exceeded bounds",
+		"report only the step label, status class, and byte counts, never raw stderr",
 		"owner-operated Codex OAuth",
 		"auth_type=oauth",
 		"auth_mode=0600",
@@ -129,6 +135,8 @@ func TestExperimentalPiSparkOrbRecipeStaysProviderSpecificAndFailClosed(t *testi
 		"if os.path.lexists(path):",
 		"type == \"string\" and startswith(\"sha512-\")",
 		"type == \"array\" and length == 1",
+		"selects an in-memory manager",
+		"This proves source behavior, not a successful Orb pilot",
 		"65536",
 		"16384",
 		"Do not send the full event stream or raw stderr",
@@ -156,6 +164,22 @@ func TestExperimentalPiSparkOrbRecipeStaysProviderSpecificAndFailClosed(t *testi
 	if count := strings.Count(recipe, `TERM="${TERM:-xterm-256color}"`); count != 2 {
 		t.Errorf("Pi/Spark recipe passes TERM %d times, want login and logout only", count)
 	}
+	if count := strings.Count(recipe, `timeout --signal=TERM --kill-after=5s 600s "$PI"`); count != 2 {
+		t.Errorf("Pi/Spark recipe bounds %d interactive auth commands, want login and logout", count)
+	}
+	for _, step := range []string{
+		"npm-metadata", "node-checksums-download", "node-archive-download", "node-checksum",
+		"node-extract", "node-version", "npm-pack", "npm-install", "pi-version", "npm-list",
+		"model-catalog", "npm-uninstall",
+	} {
+		pattern := regexp.MustCompile(`run_setup ` + regexp.QuoteMeta(step) + ` [0-9]+ [0-9]+ [0-9]+ `)
+		if !pattern.MatchString(recipe) {
+			t.Errorf("Pi/Spark setup step %q lacks timeout/output bounds", step)
+		}
+	}
+	if count := strings.Count(recipe, "--connect-timeout 10 --max-time 110 --max-filesize"); count != 2 {
+		t.Errorf("Pi/Spark recipe has %d internally bounded downloads, want 2", count)
+	}
 	runStart := strings.Index(recipe, "RESULT=$RUN_DIR/result.txt")
 	if runStart < 0 {
 		t.Fatal("Pi/Spark run block is missing its result binding")
@@ -179,6 +203,40 @@ func TestExperimentalPiSparkOrbRecipeStaysProviderSpecificAndFailClosed(t *testi
 			t.Errorf("Pi/Spark capture invariant missing or out of order: %q", marker)
 		}
 		last = at
+	}
+}
+
+func TestPiSparkResultPipelineDecodesSchemaCorrectTextDelta(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	recipe := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "pi-spark-orb-executor.md"))
+	const pipeline = `jq -s '[.[] | select(.type == "message_update") | .assistantMessageEvent | select(.type == "text_delta") | .delta] | join("")' "$VALIDATED_EVENTS" | jq -r . >"$RESULT"`
+	if !strings.Contains(recipe, pipeline) {
+		t.Fatal("Pi/Spark recipe is missing the reviewed result-decoding pipeline")
+	}
+
+	dir := t.TempDir()
+	events := filepath.Join(dir, "events.validated.jsonl")
+	result := filepath.Join(dir, "result.txt")
+	fixture := "{\"type\":\"message_update\",\"message\":{\"role\":\"assistant\",\"content\":[]},\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"SPARK_PROBE_OK\"}}\n"
+	if err := os.WriteFile(events, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", "-c", pipeline)
+	cmd.Env = []string{
+		"PATH=/usr/local/bin:/usr/bin:/bin",
+		"VALIDATED_EVENTS=" + events,
+		"RESULT=" + result,
+	}
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("result pipeline failed: %v: %s", err, output)
+	}
+	output, err := os.ReadFile(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(output) != "SPARK_PROBE_OK\n" {
+		t.Fatalf("result pipeline output=%q, want exact decoded probe", output)
 	}
 }
 
