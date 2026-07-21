@@ -13,6 +13,7 @@ const (
 	RunnersFile                  = "runners.tsv"
 	ShelvesFile                  = "shelves.tsv"
 	GroupsFile                   = "groups.tsv"
+	GroupNamingFile              = "group-naming.json"
 	OperationsFile               = "operations.json"
 	ReportsFile                  = "reports.json"
 	MaintenanceFile              = "runner-maintenance.json"
@@ -60,6 +61,10 @@ func (d Directory) ShelvesPath() string {
 
 func (d Directory) GroupsPath() string {
 	return filepath.Join(d.Path, GroupsFile)
+}
+
+func (d Directory) GroupNamingPath() string {
+	return filepath.Join(d.Path, GroupNamingFile)
 }
 
 func (d Directory) OperationsPath() string {

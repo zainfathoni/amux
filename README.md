@@ -189,9 +189,17 @@ amux group reconcile --all
 amux group remove --group amux-131 --thread T-worker
 ```
 
-Group IDs map byte-for-byte to Amp labels and must match `^[a-z0-9]+(?:-[a-z0-9]+)*$`; amux never normalizes or infers them from titles, branches, issue numbers, or existing labels. Local `groups.tsv` intent is authoritative and survives worker/tmux/worktree lifecycle changes. `group list` and `group show` are deterministic local-only reads.
+Group IDs map byte-for-byte to Amp labels and must match `^[a-z0-9]+(?:-[a-z0-9]+)*$`. Generic `amux group` commands never normalize or infer them from titles, branches, issue numbers, or existing labels. Local `groups.tsv` intent is authoritative and survives worker/tmux/worktree lifecycle changes. `group list` and `group show` are deterministic local-only reads.
 
-The bundled issue-coordination workflow uses repository-qualified identities. For this repository, issue `#131` uses group/Amp label `amux-131`, and its first worker uses report ID `amux-131-worker-1`; another repository uses the equivalent `<repository-slug>-131` and `<repository-slug>-131-worker-1`. This convention does not narrow the generic group-ID contract. Legacy `issue-*` identities and purpose-specific groups such as `pr-181-review` remain valid and are never migrated, renamed, removed externally, or rewritten.
+The bundled issue-coordination workflow preserves repository-qualified defaults. For this repository, issue `#131` uses group/Amp label `amux-131`, and its first worker uses report ID `amux-131-worker-1`; another unconfigured repository uses the equivalent `<repository-slug>-131` and `<repository-slug>-131-worker-1` explicitly. A repository may instead opt into tracker-neutral automatic naming with `--work-item-id`, `--worker-ordinal`, and a semantic window slug. The same exact resolved group derives the stable report ID. This workflow feature does not narrow the generic group-ID contract. Existing `amux-*`, repository-slug, `issue-*`, purpose-specific groups such as `pr-181-review`, and explicit groups remain valid and are never migrated, renamed, removed externally, or rewritten.
+
+Automatic naming is repository-scoped in the selected config directory:
+
+```json
+{"schema_version":1,"projects":[{"repository":"github.com/owner/project","prefix":"project"}]}
+```
+
+`repository` is the lowercase `host/owner/repository` identity verified from the spawn workdir's `origin`; amux never uses cwd basename, worktree/tmux names, or existing labels as scope. With no explicit group, `--work-item-id 975 --worker-ordinal 1 --window unlisted-addons` derives `project-975-unlisted-addons` and report ID `project-975-unlisted-addons-worker-1`. Work-item IDs are owner-supplied and tracker-neutral, so GitHub issue and Trello card identities require no tracker fetch. Inputs must already satisfy the lowercase/hyphen grammar and the final group must fit 32 characters; amux rejects missing, ambiguous, invalid, mismatched, non-canonical, or over-limit values without guessing, normalizing, or truncating. `--dry-run` returns the resolved prefix, work item, slug, group, report, and config source before Amp/tmux/config mutation. Explicit `--group` remains authoritative and bypasses automatic naming.
 
 Worker spawn accepts repeatable `--group <id>`. amux validates and deterministically sorts/deduplicates the complete set before creation, binds memberships only to the final authoritative receiving thread, persists all local intent before add-only label synchronization, and resumes a partial grouping failure with the same idempotency key without recreating or resubmitting the worker.
 
@@ -291,6 +299,7 @@ Current config is directory-based:
 ~/.config/amux/runners.tsv
 ~/.config/amux/shelves.tsv
 ~/.config/amux/groups.tsv
+~/.config/amux/group-naming.json
 ~/.config/amux/reports.json
 ```
 

@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math/big"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -186,6 +188,248 @@ func TestWorkerSpawnRejectsOverlongGroupBeforeSideEffects(t *testing.T) {
 	if readErr != nil || len(entries) != 0 {
 		t.Fatalf("overlong group mutated config: entries=%v err=%v", entries, readErr)
 	}
+}
+
+func TestWorkerSpawnDerivesRepositoryScopedTrackerNeutralNaming(t *testing.T) {
+	for _, workItemID := range []string{"123", "975"} {
+		t.Run(workItemID, func(t *testing.T) {
+			dir := t.TempDir()
+			workdir := testGitRepository(t, "https://github.com/owner/project.git")
+			writeGroupNamingConfig(t, dir, "github.com/owner/project", "bta")
+			bin := t.TempDir()
+			called := filepath.Join(bin, "called")
+			writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			got := executeWorkerJSON(t, "--json", "--dry-run", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "unlisted-addons", "--workdir", workdir, "--work-item-id", workItemID, "--worker-ordinal", "2", "--message", "hello", "--idempotency-key", "derived-"+workItemID)
+			if len(got.Planned) != 3 || got.Planned[0].GroupNaming == nil {
+				t.Fatalf("derived dry-run = %+v", got)
+			}
+			naming := got.Planned[0].GroupNaming
+			wantGroup := "bta-" + workItemID + "-unlisted-addons"
+			if naming.ProjectPrefix != "bta" || naming.WorkItemID != workItemID || naming.Slug != "unlisted-addons" || naming.GroupID != wantGroup || naming.ReportID != wantGroup+"-worker-2" || naming.ConfigSource != filepath.Join(dir, config.GroupNamingFile) {
+				t.Fatalf("resolved naming = %+v", naming)
+			}
+			if got.Planned[2].Group == nil || got.Planned[2].Group.ID != wantGroup {
+				t.Fatalf("derived group plan = %+v", got.Planned)
+			}
+			if _, err := os.Stat(called); !os.IsNotExist(err) {
+				t.Fatalf("derived dry-run called amp or tmux: %v", err)
+			}
+			for _, name := range []string{config.WorkersFile, config.OperationsFile, config.GroupsFile} {
+				if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+					t.Fatalf("derived dry-run created %s: %v", name, err)
+				}
+			}
+		})
+	}
+}
+
+func TestWorkerSpawnExplicitGroupOverridesAutomaticNaming(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	got := executeWorkerJSON(t, "--json", "--dry-run", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "legacy", "--workdir", workdir, "--group", "explicit-group", "--work-item-id", "#invalid", "--worker-ordinal", "invalid", "--message", "hello", "--idempotency-key", "explicit-wins")
+	if len(got.Planned) != 2 || got.Planned[1].Group == nil || got.Planned[1].Group.ID != "explicit-group" || got.Planned[0].GroupNaming != nil {
+		t.Fatalf("explicit override = %+v", got)
+	}
+}
+
+func TestWorkerSpawnAutomaticNamingOrdinalBoundaries(t *testing.T) {
+	dir := t.TempDir()
+	workdir := testGitRepository(t, "https://github.com/owner/project.git")
+	writeGroupNamingConfig(t, dir, "github.com/owner/project", "bta")
+	args := []string{"--json", "--dry-run", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "addons", "--workdir", workdir, "--work-item-id", "975", "--worker-ordinal", "10000", "--message", "hello", "--idempotency-key", "ordinal-boundary"}
+	got := executeWorkerJSON(t, args...)
+	if len(got.Planned) != 3 || got.Planned[0].GroupNaming == nil || got.Planned[0].GroupNaming.ReportID != "bta-975-addons-worker-10000" {
+		t.Fatalf("ordinal above former ceiling = %+v", got)
+	}
+
+	maxInt := int(^uint(0) >> 1)
+	overflow := new(big.Int).Add(big.NewInt(int64(maxInt)), big.NewInt(1)).String()
+	args[optionValueIndex(t, args, "--worker-ordinal")] = overflow
+	if err := executeWorkerJSONError(t, args...); err == nil || !strings.Contains(err.Error(), "canonical positive integer") {
+		t.Fatalf("host-int overflow ordinal error = %v", err)
+	}
+}
+
+func TestWorkerSpawnAutomaticNamingResumesRealGrouping(t *testing.T) {
+	dir := t.TempDir()
+	workdir := testGitRepository(t, "https://github.com/owner/project.git")
+	writeGroupNamingConfig(t, dir, "github.com/owner/project", "bta")
+	groupID, reportID, err := config.DeriveGroupNaming("bta", "975", "unlisted-addons", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := config.Row{Workspace: "alpha", Window: "unlisted-addons", Workdir: workdir, Thread: "T-spawned"}
+	writeWorkerRegistry(t, dir, row.String()+"\n")
+	now := time.Now().UTC()
+	record := config.OperationRecord{
+		Key:         "derived-grouping",
+		Kind:        "worker-spawn",
+		RequestHash: automaticNamingRequestHash("alpha", "unlisted-addons", workdir, "", "hello", groupID, "github.com/owner/project", reportID),
+		State:       config.OperationStarted,
+		Phase:       config.OperationPhaseConfigured,
+		Resource:    config.OperationResource{Kind: "worker", Thread: row.Thread},
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if _, err := config.StoreOperation(filepath.Join(dir, config.OperationsFile), record); err != nil {
+		t.Fatal(err)
+	}
+	calls := installSupportedGroupAmp(t, func([]string) ([]byte, error) { return nil, nil })
+
+	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "unlisted-addons", "--workdir", workdir, "--work-item-id", "975", "--worker-ordinal", "2", "--message", "hello", "--idempotency-key", "derived-grouping")
+	memberships, err := config.LoadGroupsReadOnly(filepath.Join(dir, config.GroupsFile))
+	if err != nil || len(memberships) != 1 || memberships[0].Group != groupID || memberships[0].Thread != row.Thread {
+		t.Fatalf("derived membership = %+v, error = %v", memberships, err)
+	}
+	completed, found, err := config.LoadOperation(filepath.Join(dir, config.OperationsFile), "derived-grouping")
+	if err != nil || !found || completed.State != config.OperationSucceeded || completed.Phase != config.OperationPhaseGrouped {
+		t.Fatalf("derived operation = %+v, found=%t, error=%v", completed, found, err)
+	}
+	if targets := groupLabelTargets(*calls); !reflect.DeepEqual(targets, []string{"T-spawned/" + groupID}) {
+		t.Fatalf("derived label calls = %+v", *calls)
+	}
+	if len(got.Successful) != 2 || got.Successful[0].GroupNaming == nil || got.Successful[1].Resource.Group != groupID {
+		t.Fatalf("derived grouping outcomes = %+v", got)
+	}
+}
+
+func TestWorkerSpawnAutomaticNamingBindsOrdinalAndRepositoryToIdempotency(t *testing.T) {
+	dir := t.TempDir()
+	workdir := testGitRepository(t, "https://github.com/owner/one.git")
+	configPath := filepath.Join(dir, config.GroupNamingFile)
+	if err := os.WriteFile(configPath, []byte(`{"schema_version":1,"projects":[{"repository":"github.com/owner/one","prefix":"bta"},{"repository":"github.com/owner/two","prefix":"bta"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	groupID, reportID, err := config.DeriveGroupNaming("bta", "975", "addons", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	record := config.OperationRecord{Key: "bound-naming", Kind: "worker-spawn", RequestHash: automaticNamingRequestHash("alpha", "addons", workdir, "", "hello", groupID, "github.com/owner/one", reportID), State: config.OperationStarted, Phase: config.OperationPhaseCreatingThread, Resource: config.OperationResource{Kind: "worker"}, CreatedAt: now, UpdatedAt: now}
+	if _, err := config.StoreOperation(filepath.Join(dir, config.OperationsFile), record); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{"--json", "--dry-run", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "addons", "--workdir", workdir, "--work-item-id", "975", "--worker-ordinal", "1", "--message", "hello", "--idempotency-key", "bound-naming"}
+	if got := executeWorkerJSON(t, base...); len(got.Planned) != 3 {
+		t.Fatalf("exact automatic replay = %+v", got)
+	}
+	ordinalMismatch := append([]string(nil), base...)
+	ordinalMismatch[optionValueIndex(t, ordinalMismatch, "--worker-ordinal")] = "2"
+	if err := executeWorkerJSONError(t, ordinalMismatch...); err == nil || !strings.Contains(err.Error(), "different request") {
+		t.Fatalf("ordinal idempotency mismatch = %v", err)
+	}
+	if output, err := exec.Command("git", "-C", workdir, "remote", "set-url", "origin", "https://github.com/owner/two.git").CombinedOutput(); err != nil {
+		t.Fatalf("change origin: %v: %s", err, output)
+	}
+	if err := executeWorkerJSONError(t, base...); err == nil || !strings.Contains(err.Error(), "different request") {
+		t.Fatalf("repository idempotency mismatch = %v", err)
+	}
+}
+
+func TestVerifiedRepositoryIdentityRejectsAmbiguousAndOverLimitOrigins(t *testing.T) {
+	t.Run("multiple URLs", func(t *testing.T) {
+		workdir := testGitRepository(t, "https://github.com/owner/project.git")
+		if output, err := exec.Command("git", "-C", workdir, "config", "--add", "remote.origin.url", "https://github.com/owner/other.git").CombinedOutput(); err != nil {
+			t.Fatalf("add origin: %v: %s", err, output)
+		}
+		if _, err := verifiedRepositoryIdentity(workdir); err == nil || !strings.Contains(err.Error(), "exactly one") {
+			t.Fatalf("ambiguous origin error = %v", err)
+		}
+	})
+	t.Run("over limit output", func(t *testing.T) {
+		workdir := testGitRepository(t, "https://github.com/owner/project.git")
+		remote := "https://github.com/owner/" + strings.Repeat("a", 5000) + ".git"
+		if output, err := exec.Command("git", "-C", workdir, "remote", "set-url", "origin", remote).CombinedOutput(); err != nil {
+			t.Fatalf("set large origin: %v: %s", err, output)
+		}
+		if _, err := verifiedRepositoryIdentity(workdir); err == nil || !strings.Contains(err.Error(), "over-limit") {
+			t.Fatalf("over-limit origin error = %v", err)
+		}
+	})
+}
+
+func TestWorkerSpawnNamingRejectionsHaveNoSideEffects(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		configure  bool
+		repository string
+		workItem   string
+		slug       string
+		ordinal    string
+		want       string
+	}{
+		{name: "missing config", workItem: "123", slug: "valid", ordinal: "1", want: "config is missing"},
+		{name: "repository scope mismatch", configure: true, repository: "github.com/owner/other", workItem: "123", slug: "valid", ordinal: "1", want: "no project matching verified repository"},
+		{name: "invalid slug", configure: true, repository: "github.com/owner/project", workItem: "123", slug: "Invalid-Slug", ordinal: "1", want: "invalid group slug"},
+		{name: "over limit slug", configure: true, repository: "github.com/owner/project", workItem: "123", slug: strings.Repeat("a", 29), ordinal: "1", want: "without truncation"},
+		{name: "invalid ordinal", configure: true, repository: "github.com/owner/project", workItem: "123", slug: "valid", ordinal: "01", want: "canonical positive integer"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			workdir := testGitRepository(t, "git@github.com:owner/project.git")
+			if test.configure {
+				writeGroupNamingConfig(t, dir, test.repository, "bta")
+			}
+			bin := t.TempDir()
+			called := filepath.Join(bin, "called")
+			writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+called+"'\nexit 99\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			err := executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", test.slug, "--workdir", workdir, "--work-item-id", test.workItem, "--worker-ordinal", test.ordinal, "--message", "hello", "--idempotency-key", "rejected")
+			if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("naming rejection = %v, want %q", err, test.want)
+			}
+			if _, err := os.Stat(called); !os.IsNotExist(err) {
+				t.Fatalf("naming rejection called amp or tmux: %v", err)
+			}
+			for _, name := range []string{config.WorkersFile, config.OperationsFile, config.GroupsFile} {
+				if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+					t.Fatalf("naming rejection created %s: %v", name, err)
+				}
+			}
+		})
+	}
+}
+
+func testGitRepository(t *testing.T, remote string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, args := range [][]string{{"init", "-q", dir}, {"-C", dir, "remote", "add", "origin", remote}} {
+		command := exec.Command("git", args...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+	return dir
+}
+
+func writeGroupNamingConfig(t *testing.T, dir, repository, prefix string) {
+	t.Helper()
+	content := `{"schema_version":1,"projects":[{"repository":` + strconv.Quote(repository) + `,"prefix":` + strconv.Quote(prefix) + `}]}`
+	if err := os.WriteFile(filepath.Join(dir, config.GroupNamingFile), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func automaticNamingRequestHash(workspace, window, workdir, mode, message, groupID, repository, reportID string) string {
+	fields := []string{workspace, window, workdir, mode, message, "groups", groupID, "group-naming/v1", repository, reportID}
+	sum := sha256.Sum256([]byte(strings.Join(fields, "\x00")))
+	return hex.EncodeToString(sum[:])
+}
+
+func optionValueIndex(t *testing.T, args []string, option string) int {
+	t.Helper()
+	for index := range args {
+		if args[index] == option && index+1 < len(args) {
+			return index + 1
+		}
+	}
+	t.Fatalf("missing option %s in %v", option, args)
+	return -1
 }
 
 func TestWorkerSpawnDeliveryReplayNeverResubmitsOrSearchesOtherThreads(t *testing.T) {
