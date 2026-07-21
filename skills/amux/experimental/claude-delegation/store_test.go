@@ -2668,6 +2668,129 @@ print("ok")
 	}
 }
 
+func TestPreIdentityAcquiredNoReportPairHasPermanentTerminalPolicy(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import copy, hashlib, importlib.util, pathlib, shutil, sys, tempfile
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+
+def fixture(name="synthetic-pre-identity-acquired"):
+    state = pathlib.Path(tempfile.mkdtemp()).resolve(); state.chmod(0o700)
+    workdir = pathlib.Path(tempfile.mkdtemp()).resolve()
+    store = module.ReceiptStore(state, state)
+    binding = {"protocol_version":1, "delegation_id":name, "nonce":"1" * 64, "task_id":"task",
+        "question_message_id":"question", "origin_thread":"T-synthetic", "repository":"repository",
+        "base":"2" * 40, "workdir":str(workdir), "producer_role":"thinker", "authority":"read_only",
+        "task_reference":"fixture", "packet_digest":"3" * 64, "launch_policy_digest":"4" * 64,
+        "launch_command_digest":"5" * 64}
+    assert store.create({"binding":binding, "routing":{"target":"machine_local_inbox"}}) == "recorded"
+    data = store.load_store(); receipt = data["receipts"][0]
+    intent = {"event_id":"launch", "kind":"launch_intent", "workflow":"read_only",
+        "request_digest":"8" * 64, "claude_session_id":"550e8400-e29b-41d4-a716-446655440000",
+        "tmux_session":"Synthetic", "tmux_window":"pre-identity", "packet_digest":"3" * 64,
+        "launch_policy_digest":"4" * 64, "launch_command_digest":"5" * 64,
+        "at":"2026-07-20T12:00:00Z"}
+    completed_identity = {"session":"Synthetic", "window":"pre-identity", "window_id":"@17", "pane_id":"%23"}
+    acquired_identity = {**completed_identity, "pane_pid":4242,
+        "claude_session_id":intent["claude_session_id"], "workdir":str(workdir),
+        "current_command":"claude", "process_name":"claude", "process_identity":"1750000000.000017",
+        "process_command_digest":"9" * 64, "launch_command_digest":"5" * 64}
+    receipt["events"].extend([
+        intent,
+        {"event_id":module.internal_event_id("launch-result", "launch"), "kind":"launch_completed",
+         "operation_event_id":"launch", "identity":completed_identity, "at":"2026-07-20T12:00:01Z"},
+        {"event_id":"acquired", "kind":"session_acquired", "identity":acquired_identity,
+         "at":"2026-07-20T12:00:02Z"},
+    ])
+    receipt["session_identity"] = copy.deepcopy(acquired_identity)
+    receipt["updated_at"] = "2026-07-20T12:00:02Z"; store.commit(data)
+    request = {"delegation_id":name, "event_id":"policy-stable", "origin_thread":"T-synthetic",
+        "compatibility":"pre_identity_acquired_no_report_v1",
+        "authorization":{"terminal_state":"merged", "report_sha256":"6" * 64,
+                         "coordinator_authorization_sha256":"7" * 64}}
+    store.synthetic_workdir = workdir
+    return store, request
+
+store, request = fixture(); before = store.path.read_bytes(); inspections = []; stops = []
+module.inspect_live_indeterminate_target = lambda *args: inspections.append(args)
+module.stop_exact_retirement_target = lambda *args: stops.append(args)
+result = store.retire_live_acquired_no_report_pair(request)
+assert result == {
+    "action":"live_acquired_no_report_pair_retirement",
+    "origin_thread_sha256":hashlib.sha256(b"T-synthetic").hexdigest(),
+    "pair_sha256":hashlib.sha256(b"synthetic-pre-identity-acquired").hexdigest(),
+    "outcome":"blocked", "blocker":"pre_identity_acquired_pair_permanently_non_retirable",
+    "policy":"preserve_receipt_runtime_artifacts_and_origin_fence",
+    "remediation":"paired_worker_teardown_prohibited",
+    "compatibility":"pre_identity_acquired_no_report_v1", "fence":"retained",
+}
+assert store.path.read_bytes() == before and not inspections and not stops
+assert "T-synthetic" in store.lifecycle.load()["teardown_fences"]
+assert store.retire_live_acquired_no_report_pair(request) == result
+teardown = store.worker_teardown("T-synthetic", True)
+assert teardown["outcome"] == "blocked"
+assert teardown["pairs"] == [{
+    "pair_sha256":hashlib.sha256(b"synthetic-pre-identity-acquired").hexdigest(),
+    "state":"created", "action":"block",
+    "blocker":"pre_identity_acquired_pair_permanently_non_retirable"}]
+
+# The selector is mandatory and exact; malformed, report-bearing, and modern shapes retain their old paths.
+without = copy.deepcopy(request); without.pop("compatibility")
+try: store.retire_live_acquired_no_report_pair(without)
+except module.HelperError: pass
+else: raise AssertionError("pre-identity acquired shape entered the modern route")
+for name, mutate in [
+    ("completion-expanded", lambda receipt: receipt["events"][2]["identity"].update(pane_pid=4242)),
+    ("acquired-normalized-argv", lambda receipt: receipt["session_identity"].update(normalized_argv_digest="a" * 64)),
+    ("acquired-event-drift", lambda receipt: receipt["events"][3]["identity"].update(pane_id="%99")),
+    ("report-bearing", lambda receipt: (receipt.update(state="valid_report", report_message_id="report"),
+                                         receipt["events"].append({"event_id":"report", "kind":"valid_report"}))),
+]:
+    blocked, candidate = fixture("synthetic-blocked-" + name)
+    data = blocked.load_store(); mutate(data["receipts"][0]); blocked.commit(data)
+    before = blocked.path.read_bytes(); inspections.clear(); stops.clear()
+    try: blocked.retire_live_acquired_no_report_pair(candidate)
+    except module.HelperError: pass
+    else: raise AssertionError("malformed pre-identity acquired shape accepted: " + name)
+    assert blocked.path.read_bytes() == before and not inspections and not stops, name
+
+for name, value in [("boolean-pid", True), ("oversized-process-name", "x" * 257)]:
+    blocked, candidate = fixture("synthetic-malformed-" + name)
+    data = blocked.load_store(); receipt = data["receipts"][0]
+    field = "pane_pid" if name == "boolean-pid" else "process_name"
+    receipt["session_identity"][field] = value
+    receipt["events"][3]["identity"][field] = value
+    blocked.commit(data); before = blocked.path.read_bytes()
+    try: blocked.retire_live_acquired_no_report_pair(candidate)
+    except module.HelperError: pass
+    else: raise AssertionError("malformed durable identity accepted: " + name)
+    assert blocked.path.read_bytes() == before and not inspections and not stops, name
+
+store, request = fixture("synthetic-missing-workdir"); shutil.rmtree(store.synthetic_workdir)
+result = store.retire_live_acquired_no_report_pair(request)
+assert result["blocker"] == "pre_identity_acquired_pair_permanently_non_retirable"
+assert store.worker_teardown("T-synthetic", True)["blockers"] == [{
+    "pair_sha256":hashlib.sha256(b"synthetic-missing-workdir").hexdigest(),
+    "blocker":"pre_identity_acquired_pair_permanently_non_retirable"}]
+
+store, request = fixture("synthetic-no-recovery")
+try: store.retire_live_acquired_no_report_pair(dict(request, recover=True))
+except module.HelperError: pass
+else: raise AssertionError("permanent-terminal policy accepted recovery mutation")
+assert not inspections and not stops
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil || string(output) != "ok\n" {
+		t.Fatalf("pre-identity acquired policy fixture: %v: %s", err, output)
+	}
+}
+
 func TestRetirementControlConnectionNeverReconnectsToReplacementTmuxServer(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux is required for the retained control-connection boundary")
