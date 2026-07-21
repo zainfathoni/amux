@@ -893,6 +893,189 @@ class ReceiptStore:
             origin_sha256, pair_sha256, "retired", compatibility
         )
 
+    def dispose_exact_pre_identity_acquired_pair(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        delegation_id = protocol_id(request, "delegation_id")
+        event_id = protocol_id(request, "event_id")
+        origin_thread = required_string(request, "origin_thread", 256)
+        authorization = validate_terminal_amp_authorization(request.get("authorization"))
+        owner_authorization = validate_exact_pane_owner_authorization(
+            request.get("owner_authorization")
+        )
+        compatibility = request.get("compatibility")
+        if compatibility != PRE_IDENTITY_ACQUIRED_NO_REPORT_COMPATIBILITY:
+            raise HelperError("exact-pane disposal requires its explicit compatibility selector")
+        recover = request.get("recover", False)
+        if not isinstance(recover, bool):
+            raise HelperError("exact-pane disposal recover must be boolean")
+        reject_unknown(
+            request,
+            {
+                "delegation_id", "event_id", "origin_thread", "authorization",
+                "owner_authorization", "compatibility", "recover",
+            },
+            "exact pre-identity pane disposal",
+        )
+        origin_sha256 = hashlib.sha256(origin_thread.encode()).hexdigest()
+        pair_sha256 = hashlib.sha256(delegation_id.encode()).hexdigest()
+        result_id = internal_event_id("exact-pane-disposal-result", event_id)
+        with self.lifecycle.mutation_lock():
+            lifecycle = self.lifecycle.load()
+            state_path = str(self.state_dir.resolve())
+            if state_path not in lifecycle["stores"]:
+                raise HelperError("receipt store is not registered in the canonical lifecycle registry")
+            verify_registered_store_object(
+                state_path, lifecycle["legacy_store_objects"].get(state_path)
+            )
+            if origin_thread not in lifecycle["teardown_fences"]:
+                lifecycle["teardown_fences"][origin_thread] = {
+                    "operation_id": hashlib.sha256(
+                        f"worker-teardown\0{origin_thread}".encode()
+                    ).hexdigest(),
+                    "created_at": utc_now(),
+                }
+                self.lifecycle.commit(lifecycle)
+            store_lock = (
+                contextlib.nullcontext()
+                if self.lifecycle.state_dir == self.state_dir
+                else self.mutation_lock()
+            )
+            with store_lock:
+                store = load_registered_receipt_store(
+                    self,
+                    state_path,
+                    lifecycle["legacy_store_objects"].get(state_path),
+                    acquire_lock=False,
+                )
+                receipt = self.find(store, delegation_id)
+                if receipt["binding"].get("origin_thread") != origin_thread:
+                    raise HelperError("receipt immutable origin does not match exact-pane authority")
+                terminal = find_event(receipt, result_id)
+                existing = find_event(receipt, event_id)
+                intents = [
+                    event
+                    for event in receipt.get("events", [])
+                    if isinstance(event, dict)
+                    and event.get("kind") == "exact_pane_disposal_intent"
+                ]
+                if len(intents) > 1 or (intents and intents[0].get("event_id") != event_id):
+                    raise HelperError("receipt already has a different exact-pane disposal operation")
+                if terminal is not None:
+                    if existing is None or not valid_exact_pane_disposal_chain(receipt):
+                        raise HelperError("terminal exact-pane disposal proof is invalid")
+                    validate_exact_pane_disposal_operation(
+                        existing, authorization, owner_authorization, event_id
+                    )
+                    return exact_pane_disposal_result(
+                        origin_sha256, pair_sha256, "duplicate"
+                    )
+                if not valid_exact_pane_disposal_candidate(
+                    receipt, authorization, owner_authorization, event_id
+                ):
+                    raise HelperError(
+                        "exact-pane disposal requires the exact pre-identity acquired no-report chain"
+                    )
+                durable_identity = receipt["session_identity"]
+                try:
+                    with self.live_retirement_exclusion(delegation_id):
+                        with TmuxControlConnection(durable_identity["session"]) as control:
+                            if existing is None:
+                                if recover:
+                                    raise HelperError(
+                                        "exact-pane disposal recovery requires a durable intent"
+                                    )
+                                identity = inspect_exact_pre_identity_target(
+                                    control, durable_identity
+                                )
+                                disposal_intent = {
+                                    "event_id": event_id,
+                                    "kind": "exact_pane_disposal_intent",
+                                    "terminal_state": authorization["terminal_state"],
+                                    "report_sha256": authorization["report_sha256"],
+                                    "coordinator_authorization_sha256": authorization[
+                                        "coordinator_authorization_sha256"
+                                    ],
+                                    "owner_authorization": copy.deepcopy(owner_authorization),
+                                    "compatibility": compatibility,
+                                    "identity": identity,
+                                    "at": utc_now(),
+                                }
+                                receipt["events"].append(disposal_intent)
+                                receipt["exact_pane_disposal_intent"] = copy.deepcopy(
+                                    disposal_intent
+                                )
+                                receipt["updated_at"] = disposal_intent["at"]
+                                self.commit(store)
+                                current = inspect_exact_pre_identity_target(
+                                    control, durable_identity
+                                )
+                                if current != identity:
+                                    return exact_pane_disposal_blocked(
+                                        origin_sha256,
+                                        pair_sha256,
+                                        "exact_pane_identity_changed",
+                                    )
+                                stop_exact_pre_identity_target(control, identity)
+                            else:
+                                if not recover:
+                                    raise HelperError(
+                                        "exact-pane disposal outcome is indeterminate; explicit recovery is required"
+                                    )
+                                validate_exact_pane_disposal_operation(
+                                    existing, authorization, owner_authorization, event_id
+                                )
+                                identity = copy.deepcopy(existing.get("identity"))
+                                if not exact_pane_disposal_identity_matches(
+                                    identity, durable_identity
+                                ):
+                                    raise HelperError("durable exact-pane disposal identity is invalid")
+                                absence = confirm_exact_pre_identity_target_absent(
+                                    control, identity
+                                )
+                                if absence != "exact_pane_process_incarnation_absent":
+                                    if absence != "exact_pane_process_incarnation_still_live":
+                                        return exact_pane_disposal_blocked(
+                                            origin_sha256, pair_sha256, absence
+                                        )
+                                    current = inspect_exact_pre_identity_target(
+                                        control, durable_identity
+                                    )
+                                    if current != identity:
+                                        return exact_pane_disposal_blocked(
+                                            origin_sha256,
+                                            pair_sha256,
+                                            "exact_pane_identity_changed",
+                                        )
+                                    stop_exact_pre_identity_target(control, identity)
+                            absence = confirm_exact_pre_identity_target_absent(control, identity)
+                            if absence != "exact_pane_process_incarnation_absent":
+                                return exact_pane_disposal_blocked(
+                                    origin_sha256, pair_sha256, absence
+                                )
+                            result = {
+                                "event_id": result_id,
+                                "kind": "exact_pane_disposed",
+                                "operation_event_id": event_id,
+                                "absence_code": absence,
+                                "at": utc_now(),
+                            }
+                            receipt["events"].append(result)
+                            receipt["exact_pane_disposed"] = copy.deepcopy(result)
+                            receipt["updated_at"] = result["at"]
+                            if not valid_exact_pane_disposal_chain(receipt):
+                                raise HelperError(
+                                    "terminal exact-pane disposal proof did not seal exactly"
+                                )
+                            self.commit(store)
+                except LaunchGateBusy:
+                    return exact_pane_disposal_blocked(
+                        origin_sha256,
+                        pair_sha256,
+                        "launch_transport_active_or_indeterminate",
+                    )
+        return exact_pane_disposal_result(origin_sha256, pair_sha256, "disposed")
+
     def worker_teardown(self, origin_thread: str, dry_run: bool) -> dict[str, Any]:
         required_string({"origin_thread": origin_thread}, "origin_thread", 256)
         origin_thread_sha256 = hashlib.sha256(origin_thread.encode()).hexdigest()
@@ -941,6 +1124,8 @@ class ReceiptStore:
                 public_state = "pair_retired"
             elif valid_acquired_no_report_pair_retirement_chain(receipt):
                 public_state = "acquired_pair_retired"
+            elif valid_exact_pane_disposal_chain(receipt):
+                public_state = "exact_pane_disposed"
             pair = {"pair_sha256": pair_id, "state": public_state}
             blocker = worker_teardown_receipt_blocker(receipt)
             if blocker is not None:
@@ -962,6 +1147,10 @@ class ReceiptStore:
                 pairs.append(pair)
                 continue
             if valid_acquired_no_report_pair_retirement_chain(receipt):
+                pair["action"] = "none"
+                pairs.append(pair)
+                continue
+            if valid_exact_pane_disposal_chain(receipt):
                 pair["action"] = "none"
                 pairs.append(pair)
                 continue
@@ -4561,6 +4750,23 @@ def validate_terminal_amp_authorization(value: Any) -> dict[str, str]:
     return copy.deepcopy(value)
 
 
+def validate_exact_pane_owner_authorization(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise HelperError("exact-pane disposal owner authorization must be an object")
+    fields = {
+        "decision", "executable_identity_acknowledgement", "authorization_sha256",
+    }
+    reject_unknown(value, fields, "exact-pane disposal owner authorization")
+    if value.get("decision") != "dispose_exact_pane_process_incarnation":
+        raise HelperError("exact-pane disposal owner decision is not explicit")
+    if value.get("executable_identity_acknowledgement") != "unproved":
+        raise HelperError("exact-pane disposal must acknowledge unproved executable identity")
+    digest = required_string(value, "authorization_sha256", 64)
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise HelperError("exact-pane disposal owner authorization must be a lowercase SHA-256 value")
+    return copy.deepcopy(value)
+
+
 def reject_unknown(value: dict[str, Any], allowed: set[str], label: str) -> None:
     unknown = sorted(set(value) - allowed)
     if unknown:
@@ -4582,6 +4788,8 @@ def require_receipt_mutable(receipt: dict[str, Any]) -> None:
         or receipt.get("pair_retired") is not None
         or receipt.get("acquired_retirement_intent") is not None
         or receipt.get("acquired_pair_retired") is not None
+        or receipt.get("exact_pane_disposal_intent") is not None
+        or receipt.get("exact_pane_disposed") is not None
         or (
         isinstance(events, list)
         and any(
@@ -4589,6 +4797,7 @@ def require_receipt_mutable(receipt: dict[str, Any]) -> None:
             and event.get("kind") in {
                 "worker_detached", "retirement_intent", "pair_retired",
                 "acquired_retirement_intent", "acquired_pair_retired",
+                "exact_pane_disposal_intent", "exact_pane_disposed",
             }
             for event in events
         )
@@ -4715,6 +4924,7 @@ def worker_teardown_receipt_blocker(receipt: dict[str, Any]) -> str | None:
         valid_worker_detach_chain(receipt)
         or valid_pair_retirement_chain(receipt)
         or valid_acquired_no_report_pair_retirement_chain(receipt)
+        or valid_exact_pane_disposal_chain(receipt)
     ):
         return None
     if valid_pre_identity_acquired_no_report_candidate(receipt):
@@ -5190,6 +5400,185 @@ def valid_pre_identity_acquired_no_report_candidate(receipt: dict[str, Any]) -> 
     )
 
 
+def exact_pane_disposal_identity_matches(identity: Any, acquired_identity: Any) -> bool:
+    if not isinstance(identity, dict) or not isinstance(acquired_identity, dict):
+        return False
+    try:
+        expected_start = acquired_identity.get("process_start_identity")
+        if expected_start is None:
+            expected_start = process_start_identity_from_process_identity(
+                acquired_identity.get("process_identity", "")
+            )
+        expected_fields = (
+            set(acquired_identity) - {"process_identity"}
+        ) | {"session_id", "process_start_identity"}
+        return (
+            set(identity) == expected_fields
+            and all(
+                identity.get(key) == value
+                for key, value in acquired_identity.items()
+                if key not in {"process_identity", "process_start_identity"}
+            )
+            and isinstance(identity.get("session_id"), str)
+            and re.fullmatch(r"\$[0-9]+", identity["session_id"]) is not None
+            and identity.get("process_start_identity") == expected_start
+        )
+    except (HelperError, KeyError, TypeError):
+        return False
+
+
+def valid_exact_pane_disposal_source_candidate(receipt: dict[str, Any]) -> bool:
+    if not valid_pre_identity_acquired_no_report_candidate(receipt):
+        return False
+    binding = receipt.get("binding")
+    historical_read_only_binding_fields = {
+        "protocol_version", "delegation_id", "nonce", "task_id", "question_message_id",
+        "origin_thread", "repository", "base", "workdir", "producer_role", "authority",
+        "task_reference", "packet_digest", "launch_policy_digest", "launch_command_digest",
+    }
+    intents = [
+        event
+        for event in receipt.get("events", [])
+        if isinstance(event, dict) and event.get("kind") == "launch_intent"
+    ]
+    return (
+        isinstance(binding, dict)
+        and set(binding) == historical_read_only_binding_fields
+        and binding.get("producer_role") == "thinker"
+        and binding.get("authority") == "read_only"
+        and len(intents) == 1
+        and intents[0].get("workflow") == "read_only"
+    )
+
+
+def validate_exact_pane_disposal_operation(
+    event: dict[str, Any],
+    authorization: dict[str, str],
+    owner_authorization: dict[str, str],
+    operation_event_id: str,
+) -> None:
+    fields = {
+        "event_id", "kind", "terminal_state", "report_sha256",
+        "coordinator_authorization_sha256", "owner_authorization", "compatibility", "identity",
+        "at",
+    }
+    if (
+        set(event) != fields
+        or event.get("kind") != "exact_pane_disposal_intent"
+        or event.get("event_id") != operation_event_id
+        or event.get("compatibility") != PRE_IDENTITY_ACQUIRED_NO_REPORT_COMPATIBILITY
+        or not bounded_utc_timestamp(event.get("at"))
+        or any(event.get(key) != authorization[key] for key in authorization)
+        or event.get("owner_authorization") != owner_authorization
+    ):
+        raise HelperError("exact-pane disposal operation conflicts with durable intent")
+
+
+def valid_exact_pane_disposal_candidate(
+    receipt: dict[str, Any],
+    authorization: dict[str, str],
+    owner_authorization: dict[str, str],
+    operation_event_id: str,
+) -> bool:
+    events = receipt.get("events")
+    if not isinstance(events, list):
+        return False
+    intents = [
+        event
+        for event in events
+        if isinstance(event, dict) and event.get("kind") == "exact_pane_disposal_intent"
+    ]
+    if not intents:
+        return valid_exact_pane_disposal_source_candidate(receipt)
+    if len(intents) != 1 or events[-1] != intents[0]:
+        return False
+    intent = intents[0]
+    if receipt.get("exact_pane_disposal_intent") != intent:
+        return False
+    if set(receipt) != {
+        "binding", "routing", "state", "report_message_id", "created_at", "updated_at", "events",
+        "session_identity", "exact_pane_disposal_intent",
+    } or receipt.get("updated_at") != intent.get("at"):
+        return False
+    try:
+        validate_exact_pane_disposal_operation(
+            intent, authorization, owner_authorization, operation_event_id
+        )
+    except HelperError:
+        return False
+    if not exact_pane_disposal_identity_matches(
+        intent.get("identity"), receipt.get("session_identity")
+    ):
+        return False
+    prior = copy.deepcopy(receipt)
+    prior.pop("exact_pane_disposal_intent", None)
+    prior["events"] = prior["events"][:-1]
+    prior["updated_at"] = prior["events"][-1]["at"]
+    return valid_exact_pane_disposal_source_candidate(prior)
+
+
+def valid_exact_pane_disposal_chain(receipt: dict[str, Any]) -> bool:
+    events = receipt.get("events")
+    intent = receipt.get("exact_pane_disposal_intent")
+    result = receipt.get("exact_pane_disposed")
+    if not isinstance(events, list) or not isinstance(intent, dict) or not isinstance(result, dict):
+        return False
+    intents = [
+        event
+        for event in events
+        if isinstance(event, dict) and event.get("kind") == "exact_pane_disposal_intent"
+    ]
+    results = [
+        event
+        for event in events
+        if isinstance(event, dict) and event.get("kind") == "exact_pane_disposed"
+    ]
+    if (
+        len(intents) != 1
+        or len(results) != 1
+        or intents[0] != intent
+        or results[0] != result
+        or events[-2:] != [intent, result]
+    ):
+        return False
+    if set(receipt) != {
+        "binding", "routing", "state", "report_message_id", "created_at", "updated_at", "events",
+        "session_identity", "exact_pane_disposal_intent", "exact_pane_disposed",
+    }:
+        return False
+    if (
+        set(result) != {"event_id", "kind", "operation_event_id", "absence_code", "at"}
+        or result.get("event_id")
+        != internal_event_id("exact-pane-disposal-result", intent.get("event_id", ""))
+        or result.get("operation_event_id") != intent.get("event_id")
+        or result.get("absence_code") != "exact_pane_process_incarnation_absent"
+        or not bounded_utc_timestamp(result.get("at"))
+        or receipt.get("updated_at") != result.get("at")
+    ):
+        return False
+    authorization = {
+        key: intent.get(key)
+        for key in ("terminal_state", "report_sha256", "coordinator_authorization_sha256")
+    }
+    try:
+        validate_terminal_amp_authorization(authorization)
+        owner_authorization = validate_exact_pane_owner_authorization(
+            intent.get("owner_authorization")
+        )
+        validate_exact_pane_disposal_operation(
+            intent, authorization, owner_authorization, intent.get("event_id", "")
+        )
+    except HelperError:
+        return False
+    prior = copy.deepcopy(receipt)
+    prior.pop("exact_pane_disposed", None)
+    prior["events"] = prior["events"][:-1]
+    prior["updated_at"] = intent["at"]
+    return valid_exact_pane_disposal_candidate(
+        prior, authorization, owner_authorization, intent["event_id"]
+    )
+
+
 def validate_acquired_retirement_operation(
     event: dict[str, Any],
     authorization: dict[str, str],
@@ -5341,6 +5730,34 @@ def pre_identity_acquired_permanent_terminal_result(
         "blocker": "pre_identity_acquired_pair_permanently_non_retirable",
         "policy": "preserve_receipt_runtime_artifacts_and_origin_fence",
         "remediation": "paired_worker_teardown_prohibited",
+        "compatibility": PRE_IDENTITY_ACQUIRED_NO_REPORT_COMPATIBILITY,
+        "fence": "retained",
+    }
+
+
+def exact_pane_disposal_result(
+    origin_sha256: str, pair_sha256: str, outcome: str
+) -> dict[str, str]:
+    return {
+        "action": "exact_pre_identity_pane_disposal",
+        "origin_thread_sha256": origin_sha256,
+        "pair_sha256": pair_sha256,
+        "outcome": outcome,
+        "absence_code": "exact_pane_process_incarnation_absent",
+        "compatibility": PRE_IDENTITY_ACQUIRED_NO_REPORT_COMPATIBILITY,
+        "fence": "retained",
+    }
+
+
+def exact_pane_disposal_blocked(
+    origin_sha256: str, pair_sha256: str, blocker: str
+) -> dict[str, str]:
+    return {
+        "action": "exact_pre_identity_pane_disposal",
+        "origin_thread_sha256": origin_sha256,
+        "pair_sha256": pair_sha256,
+        "outcome": "blocked",
+        "blocker": blocker,
         "compatibility": PRE_IDENTITY_ACQUIRED_NO_REPORT_COMPATIBILITY,
         "fence": "retained",
     }
@@ -5524,6 +5941,137 @@ def inspect_live_indeterminate_target(
     if not valid_retirement_identity(identity, launch_intent, binding):
         raise HelperError("retirement target does not match complete launch identity")
     return identity
+
+
+def inspect_exact_pre_identity_target(
+    control: TmuxControlConnection, durable_identity: dict[str, Any]
+) -> dict[str, Any]:
+    formats = [
+        "session_name", "session_id", "window_name", "window_id", "pane_id", "pane_pid",
+        "pane_current_path", "pane_current_command", "pane_start_command",
+    ]
+    values: list[str] = []
+    for format_value in formats:
+        token = secrets.token_hex(32)
+        response = control.command([
+            "display-message", "-p", "-t", durable_identity["pane_id"],
+            f"{token}:{tmux_single_line_format(format_value)}",
+        ])
+        prefix = f"{token}:"
+        if len(response) != 1 or not response[0].startswith(prefix):
+            raise HelperError("exact-pane tmux control snapshot is ambiguous")
+        values.append(decode_tmux_command_argument(response[0][len(prefix) :]))
+    try:
+        pane_pid = int(values[5])
+    except ValueError as error:
+        raise HelperError("exact-pane snapshot has invalid process identity") from error
+    try:
+        workdir = str(pathlib.Path(values[6]).resolve(strict=True))
+    except OSError as error:
+        raise HelperError("exact-pane workdir identity is unavailable") from error
+    start_command = values[8]
+    if start_command.startswith('"') and start_command.endswith('"'):
+        try:
+            decoded = ast.literal_eval(start_command)
+        except (SyntaxError, ValueError) as error:
+            raise HelperError("exact-pane launch command has invalid tmux quoting") from error
+        if not isinstance(decoded, str):
+            raise HelperError("exact-pane launch command has invalid tmux quoting")
+        start_command = decoded
+    process_name, process_identity, process_args, process_command_digest = exact_process_identity(
+        pane_pid
+    )
+    if platform.system() == "Darwin":
+        final_name, final_identity, final_args, final_digest = exact_process_identity(pane_pid)
+        if (
+            final_name != process_name
+            or final_identity != process_identity
+            or final_args != process_args
+            or final_digest != process_command_digest
+        ):
+            raise HelperError("Darwin exact-pane process changed during identity inspection")
+    identity = {
+        "claude_session_id": durable_identity["claude_session_id"],
+        "session": values[0],
+        "session_id": values[1],
+        "window": values[2],
+        "window_id": values[3],
+        "pane_id": values[4],
+        "pane_pid": pane_pid,
+        "workdir": workdir,
+        "current_command": values[7],
+        "process_name": process_name,
+        "process_start_identity": process_start_identity_from_process_identity(process_identity),
+        "process_command_digest": process_command_digest,
+        "launch_command_digest": hashlib.sha256(start_command.encode()).hexdigest(),
+    }
+    if not exact_pane_disposal_identity_matches(identity, durable_identity):
+        raise HelperError("live target does not match the exact durable pane/process incarnation")
+    return identity
+
+
+def stop_exact_pre_identity_target(
+    control: TmuxControlConnection, identity: dict[str, Any]
+) -> None:
+    if inspect_exact_pre_identity_target(control, identity) != identity:
+        raise HelperError("exact-pane target changed immediately before exact stop")
+    token = secrets.token_hex(32)
+    responses = control.command_sequence([
+        ["kill-pane", "-t", identity["pane_id"]],
+        ["display-message", "-p", f"exact-pane-disposal:{token}"],
+    ])
+    if responses != [[], [f"exact-pane-disposal:{token}"]]:
+        raise HelperError("exact-pane stop returned ambiguous output")
+
+
+def confirm_exact_pre_identity_target_absent(
+    control: TmuxControlConnection, identity: dict[str, Any]
+) -> str:
+    deadline = time.monotonic() + 2.0
+    confirmed = 0
+    while time.monotonic() < deadline:
+        token = secrets.token_hex(32)
+        try:
+            response = control.command([
+                "list-panes", "-a", "-F", f"{token}:#{{pane_id}}",
+            ])
+        except HelperError:
+            return "tmux_control_connection_unavailable"
+        prefix = f"{token}:"
+        if (
+            len(response) > MAX_ABSENCE_PANES
+            or any(
+                not row.startswith(prefix)
+                or re.fullmatch(r"%[0-9]+", row[len(prefix) :]) is None
+                for row in response
+            )
+        ):
+            return "tmux_inspection_ambiguous"
+        panes = [row[len(prefix) :] for row in response]
+        if len(panes) != len(set(panes)):
+            return "tmux_inspection_ambiguous"
+        if identity["pane_id"] in panes:
+            return "exact_pane_process_incarnation_still_live"
+        try:
+            _, process_identity, _, _ = exact_process_identity(identity["pane_pid"])
+        except HelperError:
+            if not process_pid_is_absent(identity["pane_pid"]):
+                return "process_inspection_unavailable"
+            confirmed += 1
+            if confirmed >= 2:
+                return "exact_pane_process_incarnation_absent"
+            time.sleep(STARTUP_POLL_SECONDS)
+            continue
+        if (
+            process_start_identity_from_process_identity(process_identity)
+            == identity["process_start_identity"]
+        ):
+            return "exact_pane_process_incarnation_still_live"
+        confirmed += 1
+        if confirmed >= 2:
+            return "exact_pane_process_incarnation_absent"
+        time.sleep(STARTUP_POLL_SECONDS)
+    return "exact_pane_absence_unconfirmed"
 
 
 def stop_exact_retirement_target(
@@ -5969,6 +6517,7 @@ def parser() -> argparse.ArgumentParser:
     lifecycle_commands.add_parser("detach-indeterminate-worker")
     lifecycle_commands.add_parser("retire-live-indeterminate-pair")
     lifecycle_commands.add_parser("retire-live-acquired-no-report-pair")
+    lifecycle_commands.add_parser("dispose-exact-pre-identity-acquired-pair")
     commands.add_parser("diagnose")
     return root
 
@@ -6048,6 +6597,21 @@ def main() -> int:
                 "action": "live_acquired_no_report_pair_retirement",
                 "outcome": "blocked",
                 "blocker": "retirement_proof_invalid_or_unavailable",
+                "fence": "unchanged_or_retained",
+            }
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 2 if result["outcome"] == "blocked" else 0
+    if (
+        arguments.area == "lifecycle"
+        and arguments.command == "dispose-exact-pre-identity-acquired-pair"
+    ):
+        try:
+            result = store.dispose_exact_pre_identity_acquired_pair(read_input())
+        except HelperError:
+            result = {
+                "action": "exact_pre_identity_pane_disposal",
+                "outcome": "blocked",
+                "blocker": "exact_pane_disposal_proof_invalid_or_unavailable",
                 "fence": "unchanged_or_retained",
             }
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
