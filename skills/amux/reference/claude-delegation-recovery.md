@@ -70,7 +70,7 @@ Any privacy-safe blocker preserves the durable fence, report, receipt, runtime, 
 
 ## Explicit live acquired/no-report pair retirement
 
-Use this branch only after an owner explicitly authorizes retirement of one read-only receipt whose complete event chain is exactly `created → launch_intent → launch_completed → session_acquired`, whose materialized acquired identity equals both launch completion and acquisition byte-for-byte, and which has no Claude report or input. The terminal Amp-work report digest below is a trusted reference to the terminal Amp work; it is not a Claude semantic report and the helper never writes one. Submit the exact owner-private identity and stable operation on stdin:
+Use this branch only after an owner explicitly authorizes retirement of one read-only receipt whose complete event chain is exactly `created → launch_intent → launch_completed → session_acquired`, whose materialized acquired identity equals both launch completion and acquisition byte-for-byte, and which has no Claude report or input. This includes an exact-model session blocked by a provider entitlement, credit, quota, or availability prompt before semantic submission: CLI `--model` support never proves those provider properties. Do not select any offered fallback or press any provider UI choice. The terminal Amp-work report digest below is a trusted reference to the terminal Amp work; it is not a Claude semantic report and the helper never writes one. Submit the exact owner-private identity and stable operation on stdin:
 
 ```sh
 python3 "$HELPER" lifecycle retire-live-acquired-no-report-pair <<'JSON'

@@ -2047,9 +2047,12 @@ def fixture(name="synthetic-live"):
     return store, bound, request
 
 # Reproduce the exact launch-completed, acquired, no-report state before exercising its separate recovery.
-def acquired_fixture(name="synthetic-acquired-no-report"):
+def acquired_fixture(name="synthetic-acquired-no-report", model=None):
     acquired, bound, request = fixture(name)
     data = acquired.load_store(); receipt = data["receipts"][0]
+    if model is not None:
+        receipt["binding"]["model"] = model
+        receipt["events"][1]["model"] = model
     acquired_identity = {key:value for key,value in bound.items() if key not in {
         "session_id", "process_start_identity", "expected_launcher_identity",
         "expected_executable_object_identity", "expected_launcher_argv0_digest"}}
@@ -2098,6 +2101,60 @@ try:
 except module.HelperError: pass
 else: raise AssertionError("acquired no-report retirement did not seal later mutation")
 assert acquired.load_store() == sealed
+
+# Exact Opus selection remains immutable through pre-semantic acquired-session retirement.
+opus, current_identity, opus_request = acquired_fixture(
+    "synthetic-acquired-opus-entitlement", "claude-opus-4-8")
+original = copy.deepcopy(opus.load_store()["receipts"][0]); stops = []
+assert module.receipt_launch_intent(original)["model"] == "claude-opus-4-8"
+acknowledged = copy.deepcopy(original); acknowledged["report_message_id"] = "report"
+acknowledged["state"] = "acknowledged"
+acknowledged["events"].extend([
+    {"event_id":"report", "kind":"valid_report"},
+    {"event_id":"deliver", "kind":"delivered", "message_id":"report"},
+    {"event_id":"ack", "kind":"acknowledged", "message_id":"report"},
+])
+assert module.valid_worker_lifecycle_chain(acknowledged, False)
+parked = copy.deepcopy(acknowledged); parked["state"] = "verified_parked"
+parked["parked_at"] = "2026-07-20T12:00:03Z"
+parked["cleanup_eligible_at"] = "2026-08-19T12:00:03Z"
+parked["events"].extend([
+    {"event_id":"park", "kind":"park_intent", "identity":copy.deepcopy(parked["session_identity"])},
+    {"event_id":"parked", "kind":"verified_parked", "operation_event_id":"park",
+     "at":parked["parked_at"]},
+])
+assert module.valid_worker_lifecycle_chain(parked, True)
+for name, mutate in [
+    ("omitted", lambda receipt: receipt["events"][1].pop("model")),
+    ("changed", lambda receipt: receipt["events"][1].update(model="claude-fable-5")),
+]:
+    drifted = copy.deepcopy(parked); mutate(drifted)
+    try: module.receipt_launch_intent(drifted)
+    except module.HelperError: pass
+    else: raise AssertionError("model drift entered acquisition or parking: " + name)
+    assert not module.valid_worker_lifecycle_chain(drifted, True), name
+module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+module.stop_exact_retirement_target = lambda bound, *args: stops.append(copy.deepcopy(bound))
+module.confirm_retirement_target_absent = lambda bound: "exact_retirement_target_absent"
+assert opus.retire_live_acquired_no_report_pair(opus_request)["outcome"] == "retired"
+receipt = opus.load_store()["receipts"][0]
+assert receipt["binding"]["model"] == "claude-opus-4-8"
+assert receipt["events"][1]["model"] == "claude-opus-4-8"
+assert receipt["events"][:4] == original["events"] and stops == [current_identity]
+
+# A changed model in recovery evidence fails before inspection, stop, or durable-byte mutation.
+changed, current_identity, changed_request = acquired_fixture(
+    "synthetic-acquired-opus-changed", "claude-opus-4-8")
+data = changed.load_store(); data["receipts"][0]["events"][1]["model"] = "claude-fable-5"
+changed.commit(data); before = (changed.state_dir / "receipts.json").read_bytes()
+inspections = []; stops = []
+module.inspect_live_indeterminate_target = lambda *args: inspections.append(args)
+module.stop_exact_retirement_target = lambda *args: stops.append(args)
+try: changed.retire_live_acquired_no_report_pair(changed_request)
+except module.HelperError: pass
+else: raise AssertionError("changed acquired-session model entered retirement")
+assert (changed.state_dir / "receipts.json").read_bytes() == before
+assert not inspections and not stops
 
 # The already-bounded historical-modern selector remains explicit on this separate exact chain.
 historical, current_identity, acquired_request = acquired_fixture("synthetic-acquired-historical")
@@ -4792,17 +4849,28 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 	}
 	defaultPolicy := decodeJSONMap(t, defaultStdout)
 	explicitStdout, explicitStderr, err := runHelper(t, fixture.stateDir, map[string]any{
-		"workflow": "read_only", "model": "claude-fable-5",
+		"workflow": "read_only", "model": "claude-opus-4-8",
 	}, "launch", "policy-digest")
 	if err != nil {
 		t.Fatalf("explicit policy digest: %v: %s", err, explicitStderr)
 	}
 	explicitPolicy := decodeJSONMap(t, explicitStdout)
-	if explicitPolicy["model"] != "claude-fable-5" {
+	if explicitPolicy["model"] != "claude-opus-4-8" {
 		t.Fatalf("explicit policy model = %#v", explicitPolicy["model"])
 	}
 	if explicitPolicy["launch_policy_digest"] == defaultPolicy["launch_policy_digest"] {
 		t.Fatal("explicit model did not change launch policy digest")
+	}
+	fableStdout, fableStderr, err := runHelper(t, fixture.stateDir, map[string]any{
+		"workflow": "read_only", "model": "claude-fable-5",
+	}, "launch", "policy-digest")
+	if err != nil {
+		t.Fatalf("fable policy digest: %v: %s", err, fableStderr)
+	}
+	fablePolicy := decodeJSONMap(t, fableStdout)
+	if fablePolicy["model"] != "claude-fable-5" ||
+		fablePolicy["launch_policy_digest"] == explicitPolicy["launch_policy_digest"] {
+		t.Fatalf("fable policy = %#v", fablePolicy)
 	}
 
 	for _, test := range []struct {
@@ -4862,7 +4930,7 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 	}
 
 	request := cloneJSONMap(t, fixture.request)
-	request["model"] = "claude-fable-5"
+	request["model"] = "claude-opus-4-8"
 	request["expected_launch_policy_digest"] = explicitPolicy["launch_policy_digest"]
 	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -4872,7 +4940,7 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 		t.Fatalf("explicit model launch plan: %v: %s", err, stderr)
 	}
 	plan := decodeJSONMap(t, stdout)
-	if plan["model"] != "claude-fable-5" || plan["launch_policy_digest"] != explicitPolicy["launch_policy_digest"] {
+	if plan["model"] != "claude-opus-4-8" || plan["launch_policy_digest"] != explicitPolicy["launch_policy_digest"] {
 		t.Fatalf("explicit model plan = %#v", plan)
 	}
 	binding := testBinding(request["delegation_id"].(string))
@@ -4881,7 +4949,7 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 	binding["packet_digest"] = plan["packet_digest"]
 	binding["launch_policy_digest"] = plan["launch_policy_digest"]
 	binding["launch_command_digest"] = plan["launch_command_digest"]
-	binding["model"] = "claude-fable-5"
+	binding["model"] = "claude-opus-4-8"
 	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "recorded", map[string]any{
 		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
 	}, "receipt", "create")
@@ -4918,8 +4986,9 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 		t.Fatal(readErr)
 	}
 	changed := cloneJSONMap(t, request)
-	changed["model"] = "claude-unknown-5"
-	if _, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, changed, "launch", "execute"); err == nil || !strings.Contains(stderr, "exact approved read-only model") {
+	changed["model"] = "claude-fable-5"
+	changed["expected_launch_policy_digest"] = fablePolicy["launch_policy_digest"]
+	if _, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, changed, "launch", "execute"); err == nil || !strings.Contains(stderr, "model selection does not match immutable receipt binding") {
 		t.Fatalf("changed-after-plan error = %v, stderr %q", err, stderr)
 	}
 	afterChanged, err := os.ReadFile(receiptPath)
@@ -4958,12 +5027,12 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 	for index, argument := range transport.Argv {
 		arguments[index] = []byte(argument)
 	}
-	assertExactArgValue(t, arguments, "--model", "claude-fable-5")
+	assertExactArgValue(t, arguments, "--model", "claude-opus-4-8")
 	finalReceipt, err := os.ReadFile(receiptPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(finalReceipt, []byte(`"model":"claude-fable-5"`)) || !bytes.Contains(finalReceipt, []byte(plan["expected_argv_digest"].(string))) {
+	if !bytes.Contains(finalReceipt, []byte(`"model":"claude-opus-4-8"`)) || !bytes.Contains(finalReceipt, []byte(plan["expected_argv_digest"].(string))) {
 		t.Fatalf("receipt does not bind model command identity: %s", finalReceipt)
 	}
 }

@@ -14,7 +14,7 @@ Capacity is independent. When trustworthy provider-reported capacity is unavaila
 printf '%s\n' '{"workflow":"read_only"}' | python3 "$HELPER" launch policy-digest
 ```
 
-To use the single approved explicit model, include `"model":"claude-fable-5"` in this request and in the otherwise identical `launch plan` and `launch execute` requests. Omit `model` everywhere to retain Claude's existing default-model argv exactly; omission does not select or attest to any particular default. The helper accepts only the exact approved identifier and never chooses, normalizes, falls back, or retries a model autonomously.
+To use an approved explicit model, include either exact `"model":"claude-fable-5"` or exact `"model":"claude-opus-4-8"` in this request and in the otherwise identical `launch plan` and `launch execute` requests. This selection requires explicit owner authorization for that exact value. Omit `model` everywhere to retain Claude's existing default-model argv exactly; omission does not select or attest to any particular default. The helper accepts only these exact approved identifiers and never chooses, normalizes, aliases, falls back, or retries a model autonomously.
 
 This pre-packet command reads no packet, worktree, receipt, or runtime evidence and creates no private state. Prepare one clean dedicated linked worktree at the exact base and one owner-only launch-packet file containing the complete initial task, allowed source roots, correlation fields, exclusions, report schema, and the returned `launch_policy_digest`. The packet must give the thinker every value required to submit its semantic envelope without follow-up input.
 
@@ -33,6 +33,8 @@ Completion: the owner-only receipt durably exists before tmux launch and `receip
 Submit the identical launch-plan request, including `expected_launch_policy_digest` and the same presence or absence of `model`, to `launch execute`. It revalidates the expectation and immutable receipt model selection before platform, session, packet, worktree, or Claude probes. Do not type, paste, or inject anything afterward. Using the exact returned pane ID and chosen Claude session UUID, submit a fresh event to `session acquire`. Acquisition must match the receipt's canonical workdir and model-bound launch-command digest.
 
 Completion: the receipt contains one exact `session_acquired` incarnation; pane echo, idle state, and process existence do not establish semantic receipt.
+
+The installed CLI accepting `--model` does not prove provider entitlement, credits, quota, capacity, or availability for the selected model. If an entitlement or credit prompt appears after exact acquisition but before any semantic report or input, do not press a provider choice, accept a fallback, inject composer input, retry with another model, or manually stop the pane or PID. Preserve the exact acquired/no-report evidence and use only the explicitly owner-authorized `retire-live-acquired-no-report-pair` procedure in the recovery reference. If that procedure cannot verify the complete acquired identity, it fails closed and the pair remains preserved.
 
 ## 4. Recover and deliver
 

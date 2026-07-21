@@ -58,7 +58,7 @@ REQUIRED_CLAUDE_FLAGS = [
     "--no-chrome", "--permission-mode", "--prompt-suggestions", "--session-id",
     "--setting-sources", "--settings", "--strict-mcp-config", "--tools",
 ]
-APPROVED_READ_ONLY_MODELS = {"claude-fable-5"}
+APPROVED_READ_ONLY_MODELS = {"claude-fable-5", "claude-opus-4-8"}
 
 
 class HelperError(Exception):
@@ -4600,6 +4600,12 @@ def receipt_launch_intent(receipt: dict[str, Any]) -> dict[str, Any]:
     if len(intents) != 1:
         raise HelperError("session identity requires one immutable launch intent")
     intent = intents[0]
+    binding = receipt.get("binding")
+    if (
+        not isinstance(binding, dict)
+        or optional_read_only_model(intent) != optional_read_only_model(binding)
+    ):
+        raise HelperError("launch intent model differs from immutable binding")
     for key in (
         "expected_argv_digest", "expected_launcher_identity", "expected_executable_object_identity"
     ):
@@ -5764,6 +5770,11 @@ def valid_worker_lifecycle_chain(receipt: dict[str, Any], parked: bool) -> bool:
     launch_completed = exactly_one("launch_completed")
     acquired = exactly_one("session_acquired")
     if launch_intent is None or launch_completed is None or acquired is None:
+        return False
+    try:
+        if receipt_launch_intent(receipt) != launch_intent[1]:
+            return False
+    except HelperError:
         return False
     if not (launch_intent[0] < launch_completed[0] < acquired[0]):
         return False
