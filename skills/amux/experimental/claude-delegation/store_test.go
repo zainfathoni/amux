@@ -1994,7 +1994,7 @@ func TestExactLivePairRetirementsAreDurableAndRecoverable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := `import copy, hashlib, importlib.util, json, pathlib, sys, tempfile
+	script := `import copy, hashlib, importlib.util, json, os, pathlib, sys, tempfile, time
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
 module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
@@ -2069,6 +2069,57 @@ def acquired_fixture(name="synthetic-acquired-no-report", model=None):
     receipt["updated_at"] = "2026-07-20T12:00:02Z"; acquired.commit(data)
     request["authorization"]["report_sha256"] = "6" * 64
     return acquired, bound, request
+
+# A successful exec ends launch-gate ownership before either exact live retirement route runs.
+def assert_exec_releases_launch_gate(store, current_identity, request, retire):
+    completed = store.load_store()
+    preexec = copy.deepcopy(completed)
+    receipt = preexec["receipts"][0]
+    receipt["state"] = "created"; receipt["report_message_id"] = ""
+    receipt["events"] = receipt["events"][:2]
+    for field in ("session_identity", "acquired_retirement_intent", "acquired_pair_retired",
+                  "retirement_intent", "pair_retired"):
+        receipt.pop(field, None)
+    store.commit(preexec)
+    marker = store.state_dir / "transport-exec-complete"
+    child = os.fork()
+    if child == 0:
+        try:
+            with store.launch_gate(receipt["binding"]["delegation_id"]):
+                module.execute_authorized_launch_transport(
+                    store, receipt["binding"]["delegation_id"], sys.executable,
+                    [sys.executable, "-c",
+                     "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text('exec'); time.sleep(30)",
+                     str(marker)], dict(os.environ))
+        finally: os._exit(1)
+    reaped = False
+    try:
+        deadline = time.monotonic() + 3
+        while not marker.exists() and time.monotonic() < deadline: time.sleep(0.01)
+        assert marker.exists(), "exec target did not start"
+        store.commit(completed)
+        stops = []
+        module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+        def stop(bound, *args):
+            nonlocal reaped
+            stops.append(copy.deepcopy(bound)); os.kill(child, 15); os.waitpid(child, 0); reaped = True
+        module.stop_exact_retirement_target = stop
+        module.confirm_retirement_target_absent = lambda bound: "exact_retirement_target_absent"
+        outcome = retire(request)
+        assert outcome["outcome"] == "retired", outcome
+        assert stops == [current_identity]
+    finally:
+        if not reaped:
+            try: os.kill(child, 15)
+            except ProcessLookupError: pass
+            os.waitpid(child, 0)
+
+launched, current_identity, launched_request = acquired_fixture("acquired-after-transport-exec")
+assert_exec_releases_launch_gate(
+    launched, current_identity, launched_request, launched.retire_live_acquired_no_report_pair)
+launched, current_identity, launched_request = fixture("report-after-transport-exec")
+assert_exec_releases_launch_gate(
+    launched, current_identity, launched_request, launched.retire_live_indeterminate_pair)
 
 acquired, current_identity, acquired_request = acquired_fixture()
 original = copy.deepcopy(acquired.load_store()["receipts"][0]); stops = []
