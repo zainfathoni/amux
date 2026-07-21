@@ -37,6 +37,8 @@ type selectors struct {
 	Groups         []string
 	Mode           string
 	TitlePrefix    string
+	WorkItemID     string
+	WorkerOrdinal  string
 	Current        bool
 	All            bool
 	Shelf          string
@@ -95,7 +97,7 @@ var rootCommand = &commandSpec{
 		reportCommand(),
 		installCommand(),
 		lifecycleCommand("workspaces", "Exact alias for workspace list", false, "--mode, -m <worker|runner>"),
-		lifecycleCommand("spawn", "Spawn an interactive worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--group <id>  Repeat to attach the authoritative worker thread to multiple groups", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>", "--reconcile  Recover a verified exact provisioned-thread timeout without resubmitting"),
+		lifecycleCommand("spawn", "Spawn an interactive worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--group <id>  Repeat to attach the authoritative worker thread to multiple groups; explicit groups override automatic naming", "--work-item-id <id>  Derive one configured repository-scoped group using the semantic window as its slug", "--worker-ordinal <number>  Positive worker ordinal used to derive the stable report ID", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>", "--reconcile  Recover a verified exact provisioned-thread timeout without resubmitting"),
 		lifecycleCommand("shelve", "Shelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		lifecycleCommand("unshelve", "Unshelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		lifecycleCommand("teardown", "Teardown workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
@@ -143,7 +145,7 @@ func workerCommand() *commandSpec {
 		workerLeaf("park", "Park workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("restart", "Restart workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("remove", "Remove workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
-		workerLeaf("spawn", "Spawn a worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--group <id>  Repeat to attach the authoritative worker thread to multiple groups", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>", "--reconcile  Recover a verified exact provisioned-thread timeout without resubmitting"),
+		workerLeaf("spawn", "Spawn a worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--group <id>  Repeat to attach the authoritative worker thread to multiple groups; explicit groups override automatic naming", "--work-item-id <id>  Derive one configured repository-scoped group using the semantic window as its slug", "--worker-ordinal <number>  Positive worker ordinal used to derive the stable report ID", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>", "--reconcile  Recover a verified exact provisioned-thread timeout without resubmitting"),
 		workerLeaf("shelve", "Shelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("unshelve", "Unshelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("teardown", "Teardown workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
@@ -538,7 +540,7 @@ func commandOptionRequiresValue(arg string) bool {
 	}
 	switch name {
 	case "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--thread", "-t",
-		"--group", "--mode", "-m", "--title-prefix", "--shelf", "--idempotency-key",
+		"--group", "--mode", "-m", "--title-prefix", "--work-item-id", "--worker-ordinal", "--shelf", "--idempotency-key",
 		"--report-id", "--pane", "--status", "--issue", "--reference", "--pr", "--summary",
 		"--message", "--message-file", "--update-owner":
 		return true
@@ -675,6 +677,19 @@ func parseSelectors(args []string) (selectors, []string, error) {
 			if err := setSelector(&parsed.TitlePrefix, value, "--title-prefix"); err != nil {
 				return parsed, nil, err
 			}
+		case "--work-item-id", "--worker-ordinal":
+			value, next, err := selectorValue(args, i, name, inline, hasInline)
+			if err != nil {
+				return parsed, nil, err
+			}
+			i = next
+			target := &parsed.WorkItemID
+			if name == "--worker-ordinal" {
+				target = &parsed.WorkerOrdinal
+			}
+			if err := setSelector(target, value, name); err != nil {
+				return parsed, nil, err
+			}
 		case "--shelf":
 			value, next, err := selectorValue(args, i, name, inline, hasInline)
 			if err != nil {
@@ -797,6 +812,8 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 		{"--group", parsed.Group},
 		{"--mode", parsed.Mode},
 		{"--title-prefix", parsed.TitlePrefix},
+		{"--work-item-id", parsed.WorkItemID},
+		{"--worker-ordinal", parsed.WorkerOrdinal},
 		{"--shelf", parsed.Shelf},
 		{"--idempotency-key", parsed.IdempotencyKey},
 		{"--report-id", parsed.ReportID},
@@ -932,7 +949,7 @@ func compactStrings(values []string) []string {
 }
 
 func selectorsEmpty(parsed selectors) bool {
-	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && !parsed.Reconcile
+	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && parsed.WorkItemID == "" && parsed.WorkerOrdinal == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && !parsed.Reconcile
 }
 
 func isGroupPath(path []string) bool {

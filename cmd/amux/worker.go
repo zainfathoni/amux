@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -334,6 +335,7 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 
 func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelope) (*result.Envelope, error) {
 	s := in.Selectors
+	semanticWindow := s.Window
 	if s.IdempotencyKey == "" {
 		return env, result.Request(errors.New("worker spawn requires --idempotency-key"))
 	}
@@ -346,10 +348,6 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	}
 	if err := validateIssueWindowTitle(s.TitlePrefix, s.Window); err != nil {
 		return env, result.Preflight(err)
-	}
-	if s.TitlePrefix != "" {
-		s.Window = prefixedSpawnName(s.TitlePrefix, s.Window)
-		in.Selectors.Window = s.Window
 	}
 	message := s.Message
 	messageSource := config.OperationMessageSourceMessage
@@ -390,10 +388,36 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		return env, result.Preflight(fmt.Errorf("missing workdir: %s", workdir))
 	}
 	s.Workdir = filepath.Clean(workdir)
-	for name, value := range map[string]string{"workspace": workspace, "window": s.Window, "workdir": s.Workdir} {
+	for name, value := range map[string]string{"workspace": workspace, "window": semanticWindow, "workdir": s.Workdir} {
 		if err := config.ValidateField(name, value); err != nil {
 			return env, result.Preflight(err)
 		}
+	}
+	naming, err := resolveSpawnGroupNaming(dir, s, semanticWindow)
+	if err != nil {
+		return env, result.Preflight(err)
+	}
+	if naming != nil {
+		s.Groups = []string{naming.GroupID}
+		in.Selectors.Groups = append([]string(nil), s.Groups...)
+		outcome := result.Outcome{
+			Resource:    result.ConfigResource(naming.ConfigSource),
+			Action:      "resolve-group-naming",
+			Message:     "resolved repository-scoped work-group naming before mutation",
+			GroupNaming: naming,
+		}
+		if in.Options.DryRun {
+			env.Planned = append(env.Planned, outcome)
+		} else {
+			env.Successful = append(env.Successful, outcome)
+		}
+		if !in.Options.JSON {
+			fmt.Fprintf(a.stdout, "GROUP_NAMING\t%s\t%s\t%s\t%s\t%s\t%s\n", naming.ProjectPrefix, naming.WorkItemID, naming.Slug, naming.GroupID, naming.ReportID, naming.ConfigSource)
+		}
+	}
+	if s.TitlePrefix != "" {
+		s.Window = prefixedSpawnName(s.TitlePrefix, semanticWindow)
+		in.Selectors.Window = s.Window
 	}
 	requestFields := []string{workspace, s.Window, s.Workdir, s.Mode, message}
 	if s.TitlePrefix != "" {
@@ -402,6 +426,9 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	if len(s.Groups) != 0 {
 		requestFields = append(requestFields, "groups")
 		requestFields = append(requestFields, s.Groups...)
+	}
+	if naming != nil {
+		requestFields = append(requestFields, "group-naming/v1", naming.Repository, naming.ReportID)
 	}
 	request := strings.Join(requestFields, "\x00")
 	sum := sha256.Sum256([]byte(request))
@@ -992,6 +1019,107 @@ func operationAllowsTerminalLineEndingNormalization(operation config.OperationRe
 		return replaySource == config.OperationMessageSourceFile
 	}
 	return operation.MessageSource == config.OperationMessageSourceFile
+}
+
+func resolveSpawnGroupNaming(dir config.Directory, s selectors, slug string) (*result.GroupNamingDetails, error) {
+	if len(s.Groups) != 0 {
+		return nil, nil
+	}
+	if s.WorkItemID == "" && s.WorkerOrdinal == "" {
+		return nil, nil
+	}
+	if s.WorkItemID == "" || s.WorkerOrdinal == "" {
+		return nil, errors.New("automatic group naming requires both --work-item-id and --worker-ordinal")
+	}
+	ordinal, err := strconv.Atoi(s.WorkerOrdinal)
+	if err != nil || ordinal < 1 || ordinal > 9999 || strconv.Itoa(ordinal) != s.WorkerOrdinal {
+		return nil, errors.New("worker ordinal must be a canonical positive integer from 1 through 9999")
+	}
+	repository, err := verifiedRepositoryIdentity(s.Workdir)
+	if err != nil {
+		return nil, err
+	}
+	configSource := dir.GroupNamingPath()
+	if len(configSource) > 4096 || strings.ContainsAny(configSource, "\t\r\n") {
+		return nil, errors.New("group naming config source path is invalid or exceeds 4096 characters")
+	}
+	namingConfig, err := config.LoadGroupNaming(configSource)
+	if err != nil {
+		return nil, err
+	}
+	project, err := namingConfig.Project(repository)
+	if err != nil {
+		return nil, err
+	}
+	groupID, reportID, err := config.DeriveGroupNaming(project.Prefix, s.WorkItemID, slug, ordinal)
+	if err != nil {
+		return nil, err
+	}
+	return &result.GroupNamingDetails{
+		ProjectPrefix: project.Prefix,
+		Repository:    repository,
+		WorkItemID:    s.WorkItemID,
+		Slug:          slug,
+		GroupID:       groupID,
+		ReportID:      reportID,
+		ConfigSource:  configSource,
+	}, nil
+}
+
+func verifiedRepositoryIdentity(workdir string) (string, error) {
+	command := exec.Command("git", "-C", workdir, "remote", "get-url", "--all", "origin")
+	var output boundedOutput
+	command.Stdout = &output
+	err := command.Run()
+	if err != nil {
+		return "", fmt.Errorf("verify repository identity from origin: %w", err)
+	}
+	if output.overflow || output.buffer.Len() == 0 || bytes.ContainsAny(output.buffer.Bytes(), "\x00\r") {
+		return "", errors.New("verify repository identity from origin: invalid or over-limit remote URL")
+	}
+	remote := strings.TrimSuffix(output.buffer.String(), "\n")
+	if remote == "" || strings.Contains(remote, "\n") {
+		return "", errors.New("verify repository identity from origin: expected exactly one remote URL")
+	}
+	return canonicalRepositoryRemote(remote)
+}
+
+func canonicalRepositoryRemote(remote string) (string, error) {
+	if strings.HasPrefix(remote, "git@") && strings.Contains(remote, ":") {
+		remote = "ssh://" + strings.Replace(remote, ":", "/", 1)
+	}
+	parsed, err := url.Parse(remote)
+	if err != nil || parsed.Hostname() == "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("verify repository identity from origin: unsupported remote URL %q", remote)
+	}
+	path := strings.TrimSuffix(strings.TrimPrefix(parsed.Path, "/"), ".git")
+	if strings.Count(path, "/") != 1 || strings.ContainsAny(path, " \t\r\n:@") {
+		return "", fmt.Errorf("verify repository identity from origin: expected host/owner/repository in %q", remote)
+	}
+	identity := parsed.Hostname() + "/" + path
+	if err := config.ValidateRepositoryIdentity(identity); err != nil {
+		return "", fmt.Errorf("verify repository identity from origin: %w", err)
+	}
+	return identity, nil
+}
+
+type boundedOutput struct {
+	buffer   bytes.Buffer
+	overflow bool
+}
+
+func (w *boundedOutput) Write(p []byte) (int, error) {
+	remaining := 4096 - w.buffer.Len()
+	if remaining > 0 {
+		if remaining > len(p) {
+			remaining = len(p)
+		}
+		_, _ = w.buffer.Write(p[:remaining])
+	}
+	if remaining < len(p) {
+		w.overflow = true
+	}
+	return len(p), nil
 }
 
 // stableSpawnGroupReplay reports whether a found spawn operation has advanced far

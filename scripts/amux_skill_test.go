@@ -300,8 +300,8 @@ func TestInvocationPolicyIsProgressivelyDisclosedWithoutChangingClaudeRoutes(t *
 			t.Errorf("workflows.md:%d automatic spawn does not bind shared MODE: %s", lineNumber, strings.TrimSpace(line))
 		}
 	})
-	if spawnCommands != 6 {
-		t.Errorf("automatic spawn command coverage=%d, want 6", spawnCommands)
+	if spawnCommands != 7 {
+		t.Errorf("automatic spawn command coverage=%d, want 7", spawnCommands)
 	}
 }
 
@@ -776,7 +776,7 @@ func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
 	}
 }
 
-func TestIssueCoordinationUsesRepositoryQualifiedDurableIdentity(t *testing.T) {
+func TestIssueCoordinationPreservesAndConfiguresDurableIdentity(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	checks := map[string][]string{
@@ -788,18 +788,27 @@ func TestIssueCoordinationUsesRepositoryQualifiedDurableIdentity(t *testing.T) {
 			"not a generic `amux group` validation rule",
 			"`amux-135-worker-1`",
 			"purpose-specific groups such as `pr-181-review`",
+			"`<project-prefix>-<work-item-id>-<short-slug>`",
+			"`<group-id>-worker-<ordinal>`",
+			"`host/owner/repository` identity verified from the selected workdir's `origin`",
+			"--work-item-id <work-item-id> --worker-ordinal <ordinal>",
+			"Explicit `--group` wins",
 		},
 		"README.md": {
 			"--group amux-110",
 			"--report-id amux-133-worker-1 --group amux-133",
-			"another repository uses the equivalent `<repository-slug>-131` and `<repository-slug>-131-worker-1`",
-			"Legacy `issue-*` identities and purpose-specific groups such as `pr-181-review` remain valid",
+			"another unconfigured repository uses the equivalent `<repository-slug>-131` and `<repository-slug>-131-worker-1` explicitly",
+			"Existing `amux-*`, repository-slug, `issue-*`, purpose-specific groups such as `pr-181-review`, and explicit groups remain valid",
+			"`--work-item-id 975 --worker-ordinal 1 --window unlisted-addons`",
+			"Explicit `--group` remains authoritative",
 		},
 		filepath.Join("docs", "skill", "index.html"): {
 			"amux-&lt;issue-number&gt;",
 			"amux-&lt;issue-number&gt;-worker-&lt;ordinal&gt;",
 			"--group amux-135",
 			"--report-id amux-135-worker-1 --group amux-135",
+			"&lt;project-prefix&gt;-&lt;work-item-id&gt;-&lt;short-slug&gt;",
+			"Explicit <code>--group</code> remains authoritative",
 		},
 	}
 	for relativePath, required := range checks {
@@ -817,13 +826,33 @@ func TestIssueCoordinationUsesRepositoryQualifiedDurableIdentity(t *testing.T) {
 	}
 }
 
+func TestConfigurableGroupNamingSourceReferencesStayConsistent(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	commands := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "commands.md"))
+	readme := readSkillFile(t, root, "README.md")
+	for _, contents := range []string{workflow, commands, readme} {
+		for _, required := range []string{"group-naming.json", "--work-item-id", "--worker-ordinal", "origin", "Explicit `--group`"} {
+			if !strings.Contains(contents, required) {
+				t.Errorf("configurable naming reference is missing %q", required)
+			}
+		}
+	}
+	for _, required := range []string{"GROUP_NAMING<TAB><prefix><TAB><work-item><TAB><slug><TAB><group><TAB><report><TAB><config-source>", "before Amp, tmux, or registry mutation", "without normalization or truncation"} {
+		if !strings.Contains(commands, required) {
+			t.Errorf("command naming contract is missing %q", required)
+		}
+	}
+}
+
 func TestWorkGroupCompletionsExposeImplementedCommands(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	checks := map[string][]string{
-		"bash": {"declare add remove coordinator list show reconcile", "register clear", "submit pending history acknowledge authorize-finish"},
-		"zsh":  {"group_commands=(", "callback_commands=(", "report_commands=(", "--report-id", "--pane"},
-		"fish": {"__fish_amux_group_leaf", "__fish_amux_callback_leaf", "__fish_amux_report_leaf", "authorize-finish", "-l 'report-id'", "-l 'pane'"},
+		"bash": {"declare add remove coordinator list show reconcile", "register clear", "submit pending history acknowledge authorize-finish", "--work-item-id --worker-ordinal"},
+		"zsh":  {"group_commands=(", "callback_commands=(", "report_commands=(", "--report-id", "--pane", "--work-item-id", "--worker-ordinal"},
+		"fish": {"__fish_amux_group_leaf", "__fish_amux_callback_leaf", "__fish_amux_report_leaf", "authorize-finish", "-l 'report-id'", "-l 'pane'", "-l 'work-item-id'", "-l 'worker-ordinal'"},
 	}
 	for shell, wants := range checks {
 		command := exec.Command("go", "run", "./cmd/amux", "completion", shell)

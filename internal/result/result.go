@@ -173,6 +173,16 @@ type CallbackDetails struct {
 	Notified     bool   `json:"notified,omitempty"`
 }
 
+type GroupNamingDetails struct {
+	ProjectPrefix string `json:"project_prefix"`
+	Repository    string `json:"repository"`
+	WorkItemID    string `json:"work_item_id"`
+	Slug          string `json:"slug"`
+	GroupID       string `json:"group_id"`
+	ReportID      string `json:"report_id"`
+	ConfigSource  string `json:"config_source"`
+}
+
 type Outcome struct {
 	Resource    ResourceID          `json:"resource"`
 	Action      string              `json:"action"`
@@ -183,6 +193,7 @@ type Outcome struct {
 	Group       *GroupDetails       `json:"group,omitempty"`
 	Report      *ReportDetails      `json:"report,omitempty"`
 	Callback    *CallbackDetails    `json:"callback,omitempty"`
+	GroupNaming *GroupNamingDetails `json:"group_naming,omitempty"`
 	Error       *Failure            `json:"error,omitempty"`
 }
 
