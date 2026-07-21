@@ -467,6 +467,7 @@ case "$1" in
   list-panes)
     n=0; test -e "`+calls+`" && n=$(cat "`+calls+`"); n=$((n+1)); echo "$n" > "`+calls+`"
     if [ "$n" -eq 1 ]; then
+      sleep 0.02
       printf 'alpha\t`+window+`\t@7\t%%9\t`+workdir+`\tzsh\t%s\t0\t4242\t123\n' `+shellSingleQuote(start)+`
     else
       echo 'transient pane lookup failure' >&2

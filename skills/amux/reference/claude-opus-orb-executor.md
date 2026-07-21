@@ -420,11 +420,17 @@ For the no-tool profile, require no workdir writes. Inspect fresh config persist
 ```sh
 if test "$TOOL_PROFILE" = no-tool; then
   WORK_INVENTORY="$RUN_ROOT/work.inventory"
-  if (
-    ulimit -f 64 || exit 1
-    exec timeout --signal=TERM --kill-after=5s 15s \
-      find "$WORK_DIR" -mindepth 1 -printf '%P\n'
-  ) >"$WORK_INVENTORY"; then
+  if python3 -c 'import os, resource, signal, sys
+resource.setrlimit(resource.RLIMIT_FSIZE, (32768, 32768))
+signal.alarm(15)
+root = sys.argv[1]
+if not os.path.isdir(root):
+    raise SystemExit("inventory root is not a directory")
+def walk_error(error):
+    raise error
+for base, dirs, files in os.walk(root, onerror=walk_error):
+    for name in dirs + files:
+        print(os.path.relpath(os.path.join(base, name), root))' "$WORK_DIR" >"$WORK_INVENTORY"; then
     WORK_INVENTORY_STATUS=0
   else
     WORK_INVENTORY_STATUS=$?
@@ -433,12 +439,21 @@ if test "$TOOL_PROFILE" = no-tool; then
   test ! -s "$WORK_INVENTORY" || { RESULT_FAILURE=workdir_persistence; exit 1; }
 fi
 CONFIG_INVENTORY="$RUN_ROOT/config.inventory"
-if (
-  set -o pipefail
-  ulimit -f 64 || exit 1
-  timeout --signal=TERM --kill-after=5s 15s \
-    find "$CONFIG_DIR" -type f -printf '%P\t%s\n' | LC_ALL=C sort
-) >"$CONFIG_INVENTORY"; then
+if python3 -c 'import os, resource, signal, sys
+resource.setrlimit(resource.RLIMIT_FSIZE, (32768, 32768))
+signal.alarm(15)
+root = sys.argv[1]
+if not os.path.isdir(root):
+    raise SystemExit("inventory root is not a directory")
+entries = []
+def walk_error(error):
+    raise error
+for base, _, files in os.walk(root, onerror=walk_error):
+    for name in files:
+        path = os.path.join(base, name)
+        entries.append((os.path.relpath(path, root), os.path.getsize(path)))
+for name, size in sorted(entries):
+    print(f"{name}\t{size}")' "$CONFIG_DIR" >"$CONFIG_INVENTORY"; then
   CONFIG_INVENTORY_STATUS=0
 else
   CONFIG_INVENTORY_STATUS=$?
