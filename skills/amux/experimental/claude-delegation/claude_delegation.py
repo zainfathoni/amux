@@ -681,6 +681,185 @@ class ReceiptStore:
                     )
         return pair_retirement_result(origin_sha256, pair_sha256, "retired", compatibility)
 
+    def retire_live_acquired_no_report_pair(self, request: dict[str, Any]) -> dict[str, Any]:
+        delegation_id = protocol_id(request, "delegation_id")
+        event_id = protocol_id(request, "event_id")
+        origin_thread = required_string(request, "origin_thread", 256)
+        authorization = validate_terminal_amp_authorization(request.get("authorization"))
+        compatibility = request.get("compatibility")
+        if (
+            compatibility is not None
+            and compatibility != HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY
+        ):
+            raise HelperError("acquired no-report pair retirement compatibility is unsupported")
+        recover = request.get("recover", False)
+        if not isinstance(recover, bool):
+            raise HelperError("acquired no-report pair retirement recover must be boolean")
+        reject_unknown(
+            request,
+            {
+                "delegation_id", "event_id", "origin_thread", "authorization", "compatibility",
+                "recover",
+            },
+            "live acquired no-report pair retirement",
+        )
+        origin_sha256 = hashlib.sha256(origin_thread.encode()).hexdigest()
+        pair_sha256 = hashlib.sha256(delegation_id.encode()).hexdigest()
+        result_id = internal_event_id("acquired-retirement-result", event_id)
+        with self.lifecycle.mutation_lock():
+            lifecycle = self.lifecycle.load()
+            state_path = str(self.state_dir.resolve())
+            if state_path not in lifecycle["stores"]:
+                raise HelperError("receipt store is not registered in the canonical lifecycle registry")
+            verify_registered_store_object(state_path, lifecycle["legacy_store_objects"].get(state_path))
+            if origin_thread not in lifecycle["teardown_fences"]:
+                lifecycle["teardown_fences"][origin_thread] = {
+                    "operation_id": hashlib.sha256(f"worker-teardown\0{origin_thread}".encode()).hexdigest(),
+                    "created_at": utc_now(),
+                }
+                self.lifecycle.commit(lifecycle)
+            store_lock = contextlib.nullcontext() if self.lifecycle.state_dir == self.state_dir else self.mutation_lock()
+            with store_lock:
+                store = load_registered_receipt_store(
+                    self, state_path, lifecycle["legacy_store_objects"].get(state_path), acquire_lock=False
+                )
+                receipt = self.find(store, delegation_id)
+                if receipt["binding"].get("origin_thread") != origin_thread:
+                    raise HelperError("receipt immutable origin does not match acquired retirement authority")
+                terminal = find_event(receipt, result_id)
+                existing = find_event(receipt, event_id)
+                acquired_intents = [
+                    event for event in receipt.get("events", [])
+                    if isinstance(event, dict) and event.get("kind") == "acquired_retirement_intent"
+                ]
+                if len(acquired_intents) > 1 or (
+                    acquired_intents and acquired_intents[0].get("event_id") != event_id
+                ):
+                    raise HelperError("receipt already has a different acquired retirement operation")
+                if terminal is not None:
+                    if existing is None or not valid_acquired_no_report_pair_retirement_chain(receipt):
+                        raise HelperError("terminal acquired no-report pair retirement proof is invalid")
+                    validate_acquired_retirement_operation(
+                        existing, authorization, event_id, compatibility
+                    )
+                    return acquired_pair_retirement_result(
+                        origin_sha256, pair_sha256, "duplicate", compatibility
+                    )
+                if not valid_live_acquired_no_report_retirement_candidate(
+                    receipt, authorization, event_id, compatibility
+                ):
+                    raise HelperError(
+                        "retirement requires the exact live launch-completed acquired no-report chain"
+                    )
+                launch_intent = modern_read_only_retirement_launch_intent(receipt, compatibility)
+                expected_private_executable_path = retirement_private_executable_path(
+                    self, delegation_id, compatibility
+                )
+                try:
+                    with self.launch_gate(delegation_id, timeout_seconds=0.2):
+                        if existing is None:
+                            if recover:
+                                raise HelperError("acquired retirement recovery requires a durable intent")
+                            identity = inspect_live_indeterminate_target(
+                                launch_intent, receipt["binding"], self, delegation_id,
+                                compatibility, expected_private_executable_path,
+                            )
+                            if not retirement_identity_matches_acquired_identity(
+                                identity, receipt["session_identity"], launch_intent, receipt["binding"]
+                            ):
+                                raise HelperError("acquired retirement target does not match complete launch identity")
+                            retirement_intent = {
+                                "event_id": event_id,
+                                "kind": "acquired_retirement_intent",
+                                "terminal_state": authorization["terminal_state"],
+                                "report_sha256": authorization["report_sha256"],
+                                "coordinator_authorization_sha256": authorization["coordinator_authorization_sha256"],
+                                "identity": identity,
+                                "at": utc_now(),
+                            }
+                            if compatibility is not None:
+                                retirement_intent["compatibility"] = compatibility
+                            receipt["events"].append(retirement_intent)
+                            receipt["acquired_retirement_intent"] = copy.deepcopy(retirement_intent)
+                            receipt["updated_at"] = retirement_intent["at"]
+                            self.commit(store)
+                            current = inspect_live_indeterminate_target(
+                                launch_intent, receipt["binding"], self, delegation_id,
+                                compatibility, expected_private_executable_path,
+                            )
+                            if (
+                                current != identity
+                                or not retirement_identity_matches_acquired_identity(
+                                    current, receipt["session_identity"], launch_intent, receipt["binding"]
+                                )
+                            ):
+                                return acquired_pair_retirement_blocked(
+                                    origin_sha256, pair_sha256, "retirement_identity_changed"
+                                )
+                            stop_exact_retirement_target(
+                                identity, expected_private_executable_path, compatibility
+                            )
+                        else:
+                            if not recover:
+                                raise HelperError(
+                                    "acquired retirement outcome is indeterminate; explicit recovery is required"
+                                )
+                            validate_acquired_retirement_operation(
+                                existing, authorization, event_id, compatibility
+                            )
+                            identity = copy.deepcopy(existing.get("identity"))
+                            if not retirement_identity_matches_acquired_identity(
+                                identity, receipt["session_identity"], launch_intent, receipt["binding"]
+                            ):
+                                raise HelperError("durable acquired retirement identity is invalid")
+                            absence = confirm_retirement_target_absent(identity)
+                            if absence != "exact_retirement_target_absent":
+                                try:
+                                    current = inspect_live_indeterminate_target(
+                                        launch_intent, receipt["binding"], self, delegation_id,
+                                        compatibility, expected_private_executable_path,
+                                    )
+                                except HelperError:
+                                    return acquired_pair_retirement_blocked(
+                                        origin_sha256, pair_sha256, absence
+                                    )
+                                if (
+                                    current != identity
+                                    or not retirement_identity_matches_acquired_identity(
+                                        current, receipt["session_identity"], launch_intent,
+                                        receipt["binding"],
+                                    )
+                                ):
+                                    return acquired_pair_retirement_blocked(
+                                        origin_sha256, pair_sha256, "retirement_identity_changed"
+                                    )
+                                stop_exact_retirement_target(
+                                    identity, expected_private_executable_path, compatibility
+                                )
+                        absence = confirm_retirement_target_absent(identity)
+                        if absence != "exact_retirement_target_absent":
+                            return acquired_pair_retirement_blocked(origin_sha256, pair_sha256, absence)
+                        result = {
+                            "event_id": result_id,
+                            "kind": "acquired_pair_retired",
+                            "operation_event_id": event_id,
+                            "absence_code": absence,
+                            "at": utc_now(),
+                        }
+                        receipt["events"].append(result)
+                        receipt["acquired_pair_retired"] = copy.deepcopy(result)
+                        receipt["updated_at"] = result["at"]
+                        if not valid_acquired_no_report_pair_retirement_chain(receipt):
+                            raise HelperError("terminal acquired no-report retirement proof did not seal exactly")
+                        self.commit(store)
+                except LaunchGateBusy:
+                    return acquired_pair_retirement_blocked(
+                        origin_sha256, pair_sha256, "launch_transport_active_or_indeterminate"
+                    )
+        return acquired_pair_retirement_result(
+            origin_sha256, pair_sha256, "retired", compatibility
+        )
+
     def worker_teardown(self, origin_thread: str, dry_run: bool) -> dict[str, Any]:
         required_string({"origin_thread": origin_thread}, "origin_thread", 256)
         origin_thread_sha256 = hashlib.sha256(origin_thread.encode()).hexdigest()
@@ -727,6 +906,8 @@ class ReceiptStore:
                 public_state = "worker_detached"
             elif valid_pair_retirement_chain(receipt):
                 public_state = "pair_retired"
+            elif valid_acquired_no_report_pair_retirement_chain(receipt):
+                public_state = "acquired_pair_retired"
             pair = {"pair_sha256": pair_id, "state": public_state}
             blocker = worker_teardown_receipt_blocker(receipt)
             if blocker is not None:
@@ -744,6 +925,10 @@ class ReceiptStore:
                 pairs.append(pair)
                 continue
             if valid_pair_retirement_chain(receipt):
+                pair["action"] = "none"
+                pairs.append(pair)
+                continue
+            if valid_acquired_no_report_pair_retirement_chain(receipt):
                 pair["action"] = "none"
                 pairs.append(pair)
                 continue
@@ -4327,11 +4512,16 @@ def require_receipt_mutable(receipt: dict[str, Any]) -> None:
         receipt.get("worker_detached") is not None
         or receipt.get("retirement_intent") is not None
         or receipt.get("pair_retired") is not None
+        or receipt.get("acquired_retirement_intent") is not None
+        or receipt.get("acquired_pair_retired") is not None
         or (
         isinstance(events, list)
         and any(
             isinstance(event, dict)
-            and event.get("kind") in {"worker_detached", "retirement_intent", "pair_retired"}
+            and event.get("kind") in {
+                "worker_detached", "retirement_intent", "pair_retired",
+                "acquired_retirement_intent", "acquired_pair_retired",
+            }
             for event in events
         )
         )
@@ -4440,7 +4630,11 @@ def pre_identity_launch_intent(receipt: dict[str, Any]) -> dict[str, Any]:
 
 
 def worker_teardown_receipt_blocker(receipt: dict[str, Any]) -> str | None:
-    if valid_worker_detach_chain(receipt) or valid_pair_retirement_chain(receipt):
+    if (
+        valid_worker_detach_chain(receipt)
+        or valid_pair_retirement_chain(receipt)
+        or valid_acquired_no_report_pair_retirement_chain(receipt)
+    ):
         return None
     if receipt.get("input_state") in {"pending", "seen"}:
         return "unresolved_input"
@@ -4730,6 +4924,189 @@ def valid_pair_retirement_chain(receipt: dict[str, Any]) -> bool:
     return valid_live_retirement_candidate(prior, authorization, compatibility)
 
 
+def valid_live_acquired_no_report_retirement_candidate(
+    receipt: dict[str, Any],
+    authorization: dict[str, str],
+    operation_event_id: str,
+    compatibility: str | None = None,
+) -> bool:
+    events = receipt.get("events")
+    if (
+        not isinstance(events, list)
+        or any(not isinstance(event, dict) for event in events)
+        or receipt.get("state") != "created"
+        or receipt.get("report_message_id") != ""
+        or any(key in receipt for key in (
+            "input_state", "input_message_id", "worker_detached", "retirement_intent", "pair_retired",
+            "acquired_pair_retired", "parked_at", "cleanup_eligible_at", "submission_frozen",
+            "handoff_validation",
+        ))
+    ):
+        return False
+    kinds = [event.get("kind") for event in events]
+    if kinds not in (
+        ["created", "launch_intent", "launch_completed", "session_acquired"],
+        [
+            "created", "launch_intent", "launch_completed", "session_acquired",
+            "acquired_retirement_intent",
+        ],
+    ):
+        return False
+    created, launch_intent, launch_completed, acquired = events[:4]
+    binding = receipt.get("binding", {})
+    identity = receipt.get("session_identity")
+    common_acquired_identity_fields = {
+        "session", "window", "window_id", "pane_id", "pane_pid", "claude_session_id", "workdir",
+        "current_command", "process_name", "process_identity", "process_executable_identity",
+        "normalized_argv_digest", "process_command_digest", "launch_command_digest",
+    }
+    acquired_identity_fields = set(identity) if isinstance(identity, dict) else set()
+    system = platform.system()
+    valid_identity_schema = (
+        acquired_identity_fields == common_acquired_identity_fields | {
+            "process_executable_object_identity"
+        }
+        if system == "Darwin"
+        else system == "Linux" and acquired_identity_fields in (
+            common_acquired_identity_fields,
+            common_acquired_identity_fields | {"process_executable_object_identity"},
+        )
+    )
+    intents = [event for event in events if event.get("kind") == "acquired_retirement_intent"]
+    receipt_fields = {
+        "binding", "routing", "state", "report_message_id", "created_at", "updated_at", "events",
+        "session_identity",
+    }
+    if intents:
+        receipt_fields.add("acquired_retirement_intent")
+    if (
+        set(receipt) != receipt_fields
+        or set(created) != {"event_id", "kind", "at", "routing"}
+        or created.get("event_id") != f"create:{binding.get('delegation_id', '')}"
+        or not bounded_utc_timestamp(created.get("at"))
+        or receipt.get("created_at") != created.get("at")
+        or receipt.get("updated_at") != events[-1].get("at")
+        or set(launch_completed) != {
+            "event_id", "kind", "operation_event_id", "identity", "at",
+        }
+        or launch_completed.get("event_id")
+        != internal_event_id("launch-result", launch_intent.get("event_id", ""))
+        or launch_completed.get("operation_event_id") != launch_intent.get("event_id")
+        or not bounded_utc_timestamp(launch_completed.get("at"))
+        or set(acquired) != {"event_id", "kind", "identity", "at"}
+        or not bounded_utc_timestamp(acquired.get("at"))
+        or not isinstance(identity, dict)
+        or not valid_identity_schema
+        or launch_completed.get("identity") != identity
+        or acquired.get("identity") != identity
+    ):
+        return False
+    try:
+        protocol_id(acquired, "event_id")
+        routing = validate_routing(receipt.get("routing"))
+        if routing != receipt.get("routing") or created.get("routing") != routing:
+            return False
+        modern_read_only_retirement_launch_intent(receipt, compatibility)
+    except HelperError:
+        return False
+    if intents:
+        try:
+            validate_acquired_retirement_operation(
+                intents[0], authorization, operation_event_id, compatibility
+            )
+        except HelperError:
+            return False
+        if receipt.get("acquired_retirement_intent") != intents[0]:
+            return False
+    elif receipt.get("acquired_retirement_intent") is not None:
+        return False
+    return True
+
+
+def validate_acquired_retirement_operation(
+    event: dict[str, Any],
+    authorization: dict[str, str],
+    operation_event_id: str,
+    compatibility: str | None = None,
+) -> None:
+    fields = {
+        "event_id", "kind", "terminal_state", "report_sha256",
+        "coordinator_authorization_sha256", "identity", "at",
+    }
+    if compatibility is not None:
+        fields.add("compatibility")
+    if (
+        set(event) != fields
+        or event.get("kind") != "acquired_retirement_intent"
+        or event.get("event_id") != operation_event_id
+        or not bounded_utc_timestamp(event.get("at"))
+        or any(event.get(key) != authorization[key] for key in authorization)
+        or event.get("compatibility") != compatibility
+    ):
+        raise HelperError("acquired retirement operation conflicts with durable intent")
+
+
+def valid_acquired_no_report_pair_retirement_chain(receipt: dict[str, Any]) -> bool:
+    events = receipt.get("events")
+    intent = receipt.get("acquired_retirement_intent")
+    result = receipt.get("acquired_pair_retired")
+    if not isinstance(events, list) or not isinstance(intent, dict) or not isinstance(result, dict):
+        return False
+    intents = [
+        event for event in events
+        if isinstance(event, dict) and event.get("kind") == "acquired_retirement_intent"
+    ]
+    results = [
+        event for event in events
+        if isinstance(event, dict) and event.get("kind") == "acquired_pair_retired"
+    ]
+    if len(intents) != 1 or len(results) != 1 or intents[0] != intent or results[0] != result:
+        return False
+    if events[-1] != result or events[-2] != intent:
+        return False
+    if set(receipt) != {
+        "binding", "routing", "state", "report_message_id", "created_at", "updated_at", "events",
+        "session_identity", "acquired_retirement_intent", "acquired_pair_retired",
+    }:
+        return False
+    result_fields = {"event_id", "kind", "operation_event_id", "absence_code", "at"}
+    if (
+        set(result) != result_fields
+        or result.get("event_id")
+        != internal_event_id("acquired-retirement-result", intent.get("event_id", ""))
+        or result.get("operation_event_id") != intent.get("event_id")
+        or result.get("absence_code") != "exact_retirement_target_absent"
+        or not bounded_utc_timestamp(result.get("at"))
+        or receipt.get("updated_at") != result.get("at")
+    ):
+        return False
+    authorization = {
+        key: intent.get(key)
+        for key in ("terminal_state", "report_sha256", "coordinator_authorization_sha256")
+    }
+    compatibility = intent.get("compatibility")
+    try:
+        validate_terminal_amp_authorization(authorization)
+        validate_acquired_retirement_operation(
+            intent, authorization, intent.get("event_id", ""), compatibility
+        )
+        launch_intent = modern_read_only_retirement_launch_intent(receipt, compatibility)
+    except HelperError:
+        return False
+    if not retirement_identity_matches_acquired_identity(
+        intent.get("identity"), receipt.get("session_identity"), launch_intent,
+        receipt.get("binding", {}),
+    ):
+        return False
+    prior = copy.deepcopy(receipt)
+    prior.pop("acquired_pair_retired", None)
+    prior["events"] = prior["events"][:-1]
+    prior["updated_at"] = intent["at"]
+    return valid_live_acquired_no_report_retirement_candidate(
+        prior, authorization, intent["event_id"], compatibility
+    )
+
+
 def pair_retirement_result(
     origin_sha256: str, pair_sha256: str, outcome: str, compatibility: str | None = None
 ) -> dict[str, str]:
@@ -4749,6 +5126,35 @@ def pair_retirement_result(
 def pair_retirement_blocked(origin_sha256: str, pair_sha256: str, blocker: str) -> dict[str, str]:
     return {
         "action": "live_indeterminate_pair_retirement",
+        "origin_thread_sha256": origin_sha256,
+        "pair_sha256": pair_sha256,
+        "outcome": "blocked",
+        "blocker": blocker,
+        "fence": "retained",
+    }
+
+
+def acquired_pair_retirement_result(
+    origin_sha256: str, pair_sha256: str, outcome: str, compatibility: str | None = None
+) -> dict[str, str]:
+    result = {
+        "action": "live_acquired_no_report_pair_retirement",
+        "origin_thread_sha256": origin_sha256,
+        "pair_sha256": pair_sha256,
+        "outcome": outcome,
+        "absence_code": "exact_retirement_target_absent",
+        "fence": "retained",
+    }
+    if compatibility is not None:
+        result["compatibility"] = compatibility
+    return result
+
+
+def acquired_pair_retirement_blocked(
+    origin_sha256: str, pair_sha256: str, blocker: str
+) -> dict[str, str]:
+    return {
+        "action": "live_acquired_no_report_pair_retirement",
         "origin_thread_sha256": origin_sha256,
         "pair_sha256": pair_sha256,
         "outcome": "blocked",
@@ -4816,6 +5222,28 @@ def valid_retirement_identity(
         == launch_intent.get("expected_launcher_argv0_digest")
         and identity["workdir"] == workdir
         and identity["launch_command_digest"] == binding.get("launch_command_digest")
+    )
+
+
+def retirement_identity_matches_acquired_identity(
+    retirement_identity: Any,
+    acquired_identity: Any,
+    launch_intent: dict[str, Any],
+    binding: dict[str, Any],
+) -> bool:
+    if (
+        not valid_retirement_identity(retirement_identity, launch_intent, binding)
+        or not isinstance(acquired_identity, dict)
+    ):
+        return False
+    retirement_only_fields = {
+        "session_id", "process_start_identity", "expected_launcher_identity",
+        "expected_executable_object_identity", "expected_launcher_argv0_digest",
+    }
+    return (
+        set(acquired_identity).issubset(retirement_identity)
+        and not set(acquired_identity).intersection(retirement_only_fields)
+        and all(retirement_identity.get(key) == value for key, value in acquired_identity.items())
     )
 
 
@@ -5352,6 +5780,7 @@ def parser() -> argparse.ArgumentParser:
     register_legacy.add_argument("--store-path", type=pathlib.Path, required=True)
     lifecycle_commands.add_parser("detach-indeterminate-worker")
     lifecycle_commands.add_parser("retire-live-indeterminate-pair")
+    lifecycle_commands.add_parser("retire-live-acquired-no-report-pair")
     commands.add_parser("diagnose")
     return root
 
@@ -5417,6 +5846,18 @@ def main() -> int:
         except HelperError:
             result = {
                 "action": "live_indeterminate_pair_retirement",
+                "outcome": "blocked",
+                "blocker": "retirement_proof_invalid_or_unavailable",
+                "fence": "unchanged_or_retained",
+            }
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 2 if result["outcome"] == "blocked" else 0
+    if arguments.area == "lifecycle" and arguments.command == "retire-live-acquired-no-report-pair":
+        try:
+            result = store.retire_live_acquired_no_report_pair(read_input())
+        except HelperError:
+            result = {
+                "action": "live_acquired_no_report_pair_retirement",
                 "outcome": "blocked",
                 "blocker": "retirement_proof_invalid_or_unavailable",
                 "fence": "unchanged_or_retained",

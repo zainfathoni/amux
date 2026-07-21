@@ -1988,7 +1988,7 @@ print("ok")
 	}
 }
 
-func TestLiveReportBearingIndeterminatePairRetirementIsExactDurableAndRecoverable(t *testing.T) {
+func TestExactLivePairRetirementsAreDurableAndRecoverable(t *testing.T) {
 	t.Parallel()
 	helper, err := filepath.Abs("claude_delegation.py")
 	if err != nil {
@@ -2045,6 +2045,236 @@ def fixture(name="synthetic-live"):
         "authorization":{"terminal_state":"merged", "report_sha256":module.canonical_sha256(report),
                          "coordinator_authorization_sha256":"7" * 64}}
     return store, bound, request
+
+# Reproduce the exact launch-completed, acquired, no-report state before exercising its separate recovery.
+def acquired_fixture(name="synthetic-acquired-no-report"):
+    acquired, bound, request = fixture(name)
+    data = acquired.load_store(); receipt = data["receipts"][0]
+    acquired_identity = {key:value for key,value in bound.items() if key not in {
+        "session_id", "process_start_identity", "expected_launcher_identity",
+        "expected_executable_object_identity", "expected_launcher_argv0_digest"}}
+    receipt["state"] = "created"; receipt["report_message_id"] = ""
+    receipt["events"] = receipt["events"][:2]
+    receipt["events"].extend([
+        {"event_id":module.internal_event_id("launch-result", "launch"), "kind":"launch_completed",
+         "operation_event_id":"launch",
+         "identity":copy.deepcopy(acquired_identity), "at":"2026-07-20T12:00:01Z"},
+        {"event_id":"acquired", "kind":"session_acquired", "identity":copy.deepcopy(acquired_identity),
+         "at":"2026-07-20T12:00:02Z"},
+    ])
+    receipt["session_identity"] = copy.deepcopy(acquired_identity)
+    receipt["updated_at"] = "2026-07-20T12:00:02Z"; acquired.commit(data)
+    request["authorization"]["report_sha256"] = "6" * 64
+    return acquired, bound, request
+
+acquired, current_identity, acquired_request = acquired_fixture()
+original = copy.deepcopy(acquired.load_store()["receipts"][0]); stops = []
+module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+module.stop_exact_retirement_target = lambda bound, *args: stops.append(copy.deepcopy(bound))
+module.confirm_retirement_target_absent = lambda bound: "exact_retirement_target_absent"
+result = acquired.retire_live_acquired_no_report_pair(acquired_request)
+assert result["outcome"] == "retired" and result["fence"] == "retained", result
+receipt = acquired.load_store()["receipts"][0]
+assert stops == [current_identity]
+assert receipt["events"][:4] == original["events"] and receipt["binding"] == original["binding"]
+assert receipt["routing"] == original["routing"] and receipt["session_identity"] == original["session_identity"]
+assert [event["kind"] for event in receipt["events"]][-2:] == [
+    "acquired_retirement_intent", "acquired_pair_retired"]
+assert receipt["state"] == "created" and receipt["report_message_id"] == ""
+assert "cleanup_eligible_at" not in receipt
+assert module.valid_acquired_no_report_pair_retirement_chain(receipt)
+for forbidden in ("valid_report", "input_request", "delivered", "acknowledged", "park_intent",
+                  "verified_parked", "worker_detached", "pair_retired"):
+    assert forbidden not in [event["kind"] for event in receipt["events"]]
+assert acquired.worker_teardown("T-synthetic", True)["pairs"] == [{
+    "pair_sha256":hashlib.sha256(b"synthetic-acquired-no-report").hexdigest(),
+    "state":"acquired_pair_retired", "action":"none"}]
+assert acquired.retire_live_acquired_no_report_pair(acquired_request)["outcome"] == "duplicate"
+assert stops == [current_identity]
+sealed = acquired.load_store()
+try:
+    acquired.route({"delegation_id":"synthetic-acquired-no-report", "event_id":"sealed-route",
+                    "routing":{"target":"machine_local_inbox"}})
+except module.HelperError: pass
+else: raise AssertionError("acquired no-report retirement did not seal later mutation")
+assert acquired.load_store() == sealed
+
+# The already-bounded historical-modern selector remains explicit on this separate exact chain.
+historical, current_identity, acquired_request = acquired_fixture("synthetic-acquired-historical")
+data = historical.load_store(); data["receipts"][0]["events"][1].pop("expected_launcher_argv0_digest")
+historical.commit(data); current_identity.pop("expected_launcher_argv0_digest")
+acquired_request["compatibility"] = "historical_modern_read_only_launch_intent_v1"
+real_system = module.platform.system; module.platform.system = lambda: "Darwin"; stops = []
+module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+module.stop_exact_retirement_target = lambda bound, *args: stops.append(copy.deepcopy(bound))
+module.confirm_retirement_target_absent = lambda bound: "exact_retirement_target_absent"
+result = historical.retire_live_acquired_no_report_pair(acquired_request)
+assert result["outcome"] == "retired" and result["compatibility"] == acquired_request["compatibility"]
+assert stops == [current_identity]
+assert historical.load_store()["receipts"][0]["acquired_retirement_intent"]["compatibility"] == acquired_request["compatibility"]
+module.platform.system = real_system
+
+# Recovery observes absence before acting and exact replay never performs a blind second stop.
+interrupted, current_identity, acquired_request = acquired_fixture("synthetic-acquired-interrupted")
+module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+module.stop_exact_retirement_target = lambda *args: (_ for _ in ()).throw(RuntimeError("synthetic interruption"))
+try: interrupted.retire_live_acquired_no_report_pair(acquired_request)
+except RuntimeError: pass
+else: raise AssertionError("synthetic acquired retirement interruption was not exposed")
+receipt = interrupted.load_store()["receipts"][0]
+assert receipt["events"][-1]["kind"] == "acquired_retirement_intent"
+assert not module.valid_acquired_no_report_pair_retirement_chain(receipt)
+stops = []; module.stop_exact_retirement_target = lambda bound, *args: stops.append(bound)
+module.inspect_live_indeterminate_target = lambda *args: (_ for _ in ()).throw(module.HelperError("absent"))
+module.confirm_retirement_target_absent = lambda bound: "exact_retirement_target_absent"
+assert interrupted.retire_live_acquired_no_report_pair(
+    dict(acquired_request, recover=True))["outcome"] == "retired"
+assert not stops
+
+# A durable operation identity cannot be replaced by a fresh event ID after interruption.
+conflicted, current_identity, acquired_request = acquired_fixture("synthetic-acquired-conflict")
+module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+module.stop_exact_retirement_target = lambda *args: (_ for _ in ()).throw(RuntimeError("synthetic interruption"))
+try: conflicted.retire_live_acquired_no_report_pair(acquired_request)
+except RuntimeError: pass
+before = (conflicted.state_dir / "receipts.json").read_bytes(); inspections = []; stops = []
+module.inspect_live_indeterminate_target = lambda *args: inspections.append(args)
+module.stop_exact_retirement_target = lambda *args: stops.append(args)
+different = copy.deepcopy(acquired_request); different["event_id"] = "retire-different"
+try: conflicted.retire_live_acquired_no_report_pair(different)
+except module.HelperError: pass
+else: raise AssertionError("different acquired retirement event ID replaced durable intent")
+assert (conflicted.state_dir / "receipts.json").read_bytes() == before
+assert not inspections and not stops
+
+# Completion/acquisition provenance, receipt shape, and platform identity schema are exact.
+for name, mutate in [
+    ("completion-id", lambda receipt: receipt["events"][2].update(event_id="fabricated")),
+    ("acquisition-id", lambda receipt: receipt["events"][3].update(event_id="invalid id")),
+    ("created-at", lambda receipt: receipt.update(created_at="2026-07-20T12:00:09Z")),
+    ("updated-at", lambda receipt: receipt.update(updated_at="2026-07-20T12:00:09Z")),
+    ("null-marker", lambda receipt: receipt.update(acquired_pair_retired=None)),
+    ("extra-field", lambda receipt: receipt.update(extra="fabricated")),
+]:
+    blocked, current_identity, candidate = acquired_fixture("acquired-provenance-" + name)
+    data = blocked.load_store(); mutate(data["receipts"][0]); blocked.commit(data)
+    inspections = []; stops = []
+    module.inspect_live_indeterminate_target = lambda *args: inspections.append(args)
+    module.stop_exact_retirement_target = lambda *args: stops.append(args)
+    try: blocked.retire_live_acquired_no_report_pair(candidate)
+    except module.HelperError: pass
+    else: raise AssertionError("malformed acquired provenance retired: " + name)
+    assert not inspections and not stops, name
+
+blocked, current_identity, candidate = acquired_fixture("acquired-darwin-object-missing")
+data = blocked.load_store(); receipt = data["receipts"][0]
+for durable in (receipt["session_identity"], receipt["events"][2]["identity"],
+                receipt["events"][3]["identity"]):
+    durable.pop("process_executable_object_identity")
+blocked.commit(data); real_system = module.platform.system; module.platform.system = lambda: "Darwin"
+inspections = []; stops = []
+module.inspect_live_indeterminate_target = lambda *args: inspections.append(args)
+module.stop_exact_retirement_target = lambda *args: stops.append(args)
+try: blocked.retire_live_acquired_no_report_pair(candidate)
+except module.HelperError: pass
+else: raise AssertionError("incomplete Darwin acquired identity retired")
+assert not inspections and not stops
+module.platform.system = real_system
+
+# Every live identity component is required before durable intent or process mutation.
+for name, mutate in [
+    ("pane", lambda live: live.update(pane_id="%99")),
+    ("pid", lambda live: live.update(pane_pid=9999)),
+    ("executable", lambda live: live.update(process_executable_identity="file:changed")),
+    ("object", lambda live: live.update(process_executable_object_identity="object:changed")),
+    ("argv", lambda live: live.update(normalized_argv_digest="9" * 64)),
+    ("session", lambda live: live.update(claude_session_id="550e8400-e29b-41d4-a716-446655440099")),
+    ("workdir", lambda live: live.update(workdir="/synthetic/substitute")),
+]:
+    blocked, current_identity, candidate = acquired_fixture("acquired-blocked-" + name)
+    mutate(current_identity); stops = []
+    module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+    module.stop_exact_retirement_target = lambda bound, *args: stops.append(bound)
+    try: outcome = blocked.retire_live_acquired_no_report_pair(candidate)
+    except module.HelperError: outcome = {"outcome":"blocked"}
+    receipt = blocked.load_store()["receipts"][0]
+    assert outcome["outcome"] == "blocked" and not stops, name
+    assert "acquired_retirement_intent" not in receipt and "acquired_pair_retired" not in receipt, name
+
+# Pending input and every report/delivery/acknowledgement/park/detach/prior-retirement shape are ineligible.
+for name, event, materialized in [
+    ("input", {"event_id":"input", "kind":"input_request"}, {"input_state":"pending"}),
+    ("report", {"event_id":"report", "kind":"valid_report"}, {"report_message_id":"report"}),
+    ("delivery", {"event_id":"delivery", "kind":"delivered"}, {}),
+    ("ack", {"event_id":"ack", "kind":"acknowledged"}, {}),
+    ("park", {"event_id":"park", "kind":"park_intent"}, {}),
+    ("detach", {"event_id":"detach", "kind":"worker_detached"}, {}),
+    ("retired", {"event_id":"retired", "kind":"pair_retired"}, {}),
+]:
+    blocked, current_identity, candidate = acquired_fixture("acquired-forbidden-" + name)
+    data = blocked.load_store(); receipt = data["receipts"][0]
+    receipt["events"].append(event); receipt.update(materialized); blocked.commit(data)
+    inspections = []; stops = []
+    module.inspect_live_indeterminate_target = lambda *args: inspections.append(args)
+    module.stop_exact_retirement_target = lambda *args: stops.append(args)
+    try: blocked.retire_live_acquired_no_report_pair(candidate)
+    except module.HelperError: pass
+    else: raise AssertionError("forbidden acquired receipt shape retired: " + name)
+    assert not inspections and not stops, name
+
+# Pane/PID replacement between the two inspections, unavailable inspection, and ambiguous absence fail closed.
+for name, mutate in [
+    ("replaced-pane", lambda live: live.update(pane_id="%99")),
+    ("pid-reuse", lambda live: (live.update(process_identity="start:reused"),
+                                live.update(process_start_identity="process-start:start:reused"))),
+]:
+    blocked, current_identity, candidate = acquired_fixture("acquired-race-" + name)
+    changed = copy.deepcopy(current_identity); mutate(changed); observations = [current_identity, changed]
+    stops = []; module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(observations.pop(0))
+    module.stop_exact_retirement_target = lambda bound, *args: stops.append(bound)
+    outcome = blocked.retire_live_acquired_no_report_pair(candidate)
+    assert outcome["outcome"] == "blocked" and outcome["blocker"] == "retirement_identity_changed"
+    assert not stops
+
+blocked, current_identity, candidate = acquired_fixture("acquired-inspection-unavailable")
+module.inspect_live_indeterminate_target = lambda *args: (_ for _ in ()).throw(module.HelperError("unavailable"))
+stops = []; module.stop_exact_retirement_target = lambda *args: stops.append(args)
+try: blocked.retire_live_acquired_no_report_pair(candidate)
+except module.HelperError: pass
+else: raise AssertionError("unavailable acquired inspection retired")
+assert not stops and "acquired_retirement_intent" not in blocked.load_store()["receipts"][0]
+
+blocked, current_identity, candidate = acquired_fixture("acquired-absence-ambiguous")
+module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+stops = []; module.stop_exact_retirement_target = lambda bound, *args: stops.append(bound)
+module.confirm_retirement_target_absent = lambda bound: "retirement_absence_unconfirmed"
+outcome = blocked.retire_live_acquired_no_report_pair(candidate)
+assert outcome["outcome"] == "blocked" and outcome["blocker"] == "retirement_absence_unconfirmed"
+receipt = blocked.load_store()["receipts"][0]
+assert len(stops) == 1 and "acquired_retirement_intent" in receipt and "acquired_pair_retired" not in receipt
+
+# A busy launch transport and mutated durable retirement evidence cannot authorize a stop or terminal proof.
+blocked, current_identity, candidate = acquired_fixture("acquired-transport-race")
+class BusyGate:
+    def __enter__(self): raise module.LaunchGateBusy()
+    def __exit__(self, *args): pass
+blocked.launch_gate = lambda *args, **kwargs: BusyGate(); stops = []
+module.stop_exact_retirement_target = lambda *args: stops.append(args)
+outcome = blocked.retire_live_acquired_no_report_pair(candidate)
+assert outcome["outcome"] == "blocked" and outcome["blocker"] == "launch_transport_active_or_indeterminate"
+assert not stops and "acquired_retirement_intent" not in blocked.load_store()["receipts"][0]
+
+blocked, current_identity, candidate = acquired_fixture("acquired-mutated-intent")
+module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+module.stop_exact_retirement_target = lambda *args: (_ for _ in ()).throw(RuntimeError("synthetic interruption"))
+try: blocked.retire_live_acquired_no_report_pair(candidate)
+except RuntimeError: pass
+data = blocked.load_store(); data["receipts"][0]["acquired_retirement_intent"]["identity"]["pane_id"] = "%99"
+blocked.commit(data); stops = []; module.stop_exact_retirement_target = lambda *args: stops.append(args)
+try: blocked.retire_live_acquired_no_report_pair(dict(candidate, recover=True))
+except module.HelperError: pass
+else: raise AssertionError("mutated acquired retirement intent recovered")
+assert not stops
 
 stops = []
 module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
@@ -2425,6 +2655,15 @@ print("ok")
 	for _, forbidden := range []string{"private-delegation", "private-event", "private-origin"} {
 		if strings.Contains(stdout+stderr, forbidden) {
 			t.Fatalf("retirement CLI leaked private identity %q: %s%s", forbidden, stdout, stderr)
+		}
+	}
+	stdout, stderr, err = runHelper(t, stateDir, private, "lifecycle", "retire-live-acquired-no-report-pair")
+	if err == nil || !strings.Contains(stdout, `"blocker":"retirement_proof_invalid_or_unavailable"`) {
+		t.Fatalf("privacy-safe acquired retirement CLI blocker = %v: %s%s", err, stdout, stderr)
+	}
+	for _, forbidden := range []string{"private-delegation", "private-event", "private-origin"} {
+		if strings.Contains(stdout+stderr, forbidden) {
+			t.Fatalf("acquired retirement CLI leaked private identity %q: %s%s", forbidden, stdout, stderr)
 		}
 	}
 }
