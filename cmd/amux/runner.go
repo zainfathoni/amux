@@ -642,6 +642,7 @@ func launchRunner(row config.RunnerRow) (tmux.WindowPane, error) {
 	lastDetailedObservation := ""
 	lastObservation := ""
 	for {
+		hadExactObservation := observedExact
 		pane, inspectErr := runner.RestartPaneByID(created.PaneID)
 		if inspectErr == nil && pane.WindowID == created.WindowID && pane.PaneID == created.PaneID && pane.Session == row.Workspace && pane.Window == row.Window {
 			exactProcess, processDiagnostic, processErr := observeRunnerPaneProcess(pane, true)
@@ -654,7 +655,7 @@ func launchRunner(row config.RunnerRow) (tmux.WindowPane, error) {
 			lastDetailedObservation = lastObservation
 			if processErr == nil && !pane.Dead && exactProcess && workdirMatches && startMatches {
 				observedExact = true
-				if !time.Now().Before(deadline) {
+				if hadExactObservation && !time.Now().Before(deadline) {
 					return pane, nil
 				}
 			}
@@ -669,6 +670,9 @@ func launchRunner(row config.RunnerRow) (tmux.WindowPane, error) {
 			lastObservation = fmt.Sprintf("last observed at +%s: exact pane %s unavailable: %s", time.Since(startupBegan).Round(time.Millisecond), created.PaneID, boundedDiagnostic(inspectErr.Error(), 1024))
 		}
 		if !time.Now().Before(deadline) {
+			if observedExact && !hadExactObservation {
+				continue
+			}
 			diagnostic, _ := runner.CapturePaneHistory(created.PaneID, 100)
 			_ = runner.KillWindow(created.WindowID)
 			processDiagnostic := ""
