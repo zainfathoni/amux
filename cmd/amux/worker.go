@@ -591,17 +591,41 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 			}
 		}
 		env.Planned = append(env.Planned, result.Outcome{Resource: resource, Action: "spawn", Message: message})
-		for _, group := range s.Groups {
-			groupResource := result.CommandResource()
-			if existing.Resource.Thread != "" && (existing.Phase == config.OperationPhaseMessageVerified || existing.Phase == config.OperationPhaseConfigured || existing.Phase == config.OperationPhaseGroupIntent || existing.Phase == config.OperationPhaseGrouped) {
-				groupResource, _ = result.GroupMembershipResource(group, existing.Resource.Thread)
+		if len(s.Groups) != 0 {
+			// For a stable authoritative replay the receiving thread and durable
+			// memberships are already known, so a group whose membership is already a
+			// coordinator is a not-projected skip; every other requested group is a
+			// member whose additive label ensure remains planned.
+			authoritative := stableSpawnGroupReplay(found, existing)
+			var memberships []config.GroupMembership
+			if authoritative {
+				memberships, err = config.LoadGroupsReadOnly(dir.GroupsPath())
+				if err != nil {
+					return env, result.Preflight(err)
+				}
 			}
-			env.Planned = append(env.Planned, result.Outcome{
-				Resource: groupResource,
-				Action:   "attach-group",
-				Message:  "would persist membership for the authoritative receiving thread, then add-only ensure its Amp label",
-				Group:    &result.GroupDetails{ID: group, Role: string(config.GroupMember), ExternalSync: "additive_ensure_planned"},
-			})
+			for _, group := range s.Groups {
+				if authoritative {
+					if index := membershipIndex(memberships, group, existing.Resource.Thread); index >= 0 && memberships[index].Role == config.GroupCoordinator {
+						out := groupOutcome(memberships[index], "attach-group")
+						out.Group.ID = group
+						out.Group.ExternalSync = "not_projected"
+						out.Message = "coordinator membership is local-only; the coordinator label is not projected to Amp"
+						env.Skipped = append(env.Skipped, out)
+						continue
+					}
+				}
+				groupResource := result.CommandResource()
+				if authoritative {
+					groupResource, _ = result.GroupMembershipResource(group, existing.Resource.Thread)
+				}
+				env.Planned = append(env.Planned, result.Outcome{
+					Resource: groupResource,
+					Action:   "attach-group",
+					Message:  "would persist membership for the authoritative receiving thread, then add-only ensure its Amp label",
+					Group:    &result.GroupDetails{ID: group, Role: string(config.GroupMember), ExternalSync: "additive_ensure_planned"},
+				})
+			}
 		}
 		if !in.Options.JSON {
 			fmt.Fprintln(a.stdout, message)
@@ -610,12 +634,30 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	}
 	var groupAmpPath string
 	if len(s.Groups) != 0 {
-		if _, loadErr := config.LoadGroupsReadOnly(dir.GroupsPath()); loadErr != nil {
+		memberships, loadErr := config.LoadGroupsReadOnly(dir.GroupsPath())
+		if loadErr != nil {
 			return env, result.Preflight(loadErr)
 		}
-		groupAmpPath, err = preflightGroupAmp()
-		if err != nil {
-			return env, result.Preflight(err)
+		// A stable authoritative replay can classify roles now: coordinator
+		// memberships are never projected, so Amp preflight is required only when at
+		// least one requested group is (or will become) a projected member. Fresh and
+		// early spawns have no authoritative future role yet and preflight eagerly.
+		needsProjection := true
+		if stableSpawnGroupReplay(found, existing) {
+			needsProjection = false
+			for _, group := range s.Groups {
+				index := membershipIndex(memberships, group, existing.Resource.Thread)
+				if index < 0 || memberships[index].Role != config.GroupCoordinator {
+					needsProjection = true
+					break
+				}
+			}
+		}
+		if needsProjection {
+			groupAmpPath, err = preflightGroupAmp()
+			if err != nil {
+				return env, result.Preflight(err)
+			}
 		}
 	}
 	if found {
@@ -952,6 +994,24 @@ func operationAllowsTerminalLineEndingNormalization(operation config.OperationRe
 	return operation.MessageSource == config.OperationMessageSourceFile
 }
 
+// stableSpawnGroupReplay reports whether a found spawn operation has advanced far
+// enough that its receiving thread identity is authoritative and its durable group
+// memberships are meaningful, so effective per-group roles can be derived before
+// dry-run planning or Amp preflight. Fresh spawns and early phases (before the
+// initial message is verified) have no authoritative identity or future role yet
+// and must preflight eagerly.
+func stableSpawnGroupReplay(found bool, operation config.OperationRecord) bool {
+	if !found || operation.Resource.Thread == "" {
+		return false
+	}
+	switch operation.Phase {
+	case config.OperationPhaseMessageVerified, config.OperationPhaseConfigured, config.OperationPhaseGroupIntent, config.OperationPhaseGrouped:
+		return true
+	default:
+		return false
+	}
+}
+
 func (a app) resumeSpawnGrouping(dir config.Directory, env *result.Envelope, record config.OperationRecord, row config.Row, groups []string, ampPath string, jsonOutput bool) (*result.Envelope, error) {
 	if record.Phase == config.OperationPhaseConfigured {
 		memberships, err := config.LoadGroupsReadOnly(dir.GroupsPath())
@@ -986,6 +1046,18 @@ func (a app) resumeSpawnGrouping(dir config.Directory, env *result.Envelope, rec
 			return env, result.Runtime(fmt.Errorf("durable spawn group intent %s/%s is missing; refusing label synchronization", group, row.Thread))
 		}
 		membership := memberships[index]
+		if membership.Role == config.GroupCoordinator {
+			// The membership was promoted to coordinator after spawn; coordinator
+			// identity is durable local metadata and is never projected to a label.
+			out := groupOutcome(membership, "attach-group")
+			out.Group.ExternalSync = "not_projected"
+			out.Message = "membership became coordinator after spawn; coordinator labels are not projected to Amp"
+			env.Skipped = append(env.Skipped, out)
+			if !jsonOutput {
+				fmt.Fprintf(a.stdout, "Skipped label projection for coordinator membership %s\t%s; coordinator labels are not projected.\n", membership.Group, membership.Thread)
+			}
+			continue
+		}
 		out := groupOutcome(membership, "attach-group")
 		if _, err := a.ensureGroupLabel(env, out, ampPath, membership, jsonOutput); err != nil {
 			failed = true

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -1914,6 +1915,190 @@ func TestWorkerSpawnGroupingReplayHumanFailureShowsWorkerIntentAndDrift(t *testi
 	}
 	if strings.Contains(stdout.String(), "Spawned worker") {
 		t.Fatalf("human grouping replay falsely claimed worker creation: %s", stdout.String())
+	}
+}
+
+func TestWorkerSpawnResumeGroupingSkipsLabelWhenMembershipBecameCoordinator(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-spawned"}
+	writeWorkerRegistry(t, dir, row.String()+"\n")
+	// The spawned thread was later promoted to coordinator of its group; coordinator
+	// identity is durable local metadata and must never be projected to an Amp label.
+	if err := config.WriteGroups(filepath.Join(dir, config.GroupsFile), []config.GroupMembership{{Group: "issue-140", Thread: row.Thread, Role: config.GroupCoordinator}}); err != nil {
+		t.Fatal(err)
+	}
+	request := strings.Join([]string{"alpha", "worker", workdir, "", "hello", "groups", "issue-140"}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Now().UTC()
+	record := config.OperationRecord{Key: "coordinator-resume", Kind: "worker-spawn", RequestHash: hex.EncodeToString(sum[:]), State: config.OperationStarted, Phase: config.OperationPhaseConfigured, Resource: config.OperationResource{Kind: "worker", Thread: row.Thread}, CreatedAt: now, UpdatedAt: now}
+	if _, err := config.StoreOperation(filepath.Join(dir, config.OperationsFile), record); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	calls := installSupportedGroupAmp(t, func([]string) ([]byte, error) { return nil, nil })
+
+	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--group", "issue-140", "--message", "hello", "--idempotency-key", "coordinator-resume")
+	if len(got.Failed) != 0 {
+		t.Fatalf("coordinator grouping resume failed: %+v", got)
+	}
+	var attach *result.Outcome
+	for i := range got.Skipped {
+		if got.Skipped[i].Action == "attach-group" {
+			attach = &got.Skipped[i]
+		}
+	}
+	if attach == nil || attach.Group.Role != string(config.GroupCoordinator) || attach.Group.ExternalSync != "not_projected" {
+		t.Fatalf("coordinator attach outcome = %+v (env=%+v)", attach, got)
+	}
+	if got := countMutationCommands(*calls); got != 0 {
+		t.Fatalf("coordinator resume projected a label: %v", *calls)
+	}
+	memberships, err := config.LoadGroupsReadOnly(filepath.Join(dir, config.GroupsFile))
+	if err != nil || len(memberships) != 1 || memberships[0].Role != config.GroupCoordinator {
+		t.Fatalf("coordinator role not preserved: %+v, %v", memberships, err)
+	}
+	completed, found, err := config.LoadOperation(filepath.Join(dir, config.OperationsFile), "coordinator-resume")
+	if err != nil || !found || completed.State != config.OperationSucceeded || completed.Phase != config.OperationPhaseGrouped {
+		t.Fatalf("coordinator grouping did not complete = %+v found=%t err=%v", completed, found, err)
+	}
+}
+
+func TestWorkerSpawnAllCoordinatorGroupingReplayNeverProbesAmp(t *testing.T) {
+	base := func(t *testing.T) (dir, workdir string) {
+		t.Helper()
+		dir = t.TempDir()
+		workdir = t.TempDir()
+		row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-spawned"}
+		writeWorkerRegistry(t, dir, row.String()+"\n")
+		// Both requested groups already have this thread as their coordinator; coordinator
+		// identity is durable local-only metadata that is never projected to an Amp label,
+		// so the replay must not resolve or invoke Amp at all.
+		if err := config.WriteGroups(filepath.Join(dir, config.GroupsFile), []config.GroupMembership{
+			{Group: "issue-140", Thread: row.Thread, Role: config.GroupCoordinator},
+			{Group: "issue-141", Thread: row.Thread, Role: config.GroupCoordinator},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		request := strings.Join([]string{"alpha", "worker", workdir, "", "hello", "groups", "issue-140", "issue-141"}, "\x00")
+		sum := sha256.Sum256([]byte(request))
+		now := time.Now().UTC()
+		record := config.OperationRecord{Key: "coordinator-only", Kind: "worker-spawn", RequestHash: hex.EncodeToString(sum[:]), State: config.OperationStarted, Phase: config.OperationPhaseConfigured, Resource: config.OperationResource{Kind: "worker", Thread: row.Thread}, CreatedAt: now, UpdatedAt: now}
+		if _, err := config.StoreOperation(filepath.Join(dir, config.OperationsFile), record); err != nil {
+			t.Fatal(err)
+		}
+		return dir, workdir
+	}
+	spawnArgs := func(dir, workdir string, prefix ...string) []string {
+		return append(prefix, "--config-dir", dir, "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--group", "issue-140", "--group", "issue-141", "--message", "hello", "--idempotency-key", "coordinator-only")
+	}
+
+	oldLookPath, oldExec := groupLookPath, groupExec
+	groupLookPath = func(string) (string, error) { panic("coordinator-only spawn probed Amp") }
+	groupExec = func(string, ...string) ([]byte, error) { panic("coordinator-only spawn invoked Amp") }
+	t.Cleanup(func() { groupLookPath, groupExec = oldLookPath, oldExec })
+
+	t.Run("dry-run", func(t *testing.T) {
+		dir, workdir := base(t)
+		t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+		env := executeWorkerJSON(t, spawnArgs(dir, workdir, "--json", "--dry-run")...)
+		for _, out := range env.Planned {
+			if out.Action == "attach-group" {
+				t.Fatalf("coordinator dry-run falsely planned a member label: %+v", env)
+			}
+		}
+		attachSkips := 0
+		for _, out := range env.Skipped {
+			if out.Action == "attach-group" {
+				attachSkips++
+				if out.Group.Role != string(config.GroupCoordinator) || out.Group.ExternalSync != "not_projected" {
+					t.Fatalf("coordinator dry-run skip = %+v", out)
+				}
+			}
+		}
+		if attachSkips != 2 {
+			t.Fatalf("coordinator dry-run attach skips = %d (env=%+v)", attachSkips, env)
+		}
+	})
+
+	t.Run("execution", func(t *testing.T) {
+		dir, workdir := base(t)
+		t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+		env := executeWorkerJSON(t, spawnArgs(dir, workdir, "--json")...)
+		if len(env.Failed) != 0 {
+			t.Fatalf("coordinator-only spawn failed: %+v", env)
+		}
+		attachSkips := 0
+		for _, out := range env.Skipped {
+			if out.Action == "attach-group" {
+				attachSkips++
+				if out.Group.Role != string(config.GroupCoordinator) || out.Group.ExternalSync != "not_projected" {
+					t.Fatalf("coordinator execution skip = %+v", out)
+				}
+			}
+		}
+		if attachSkips != 2 {
+			t.Fatalf("coordinator execution attach skips = %d (env=%+v)", attachSkips, env)
+		}
+		completed, found, err := config.LoadOperation(filepath.Join(dir, config.OperationsFile), "coordinator-only")
+		if err != nil || !found || completed.State != config.OperationSucceeded || completed.Phase != config.OperationPhaseGrouped {
+			t.Fatalf("coordinator-only grouping did not complete = %+v found=%t err=%v", completed, found, err)
+		}
+	})
+}
+
+func TestWorkerSpawnMixedGroupingReplayPreflightsAndLabelsMembersOnly(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-spawned"}
+	writeWorkerRegistry(t, dir, row.String()+"\n")
+	// One group is a coordinator (never projected); the other is an ordinary member
+	// whose label must still be add-only ensured, so Amp preflight is still required.
+	if err := config.WriteGroups(filepath.Join(dir, config.GroupsFile), []config.GroupMembership{
+		{Group: "issue-140", Thread: row.Thread, Role: config.GroupCoordinator},
+		{Group: "issue-141", Thread: row.Thread, Role: config.GroupMember},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := strings.Join([]string{"alpha", "worker", workdir, "", "hello", "groups", "issue-140", "issue-141"}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Now().UTC()
+	record := config.OperationRecord{Key: "mixed-resume", Kind: "worker-spawn", RequestHash: hex.EncodeToString(sum[:]), State: config.OperationStarted, Phase: config.OperationPhaseGroupIntent, Resource: config.OperationResource{Kind: "worker", Thread: row.Thread}, CreatedAt: now, UpdatedAt: now}
+	if _, err := config.StoreOperation(filepath.Join(dir, config.OperationsFile), record); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	calls := installSupportedGroupAmp(t, func([]string) ([]byte, error) { return nil, nil })
+
+	env := executeWorkerJSON(t, "--json", "--config-dir", dir, "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--group", "issue-140", "--group", "issue-141", "--message", "hello", "--idempotency-key", "mixed-resume")
+	if len(env.Failed) != 0 {
+		t.Fatalf("mixed grouping resume failed: %+v", env)
+	}
+	// Preflight ran and exactly the member group was projected.
+	if got := groupLabelTargets(*calls); !reflect.DeepEqual(got, []string{row.Thread + "/issue-141"}) {
+		t.Fatalf("mixed replay label targets = %v (calls=%v)", got, *calls)
+	}
+	coordSkips := 0
+	for _, out := range env.Skipped {
+		if out.Action == "attach-group" {
+			coordSkips++
+			if out.Group.Role != string(config.GroupCoordinator) || out.Group.ExternalSync != "not_projected" {
+				t.Fatalf("mixed replay coordinator skip = %+v", out)
+			}
+		}
+	}
+	memberSuccess := 0
+	for _, out := range env.Successful {
+		if out.Action == "attach-group" && out.Group.Role == string(config.GroupMember) {
+			memberSuccess++
+		}
+	}
+	if coordSkips != 1 || memberSuccess != 1 {
+		t.Fatalf("mixed replay outcomes: coordSkips=%d memberSuccess=%d (env=%+v)", coordSkips, memberSuccess, env)
+	}
+	completed, found, err := config.LoadOperation(filepath.Join(dir, config.OperationsFile), "mixed-resume")
+	if err != nil || !found || completed.State != config.OperationSucceeded || completed.Phase != config.OperationPhaseGrouped {
+		t.Fatalf("mixed grouping did not complete = %+v found=%t err=%v", completed, found, err)
 	}
 }
 

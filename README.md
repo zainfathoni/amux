@@ -195,7 +195,7 @@ The bundled issue-coordination workflow uses repository-qualified identities. Fo
 
 Worker spawn accepts repeatable `--group <id>`. amux validates and deterministically sorts/deduplicates the complete set before creation, binds memberships only to the final authoritative receiving thread, persists all local intent before add-only label synchronization, and resumes a partial grouping failure with the same idempotency key without recreating or resubmitting the worker.
 
-External synchronization is deliberately add-only. Declare, add, coordinator changes, and reconcile use Amp's additive label command only after a version and exact semantic-help capability check. Additive failures retain local intent as visible drift. Local removal cannot remove the Amp label, succeeds with a warning that the external label may remain indefinitely, and never claims exact synchronization. Use `--dry-run` to preflight and inspect any group mutation.
+External synchronization is deliberately add-only and member-only. Coordinator identity remains authoritative local metadata and is not projected to an Amp label, so a long-lived coordinator does not accumulate labels for every group it supervises. Member add, worker spawn, and reconcile use Amp's additive label command only after a version and exact semantic-help capability check; reconcile reports coordinator memberships as skipped. Additive failures retain local intent as visible drift. Local removal cannot remove an existing Amp label, succeeds with a warning that the external label may remain indefinitely, and never claims exact synchronization. Promoting an already-labelled member to coordinator cannot remove its prior label. Use `--dry-run` to preflight and inspect any group mutation.
 
 ### Durable worker reports and finish authorization
 
@@ -250,7 +250,8 @@ Coordinator soft budgets to `ready` are Small 30m, Medium 1h (default), Large 2h
 | `callback register` / `clear` | none; mutate machine runtime lease only | none | inspect exact pane/process | none |
 | `report submit` | persist report, then best-effort verified wake-up | none | optionally send short token | none |
 | `group list` / `group show` | inspect durable group intent | none | none | none |
-| `group declare` / `add` / `coordinator` / `reconcile` | persist/inspect durable group intent | none | none | add-only label command |
+| `group declare` / `coordinator` | persist durable coordinator intent | none | none | none; coordinators are not projected |
+| `group add` / `reconcile` | persist/inspect durable member intent | none | none | add-only member label command |
 | `group remove` | remove durable group intent | none | none | unsupported; label may remain |
 | `report pending` / `history` | inspect durable reports | none | none | none |
 | `report submit` / `acknowledge` / `authorize-finish` | mutate durable report state | none | none | none |

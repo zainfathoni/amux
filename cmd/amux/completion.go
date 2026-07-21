@@ -77,7 +77,7 @@ var completionCommands = []completionCommand{
 		{Name: "coordinator", Description: "Designate a group coordinator", Flags: []string{"--group", "--thread", "-t"}},
 		{Name: "list", Description: "List durable group memberships", Flags: []string{"--group", "--thread", "--all", "-t"}},
 		{Name: "show", Description: "Show one durable group", Flags: []string{"--group"}},
-		{Name: "reconcile", Description: "Add-only ensure group labels", Flags: []string{"--group", "--thread", "--all", "-t"}},
+		{Name: "reconcile", Description: "Add-only ensure member group labels", Flags: []string{"--group", "--thread", "--all", "-t"}},
 	}},
 	{Name: "callback", Description: "Manage ephemeral coordinator callback leases", Subcommands: []completionCommand{
 		{Name: "register", Description: "Register an exact coordinator pane", Flags: []string{"--group", "--thread", "--pane", "-t"}},

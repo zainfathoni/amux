@@ -100,7 +100,7 @@ amux --json group declare --group <durable-issue-group> --thread <coordinator-th
 amux --json callback register --group <durable-issue-group> --thread <coordinator-thread> --pane <coordinator-pane>
 ```
 
-Before registration, independently verify the pane belongs to the configured coordinator worker. Parse the successful callback outcome and confirm its config directory, group/thread, pane, session/window IDs, PID, generation, and registration time against fresh tmux/process metadata. Registration human output is tab-separated: `<durable-issue-group><TAB>registered<TAB><generation><TAB><pane>`. A restart or any identity change invalidates the lease; explicitly register a new generation. Never guess a pane.
+Group declaration persists coordinator identity locally without adding the group label to that long-lived thread. Before registration, independently verify the pane belongs to the configured coordinator worker. Parse the successful callback outcome and confirm its config directory, group/thread, pane, session/window IDs, PID, generation, and registration time against fresh tmux/process metadata. Registration human output is tab-separated: `<durable-issue-group><TAB>registered<TAB><generation><TAB><pane>`. A restart or any identity change invalidates the lease; explicitly register a new generation. Never guess a pane.
 
 ### 3. Spawn and attach the authoritative receiving thread
 

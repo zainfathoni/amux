@@ -206,7 +206,7 @@ func groupCommand() *commandSpec {
 		groupLeaf("coordinator", "Designate a group's coordinator", true, "--group <id>", "--thread, -t <id>"),
 		groupLeaf("list", "List durable group memberships locally", false, "--group <id>", "--thread, -t <id>", "--all"),
 		groupLeaf("show", "Show one durable group locally", false, "--group <id>"),
-		groupLeaf("reconcile", "Add-only ensure current membership labels", true, "--group <id>", "--thread, -t <id>", "--all"),
+		groupLeaf("reconcile", "Add-only ensure member labels; skip coordinators", true, "--group <id>", "--thread, -t <id>", "--all"),
 	}
 	return group
 }

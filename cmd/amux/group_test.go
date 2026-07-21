@@ -50,7 +50,7 @@ func TestGroupDeclareAddManyToManyAndCoordinatorTransitions(t *testing.T) {
 	if !reflect.DeepEqual(memberships, want) {
 		t.Fatalf("memberships = %+v, want %+v", memberships, want)
 	}
-	if got := countMutationCommands(*commands); got != 5 {
+	if got := countMutationCommands(*commands); got != 2 {
 		t.Fatalf("label mutation commands = %d, commands=%v", got, *commands)
 	}
 }
@@ -138,10 +138,13 @@ func TestGroupCapabilityPreflightUsesOneExecutableAndWritesNothingWhenUnsupporte
 	}
 }
 
-func TestGroupCapabilityNormalizesControlSequencesAndDryRunDoesNotWrite(t *testing.T) {
+func TestGroupCoordinatorMutationAndDryRunDoNotProbeAmp(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-	calls := installSupportedGroupAmp(t, nil)
+	oldLookPath, oldExec := groupLookPath, groupExec
+	groupLookPath = func(string) (string, error) { panic("coordinator dry-run probed Amp") }
+	groupExec = func(string, ...string) ([]byte, error) { panic("coordinator dry-run invoked Amp") }
+	t.Cleanup(func() { groupLookPath, groupExec = oldLookPath, oldExec })
 	var stdout bytes.Buffer
 	err := (app{stdout: &stdout}).execute([]string{"--json", "--dry-run", "--config-dir", dir, "group", "declare", "--group", "issue-131", "--thread", "T-coordinator"})
 	if err != nil {
@@ -154,11 +157,200 @@ func TestGroupCapabilityNormalizesControlSequencesAndDryRunDoesNotWrite(t *testi
 	if err := json.NewDecoder(&stdout).Decode(&env); err != nil {
 		t.Fatal(err)
 	}
-	if len(env.Planned) != 1 || env.Planned[0].Group.ExternalSync != "additive_ensure_planned" || len(env.Successful) != 0 {
+	if len(env.Planned) != 1 || env.Planned[0].Group.ExternalSync != "not_projected" || len(env.Successful) != 0 {
 		t.Fatalf("dry-run envelope = %+v", env)
 	}
-	if len(*calls) != 2 || (*calls)[0].path != (*calls)[1].path || countMutationCommands(*calls) != 0 {
-		t.Fatalf("capability calls = %v", *calls)
+	stdout.Reset()
+	if err := (app{stdout: &stdout}).execute([]string{"--json", "--config-dir", dir, "group", "declare", "--group", "issue-131", "--thread", "T-coordinator"}); err != nil {
+		t.Fatal(err)
+	}
+	env = result.Envelope{}
+	if err := json.NewDecoder(&stdout).Decode(&env); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.Successful) != 1 || env.Successful[0].Group.ExternalSync != "not_projected" {
+		t.Fatalf("declare envelope = %+v", env)
+	}
+	memberships, err := config.LoadGroupsReadOnly(filepath.Join(dir, config.GroupsFile))
+	if err != nil || len(memberships) != 1 || memberships[0].Role != config.GroupCoordinator {
+		t.Fatalf("coordinator membership = %+v, %v", memberships, err)
+	}
+}
+
+func TestGroupCoordinatorReassignmentReportsDemotedAndPromotedDriftWithoutProbingAmp(t *testing.T) {
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dry-run=%t", dryRun), func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, config.GroupsFile)
+			memberships := []config.GroupMembership{
+				{Group: "alpha", Thread: "T-old", Role: config.GroupCoordinator},
+				{Group: "alpha", Thread: "T-new", Role: config.GroupMember},
+			}
+			if err := config.WriteGroups(path, memberships); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			oldLookPath, oldExec := groupLookPath, groupExec
+			groupLookPath = func(string) (string, error) { panic("coordinator reassignment probed Amp") }
+			groupExec = func(string, ...string) ([]byte, error) { panic("coordinator reassignment invoked Amp") }
+			t.Cleanup(func() { groupLookPath, groupExec = oldLookPath, oldExec })
+			args := []string{"--json", "--config-dir", dir, "group", "coordinator", "--group", "alpha", "--thread", "T-new"}
+			if dryRun {
+				args = append([]string{"--json", "--dry-run"}, args[1:]...)
+			}
+			var stdout bytes.Buffer
+			if err := (app{stdout: &stdout}).execute(args); err != nil {
+				t.Fatal(err)
+			}
+			var env result.Envelope
+			if err := json.NewDecoder(&stdout).Decode(&env); err != nil {
+				t.Fatal(err)
+			}
+			bucket := env.Successful
+			if dryRun {
+				bucket = env.Planned
+			}
+			var promoted, demoted *result.Outcome
+			for i := range bucket {
+				switch bucket[i].Resource.Thread {
+				case "T-new":
+					promoted = &bucket[i]
+				case "T-old":
+					demoted = &bucket[i]
+				}
+			}
+			if promoted == nil || promoted.Group.Role != string(config.GroupCoordinator) || promoted.Group.ExternalSync != "not_projected" || promoted.Group.Drift != "may_remain_indefinitely" {
+				t.Fatalf("promoted outcome = %+v (env=%+v)", promoted, env)
+			}
+			if demoted == nil || demoted.Group.Role != string(config.GroupMember) || demoted.Group.ExternalSync != "additive_ensure_required" || demoted.Group.Drift != "label_may_be_missing" {
+				t.Fatalf("demoted outcome = %+v (env=%+v)", demoted, env)
+			}
+			after, err := config.LoadGroupsReadOnly(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := memberships
+			if !dryRun {
+				want = []config.GroupMembership{
+					{Group: "alpha", Thread: "T-new", Role: config.GroupCoordinator},
+					{Group: "alpha", Thread: "T-old", Role: config.GroupMember},
+				}
+			}
+			if !reflect.DeepEqual(after, want) {
+				t.Fatalf("memberships after reassignment (dry-run=%t) = %+v, want %+v", dryRun, after, want)
+			}
+		})
+	}
+}
+
+func TestGroupRepeatedCoordinatorAndAddOnCoordinatorAreSkippedNoOps(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.GroupsFile)
+	if err := config.WriteGroups(path, []config.GroupMembership{{Group: "alpha", Thread: "T-coordinator", Role: config.GroupCoordinator}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	oldLookPath, oldExec := groupLookPath, groupExec
+	groupLookPath = func(string) (string, error) { panic("no-op probed Amp") }
+	groupExec = func(string, ...string) ([]byte, error) { panic("no-op invoked Amp") }
+	t.Cleanup(func() { groupLookPath, groupExec = oldLookPath, oldExec })
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{"declare", "coordinator", "add"} {
+		var stdout bytes.Buffer
+		if err := (app{stdout: &stdout}).execute([]string{"--json", "--config-dir", dir, "group", command, "--group", "alpha", "--thread", "T-coordinator"}); err != nil {
+			t.Fatalf("group %s: %v", command, err)
+		}
+		var env result.Envelope
+		if err := json.NewDecoder(&stdout).Decode(&env); err != nil {
+			t.Fatal(err)
+		}
+		if len(env.Skipped) != 1 || len(env.Planned) != 0 || len(env.Successful) != 0 || len(env.Failed) != 0 {
+			t.Fatalf("group %s no-op envelope = %+v", command, env)
+		}
+		if env.Skipped[0].Group.Role != string(config.GroupCoordinator) || env.Skipped[0].Group.ExternalSync != "not_projected" {
+			t.Fatalf("group %s skipped outcome = %+v", command, env.Skipped[0])
+		}
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("no-op mutated registry: err=%v\nbefore=%s\nafter=%s", err, before, after)
+	}
+}
+
+func TestGroupDeclareRepeatWithMembersIsNoOpAndRejectsConflicts(t *testing.T) {
+	// The group already has its coordinator plus an ordinary member row; a repeat
+	// declare on the coordinator must be a skipped no-op that neither writes nor
+	// probes Amp, while a declare naming a different thread stays a conflict.
+	base := []config.GroupMembership{
+		{Group: "alpha", Thread: "T-coordinator", Role: config.GroupCoordinator},
+		{Group: "alpha", Thread: "T-member", Role: config.GroupMember},
+	}
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dry-run=%t", dryRun), func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, config.GroupsFile)
+			if err := config.WriteGroups(path, base); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			oldLookPath, oldExec := groupLookPath, groupExec
+			groupLookPath = func(string) (string, error) { panic("repeat declare probed Amp") }
+			groupExec = func(string, ...string) ([]byte, error) { panic("repeat declare invoked Amp") }
+			t.Cleanup(func() { groupLookPath, groupExec = oldLookPath, oldExec })
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"--json", "--config-dir", dir, "group", "declare", "--group", "alpha", "--thread", "T-coordinator"}
+			if dryRun {
+				args = append([]string{"--json", "--dry-run"}, args[1:]...)
+			}
+			var stdout bytes.Buffer
+			if err := (app{stdout: &stdout}).execute(args); err != nil {
+				t.Fatalf("repeat declare: %v", err)
+			}
+			var env result.Envelope
+			if err := json.NewDecoder(&stdout).Decode(&env); err != nil {
+				t.Fatal(err)
+			}
+			if len(env.Skipped) != 1 || len(env.Planned) != 0 || len(env.Successful) != 0 || len(env.Failed) != 0 {
+				t.Fatalf("repeat declare envelope = %+v", env)
+			}
+			if env.Skipped[0].Group.Role != string(config.GroupCoordinator) || env.Skipped[0].Group.ExternalSync != "not_projected" {
+				t.Fatalf("repeat declare skipped outcome = %+v", env.Skipped[0])
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(after, before) {
+				t.Fatalf("repeat declare mutated registry: err=%v\nbefore=%s\nafter=%s", err, before, after)
+			}
+		})
+	}
+
+	// A declare naming a thread that is not the existing coordinator is rejected as
+	// a conflict, whether another coordinator holds the group or none does.
+	for name, memberships := range map[string][]config.GroupMembership{
+		"other-coordinator": {{Group: "alpha", Thread: "T-other", Role: config.GroupCoordinator}, {Group: "alpha", Thread: "T-member", Role: config.GroupMember}},
+		"no-coordinator":    {{Group: "alpha", Thread: "T-member", Role: config.GroupMember}},
+	} {
+		t.Run("reject/"+name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, config.GroupsFile)
+			if err := config.WriteGroups(path, memberships); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			oldLookPath, oldExec := groupLookPath, groupExec
+			groupLookPath = func(string) (string, error) { panic("conflicting declare probed Amp") }
+			groupExec = func(string, ...string) ([]byte, error) { panic("conflicting declare invoked Amp") }
+			t.Cleanup(func() { groupLookPath, groupExec = oldLookPath, oldExec })
+			err := (app{}).execute([]string{"--config-dir", dir, "group", "declare", "--group", "alpha", "--thread", "T-coordinator"})
+			if err == nil || result.ExitCode(err) != result.ExitRejected {
+				t.Fatalf("conflicting declare = %v, exit=%d", err, result.ExitCode(err))
+			}
+		})
 	}
 }
 
@@ -296,12 +488,13 @@ func TestGroupAddOnlyReconcileByMemberGroupAndAll(t *testing.T) {
 	}
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	tests := []struct {
-		selector []string
-		want     int
+		selector    []string
+		wantTargets []string
 	}{
-		{selector: []string{"--thread", "T-two"}, want: 2},
-		{selector: []string{"--group", "alpha"}, want: 2},
-		{selector: []string{"--all"}, want: 3},
+		{selector: []string{"--thread", "T-two"}, wantTargets: []string{"T-two/alpha"}},
+		{selector: []string{"--thread", "T-one"}, wantTargets: nil},
+		{selector: []string{"--group", "alpha"}, wantTargets: []string{"T-two/alpha"}},
+		{selector: []string{"--all"}, wantTargets: []string{"T-two/alpha"}},
 	}
 	for _, test := range tests {
 		commands := installSupportedGroupAmp(t, nil)
@@ -309,9 +502,49 @@ func TestGroupAddOnlyReconcileByMemberGroupAndAll(t *testing.T) {
 		if err := (app{}).execute(args); err != nil {
 			t.Fatal(err)
 		}
-		if got := countMutationCommands(*commands); got != test.want {
-			t.Fatalf("reconcile %v mutations = %d, want %d (%v)", test.selector, got, test.want, *commands)
+		if got := groupLabelTargets(*commands); !reflect.DeepEqual(got, test.wantTargets) {
+			t.Fatalf("reconcile %v label targets = %v, want %v (%v)", test.selector, got, test.wantTargets, *commands)
 		}
+	}
+}
+
+func TestGroupCoordinatorOnlyReconcileNeverProbesAmp(t *testing.T) {
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dry-run=%t", dryRun), func(t *testing.T) {
+			dir := t.TempDir()
+			memberships := []config.GroupMembership{
+				{Group: "alpha", Thread: "T-one", Role: config.GroupCoordinator},
+				{Group: "beta", Thread: "T-one", Role: config.GroupCoordinator},
+			}
+			if err := config.WriteGroups(filepath.Join(dir, config.GroupsFile), memberships); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			oldLookPath, oldExec := groupLookPath, groupExec
+			groupLookPath = func(string) (string, error) { panic("coordinator reconcile probed Amp") }
+			groupExec = func(string, ...string) ([]byte, error) { panic("coordinator reconcile invoked Amp") }
+			t.Cleanup(func() { groupLookPath, groupExec = oldLookPath, oldExec })
+			args := []string{"--json", "--config-dir", dir, "group", "reconcile", "--thread", "T-one"}
+			if dryRun {
+				args = append([]string{"--json", "--dry-run"}, args[1:]...)
+			}
+			var stdout bytes.Buffer
+			if err := (app{stdout: &stdout}).execute(args); err != nil {
+				t.Fatal(err)
+			}
+			var env result.Envelope
+			if err := json.NewDecoder(&stdout).Decode(&env); err != nil {
+				t.Fatal(err)
+			}
+			if len(env.Planned) != 0 || len(env.Successful) != 0 || len(env.Failed) != 0 || len(env.Skipped) != 2 {
+				t.Fatalf("coordinator-only reconcile envelope = %+v", env)
+			}
+			for _, out := range env.Skipped {
+				if out.Group.ExternalSync != "not_projected" {
+					t.Fatalf("coordinator skip = %+v", out)
+				}
+			}
+		})
 	}
 }
 
@@ -346,7 +579,7 @@ func TestGroupReconcileContinuesAfterFailureAndReportsMixedJSONOutcomes(t *testi
 	if decodeErr := json.NewDecoder(&stdout).Decode(&env); decodeErr != nil {
 		t.Fatal(decodeErr)
 	}
-	if countMutationCommands(*calls) != 3 || len(env.Successful) != 2 || len(env.Failed) != 1 || env.Failed[0].Group.Drift != "label_may_be_missing" {
+	if countMutationCommands(*calls) != 2 || len(env.Successful) != 1 || len(env.Skipped) != 1 || env.Skipped[0].Group.ExternalSync != "not_projected" || len(env.Failed) != 1 || env.Failed[0].Group.Drift != "label_may_be_missing" {
 		t.Fatalf("mixed reconcile calls=%v envelope=%+v", *calls, env)
 	}
 	after, readErr := os.ReadFile(path)
@@ -447,4 +680,15 @@ func countMutationCommands(calls []groupAmpCall) int {
 		}
 	}
 	return count
+}
+
+// groupLabelTargets returns the exact "<thread>/<label>" additive-label targets, in order.
+func groupLabelTargets(calls []groupAmpCall) []string {
+	var targets []string
+	for _, call := range calls {
+		if len(call.args) == 4 && call.args[0] == "threads" && call.args[1] == "label" {
+			targets = append(targets, call.args[2]+"/"+call.args[3])
+		}
+	}
+	return targets
 }

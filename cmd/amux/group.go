@@ -76,14 +76,10 @@ func (a app) executeGroup(in invocation, dir config.Directory) (*result.Envelope
 		return a.removeGroupMembership(in, dir, memberships, &env)
 	}
 
-	ampPath, err := preflightGroupAmp()
-	if err != nil {
-		return &env, result.Preflight(err)
-	}
 	if in.Command.Name == "reconcile" {
-		return a.reconcileGroupLabels(in, memberships, ampPath, &env)
+		return a.reconcileGroupLabels(in, memberships, &env)
 	}
-	return a.addOrCoordinateGroup(in, dir, memberships, ampPath, &env)
+	return a.addOrCoordinateGroup(in, dir, memberships, &env)
 }
 
 func validateGroupInvocation(in invocation) error {
@@ -172,7 +168,7 @@ func (a app) removeGroupMembership(in invocation, dir config.Directory, membersh
 	return env, nil
 }
 
-func (a app) addOrCoordinateGroup(in invocation, dir config.Directory, memberships []config.GroupMembership, ampPath string, env *result.Envelope) (*result.Envelope, error) {
+func (a app) addOrCoordinateGroup(in invocation, dir config.Directory, memberships []config.GroupMembership, env *result.Envelope) (*result.Envelope, error) {
 	group, thread := in.Selectors.Group, in.Selectors.Thread
 	index := membershipIndex(memberships, group, thread)
 	role := config.GroupMember
@@ -180,26 +176,42 @@ func (a app) addOrCoordinateGroup(in invocation, dir config.Directory, membershi
 		role = config.GroupCoordinator
 	}
 	if in.Command.Name == "declare" {
+		// A repeat declare is a no-op only when the requested thread is already the
+		// group's coordinator; ordinary member rows never block it. Any other existing
+		// state—a different coordinator, or members with no coordinator—is a conflict.
+		existingCoordinator := ""
+		groupExists := false
 		for _, membership := range memberships {
-			if membership.Group == group && (membership.Thread != thread || membership.Role != config.GroupCoordinator) {
-				return env, result.Preflight(fmt.Errorf("group %s is already declared; use group add or group coordinator", group))
+			if membership.Group != group {
+				continue
 			}
+			groupExists = true
+			if membership.Role == config.GroupCoordinator {
+				existingCoordinator = membership.Thread
+			}
+		}
+		if groupExists && existingCoordinator != thread {
+			return env, result.Preflight(fmt.Errorf("group %s is already declared; use group add or group coordinator", group))
 		}
 	}
 	updated := append([]config.GroupMembership(nil), memberships...)
 	changed := false
+	var demoted []config.GroupMembership
 	if role == config.GroupCoordinator {
 		for i := range updated {
 			if updated[i].Group == group && updated[i].Role == config.GroupCoordinator && updated[i].Thread != thread {
 				updated[i].Role = config.GroupMember
+				demoted = append(demoted, updated[i])
 				changed = true
 			}
 		}
 	}
+	promotedFromMember := false
 	if index < 0 {
 		updated = append(updated, config.GroupMembership{Group: group, Thread: thread, Role: role})
 		changed = true
 	} else if role == config.GroupCoordinator && updated[index].Role != role {
+		promotedFromMember = updated[index].Role == config.GroupMember
 		updated[index].Role = role
 		changed = true
 	} else {
@@ -207,14 +219,66 @@ func (a app) addOrCoordinateGroup(in invocation, dir config.Directory, membershi
 	}
 	membership := config.GroupMembership{Group: group, Thread: thread, Role: role}
 	out := groupOutcome(membership, in.Command.Name)
-	out.Group.ExternalSync = "additive_ensure_planned"
-	if !changed {
-		out.Message = "local intent already in desired state; additive label ensure remains planned"
+	// An exact repeat of declare/coordinator on the already-coordinator thread, or
+	// add targeting an existing coordinator, changes nothing and is a skipped no-op.
+	noop := false
+	if role == config.GroupCoordinator {
+		out.Group.ExternalSync = "not_projected"
+		switch {
+		case !changed:
+			noop = true
+			out.Message = "coordinator intent already matches durable local state; no local or external change"
+		case promotedFromMember:
+			// A promoted member may still carry the label added while it was a member;
+			// Amp has no removal API, so the stale label may remain indefinitely.
+			out.Group.Drift = "may_remain_indefinitely"
+			out.Message = "coordinator intent persisted locally; a prior member label is not projected and may remain indefinitely"
+		default:
+			out.Message = "coordinator intent persisted locally; coordinator labels are not projected to Amp"
+		}
+	} else {
+		out.Group.ExternalSync = "additive_ensure_planned"
+		if !changed {
+			out.Message = "local intent already in desired state; additive label ensure remains planned"
+		}
+	}
+	// A demoted prior coordinator becomes a member whose label was never projected;
+	// surface the drift and reconcile guidance without probing Amp from this command.
+	demotedOutcomes := make([]result.Outcome, 0, len(demoted))
+	for _, m := range demoted {
+		d := groupOutcome(m, "demote")
+		d.Group.ExternalSync = "additive_ensure_required"
+		d.Group.Drift = "label_may_be_missing"
+		d.Message = "demoted the prior coordinator to member; its member label may be missing—run group reconcile to add-only ensure it"
+		demotedOutcomes = append(demotedOutcomes, d)
+	}
+	var ampPath string
+	if role == config.GroupMember {
+		var err error
+		ampPath, err = preflightGroupAmp()
+		if err != nil {
+			return env, result.Preflight(err)
+		}
 	}
 	if in.Options.DryRun {
-		env.Planned = append(env.Planned, out)
+		if noop {
+			env.Skipped = append(env.Skipped, out)
+		} else {
+			env.Planned = append(env.Planned, out)
+		}
+		env.Planned = append(env.Planned, demotedOutcomes...)
 		if !in.Options.JSON {
-			fmt.Fprintf(a.stdout, "Would persist %s membership %s\t%s and add-only ensure its Amp label.\n", role, group, thread)
+			switch {
+			case noop:
+				fmt.Fprintf(a.stdout, "Would leave coordinator membership %s\t%s unchanged; nothing to project.\n", group, thread)
+			case role == config.GroupCoordinator:
+				fmt.Fprintf(a.stdout, "Would persist coordinator membership %s\t%s locally without projecting an Amp label.\n", group, thread)
+			default:
+				fmt.Fprintf(a.stdout, "Would persist member membership %s\t%s and add-only ensure its Amp label.\n", group, thread)
+			}
+			for _, m := range demoted {
+				fmt.Fprintf(a.stdout, "Would demote prior coordinator %s\t%s to member; its label may be missing—run group reconcile to add-only ensure it.\n", m.Group, m.Thread)
+			}
 		}
 		return env, nil
 	}
@@ -223,16 +287,58 @@ func (a app) addOrCoordinateGroup(in invocation, dir config.Directory, membershi
 			return env, result.Runtime(err)
 		}
 	}
+	if role == config.GroupCoordinator {
+		if noop {
+			env.Skipped = append(env.Skipped, out)
+			if !in.Options.JSON {
+				fmt.Fprintf(a.stdout, "%s\t%s\t%s\tcoordinator intent already current; no change\n", membership.Group, membership.Thread, membership.Role)
+			}
+		} else {
+			env.Successful = append(env.Successful, out)
+			if !in.Options.JSON {
+				fmt.Fprintf(a.stdout, "%s\t%s\t%s\tlocal coordinator intent persisted; Amp label not projected\n", membership.Group, membership.Thread, membership.Role)
+			}
+		}
+		env.Successful = append(env.Successful, demotedOutcomes...)
+		if !in.Options.JSON {
+			for _, m := range demoted {
+				fmt.Fprintf(a.stdout, "%s\t%s\tmember\tdemoted from coordinator; run group reconcile to add-only ensure its label\n", m.Group, m.Thread)
+			}
+		}
+		return env, nil
+	}
 	return a.ensureGroupLabel(env, out, ampPath, membership, in.Options.JSON)
 }
 
-func (a app) reconcileGroupLabels(in invocation, memberships []config.GroupMembership, ampPath string, env *result.Envelope) (*result.Envelope, error) {
+func (a app) reconcileGroupLabels(in invocation, memberships []config.GroupMembership, env *result.Envelope) (*result.Envelope, error) {
 	selected := selectGroupMemberships(memberships, in.Selectors)
 	if len(selected) == 0 {
 		return env, result.Preflight(errors.New("no local group membership matches the selector"))
 	}
+	members := make([]config.GroupMembership, 0, len(selected))
+	for _, membership := range selected {
+		if membership.Role == config.GroupMember {
+			members = append(members, membership)
+			continue
+		}
+		out := groupOutcome(membership, "ensure-label")
+		out.Group.ExternalSync = "not_projected"
+		out.Message = "coordinator membership is local-only and is not projected to an Amp label"
+		env.Skipped = append(env.Skipped, out)
+		if !in.Options.JSON {
+			fmt.Fprintf(a.stdout, "Skipped label ensure for coordinator %s\t%s; coordinator labels are not projected.\n", membership.Group, membership.Thread)
+		}
+	}
+	var ampPath string
+	if len(members) != 0 {
+		var err error
+		ampPath, err = preflightGroupAmp()
+		if err != nil {
+			return env, result.Preflight(err)
+		}
+	}
 	if in.Options.DryRun {
-		for _, membership := range selected {
+		for _, membership := range members {
 			out := groupOutcome(membership, "ensure-label")
 			out.Group.ExternalSync = "additive_ensure_planned"
 			env.Planned = append(env.Planned, out)
@@ -242,8 +348,11 @@ func (a app) reconcileGroupLabels(in invocation, memberships []config.GroupMembe
 		}
 		return env, nil
 	}
+	if len(members) == 0 {
+		return env, nil
+	}
 	failed := false
-	for _, membership := range selected {
+	for _, membership := range members {
 		out := groupOutcome(membership, "ensure-label")
 		if _, err := a.ensureGroupLabel(env, out, ampPath, membership, in.Options.JSON); err != nil {
 			failed = true
