@@ -16,6 +16,7 @@ import math
 import os
 import pathlib
 import platform
+import re
 import secrets
 import selectors
 import shlex
@@ -45,6 +46,7 @@ PRE_IDENTITY_LAUNCH_INTENT_COMPATIBILITY = "pre_identity_launch_intent_v1"
 HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY = (
     "historical_modern_read_only_launch_intent_v1"
 )
+PRE_IDENTITY_ACQUIRED_NO_REPORT_COMPATIBILITY = "pre_identity_acquired_no_report_v1"
 EXEC_BUDGET_MARGIN_BYTES = 32 * 1024
 STARTUP_TIMEOUT_SECONDS = 4.0
 STARTUP_STABILITY_SECONDS = 1.5
@@ -689,7 +691,10 @@ class ReceiptStore:
         compatibility = request.get("compatibility")
         if (
             compatibility is not None
-            and compatibility != HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY
+            and compatibility not in {
+                HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY,
+                PRE_IDENTITY_ACQUIRED_NO_REPORT_COMPATIBILITY,
+            }
         ):
             raise HelperError("acquired no-report pair retirement compatibility is unsupported")
         recover = request.get("recover", False)
@@ -726,6 +731,16 @@ class ReceiptStore:
                 receipt = self.find(store, delegation_id)
                 if receipt["binding"].get("origin_thread") != origin_thread:
                     raise HelperError("receipt immutable origin does not match acquired retirement authority")
+                if compatibility == PRE_IDENTITY_ACQUIRED_NO_REPORT_COMPATIBILITY:
+                    if recover:
+                        raise HelperError("pre-identity acquired policy has no mutable outcome to recover")
+                    if not valid_pre_identity_acquired_no_report_candidate(receipt):
+                        raise HelperError(
+                            "permanent-terminal policy requires the exact pre-identity acquired no-report chain"
+                        )
+                    return pre_identity_acquired_permanent_terminal_result(
+                        origin_sha256, pair_sha256
+                    )
                 terminal = find_event(receipt, result_id)
                 existing = find_event(receipt, event_id)
                 acquired_intents = [
@@ -4636,6 +4651,8 @@ def worker_teardown_receipt_blocker(receipt: dict[str, Any]) -> str | None:
         or valid_acquired_no_report_pair_retirement_chain(receipt)
     ):
         return None
+    if valid_pre_identity_acquired_no_report_candidate(receipt):
+        return "pre_identity_acquired_pair_permanently_non_retirable"
     if receipt.get("input_state") in {"pending", "seen"}:
         return "unresolved_input"
     events = receipt.get("events", [])
@@ -5023,6 +5040,90 @@ def valid_live_acquired_no_report_retirement_candidate(
     return True
 
 
+def valid_pre_identity_acquired_no_report_candidate(receipt: dict[str, Any]) -> bool:
+    events = receipt.get("events")
+    if (
+        not isinstance(events, list)
+        or any(not isinstance(event, dict) for event in events)
+        or [event.get("kind") for event in events]
+        != ["created", "launch_intent", "launch_completed", "session_acquired"]
+        or receipt.get("state") != "created"
+        or receipt.get("report_message_id") != ""
+        or set(receipt) != {
+            "binding", "routing", "state", "report_message_id", "created_at", "updated_at", "events",
+            "session_identity",
+        }
+    ):
+        return False
+    created, launch_intent, launch_completed, acquired = events
+    binding = receipt.get("binding", {})
+    identity = receipt.get("session_identity")
+    historical_identity_fields = {
+        "claude_session_id", "session", "window", "window_id", "pane_id", "pane_pid", "workdir",
+        "current_command", "process_name", "process_identity", "process_command_digest",
+        "launch_command_digest",
+    }
+    if (
+        set(created) != {"event_id", "kind", "at", "routing"}
+        or created.get("event_id") != f"create:{binding.get('delegation_id', '')}"
+        or not bounded_utc_timestamp(created.get("at"))
+        or receipt.get("created_at") != created.get("at")
+        or receipt.get("updated_at") != acquired.get("at")
+        or set(launch_completed)
+        != {"event_id", "kind", "operation_event_id", "identity", "at"}
+        or launch_completed.get("event_id")
+        != internal_event_id("launch-result", launch_intent.get("event_id", ""))
+        or launch_completed.get("operation_event_id") != launch_intent.get("event_id")
+        or not bounded_utc_timestamp(launch_completed.get("at"))
+        or not isinstance(launch_completed.get("identity"), dict)
+        or set(launch_completed["identity"]) != {"session", "window", "window_id", "pane_id"}
+        or set(acquired) != {"event_id", "kind", "identity", "at"}
+        or not bounded_utc_timestamp(acquired.get("at"))
+        or not isinstance(identity, dict)
+        or set(identity) != historical_identity_fields
+        or acquired.get("identity") != identity
+        or any(
+            not isinstance(identity.get(key), str) or not identity[key]
+            for key in historical_identity_fields - {"pane_pid"}
+        )
+        or type(identity.get("pane_pid")) is not int
+        or identity["pane_pid"] <= 0
+        or any(
+            launch_completed["identity"].get(key) != identity.get(key)
+            for key in ("session", "window", "window_id", "pane_id")
+        )
+        or not re.fullmatch(r"@[0-9]+", identity["window_id"])
+        or not re.fullmatch(r"%[0-9]+", identity["pane_id"])
+        or any(
+            len(identity[key]) != 64
+            or any(character not in "0123456789abcdef" for character in identity[key])
+            for key in ("process_command_digest", "launch_command_digest")
+        )
+    ):
+        return False
+    try:
+        protocol_id(acquired, "event_id")
+        protocol_id(identity, "claude_session_id")
+        for key in ("session", "window", "window_id", "pane_id", "current_command", "process_name", "process_identity"):
+            required_string(identity, key, 256)
+        required_string(identity, "workdir", 2048)
+        intent = pre_identity_launch_intent(receipt)
+        if validate_binding(binding) != binding:
+            return False
+        routing = validate_routing(receipt.get("routing"))
+    except (HelperError, KeyError, OSError):
+        return False
+    return (
+        routing == receipt.get("routing")
+        and created.get("routing") == routing
+        and identity["session"] == intent["tmux_session"]
+        and identity["window"] == intent["tmux_window"]
+        and identity["claude_session_id"] == intent["claude_session_id"]
+        and identity["workdir"] == binding.get("workdir")
+        and identity["launch_command_digest"] == binding.get("launch_command_digest")
+    )
+
+
 def validate_acquired_retirement_operation(
     event: dict[str, Any],
     authorization: dict[str, str],
@@ -5159,6 +5260,22 @@ def acquired_pair_retirement_blocked(
         "pair_sha256": pair_sha256,
         "outcome": "blocked",
         "blocker": blocker,
+        "fence": "retained",
+    }
+
+
+def pre_identity_acquired_permanent_terminal_result(
+    origin_sha256: str, pair_sha256: str
+) -> dict[str, str]:
+    return {
+        "action": "live_acquired_no_report_pair_retirement",
+        "origin_thread_sha256": origin_sha256,
+        "pair_sha256": pair_sha256,
+        "outcome": "blocked",
+        "blocker": "pre_identity_acquired_pair_permanently_non_retirable",
+        "policy": "preserve_receipt_runtime_artifacts_and_origin_fence",
+        "remediation": "paired_worker_teardown_prohibited",
+        "compatibility": PRE_IDENTITY_ACQUIRED_NO_REPORT_COMPATIBILITY,
         "fence": "retained",
     }
 
