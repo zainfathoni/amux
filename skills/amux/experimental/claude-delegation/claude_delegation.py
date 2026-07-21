@@ -275,7 +275,7 @@ class ReceiptStore:
                             if time.monotonic() >= deadline:
                                 raise LaunchGateBusy("launch gate is busy") from error
                             time.sleep(0.01)
-                os.set_inheritable(gate_file.fileno(), True)
+                os.set_inheritable(gate_file.fileno(), False)
             except OSError as error:
                 raise HelperError("launch gate is unavailable") from error
             yield
