@@ -5871,25 +5871,77 @@ printf '%s\n' '[{"provider":"claude","source":"web","usage":{"primary":{"usedPer
 			t.Errorf("diagnostics leaked forbidden field %q", forbidden)
 		}
 	}
-	malformed := []string{
-		`[{"provider":"claude","source":"private-sentinel","source":"web","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
-		`[{"provider":"claude","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
-		`[{"provider":"claude","source":"claude","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
-		`[{"provider":"claude","source":"web","extra":"unsupported","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
-		`[{"provider":"claude","source":"web","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z","extra":"unsupported"}}]`,
-		`[{"provider":"claude","source":"web","usage":{"primary":{"usedPercent":12,"windowMinutes":300,"resetsAt":"2026-07-20T15:00:00Z","extra":"unsupported"},"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
-		`[{"provider":"claude","source":"web","sourceVersion":1,"schemaVersion":1,"usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
+	initialDiagnostic := decodeJSONMap(t, stdout)
+	initialCapacity := initialDiagnostic["capacity"].(map[string]any)
+	if initialCapacity["reason"] != "capacity source payload has no supported versioned contract" || len(initialCapacity["windows"].([]any)) != 0 {
+		t.Fatalf("unversioned capacity diagnostic = %#v", initialCapacity)
 	}
-	for index, payload := range malformed {
-		writeExecutable(t, filepath.Join(binDir, "codexbar"), "#!/bin/sh\nprintf '%s\\n' '"+payload+"'\n")
+	hugePercentage := strings.Repeat("9", 400)
+	capacityCases := []struct {
+		name    string
+		script  string
+		reason  string
+		private string
+	}{
+		{
+			name:   "command failure",
+			script: "#!/bin/sh\nexit 2\n",
+			reason: "capacity source command or execution failed",
+		},
+		{
+			name:    "malformed JSON",
+			script:  "#!/bin/sh\nprintf '%s\\n' '[{private-sentinel}]'\n",
+			reason:  "capacity source returned malformed JSON",
+			private: "private-sentinel",
+		},
+		{
+			name:   "nonstandard numeric constants",
+			script: "#!/bin/sh\nprintf '%s\\n' '[{\"provider\":\"claude\",\"source\":\"web\",\"usage\":{\"primary\":{\"usedPercent\":NaN},\"secondary\":{\"usedPercent\":Infinity},\"tertiary\":{\"usedPercent\":-Infinity},\"extraRateWindows\":[],\"updatedAt\":\"2026-07-20T12:00:00Z\"}}]'\n",
+			reason: "capacity source returned malformed JSON",
+		},
+		{
+			name:   "valid unrecognized payload",
+			script: "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+			reason: "capacity source payload is unrecognized",
+		},
+		{
+			name: "recognized current CodexBar shape",
+			script: `#!/bin/sh
+printf '%s\n' '[{"provider":"claude","version":"synthetic-version","source":"web","status":{"indicator":"synthetic"},"usage":{"primary":{"usedPercent":12,"windowMinutes":300},"secondary":{"usedPercent":34,"windowMinutes":10080,"resetsAt":"2026-07-24T00:00:00Z"},"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z","dataConfidence":"estimated"}}]'
+`,
+			reason: "recognized CodexBar capacity payload has unsupported schema or version",
+		},
+		{
+			name:    "duplicate key",
+			script:  "#!/bin/sh\nprintf '%s\\n' '[{\"provider\":\"claude\",\"source\":\"private-sentinel\",\"source\":\"web\",\"usage\":{\"primary\":null,\"secondary\":null,\"tertiary\":null,\"extraRateWindows\":[],\"updatedAt\":\"2026-07-20T12:00:00Z\"}}]'\n",
+			reason:  "capacity source returned malformed JSON",
+			private: "private-sentinel",
+		},
+		{
+			name:   "unsupported surrogate timestamp",
+			script: "#!/bin/sh\nprintf '%s\\n' '[{\"provider\":\"claude\",\"source\":\"web\",\"usage\":{\"primary\":null,\"secondary\":null,\"tertiary\":null,\"extraRateWindows\":[],\"updatedAt\":\"\\ud800\"}}]'\n",
+			reason: "recognized CodexBar capacity payload has unsupported schema or version",
+		},
+		{
+			name:   "unsupported oversized number",
+			script: "#!/bin/sh\nprintf '%s\\n' '[{\"provider\":\"claude\",\"source\":\"web\",\"usage\":{\"primary\":{\"usedPercent\":" + hugePercentage + ",\"windowMinutes\":300,\"resetsAt\":\"2026-07-20T15:00:00Z\"},\"secondary\":null,\"tertiary\":null,\"extraRateWindows\":[],\"updatedAt\":\"2026-07-20T12:00:00Z\"}}]'\n",
+			reason: "recognized CodexBar capacity payload has unsupported schema or version",
+		},
+	}
+	for _, test := range capacityCases {
+		writeExecutable(t, filepath.Join(binDir, "codexbar"), test.script)
 		stdout, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{}, "diagnose")
 		if err != nil {
-			t.Fatalf("diagnose malformed capacity shape %d: %v: %s", index, err, stderr)
+			t.Fatalf("diagnose %s: %v: %s", test.name, err, stderr)
 		}
 		diagnostic := decodeJSONMap(t, stdout)
 		capacity, ok := diagnostic["capacity"].(map[string]any)
-		if !ok || capacity["status"] != "unavailable" || strings.Contains(stdout, "private-sentinel") {
-			t.Fatalf("malformed diagnostic capacity %d was accepted or leaked: %s", index, stdout)
+		windows, windowsOK := capacity["windows"].([]any)
+		if !ok || capacity["status"] != "unavailable" || capacity["reason"] != test.reason || !windowsOK || len(windows) != 0 {
+			t.Fatalf("%s diagnostic = %s", test.name, stdout)
+		}
+		if test.private != "" && strings.Contains(stdout, test.private) {
+			t.Fatalf("%s diagnostic leaked private input: %s", test.name, stdout)
 		}
 	}
 	writeExecutable(t, filepath.Join(binDir, "claude"), `#!/bin/sh
@@ -5918,16 +5970,20 @@ esac
 
 	tooManyExtraWindows := strings.Repeat(`{"id":"id","title":"title","window":{"usedPercent":1,"windowMinutes":1,"resetsAt":"2026-07-20T12:01:00Z"}},`, 33)
 	tooManyExtraWindows = strings.TrimSuffix(tooManyExtraWindows, ",")
-	boundedMalformed := []string{
-		"printf '\\377'",
-		"python3 -c 'print(\"x\" * 262145)'",
-		"python3 -c 'print(\"[\" * 1100 + \"0\" + \"]\" * 1100)'",
-		"printf '%s\\n' '" + `[{"provider":"claude","source":"web","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[` + tooManyExtraWindows + `],"updatedAt":"2026-07-20T12:00:00Z"}}]` + "'",
+	boundedMalformed := []struct {
+		command string
+		reason  string
+	}{
+		{"printf '\\377'", "capacity source returned malformed JSON"},
+		{"python3 -c 'print(\"x\" * 262145)'", "capacity source command or execution failed"},
+		{"printf '%s\\n' '" + `[{"provider":"claude","source":"web","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[` + tooManyExtraWindows + `],"updatedAt":"2026-07-20T12:00:00Z"}}]` + "'", "recognized CodexBar capacity payload has unsupported schema or version"},
 	}
-	for index, command := range boundedMalformed {
-		writeExecutable(t, filepath.Join(binDir, "codexbar"), "#!/bin/sh\n"+command+"\n")
+	for index, test := range boundedMalformed {
+		writeExecutable(t, filepath.Join(binDir, "codexbar"), "#!/bin/sh\n"+test.command+"\n")
 		stdout, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{}, "diagnose")
-		if err != nil || len(stdout) > 4096 || !strings.Contains(stdout, `"status":"unavailable"`) {
+		diagnostic := decodeJSONMap(t, stdout)
+		capacity := diagnostic["capacity"].(map[string]any)
+		if err != nil || len(stdout) > 4096 || capacity["status"] != "unavailable" || capacity["reason"] != test.reason || len(capacity["windows"].([]any)) != 0 {
 			t.Fatalf("unbounded malformed diagnostic %d: %v: %s%s", index, err, stdout, stderr)
 		}
 	}

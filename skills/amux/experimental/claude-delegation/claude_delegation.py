@@ -86,6 +86,10 @@ def reject_duplicate_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
+def reject_json_constant(_value: str) -> None:
+    raise HelperError("JSON input contains an unsupported constant")
+
+
 def read_input() -> dict[str, Any]:
     raw = sys.stdin.buffer.read(MAX_STORE_BYTES + 1)
     if len(raw) > MAX_STORE_BYTES:
@@ -3839,21 +3843,43 @@ def diagnostics() -> dict[str, Any]:
     capacity: dict[str, Any] = {"status": "unavailable", "windows": []}
     try:
         diagnostic_environment = exact_launch_environment(["GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN"])
-        raw = json.loads(
-            read_capacity_source(
-                ["codexbar", "usage", "--provider", "claude", "--format", "json"],
-                diagnostic_environment,
-            ),
-            object_pairs_hook=reject_duplicate_json_pairs,
+        encoded_capacity = read_capacity_source(
+            ["codexbar", "usage", "--provider", "claude", "--format", "json"],
+            diagnostic_environment,
         )
-        validate_codexbar_capacity_payload(raw)
-        capacity = {"status": "unavailable", "reason": "capacity source payload has no supported versioned contract", "windows": []}
-    except (HelperError, json.JSONDecodeError, KeyError, RecursionError, TypeError):
-        capacity = {"status": "unavailable", "reason": "capacity source is unavailable", "windows": []}
+    except HelperError:
+        capacity = {"status": "unavailable", "reason": "capacity source command or execution failed", "windows": []}
+    else:
+        try:
+            raw = json.loads(
+                encoded_capacity,
+                object_pairs_hook=reject_duplicate_json_pairs,
+                parse_constant=reject_json_constant,
+            )
+        except (HelperError, UnicodeDecodeError, ValueError, RecursionError, TypeError):
+            capacity = {"status": "unavailable", "reason": "capacity source returned malformed JSON", "windows": []}
+        else:
+            if not is_recognized_codexbar_capacity_payload(raw):
+                capacity = {"status": "unavailable", "reason": "capacity source payload is unrecognized", "windows": []}
+            else:
+                try:
+                    validate_codexbar_capacity_payload(raw)
+                except (HelperError, KeyError, TypeError, UnicodeError, OverflowError):
+                    capacity = {
+                        "status": "unavailable",
+                        "reason": "recognized CodexBar capacity payload has unsupported schema or version",
+                        "windows": [],
+                    }
+                else:
+                    capacity = {
+                        "status": "unavailable",
+                        "reason": "capacity source payload has no supported versioned contract",
+                        "windows": [],
+                    }
     return {"experimental": True, "capabilities": capabilities, "capacity": capacity}
 
 
-def read_capacity_source(arguments: list[str], environment: dict[str, str]) -> str:
+def read_capacity_source(arguments: list[str], environment: dict[str, str]) -> bytes:
     try:
         process = subprocess.Popen(
             arguments,
@@ -3885,8 +3911,8 @@ def read_capacity_source(arguments: list[str], environment: dict[str, str]) -> s
         process.wait(timeout=max(0.001, deadline - time.monotonic()))
         if process.returncode != 0:
             raise HelperError("capacity source is unavailable")
-        return output.decode("utf-8")
-    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as error:
+        return bytes(output)
+    except (OSError, subprocess.TimeoutExpired) as error:
         raise HelperError("capacity source is unavailable") from error
     finally:
         selector.close()
@@ -3932,6 +3958,16 @@ def read_bounded_command(arguments: list[str], limit: int) -> str:
         process.wait()
         if process.stdout is not None:
             process.stdout.close()
+
+
+def is_recognized_codexbar_capacity_payload(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == 1
+        and isinstance(value[0], dict)
+        and value[0].get("provider") == "claude"
+        and "usage" in value[0]
+    )
 
 
 def validate_codexbar_capacity_payload(value: Any) -> None:
