@@ -2857,6 +2857,23 @@ print("ok")
 			t.Fatalf("acquired retirement CLI leaked private identity %q: %s%s", forbidden, stdout, stderr)
 		}
 	}
+	private["compatibility"] = "pre_identity_acquired_no_report_v1"
+	private["owner_authorization"] = map[string]any{
+		"decision":                            "dispose_exact_pane_process_incarnation",
+		"executable_identity_acknowledgement": "unproved",
+		"authorization_sha256":                strings.Repeat("8", 64),
+	}
+	stdout, stderr, err = runHelper(
+		t, stateDir, private, "lifecycle", "dispose-exact-pre-identity-acquired-pair",
+	)
+	if err == nil || !strings.Contains(stdout, `"blocker":"exact_pane_disposal_proof_invalid_or_unavailable"`) {
+		t.Fatalf("privacy-safe exact-pane disposal CLI blocker = %v: %s%s", err, stdout, stderr)
+	}
+	for _, forbidden := range []string{"private-delegation", "private-event", "private-origin"} {
+		if strings.Contains(stdout+stderr, forbidden) {
+			t.Fatalf("exact-pane disposal CLI leaked private identity %q: %s%s", forbidden, stdout, stderr)
+		}
+	}
 }
 
 func TestPreIdentityAcquiredNoReportPairHasPermanentTerminalPolicy(t *testing.T) {
@@ -2982,6 +2999,322 @@ print("ok")
 	}
 }
 
+func TestOwnerAuthorizedExactPreIdentityPaneDisposal(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import copy, hashlib, importlib.util, pathlib, sys, tempfile
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+real_inspect_exact_pre_identity_target = module.inspect_exact_pre_identity_target
+real_stop_exact_pre_identity_target = module.stop_exact_pre_identity_target
+
+state = pathlib.Path(tempfile.mkdtemp()).resolve(); state.chmod(0o700)
+workdir = pathlib.Path(tempfile.mkdtemp()).resolve()
+store = module.ReceiptStore(state, state)
+binding = {"protocol_version":1, "delegation_id":"synthetic-exact-pane", "nonce":"1" * 64,
+    "task_id":"task", "question_message_id":"question", "origin_thread":"T-synthetic",
+    "repository":"repository", "base":"2" * 40, "workdir":str(workdir), "producer_role":"thinker",
+    "authority":"read_only", "task_reference":"fixture", "packet_digest":"3" * 64,
+    "launch_policy_digest":"4" * 64, "launch_command_digest":"5" * 64}
+assert store.create({"binding":binding, "routing":{"target":"machine_local_inbox"}}) == "recorded"
+data = store.load_store(); receipt = data["receipts"][0]
+intent = {"event_id":"launch", "kind":"launch_intent", "workflow":"read_only",
+    "request_digest":"8" * 64, "claude_session_id":"550e8400-e29b-41d4-a716-446655440000",
+    "tmux_session":"Synthetic", "tmux_window":"pre-identity", "packet_digest":"3" * 64,
+    "launch_policy_digest":"4" * 64, "launch_command_digest":"5" * 64,
+    "at":"2026-07-20T12:00:00Z"}
+completed = {"session":"Synthetic", "window":"pre-identity", "window_id":"@17", "pane_id":"%23"}
+acquired = {**completed, "pane_pid":4242, "claude_session_id":intent["claude_session_id"],
+    "workdir":str(workdir), "current_command":"claude", "process_name":"claude",
+    "process_identity":"1750000000.000017", "process_command_digest":"9" * 64,
+    "launch_command_digest":"5" * 64}
+receipt["events"].extend([
+    intent,
+    {"event_id":module.internal_event_id("launch-result", "launch"), "kind":"launch_completed",
+     "operation_event_id":"launch", "identity":completed, "at":"2026-07-20T12:00:01Z"},
+    {"event_id":"acquired", "kind":"session_acquired", "identity":acquired,
+     "at":"2026-07-20T12:00:02Z"},
+])
+receipt["session_identity"] = copy.deepcopy(acquired)
+receipt["updated_at"] = "2026-07-20T12:00:02Z"; store.commit(data)
+request = {"delegation_id":"synthetic-exact-pane", "event_id":"dispose-stable",
+    "origin_thread":"T-synthetic", "compatibility":"pre_identity_acquired_no_report_v1",
+    "owner_authorization":{
+        "decision":"dispose_exact_pane_process_incarnation",
+        "executable_identity_acknowledgement":"unproved",
+        "authorization_sha256":"a" * 64,
+    },
+    "authorization":{"terminal_state":"merged", "report_sha256":"6" * 64,
+                     "coordinator_authorization_sha256":"7" * 64}}
+pristine = copy.deepcopy(store.load_store()["receipts"][0])
+
+def fixture(name):
+    fixture_state = pathlib.Path(tempfile.mkdtemp()).resolve(); fixture_state.chmod(0o700)
+    candidate = module.ReceiptStore(fixture_state, fixture_state)
+    candidate_binding = copy.deepcopy(binding); candidate_binding["delegation_id"] = name
+    assert candidate.create({"binding":candidate_binding,
+                             "routing":{"target":"machine_local_inbox"}}) == "recorded"
+    candidate_data = candidate.load_store(); candidate_receipt = copy.deepcopy(pristine)
+    candidate_receipt["binding"]["delegation_id"] = name
+    candidate_receipt["events"][0]["event_id"] = "create:" + name
+    candidate_data["receipts"] = [candidate_receipt]; candidate.commit(candidate_data)
+    candidate_request = copy.deepcopy(request); candidate_request["delegation_id"] = name
+    return candidate, candidate_request
+
+live = {key:value for key,value in acquired.items() if key != "process_identity"}
+live.update(session_id="$7", process_start_identity="process-start:1750000000.000017")
+connections = []
+class FakeControl:
+    def __init__(self, session): self.session = session; connections.append(self)
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+module.TmuxControlConnection = FakeControl
+inspections = []; stops = []; absences = []
+module.inspect_exact_pre_identity_target = lambda control, durable: (
+    inspections.append((control, copy.deepcopy(durable))), copy.deepcopy(live))[1]
+module.stop_exact_pre_identity_target = lambda control, identity: stops.append((control, copy.deepcopy(identity)))
+module.confirm_exact_pre_identity_target_absent = lambda control, identity: (
+    absences.append((control, copy.deepcopy(identity))), "exact_pane_process_incarnation_absent")[1]
+
+original = copy.deepcopy(store.load_store()["receipts"][0])
+result = store.dispose_exact_pre_identity_acquired_pair(request)
+assert result["outcome"] == "disposed" and result["fence"] == "retained", result
+assert len(connections) == 1 and len(inspections) == 2 and len(stops) == 1 and len(absences) == 1
+assert all(item[0] is connections[0] for item in inspections + stops + absences)
+sealed = store.load_store()["receipts"][0]
+assert sealed["events"][:4] == original["events"]
+assert [event["kind"] for event in sealed["events"][-2:]] == [
+    "exact_pane_disposal_intent", "exact_pane_disposed"]
+assert sealed["state"] == "created" and sealed["report_message_id"] == ""
+assert "cleanup_eligible_at" not in sealed
+assert store.worker_teardown("T-synthetic", True)["pairs"] == [{
+    "pair_sha256":hashlib.sha256(b"synthetic-exact-pane").hexdigest(),
+    "state":"exact_pane_disposed", "action":"none"}]
+
+# The old permanent-preservation query remains byte-identical and performs no live action.
+policy, policy_request = fixture("synthetic-policy-stable")
+policy_request.pop("owner_authorization")
+before = policy.path.read_bytes(); connection_count = len(connections)
+policy_result = policy.retire_live_acquired_no_report_pair(policy_request)
+assert policy_result["blocker"] == "pre_identity_acquired_pair_permanently_non_retirable"
+assert policy.path.read_bytes() == before and len(connections) == connection_count
+
+# Interruption leaves durable intent. Recovery proves absence first and never stops blindly.
+interrupted, interrupted_request = fixture("synthetic-exact-pane-interrupted")
+module.inspect_exact_pre_identity_target = lambda control, durable: copy.deepcopy(live)
+module.stop_exact_pre_identity_target = lambda *args: (_ for _ in ()).throw(
+    RuntimeError("synthetic interruption"))
+try: interrupted.dispose_exact_pre_identity_acquired_pair(interrupted_request)
+except RuntimeError: pass
+else: raise AssertionError("synthetic exact-pane interruption was not exposed")
+receipt = interrupted.load_store()["receipts"][0]
+assert receipt["events"][-1]["kind"] == "exact_pane_disposal_intent"
+recovery_stops = []; recovery_inspections = []
+module.inspect_exact_pre_identity_target = lambda *args: recovery_inspections.append(args)
+module.stop_exact_pre_identity_target = lambda *args: recovery_stops.append(args)
+module.confirm_exact_pre_identity_target_absent = lambda *args: "exact_pane_process_incarnation_absent"
+assert interrupted.dispose_exact_pre_identity_acquired_pair(
+    dict(interrupted_request, recover=True))["outcome"] == "disposed"
+assert not recovery_stops and not recovery_inspections
+connections_before_duplicate = len(connections)
+assert interrupted.dispose_exact_pre_identity_acquired_pair(interrupted_request)["outcome"] == "duplicate"
+assert len(connections) == connections_before_duplicate
+
+# Selector/owner authority, exact receipt shape, and pre-stop mutation checks all fail closed.
+for name, mutate_request in [
+    ("missing-selector", lambda candidate: candidate.pop("compatibility")),
+    ("wrong-selector", lambda candidate: candidate.update(compatibility="historical_modern_read_only_launch_intent_v1")),
+    ("missing-owner", lambda candidate: candidate.pop("owner_authorization")),
+    ("wrong-owner-decision", lambda candidate: candidate["owner_authorization"].update(decision="retire_claude")),
+    ("no-acknowledgement", lambda candidate: candidate["owner_authorization"].update(
+        executable_identity_acknowledgement="proved")),
+]:
+    blocked, candidate = fixture("synthetic-authority-" + name); mutate_request(candidate)
+    before = blocked.path.read_bytes(); connection_count = len(connections)
+    try: blocked.dispose_exact_pre_identity_acquired_pair(candidate)
+    except module.HelperError: pass
+    else: raise AssertionError("invalid exact-pane authority accepted: " + name)
+    assert blocked.path.read_bytes() == before and len(connections) == connection_count, name
+
+for name, mutate_receipt in [
+    ("report-bearing", lambda candidate: (candidate.update(state="valid_report", report_message_id="report"),
+                                           candidate["events"].append({"event_id":"report", "kind":"valid_report"}))),
+    ("mixed-modern", lambda candidate: candidate["session_identity"].update(
+        normalized_argv_digest="b" * 64)),
+    ("pane-drift", lambda candidate: candidate["events"][3]["identity"].update(pane_id="%99")),
+    ("mutating-authority", lambda candidate: (
+        candidate["binding"].update(
+            producer_role="mutating_delegate", authority="exclusive_writer",
+            baseline_branch="synthetic-branch", writer_owner="claude_mutating_delegate",
+            integration_owner="amp_coordinator", handoff="one_clean_local_commit",
+            capacity_decision_digest="c" * 64),
+        candidate["events"][1].update(workflow="mutating"),
+        candidate.pop("writer_lease", None))),
+    ("thinker-model", lambda candidate: candidate["binding"].update(model="claude-opus-4-8")),
+]:
+    blocked, candidate = fixture("synthetic-shape-" + name)
+    blocked_data = blocked.load_store(); mutate_receipt(blocked_data["receipts"][0]); blocked.commit(blocked_data)
+    before = blocked.path.read_bytes(); connection_count = len(connections)
+    try: blocked.dispose_exact_pre_identity_acquired_pair(candidate)
+    except module.HelperError: pass
+    else: raise AssertionError("ineligible exact-pane shape accepted: " + name)
+    assert blocked.path.read_bytes() == before and len(connections) == connection_count, name
+
+raced, raced_request = fixture("synthetic-exact-pane-race")
+changed = copy.deepcopy(live); changed["pane_id"] = "%99"
+observations = [copy.deepcopy(live), changed]; race_stops = []
+module.inspect_exact_pre_identity_target = lambda *args: observations.pop(0)
+module.stop_exact_pre_identity_target = lambda *args: race_stops.append(args)
+result = raced.dispose_exact_pre_identity_acquired_pair(raced_request)
+assert result["outcome"] == "blocked" and result["blocker"] == "exact_pane_identity_changed"
+assert not race_stops
+receipt = raced.load_store()["receipts"][0]
+assert "exact_pane_disposal_intent" in receipt and "exact_pane_disposed" not in receipt
+
+# Interrupted recovery is bound to the exact operation and both authorization objects.
+for name, mutate in [
+    ("terminal-authorization", lambda candidate: candidate["authorization"].update(
+        coordinator_authorization_sha256="d" * 64)),
+    ("owner-authorization", lambda candidate: candidate["owner_authorization"].update(
+        authorization_sha256="e" * 64)),
+    ("competing-event", lambda candidate: candidate.update(event_id="dispose-competing")),
+]:
+    conflicting = copy.deepcopy(raced_request); conflicting["recover"] = True; mutate(conflicting)
+    before = raced.path.read_bytes(); connection_count = len(connections)
+    try: raced.dispose_exact_pre_identity_acquired_pair(conflicting)
+    except module.HelperError: pass
+    else: raise AssertionError("conflicting exact-pane recovery was accepted: " + name)
+    assert raced.path.read_bytes() == before and len(connections) == connection_count, name
+
+# Both incomplete intent and terminal proof seal every unrelated lifecycle mutation route.
+module.expected_launch_policy = lambda request: None
+lifecycle_effects = []
+module.os.execve = lambda *args: lifecycle_effects.append(("exec", args))
+module.inspect_claude_identity = lambda *args, **kwargs: lifecycle_effects.append(("inspect", args))
+module.stop_exact_retirement_target = lambda *args: lifecycle_effects.append(("stop", args))
+target = {key:"value" for key in ("origin_thread", "session", "window", "window_id", "pane_id", "workdir",
+    "current_command", "process_name", "process_identity", "process_command_digest")}
+target["pane_pid"] = 1
+def assert_lifecycle_sealed(candidate, delegation_id, label):
+    launch = {"delegation_id":delegation_id, "event_id":"second-launch", "workdir":str(candidate.state_dir),
+        "packet_file":str(candidate.state_dir / "packet"), "tmux_session":"Synthetic", "tmux_window":"second",
+        "claude_session_id":intent["claude_session_id"], "repository":"repository", "base":"2" * 40,
+        "workflow":"read_only", "expected_launch_policy_digest":"4" * 64}
+    operations = [
+        lambda: candidate.route({"delegation_id":delegation_id, "event_id":"route",
+                                 "routing":{"target":"machine_local_inbox"}}),
+        lambda: module.execute_launch(candidate, launch),
+        lambda: module.execute_launch_transport(candidate, delegation_id, "0" * 64, "0" * 64),
+        lambda: candidate.submit_message({"delegation_id":delegation_id}, "report"),
+        lambda: candidate.submit_message({"delegation_id":delegation_id}, "input_request"),
+        lambda: candidate.consume({"delegation_id":delegation_id, "event_id":"consume",
+                                   "message_id":"message"}),
+        lambda: candidate.acknowledge({"delegation_id":delegation_id, "event_id":"ack",
+                                       "message_id":"message"}),
+        lambda: candidate.accept_input({"delegation_id":delegation_id, "event_id":"input",
+                                        "message_id":"message"}),
+        lambda: candidate.acquire_session({"delegation_id":delegation_id, "event_id":"acquire",
+            "pane_id":"%1", "claude_session_id":intent["claude_session_id"]}),
+        lambda: candidate.park({"delegation_id":delegation_id, "event_id":"park"}),
+        lambda: candidate.park({"delegation_id":delegation_id, "event_id":"park", "recover":True}),
+        lambda: candidate.record_park_failure(delegation_id, "park", "failure"),
+        lambda: candidate.notify_amp({"delegation_id":delegation_id, "event_id":"notify",
+                                      "message_id":"message", "target":target}),
+    ]
+    before = candidate.path.read_bytes(); effects_before = list(lifecycle_effects)
+    for operation in operations:
+        try: operation()
+        except module.HelperError as error: assert "sealed" in str(error), (label, error)
+        else: raise AssertionError("sealed lifecycle mutation was accepted: " + label)
+        assert candidate.path.read_bytes() == before and lifecycle_effects == effects_before, label
+
+assert_lifecycle_sealed(raced, "synthetic-exact-pane-race", "incomplete-intent")
+assert_lifecycle_sealed(store, "synthetic-exact-pane", "terminal-proof")
+
+# Linux executable-bearing process_identity bytes are outside disposal authority; start is not.
+linux_durable = copy.deepcopy(acquired)
+linux_durable["process_identity"] = "linux:17:old-device:old-inode:old-path-digest"
+linux_authority = {key:value for key,value in linux_durable.items() if key != "process_identity"}
+linux_authority.update(session_id="$7", process_start_identity="linux:17")
+assert module.exact_pane_disposal_identity_matches(linux_authority, linux_durable)
+linux_substituted = copy.deepcopy(linux_durable)
+linux_substituted["process_identity"] = "linux:17:new-device:new-inode:new-path-digest"
+assert module.exact_pane_disposal_identity_matches(linux_authority, linux_substituted)
+changed_start = copy.deepcopy(linux_substituted)
+changed_start["process_identity"] = "linux:18:new-device:new-inode:new-path-digest"
+assert not module.exact_pane_disposal_identity_matches(linux_authority, changed_start)
+
+# Malformed historical identity makes the chain invalid without escaping paired teardown.
+malformed, _ = fixture("synthetic-malformed-terminal")
+malformed_data = malformed.load_store(); malformed_receipt = malformed_data["receipts"][0]
+terminal_intent = copy.deepcopy(sealed["exact_pane_disposal_intent"])
+terminal_result = copy.deepcopy(sealed["exact_pane_disposed"])
+malformed_receipt["events"].extend([terminal_intent, terminal_result])
+malformed_receipt["exact_pane_disposal_intent"] = copy.deepcopy(terminal_intent)
+malformed_receipt["exact_pane_disposed"] = copy.deepcopy(terminal_result)
+malformed_receipt["updated_at"] = terminal_result["at"]
+for durable in (malformed_receipt["session_identity"], malformed_receipt["events"][3]["identity"]):
+    durable["process_identity"] = ""
+malformed.commit(malformed_data)
+teardown = malformed.worker_teardown("T-synthetic", True)
+assert teardown["outcome"] == "blocked" and teardown["pairs"][0]["action"] == "block"
+assert "synthetic-malformed-terminal" not in repr(teardown)
+
+# Darwin must never authorize a hybrid argv/process observation across its two kernel reads.
+snapshot_workdir = pathlib.Path(tempfile.mkdtemp()).resolve()
+start_command = "synthetic-start-command"
+darwin_durable = copy.deepcopy(acquired)
+darwin_durable.update(workdir=str(snapshot_workdir),
+    launch_command_digest=hashlib.sha256(start_command.encode()).hexdigest())
+snapshot_values = ["Synthetic", "$7", "pre-identity", "@17", "%23", "4242",
+                   str(snapshot_workdir), "claude", start_command]
+class SnapshotControl:
+    def __init__(self): self.index = 0; self.kills = []
+    def command(self, arguments):
+        value = snapshot_values[self.index]; self.index += 1
+        token = arguments[-1].split(":", 1)[0]
+        return [token + ":" + module.encode_tmux_command_argument(value)]
+    def command_sequence(self, commands): self.kills.append(commands); return [[], []]
+real_system = module.platform.system; real_exact_process_identity = module.exact_process_identity
+module.platform.system = lambda: "Darwin"
+observations = [
+    ("claude", "1750000000.000017", ["claude", "--session-id", darwin_durable["claude_session_id"]],
+     darwin_durable["process_command_digest"]),
+    ("claude", "1750000000.000017", ["substituted", "--session-id", darwin_durable["claude_session_id"]],
+     "b" * 64),
+]
+module.exact_process_identity = lambda pid: observations.pop(0)
+control = SnapshotControl()
+try: real_inspect_exact_pre_identity_target(control, darwin_durable)
+except module.HelperError: pass
+else: raise AssertionError("Darwin hybrid process observation was accepted")
+assert not control.kills
+
+darwin_authority = {key:value for key,value in darwin_durable.items() if key != "process_identity"}
+darwin_authority.update(session_id="$7", process_start_identity="process-start:1750000000.000017")
+observations = [
+    ("claude", "1750000000.000017", ["claude"], darwin_durable["process_command_digest"]),
+    ("claude", "1750000000.000017", ["substituted"], "b" * 64),
+]
+module.exact_process_identity = lambda pid: observations.pop(0)
+control = SnapshotControl()
+try: real_stop_exact_pre_identity_target(control, darwin_authority)
+except module.HelperError: pass
+else: raise AssertionError("Darwin hybrid final snapshot reached exact stop")
+assert not control.kills
+module.platform.system = real_system; module.exact_process_identity = real_exact_process_identity
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil || string(output) != "ok\n" {
+		t.Fatalf("exact-pane disposal fixture: %v: %s", err, output)
+	}
+}
+
 func TestRetirementControlConnectionNeverReconnectsToReplacementTmuxServer(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux is required for the retained control-connection boundary")
@@ -3026,8 +3359,16 @@ while True:
     time.sleep(0.01)
 replacement_before = subprocess.check_output(prefix + ["list-panes", "-a", "-F", "#{pane_id}"], text=True).strip()
 assert replacement_before == "%0", replacement_before
+exact_identity = {"session":"Synthetic", "session_id":"$0", "window":"synthetic",
+    "window_id":"@0", "pane_id":"%0", "pane_pid":4242,
+    "claude_session_id":"550e8400-e29b-41d4-a716-446655440000", "workdir":"/synthetic",
+    "current_command":"claude", "process_name":"claude", "process_identity":"synthetic-start",
+    "process_start_identity":"process-start:synthetic-start", "process_command_digest":"9" * 64,
+    "launch_command_digest":"5" * 64}
+assert module.confirm_exact_pre_identity_target_absent(connection, exact_identity) == \
+    "tmux_control_connection_unavailable"
 try:
-    connection.command(["kill-pane", "-t", "%0"])
+    module.stop_exact_pre_identity_target(connection, exact_identity)
 except module.HelperError:
     pass
 else:
