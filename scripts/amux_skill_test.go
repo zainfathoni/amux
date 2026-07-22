@@ -903,6 +903,132 @@ func TestCoordinatorDeadlinePolicyIsConsistent(t *testing.T) {
 	}
 }
 
+func TestCoordinatorDeadlineScheduleIsBoundedAndGenerationSafe(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+
+	for _, required := range []string{
+		"## Workflow Orchestration",
+		"The firing is only a wake-up",
+		"durable group and `amux report pending/history` state",
+		"Exact active generation",
+		"acknowledged before expiry?",
+		"Stop attempt already",
+		"Record one attempt; send one",
+		"Reconcile next unhandled",
+	} {
+		if !strings.Contains(skill, required) {
+			t.Errorf("SKILL.md is missing scheduled orchestration contract %q", required)
+		}
+	}
+	if strings.Contains(skill, "already acknowledged?") {
+		t.Error("SKILL.md diagram uses generic acknowledgement instead of acknowledgement before expiry")
+	}
+
+	for _, required := range []string{
+		"building-automations",
+		"get_schedule",
+		"set_schedule",
+		"update_schedule",
+		"clear_schedule",
+		"call no schedule tool",
+		"at most one schedule or trigger",
+		"AMUX_DEADLINE_QUEUE_V1",
+		"owner=AMUX_DEADLINE_QUEUE_V1",
+		"DTSTART:<utc-basic-deadline>Z",
+		"RRULE:FREQ=DAILY;COUNT=1",
+		"2030-01-02T03:04:00+02:00",
+		"DTSTART:20300102T010400Z",
+		"exactly one next/only occurrence equal to the authoritative RFC3339 instant",
+		"Repeat this inspection after every re-arm",
+		"ambiguous, conflicting, or unverifiable",
+		"amux report pending --group <durable-issue-group>",
+		"amux report history --report-id <stable-report-id>",
+		"order-independent authoritative re-reads",
+		"correctness must not depend on their arrival order",
+		"stale/late and duplicate",
+		"it was superseded",
+		"a current `blocked`, `ready`, or `merged` report",
+		"acknowledgement before expiry",
+		"AMUX_DEADLINE_STOP_ATTEMPT_V1",
+		"before native member messaging",
+		"consumes that generation even if the send is indeterminate",
+		"excluding satisfied, superseded, acknowledged-before-expiry, and stop-attempt-recorded generations",
+		"do not retry it blindly",
+		"freshly verified UTC `DTSTART`/`COUNT=1` schedule",
+		"unrelated schedule",
+		"manual wake-up",
+		"never create sleeping shell processes, recurring polling schedules, or per-worker supervisors",
+		"never authorize acknowledgement, push, PR creation or mutation, merge, release, finish, cleanup",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("deadline workflow is missing schedule safety contract %q", required)
+		}
+	}
+	deadlineStart := strings.Index(workflow, "### 7. Coordinator-owned deadline queue")
+	if deadlineStart < 0 {
+		t.Fatal("coordinator deadline workflow is missing")
+	}
+	deadlineWorkflow := workflow[deadlineStart:]
+	skillLoadAt := strings.Index(deadlineWorkflow, "load the available `building-automations` skill")
+	if skillLoadAt < 0 {
+		t.Fatal("deadline workflow does not load building-automations")
+	}
+	for _, toolName := range []string{"`get_schedule`", "`set_schedule`", "`update_schedule`", "`clear_schedule`"} {
+		toolAt := strings.Index(deadlineWorkflow, toolName)
+		if toolAt < 0 || toolAt <= skillLoadAt {
+			t.Errorf("deadline workflow does not order building-automations load before %s management: load=%d tool=%d", toolName, skillLoadAt, toolAt)
+		}
+	}
+
+	fixtureStart := strings.Index(workflow, "Load `/amux` first and execute its scheduled deadline branch")
+	if fixtureStart < 0 {
+		t.Fatal("synthetic scheduled wake-up fixture is missing")
+	}
+	fixtureEnd := strings.Index(workflow[fixtureStart:], "\n```")
+	if fixtureEnd < 0 {
+		t.Fatal("synthetic scheduled wake-up fixture is unterminated")
+	}
+	fixture := workflow[fixtureStart : fixtureStart+fixtureEnd]
+	for _, required := range []string{
+		"load `building-automations`",
+		"owner=AMUX_DEADLINE_QUEUE_V1",
+		"group=<durable-issue-group>",
+		"report=<stable-report-id>",
+		"member=<member-thread>",
+		"generation=<deadline-generation>",
+		"deadline=<rfc3339-deadline>",
+		"AMUX_DEADLINE_STOP_ATTEMPT_V1 group=<durable-issue-group> report=<stable-report-id> member=<member-thread> generation=<deadline-generation> deadline=<rfc3339-deadline>",
+		"consumes this generation even if native messaging is indeterminate",
+		"preserve work and evidence",
+		"stop implementation and review loops",
+		"submit this stable report as `blocked` with the exact remaining blocker and `--pr none` when no PR exists",
+		"remain alive",
+	} {
+		if !strings.Contains(fixture, required) {
+			t.Errorf("synthetic scheduled wake-up fixture is missing %q", required)
+		}
+	}
+	for name, forbidden := range map[string]*regexp.Regexp{
+		"real thread ID":  regexp.MustCompile(`\bT-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`),
+		"pane identifier": regexp.MustCompile(`(?:^|[[:space:]=])%[0-9]+\b`),
+		"private path":    regexp.MustCompile(`(?:/Users/|/home/|[A-Za-z]:\\Users\\)`),
+		"private field":   regexp.MustCompile(`(?i)\b(?:pane|pid|process|prompt|packet|transcript|receipt|account|secret)[[:space:]]*=`),
+	} {
+		if forbidden.MatchString(fixture) {
+			t.Errorf("synthetic scheduled wake-up fixture contains %s", name)
+		}
+	}
+	recordAt := strings.Index(fixture, "AMUX_DEADLINE_STOP_ATTEMPT_V1")
+	sendAt := strings.Index(fixture, "preserve work and evidence")
+	nextAt := strings.Index(fixture, "nearest unhandled active generation")
+	if recordAt < 0 || sendAt < 0 || nextAt < 0 || recordAt >= sendAt || sendAt >= nextAt {
+		t.Errorf("synthetic scheduled wake-up fixture does not order record, bounded send, and next-unhandled reconciliation: record=%d send=%d next=%d", recordAt, sendAt, nextAt)
+	}
+}
+
 func TestCoordinatorSafetyAppearsInPublicReferences(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
