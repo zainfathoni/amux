@@ -559,14 +559,16 @@ func TestAdoptOperationThreadOnlyRebindsAwaitingSpawnDelivery(t *testing.T) {
 	path := filepath.Join(t.TempDir(), OperationsFile)
 	now := time.Now().UTC()
 	record := OperationRecord{
-		Key:         "adopt",
-		Kind:        "worker-spawn",
-		RequestHash: "request",
-		State:       OperationStarted,
-		Phase:       OperationPhaseDeliveryStarted,
-		Resource:    OperationResource{Kind: "worker", Thread: "T-provisioned"},
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		Key:              "adopt",
+		Kind:             "worker-spawn",
+		RequestHash:      "request",
+		SubmissionStatus: OperationSubmissionTransitioned,
+		DeliveryStatus:   OperationDeliveryAlternateReceiver,
+		State:            OperationStarted,
+		Phase:            OperationPhaseDeliveryStarted,
+		Resource:         OperationResource{Kind: "worker", Thread: "T-provisioned"},
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 	if _, err := StoreOperation(path, record); err != nil {
 		t.Fatal(err)
@@ -580,12 +582,45 @@ func TestAdoptOperationThreadOnlyRebindsAwaitingSpawnDelivery(t *testing.T) {
 		t.Fatalf("second adoption error = %v", err)
 	}
 	adopted, err := CompleteOperationThreadAdoption(path, record.Key)
-	if err != nil || adopted.Resource.Thread != "T-receiving" || adopted.Phase != OperationPhaseMessageVerified {
+	if err != nil || adopted.Resource.Thread != "T-receiving" || adopted.Phase != OperationPhaseMessageVerified || adopted.SubmissionStatus != OperationSubmissionTransitioned || adopted.DeliveryStatus != OperationDeliveryAlternateReceiver {
 		t.Fatalf("completed adoption = %+v err=%v", adopted, err)
 	}
 	stored, found, err := LoadOperation(path, record.Key)
 	if err != nil || !found || stored.Resource.Thread != "T-receiving" {
 		t.Fatalf("stored adopted operation = %+v found=%t err=%v", stored, found, err)
+	}
+}
+
+func TestOperationRecordsRejectContradictorySubmissionDeliveryEvidence(t *testing.T) {
+	now := time.Now().UTC()
+	for _, test := range []struct {
+		name       string
+		phase      OperationPhase
+		submission OperationSubmissionStatus
+		delivery   OperationDeliveryStatus
+	}{
+		{name: "pre-enter missing delivery", phase: OperationPhaseDeliveryStarted, submission: OperationSubmissionInputNotVisible, delivery: OperationDeliveryMissing},
+		{name: "pre-enter persisted delivery", phase: OperationPhaseDeliveryStarted, submission: OperationSubmissionComposerCaptureUnknown, delivery: OperationDeliveryPersisted},
+		{name: "missing delivery without submission evidence", phase: OperationPhaseDeliveryStarted, delivery: OperationDeliveryMissing},
+		{name: "verified phase without persisted receiver", phase: OperationPhaseMessageVerified, submission: OperationSubmissionTransitioned, delivery: OperationDeliveryUnknown},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			record := OperationRecord{
+				Key:              "contradictory",
+				Kind:             "worker-spawn",
+				RequestHash:      "request",
+				SubmissionStatus: test.submission,
+				DeliveryStatus:   test.delivery,
+				State:            OperationStarted,
+				Phase:            test.phase,
+				Resource:         OperationResource{Kind: "worker", Thread: "T-provisioned"},
+				CreatedAt:        now,
+				UpdatedAt:        now,
+			}
+			if _, err := StoreOperation(filepath.Join(t.TempDir(), OperationsFile), record); err == nil || !strings.Contains(err.Error(), "submission") && !strings.Contains(err.Error(), "delivery") {
+				t.Fatalf("contradictory operation error = %v", err)
+			}
+		})
 	}
 }
 
