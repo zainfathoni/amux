@@ -2873,6 +2873,33 @@ exit 2
 	}
 }
 
+func TestSubmitInitialSingleLineMessageRecordsEnterWhenRetypedInputIsNotVisible(t *testing.T) {
+	bin := t.TempDir()
+	typed := filepath.Join(bin, "typed")
+	entered := filepath.Join(bin, "entered")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = send-keys ] && [ "$4" = -l ]; then touch "`+typed+`"; exit 0; fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then touch "`+entered+`"; exit 0; fi
+if [ "$1" = capture-pane ]; then
+  if [ -e "`+entered+`" ]; then printf '╭ composer ─╮\n│           │\n╰────────────╯\n';
+  elif [ -e "`+typed+`" ]; then printf '╭ composer ─╮\n│ hello │\n╰────────────╯\n';
+  else printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; fi
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	got, err := submitInitialMessage(tmux.Runner{}, "%1", "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.status != config.OperationSubmissionEnterAttempted {
+		t.Fatalf("submission status = %q, want %q", got.status, config.OperationSubmissionEnterAttempted)
+	}
+}
+
 func TestSubmitInitialMultilineMessageClassifiesUnavailableComposerCapture(t *testing.T) {
 	bin := t.TempDir()
 	pasted := filepath.Join(bin, "pasted")

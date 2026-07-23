@@ -380,6 +380,50 @@ func (r Runner) AllWindowPanes() ([]WindowPane, error) {
 	return panes, nil
 }
 
+func (r Runner) WindowPanesWithPaneID(session, window string) ([]WindowPane, error) {
+	target := exactSessionTarget(session) + ":=" + window
+	out, err := tmuxOutput("list-panes", "-t", target, "-F", "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_start_command}")
+	if err != nil {
+		return nil, err
+	}
+	text := strings.TrimSuffix(string(out), "\n")
+	if text == "" {
+		return nil, nil
+	}
+	var panes []WindowPane
+	for _, line := range strings.Split(text, "\n") {
+		fields := strings.SplitN(line, "\t", 5)
+		if len(fields) != 5 {
+			return nil, fmt.Errorf("unexpected tmux pane identity row %q", line)
+		}
+		if fields[0] != session || fields[1] != window {
+			return nil, fmt.Errorf("tmux pane identity row did not match exact session/window")
+		}
+		panes = append(panes, WindowPane{Session: fields[0], Window: fields[1], WindowID: fields[2], PaneID: fields[3], StartCommand: fields[4]})
+	}
+	return panes, nil
+}
+
+func (r Runner) AllWindowPanesWithPaneID() ([]WindowPane, error) {
+	out, err := tmuxOutput("list-panes", "-a", "-F", "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_start_command}")
+	if err != nil {
+		return nil, err
+	}
+	text := strings.TrimSuffix(string(out), "\n")
+	if text == "" {
+		return nil, nil
+	}
+	var panes []WindowPane
+	for _, line := range strings.Split(text, "\n") {
+		fields := strings.SplitN(line, "\t", 5)
+		if len(fields) != 5 {
+			return nil, fmt.Errorf("unexpected tmux global pane identity row %q", line)
+		}
+		panes = append(panes, WindowPane{Session: fields[0], Window: fields[1], WindowID: fields[2], PaneID: fields[3], StartCommand: fields[4]})
+	}
+	return panes, nil
+}
+
 func (r Runner) NewSession(session, window, command string) error {
 	args := []string{"new-session", "-d", "-s", session, "-n", window, command}
 	if r.DryRun {

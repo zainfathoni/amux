@@ -646,3 +646,81 @@ func TestBeginIndeterminateWorkerSpawnThreadAdoptionPersistsRecoveryEvidenceAtom
 		t.Fatalf("stored recovery adoption = %+v found=%t err=%v", stored, found, err)
 	}
 }
+
+func TestRetryPreSubmissionWorkerSpawnArmsExactEnterNotAttemptedStateAtomically(t *testing.T) {
+	for _, submission := range []OperationSubmissionStatus{
+		OperationSubmissionComposerUnavailable,
+		OperationSubmissionComposerCaptureUnknown,
+		OperationSubmissionInputNotVisible,
+		OperationSubmissionInputVisibilityUnknown,
+	} {
+		t.Run(string(submission), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), OperationsFile)
+			now := time.Now().UTC()
+			record := OperationRecord{
+				Key:              "retry-pre-submission",
+				Kind:             "worker-spawn",
+				RequestHash:      "request",
+				SubmissionStatus: submission,
+				DeliveryStatus:   OperationDeliveryUnknown,
+				State:            OperationIndeterminate,
+				Phase:            OperationPhaseDeliveryStarted,
+				Resource:         OperationResource{Kind: "worker", Thread: "T-provisioned"},
+				Error:            "content-free Enter not attempted evidence",
+				CreatedAt:        now,
+				UpdatedAt:        now,
+			}
+			if _, err := StoreOperation(path, record); err != nil {
+				t.Fatal(err)
+			}
+
+			armed, err := RetryPreSubmissionWorkerSpawn(path, record.Key, record.RequestHash, record.Resource.Thread, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if armed.State != OperationStarted || armed.Phase != OperationPhaseRetryArmed || armed.SubmissionStatus != "" || armed.DeliveryStatus != "" || armed.Error != OperationErrorPreSubmissionRetryArmed {
+				t.Fatalf("armed operation = %+v", armed)
+			}
+			stored, found, err := LoadOperation(path, record.Key)
+			if err != nil || !found || stored != armed {
+				t.Fatalf("stored armed operation = %+v found=%t err=%v", stored, found, err)
+			}
+			consumed, err := ConsumePreSubmissionWorkerSpawnRetry(path, record.Key, record.RequestHash, record.Resource.Thread)
+			if err != nil || consumed.State != OperationStarted || consumed.Phase != OperationPhaseDeliveryStarted || consumed.Error != OperationErrorPreSubmissionRetryConsumed {
+				t.Fatalf("consumed operation = %+v err=%v", consumed, err)
+			}
+		})
+	}
+}
+
+func TestRetryPreSubmissionWorkerSpawnRejectsPostEnterAndAmbiguousStates(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		submission OperationSubmissionStatus
+		delivery   OperationDeliveryStatus
+		adoption   *OperationThreadAdoption
+	}{
+		{name: "Enter attempted", submission: OperationSubmissionEnterAttempted, delivery: OperationDeliveryUnknown},
+		{name: "delivery missing", submission: OperationSubmissionEnterAttempted, delivery: OperationDeliveryMissing},
+		{name: "submission command failed", submission: OperationSubmissionError, delivery: OperationDeliveryUnknown},
+		{name: "thread adoption present", submission: OperationSubmissionInputNotVisible, delivery: OperationDeliveryUnknown, adoption: &OperationThreadAdoption{ProvisionedThread: "T-provisioned", ReceivingThread: "T-receiving"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), OperationsFile)
+			now := time.Now().UTC()
+			record := OperationRecord{
+				Key: "reject-pre-submission-retry", Kind: "worker-spawn", RequestHash: "request",
+				SubmissionStatus: test.submission, DeliveryStatus: test.delivery,
+				State: OperationIndeterminate, Phase: OperationPhaseDeliveryStarted,
+				Resource: OperationResource{Kind: "worker", Thread: "T-provisioned"}, ThreadAdoption: test.adoption,
+				CreatedAt: now, UpdatedAt: now,
+			}
+			if _, err := StoreOperation(path, record); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := RetryPreSubmissionWorkerSpawn(path, record.Key, record.RequestHash, record.Resource.Thread, true); err == nil {
+				t.Fatal("unsafe pre-submission retry state was accepted")
+			}
+		})
+	}
+}

@@ -2270,6 +2270,15 @@ type initialMessageSubmission struct {
 }
 
 func submitInitialMessage(runner tmux.Runner, target, message string) (initialMessageSubmission, error) {
+	return submitInitialMessageGuarded(runner, target, message, initialMessageSubmissionGuard{})
+}
+
+type initialMessageSubmissionGuard struct {
+	beforeInput func() error
+	beforeEnter func() error
+}
+
+func submitInitialMessageGuarded(runner tmux.Runner, target, message string, guard initialMessageSubmissionGuard) (initialMessageSubmission, error) {
 	multiline := strings.ContainsAny(message, "\r\n")
 	ready, captureAvailable, captureEverAvailable := waitForComposerReady(runner, target)
 	if multiline && !ready {
@@ -2277,6 +2286,11 @@ func submitInitialMessage(runner tmux.Runner, target, message string) (initialMe
 			return initialMessageSubmission{status: config.OperationSubmissionComposerCaptureUnknown}, nil
 		}
 		return initialMessageSubmission{status: config.OperationSubmissionComposerUnavailable}, nil
+	}
+	if guard.beforeInput != nil {
+		if err := guard.beforeInput(); err != nil {
+			return initialMessageSubmission{}, err
+		}
 	}
 	if !multiline && !captureEverAvailable {
 		if err := sendInitialMessageText(runner, target, message); err != nil {
@@ -2296,8 +2310,18 @@ func submitInitialMessage(runner tmux.Runner, target, message string) (initialMe
 			return initialMessageSubmission{status: config.OperationSubmissionInputVisibilityUnknown}, nil
 		}
 		if !visible {
+			if guard.beforeInput != nil {
+				if err := guard.beforeInput(); err != nil {
+					return initialMessageSubmission{}, err
+				}
+			}
 			if err := runner.ClearLine(target); err != nil {
 				return initialMessageSubmission{}, fmt.Errorf("clear initial message: %w", err)
+			}
+			if guard.beforeInput != nil {
+				if err := guard.beforeInput(); err != nil {
+					return initialMessageSubmission{}, err
+				}
 			}
 			if err := sendInitialMessageText(runner, target, message); err != nil {
 				return initialMessageSubmission{}, fmt.Errorf("send initial message: %w", err)
@@ -2307,6 +2331,11 @@ func submitInitialMessage(runner tmux.Runner, target, message string) (initialMe
 				return initialMessageSubmission{status: config.OperationSubmissionInputVisibilityUnknown}, nil
 			}
 			if !visible {
+				if guard.beforeInput != nil {
+					if err := guard.beforeInput(); err != nil {
+						return initialMessageSubmission{}, err
+					}
+				}
 				if err := runner.ClearLine(target); err != nil {
 					return initialMessageSubmission{}, fmt.Errorf("clear unverified initial message: %w", err)
 				}
@@ -2320,6 +2349,11 @@ func submitInitialMessage(runner tmux.Runner, target, message string) (initialMe
 		}
 		if !visible {
 			return initialMessageSubmission{status: config.OperationSubmissionInputNotVisible}, nil
+		}
+		if guard.beforeEnter != nil {
+			if err := guard.beforeEnter(); err != nil {
+				return initialMessageSubmission{}, err
+			}
 		}
 		if err := runner.SendEnter(target); err != nil {
 			return initialMessageSubmission{}, fmt.Errorf("submit initial message: %w", err)
@@ -2375,7 +2409,7 @@ func submitInitialMessage(runner tmux.Runner, target, message string) (initialMe
 			return initialMessageSubmission{}, fmt.Errorf("send initial message: %w", err)
 		}
 		if !waitForComposerMessage(runner, target, message) {
-			return initialMessageSubmission{status: config.OperationSubmissionInputNotVisible}, nil
+			return initialMessageSubmission{status: config.OperationSubmissionEnterAttempted}, nil
 		}
 		time.Sleep(spawnInputSettleDelay())
 		retypedAfterLostPrompt = true

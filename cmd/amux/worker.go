@@ -440,12 +440,14 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	if found && existing.RequestHash != hash {
 		return env, result.Preflight(fmt.Errorf("idempotency key %q is already bound to a different request", s.IdempotencyKey))
 	}
-	recoverable := found && recoverableProvisionedVerificationFailure(existing)
+	preSubmissionRetry := found && recoverablePreSubmissionWorkerSpawn(existing, message)
+	provisionedVerification := found && recoverableProvisionedVerificationFailure(existing)
+	recoverable := preSubmissionRetry || provisionedVerification
 	if recoverable && !s.Reconcile {
 		return env, result.Preflight(fmt.Errorf("indeterminate provisioned-thread spawn recovery requires explicit --reconcile; refusing external work"))
 	}
 	if s.Reconcile && !recoverable {
-		return env, result.Preflight(fmt.Errorf("spawn reconciliation requires an existing identical operation in the recoverable exact provisioned-thread timeout state"))
+		return env, result.Preflight(fmt.Errorf("spawn reconciliation requires an existing identical operation in the recoverable exact provisioned-thread state"))
 	}
 	if found && existing.State == config.OperationSucceeded {
 		r := config.Row{Workspace: workspace, Window: s.Window, Workdir: s.Workdir, Thread: existing.Resource.Thread}
@@ -453,7 +455,27 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		env.Skipped = append(env.Skipped, out)
 		return env, nil
 	}
-	if recoverable {
+	if preSubmissionRetry {
+		if in.Options.DryRun {
+			resource, _ := result.WorkerResource(existing.Resource.Thread)
+			env.Planned = append(env.Planned, result.Outcome{Resource: resource, Action: "spawn", Message: "would revalidate the exact empty provisioned thread and retry pre-submission delivery"})
+			return env, nil
+		}
+		requested := config.Row{Workspace: workspace, Window: s.Window, Workdir: s.Workdir, Thread: existing.Resource.Thread}
+		if err := preflightPreSubmissionWorkerSpawnRetry(dir, existing, requested, s.Groups); err != nil {
+			return env, result.Preflight(err)
+		}
+		if err := preflightPreSubmissionWorkerSpawnRetry(dir, existing, requested, s.Groups); err != nil {
+			return env, result.Preflight(fmt.Errorf("revalidate pre-submission worker spawn before retry: %w", err))
+		}
+		if existing.State == config.OperationIndeterminate {
+			existing, err = config.RetryPreSubmissionWorkerSpawn(dir.OperationsPath(), existing.Key, existing.RequestHash, existing.Resource.Thread, strings.ContainsAny(message, "\r\n"))
+			if err != nil {
+				return env, result.Runtime(err)
+			}
+		}
+	}
+	if provisionedVerification {
 		if in.Options.DryRun {
 			resource, _ := result.WorkerResource(existing.Resource.Thread)
 			env.Planned = append(env.Planned, result.Outcome{Resource: resource, Action: "spawn", Message: "would verify the exact provisioned thread and recover without resubmitting"})
@@ -506,7 +528,7 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 			if receiverInspection.state != workerPaneAbsent && receiverInspection.state != workerPaneExact && provisionedInspection.state != workerPaneExact {
 				return env, result.Preflight(fmt.Errorf("indeterminate alternate receiver %s cannot be adopted because worker tmux identity is %s", receiver, receiverInspection.state))
 			}
-			receiverPanes, paneErr := managedThreadPanes(receiver, s.Workdir)
+			receiverPanes, paneErr := managedThreadPanes(receiver)
 			if paneErr != nil {
 				return env, result.Preflight(fmt.Errorf("inspect existing tmux ownership for alternate receiver %s: %w", receiver, paneErr))
 			}
@@ -828,43 +850,105 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 
 func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.Envelope, record config.OperationRecord, workspace, workdir, message, groupAmpPath string, workerAlreadyConfigured bool) (*result.Envelope, error) {
 	row := config.Row{Workspace: workspace, Window: in.Selectors.Window, Workdir: workdir, Thread: record.Resource.Thread}
+	preSubmissionRetryArmed := record.Phase == config.OperationPhaseRetryArmed && record.Error == config.OperationErrorPreSubmissionRetryArmed
+	preSubmissionRetryConsumed := record.Error == config.OperationErrorPreSubmissionRetryConsumed
 	var err error
 	configuredThisCall := false
 	var preDeliveryThreads map[string]bool
 	var inspection workerInspection
-	if record.Phase == config.OperationPhaseThreadBound {
+	if record.Phase == config.OperationPhaseThreadBound || record.Phase == config.OperationPhaseRetryArmed {
 		var inspectErr error
 		inspection, inspectErr = inspectWorker(row)
 		err = inspectErr
-		if err == nil && inspection.state == workerPaneAbsent {
-			err = createWorkerPane(row)
+		if preSubmissionRetryArmed {
+			if err == nil && inspection.state != workerPaneAbsent && inspection.state != workerPaneExact {
+				err = fmt.Errorf("pre-submission retry worker tmux identity is %s", inspection.state)
+			}
+			if err == nil {
+				preDeliveryThreads, err = strictAmpThreadIDSet(true)
+				if err != nil {
+					err = fmt.Errorf("snapshot Amp threads before initial-message delivery: %w", err)
+				}
+			}
+			if err != nil {
+				return env, result.Runtime(err)
+			}
+			record, err = config.ConsumePreSubmissionWorkerSpawnRetry(dir.OperationsPath(), record.Key, record.RequestHash, record.Resource.Thread)
+			preSubmissionRetryConsumed = err == nil
+			if err == nil && inspection.state == workerPaneAbsent {
+				err = createWorkerPane(row)
+			}
 			if err == nil {
 				inspection, err = inspectWorker(row)
 			}
-		}
-		if err == nil && inspection.state != workerPaneExact {
-			err = fmt.Errorf("spawned worker tmux identity is %s", inspection.state)
-		}
-		if err == nil {
-			preDeliveryThreads, err = strictAmpThreadIDSet(true)
+			if err == nil && inspection.state != workerPaneExact {
+				err = fmt.Errorf("spawned worker tmux identity is %s", inspection.state)
+			}
+			if err == nil {
+				inspection.pane, err = preSubmissionRetryPane(row)
+			}
+		} else {
+			if err == nil && inspection.state == workerPaneAbsent {
+				err = createWorkerPane(row)
+				if err == nil {
+					inspection, err = inspectWorker(row)
+				}
+			}
+			if err == nil && inspection.state != workerPaneExact {
+				err = fmt.Errorf("spawned worker tmux identity is %s", inspection.state)
+			}
+			if err == nil {
+				preDeliveryThreads, err = strictAmpThreadIDSet(true)
+				if err != nil {
+					err = fmt.Errorf("snapshot Amp threads before initial-message delivery: %w", err)
+				}
+			}
 			if err != nil {
-				err = fmt.Errorf("snapshot Amp threads before initial-message delivery: %w", err)
+				record.Error = err.Error()
+				record.UpdatedAt = time.Now().UTC()
+				_, _ = config.StoreOperation(dir.OperationsPath(), record)
+				return env, result.Runtime(err)
+			}
+			deliveryRecord := record
+			deliveryRecord.Phase = config.OperationPhaseDeliveryStarted
+			deliveryRecord.Error = ""
+			deliveryRecord.UpdatedAt = time.Now().UTC()
+			if _, err = config.StoreOperation(dir.OperationsPath(), deliveryRecord); err == nil {
+				record = deliveryRecord
 			}
 		}
-		if err != nil {
-			record.Error = err.Error()
-			record.UpdatedAt = time.Now().UTC()
-			_, _ = config.StoreOperation(dir.OperationsPath(), record)
-			return env, result.Runtime(err)
-		}
-		deliveryRecord := record
-		deliveryRecord.Phase = config.OperationPhaseDeliveryStarted
-		deliveryRecord.Error = ""
-		deliveryRecord.UpdatedAt = time.Now().UTC()
-		if _, err = config.StoreOperation(dir.OperationsPath(), deliveryRecord); err == nil {
-			record = deliveryRecord
+		if err == nil {
 			var submission initialMessageSubmission
-			submission, err = submitInitialMessage(tmux.Runner{}, submissionTarget(tmux.Runner{}, inspection.pane.WindowID), message)
+			if preSubmissionRetryConsumed {
+				target := inspection.pane.PaneID
+				if target == "" {
+					err = errors.New("pre-submission retry exact pane identity is unavailable")
+				}
+				guard := initialMessageSubmissionGuard{
+					beforeInput: func() error {
+						if guardErr := validatePreSubmissionRetryMutation(row, inspection.pane); guardErr != nil {
+							return errors.New("pre-submission retry guard rejected changed thread or pane evidence")
+						}
+						return nil
+					},
+					beforeEnter: func() error {
+						if guardErr := validatePreSubmissionRetryMutation(row, inspection.pane); guardErr != nil {
+							return errors.New("pre-submission retry guard rejected changed thread or pane evidence")
+						}
+						visible, available := composerContainsMessage(tmux.Runner{}, target, message)
+						if !available || !visible {
+							return errors.New("pre-submission retry guard rejected changed composer evidence")
+						}
+						return nil
+					},
+				}
+				if err == nil {
+					submission, err = submitInitialMessageGuarded(tmux.Runner{}, target, message, guard)
+				}
+			} else {
+				target := submissionTarget(tmux.Runner{}, inspection.pane.WindowID)
+				submission, err = submitInitialMessage(tmux.Runner{}, target, message)
+			}
 			if err != nil {
 				record.SubmissionStatus = config.OperationSubmissionError
 				record.DeliveryStatus = config.OperationDeliveryUnknown
@@ -892,6 +976,9 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 				}
 				record.UpdatedAt = time.Now().UTC()
 				if publicError != "" {
+					if preSubmissionRetryConsumed {
+						record.Error = config.OperationErrorPreSubmissionRetryConsumed
+					}
 					record.State = config.OperationIndeterminate
 					if _, err = config.StoreOperation(dir.OperationsPath(), record); err == nil {
 						return env, result.Runtime(errors.New(publicError))
@@ -922,6 +1009,9 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 				record.DeliveryStatus = config.OperationDeliveryPersisted
 			} else {
 				record.DeliveryStatus = config.OperationDeliveryAlternateReceiver
+			}
+			if err == nil {
+				record.Error = ""
 			}
 			if err == nil && authoritative != row.Thread {
 				provisioned := row.Thread
@@ -979,6 +1069,7 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 		}
 		if err == nil {
 			record.Phase = config.OperationPhaseMessageVerified
+			record.Error = ""
 			record.UpdatedAt = time.Now().UTC()
 			_, err = config.StoreOperation(dir.OperationsPath(), record)
 		}
@@ -1018,7 +1109,9 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 				record.DeliveryStatus = config.OperationDeliveryUnknown
 			}
 		}
-		record.Error = err.Error()
+		if !preSubmissionRetryArmed || record.Phase != config.OperationPhaseRetryArmed {
+			record.Error = err.Error()
+		}
 		if record.Phase == config.OperationPhaseDeliveryStarted {
 			switch record.SubmissionStatus {
 			case config.OperationSubmissionComposerUnavailable:
@@ -1031,6 +1124,9 @@ func (a app) resumeBoundSpawn(in invocation, dir config.Directory, env *result.E
 				record.Error = "multiline input visibility unknown before submission; Enter not attempted"
 			default:
 				record.Error = "initial assignment delivery could not be verified; do not resubmit"
+			}
+			if preSubmissionRetryConsumed {
+				record.Error = config.OperationErrorPreSubmissionRetryConsumed
 			}
 		}
 		record.UpdatedAt = time.Now().UTC()
@@ -1071,6 +1167,169 @@ func recoverableProvisionedVerificationFailure(operation config.OperationRecord)
 		operation.ThreadAdoption != nil &&
 		operation.Resource.Thread == operation.ThreadAdoption.ProvisionedThread
 	return originalFailure || pendingAdoption
+}
+
+func recoverablePreSubmissionWorkerSpawn(operation config.OperationRecord, message string) bool {
+	if !strings.ContainsAny(message, "\r\n") {
+		return false
+	}
+	preSubmission := false
+	switch operation.SubmissionStatus {
+	case config.OperationSubmissionComposerUnavailable, config.OperationSubmissionComposerCaptureUnknown, config.OperationSubmissionInputNotVisible, config.OperationSubmissionInputVisibilityUnknown:
+		preSubmission = true
+	}
+	originalFailure := operation.State == config.OperationIndeterminate &&
+		operation.Phase == config.OperationPhaseDeliveryStarted &&
+		operation.Resource.Thread != "" &&
+		operation.ThreadAdoption == nil &&
+		preSubmission &&
+		operation.DeliveryStatus == config.OperationDeliveryUnknown &&
+		preSubmissionFailureErrorMatches(operation.SubmissionStatus, operation.Error)
+	armedRetry := operation.State == config.OperationStarted &&
+		operation.Phase == config.OperationPhaseRetryArmed &&
+		operation.Resource.Thread != "" &&
+		operation.ThreadAdoption == nil &&
+		operation.SubmissionStatus == "" &&
+		operation.DeliveryStatus == "" &&
+		operation.Error == config.OperationErrorPreSubmissionRetryArmed
+	return originalFailure || armedRetry
+}
+
+func preSubmissionFailureErrorMatches(status config.OperationSubmissionStatus, message string) bool {
+	switch status {
+	case config.OperationSubmissionComposerUnavailable:
+		return message == "multiline composer visibility unavailable before submission; Enter not attempted"
+	case config.OperationSubmissionComposerCaptureUnknown:
+		return message == "multiline composer visibility unknown before submission; Enter not attempted"
+	case config.OperationSubmissionInputNotVisible:
+		return message == "multiline input not visible before submission; Enter not attempted"
+	case config.OperationSubmissionInputVisibilityUnknown:
+		return message == "multiline input visibility unknown before submission; Enter not attempted"
+	default:
+		return false
+	}
+}
+
+func preflightPreSubmissionWorkerSpawnRetry(dir config.Directory, operation config.OperationRecord, requested config.Row, groups []string) error {
+	rows, err := config.LoadReadOnly(dir.WorkersPath())
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if workerRowsEquivalent(row, requested) {
+			continue
+		}
+		if row.Workspace == requested.Workspace && row.Window == requested.Window {
+			return fmt.Errorf("pre-submission spawn cannot retry because worker window %s/%s is configured for thread %s", requested.Workspace, requested.Window, row.Thread)
+		}
+		if row.Thread == requested.Thread {
+			return fmt.Errorf("pre-submission spawn cannot retry because thread %s is configured as %s/%s", row.Thread, row.Workspace, row.Window)
+		}
+	}
+	memberships, err := config.LoadGroupsReadOnly(dir.GroupsPath())
+	if err != nil {
+		return err
+	}
+	requestedGroups := make(map[string]bool, len(groups))
+	for _, group := range groups {
+		requestedGroups[group] = true
+	}
+	for _, membership := range memberships {
+		if membership.Thread == requested.Thread && (!requestedGroups[membership.Group] || membership.Role != config.GroupMember) {
+			return fmt.Errorf("pre-submission spawn cannot retry because thread %s has conflicting group ownership", requested.Thread)
+		}
+	}
+	inspection, err := inspectWorker(requested)
+	if err != nil {
+		return err
+	}
+	if inspection.state != workerPaneAbsent && inspection.state != workerPaneExact {
+		return fmt.Errorf("pre-submission spawn cannot retry because worker tmux identity is %s", inspection.state)
+	}
+	panes, err := managedThreadPanes(requested.Thread)
+	if err != nil {
+		return fmt.Errorf("inspect existing tmux ownership for pre-submission thread %s: %w", requested.Thread, err)
+	}
+	if len(panes) > 1 || len(panes) == 1 && (inspection.state != workerPaneExact || panes[0].WindowID != inspection.pane.WindowID) || len(panes) == 0 && inspection.state == workerPaneExact {
+		return fmt.Errorf("pre-submission thread %s has ambiguous tmux ownership", requested.Thread)
+	}
+	empty, workdirMatches, err := ampThreadEmptyInWorkdir(operation.Resource.Thread, requested.Workdir)
+	if err != nil {
+		return fmt.Errorf("verify pre-submission thread %s: %w", operation.Resource.Thread, err)
+	}
+	if !empty || !workdirMatches {
+		return fmt.Errorf("pre-submission thread %s changed or does not match the requested workdir", operation.Resource.Thread)
+	}
+	active, err := strictAmpThreadIDSet(false)
+	if err != nil {
+		return fmt.Errorf("confirm pre-submission thread %s is active: %w", operation.Resource.Thread, err)
+	}
+	if !active[operation.Resource.Thread] {
+		return fmt.Errorf("pre-submission thread %s is no longer active", operation.Resource.Thread)
+	}
+	return nil
+}
+
+func validatePreSubmissionRetryMutation(row config.Row, expected tmux.WindowPane) error {
+	current, err := preSubmissionRetryPane(row)
+	if err != nil {
+		return err
+	}
+	if expected.Session == "" || expected.Window == "" || expected.WindowID == "" || expected.PaneID == "" || current.Session != expected.Session || current.Window != expected.Window || current.WindowID != expected.WindowID || current.PaneID != expected.PaneID {
+		return errors.New("worker pane identity changed")
+	}
+	panes, err := managedThreadPanesWithPaneID(row.Thread)
+	if err != nil {
+		return err
+	}
+	if len(panes) != 1 || panes[0].Session != expected.Session || panes[0].Window != expected.Window || panes[0].WindowID != expected.WindowID || panes[0].PaneID != expected.PaneID {
+		return errors.New("worker thread ownership changed")
+	}
+	active, err := strictAmpThreadIDSet(false)
+	if err != nil {
+		return err
+	}
+	if !active[row.Thread] {
+		return errors.New("worker thread is no longer active")
+	}
+	empty, workdirMatches, err := ampThreadEmptyInWorkdir(row.Thread, row.Workdir)
+	if err != nil {
+		return err
+	}
+	if !empty || !workdirMatches {
+		return errors.New("worker thread identity or emptiness changed")
+	}
+	return nil
+}
+
+func preSubmissionRetryPane(row config.Row) (tmux.WindowPane, error) {
+	panes, err := (tmux.Runner{}).WindowPanesWithPaneID(row.Workspace, row.Window)
+	if err != nil {
+		return tmux.WindowPane{}, err
+	}
+	if len(panes) != 1 || panes[0].WindowID == "" || panes[0].PaneID == "" {
+		return tmux.WindowPane{}, errors.New("worker pane identity is not exact")
+	}
+	expected := teardownExpectedStartCommand(teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}, row)
+	if normalizedTmuxStartCommand(panes[0].StartCommand) != expected {
+		return tmux.WindowPane{}, errors.New("worker pane command changed")
+	}
+	return panes[0], nil
+}
+
+func managedThreadPanesWithPaneID(thread string) ([]tmux.WindowPane, error) {
+	panes, err := (tmux.Runner{}).AllWindowPanesWithPaneID()
+	if err != nil {
+		return nil, err
+	}
+	var matches []tmux.WindowPane
+	suffix := "exec amp threads continue " + shellSingleQuote(thread)
+	for _, pane := range panes {
+		if strings.HasSuffix(normalizedTmuxStartCommand(pane.StartCommand), suffix) {
+			matches = append(matches, pane)
+		}
+	}
+	return matches, nil
 }
 
 func messageSourceFromSelectors(selectors selectors) config.OperationMessageSource {
@@ -1395,19 +1654,48 @@ func verifyAlternateReceiverBeforeCleanup(provisioned, receiver, message, workdi
 }
 
 func ampThreadHasNoMessages(thread string) (bool, error) {
-	out, err := exec.Command("amp", "threads", "export", thread).CombinedOutput()
+	payload, err := ampThreadExport(thread)
 	if err != nil {
-		return false, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(out, &payload); err != nil {
-		return false, fmt.Errorf("parse amp threads export for %s: %w", thread, err)
+		return false, err
 	}
 	messages, ok := payload["messages"].([]any)
 	if !ok {
 		return false, fmt.Errorf("amp threads export for %s has no message list", thread)
 	}
 	return len(messages) == 0, nil
+}
+
+func ampThreadEmptyInWorkdir(thread, workdir string) (bool, bool, error) {
+	payload, err := ampThreadExport(thread)
+	if err != nil {
+		return false, false, err
+	}
+	exportedThread, ok := payload["id"].(string)
+	if !ok {
+		return false, false, fmt.Errorf("amp threads export for %s has no thread identity", thread)
+	}
+	canonical, err := config.CanonicalThreadID(exportedThread)
+	if err != nil || canonical != thread {
+		return false, false, fmt.Errorf("amp threads export for %s returned a different thread identity", thread)
+	}
+	messages, ok := payload["messages"].([]any)
+	if !ok {
+		return false, false, fmt.Errorf("amp threads export for %s has no message list", thread)
+	}
+	trees, ok := threadEnvironmentTrees(payload["env"])
+	return len(messages) == 0, ok && len(trees) == 1 && threadEnvironmentContainsWorkdir(payload["env"], workdir), nil
+}
+
+func ampThreadExport(thread string) (map[string]any, error) {
+	out, err := exec.Command("amp", "threads", "export", thread).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return nil, fmt.Errorf("parse amp threads export for %s: %w", thread, err)
+	}
+	return payload, nil
 }
 
 func ampUUIDv7ThreadTime(thread string) (time.Time, bool) {
@@ -1707,15 +1995,7 @@ func jsonValueContainsExactText(value any, want string) bool {
 }
 
 func threadEnvironmentContainsWorkdir(value any, workdir string) bool {
-	env, ok := value.(map[string]any)
-	if !ok {
-		return false
-	}
-	initial, ok := env["initial"].(map[string]any)
-	if !ok {
-		return false
-	}
-	trees, ok := initial["trees"].([]any)
+	trees, ok := threadEnvironmentTrees(value)
 	if !ok {
 		return false
 	}
@@ -1739,6 +2019,19 @@ func threadEnvironmentContainsWorkdir(value any, workdir string) bool {
 		}
 	}
 	return false
+}
+
+func threadEnvironmentTrees(value any) ([]any, bool) {
+	env, ok := value.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	initial, ok := env["initial"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	trees, ok := initial["trees"].([]any)
+	return trees, ok
 }
 
 func cleanupFailedCanonicalSpawn(provisionedRow, currentRow config.Row, inspection workerInspection) string {
@@ -1883,16 +2176,15 @@ func inspectWorker(row config.Row) (workerInspection, error) {
 	return workerInspection{state: workerPaneExact, pane: panes[0]}, nil
 }
 
-func managedThreadPanes(thread, workdir string) ([]tmux.WindowPane, error) {
+func managedThreadPanes(thread string) ([]tmux.WindowPane, error) {
 	panes, err := (tmux.Runner{}).AllWindowPanes()
 	if err != nil {
 		return nil, err
 	}
 	var matches []tmux.WindowPane
+	suffix := "exec amp threads continue " + shellSingleQuote(thread)
 	for _, pane := range panes {
-		row := config.Row{Workspace: pane.Session, Window: pane.Window, Workdir: workdir, Thread: thread}
-		identity := teardownIdentity{Workspace: pane.Session, Session: pane.Session, Window: pane.Window, Thread: thread}
-		if explicitTeardownStartCommandMatches(identity, row, normalizedTmuxStartCommand(pane.StartCommand)) {
+		if strings.HasSuffix(normalizedTmuxStartCommand(pane.StartCommand), suffix) {
 			matches = append(matches, pane)
 		}
 	}
