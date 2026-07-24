@@ -14,6 +14,171 @@ import (
 	"time"
 )
 
+func TestMutatingBindingRequiresExactOpus(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name  string
+		model any
+	}{
+		{name: "omitted"},
+		{name: "alias", model: "opus"},
+		{name: "normalized alias", model: "claude_opus_4_8"},
+		{name: "fallback", model: "claude-fable-5"},
+		{name: "wrong type", model: 48},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			binding := mutatingBinding("mutation-model-"+strings.ReplaceAll(test.name, " ", "-"), "/tmp/mutation", strings.Repeat("1", 40), "delegate")
+			if test.model == nil {
+				delete(binding, "model")
+			} else {
+				binding["model"] = test.model
+			}
+			_, stderr, err := runHelper(t, t.TempDir(), map[string]any{
+				"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+			}, "receipt", "create")
+			if err == nil || !strings.Contains(stderr, "claude-opus-4-8") {
+				t.Fatalf("mutating binding model error = %v, stderr %q", err, stderr)
+			}
+		})
+	}
+}
+
+func TestHistoricalMutatingReceiptRemainsInspectableButCannotAct(t *testing.T) {
+	fixture := newMutatingGitFixture(t)
+	stateDir := t.TempDir()
+	binding := mutatingBinding("historical-mutation", fixture.worktree, fixture.baseline, "delegate")
+	createMutatingReceipt(t, stateDir, binding)
+	path := filepath.Join(stateDir, "receipts.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var store map[string]any
+	if err := json.Unmarshal(raw, &store); err != nil {
+		t.Fatal(err)
+	}
+	receipt := store["receipts"].([]any)[0].(map[string]any)
+	delete(receipt["binding"].(map[string]any), "model")
+	for _, rawEvent := range receipt["events"].([]any) {
+		delete(rawEvent.(map[string]any), "model")
+	}
+	historical, err := json.Marshal(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, historical, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := runHelper(t, stateDir, map[string]any{}, "receipt", "show", "--delegation-id", "historical-mutation")
+	if err != nil || !strings.Contains(stdout, `"delegation_id":"historical-mutation"`) {
+		t.Fatalf("historical mutating receipt inspection: %v: %s%s", err, stdout, stderr)
+	}
+	_, stderr, err = runHelper(t, stateDir, mutatingReport(binding, "historical-report", "blocked", ""), "report", "submit")
+	if err == nil || !strings.Contains(stderr, "claude-opus-4-8") {
+		t.Fatalf("historical receipt gained Stage A authority: %v: %s", err, stderr)
+	}
+}
+
+func TestMutatingRequestAndPolicyRequireExactOpus(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import importlib.util, pathlib, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+request = {
+    "delegation_id":"d", "event_id":"e", "workdir":"/tmp/w", "packet_file":"/tmp/p",
+    "tmux_session":"s", "tmux_window":"w", "claude_session_id":"c",
+    "repository":"zainfathoni/amux", "base":"b", "workflow":"mutating",
+    "baseline_branch":"delegate", "writer_owner":"claude_mutating_delegate",
+    "integration_owner":"amp_coordinator", "coordinator_write_frozen":True,
+    "shared_writable":False, "handoff":"one_clean_local_commit", "capacity_request":{
+        "provider":"claude", "model":"claude-opus-4-8", "workflow":"mutating",
+        "delegation_id":"d", "task_id":"task",
+        "capacity_pool_evidence":"unknown", "charge_route_evidence":"unknown",
+        "admitted_impact_evidence":"unknown",
+    },
+}
+for value in (None, "opus", "claude_opus_4_8", "claude-fable-5", 48):
+    candidate = dict(request)
+    if value is not None: candidate["model"] = value
+    try: module.validate_launch_request(candidate)
+    except module.HelperError as error: assert "claude-opus-4-8" in str(error), error
+    else: raise AssertionError("non-exact mutating model accepted: " + repr(value))
+request["model"] = "claude-opus-4-8"
+validated = module.validate_launch_request(request)
+assert validated["model"] == "claude-opus-4-8"
+policy = module.launch_policy("mutating", validated["model"])
+assert policy["model"] == "claude-opus-4-8"
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil || string(output) != "ok\n" {
+		t.Fatalf("mutating request/model policy: %v: %s", err, output)
+	}
+}
+
+func TestMutatingReportAndSessionRejectModelDrift(t *testing.T) {
+	fixture := newMutatingGitFixture(t)
+	stateDir := t.TempDir()
+	binding := mutatingBinding("mutation-model-provenance", fixture.worktree, fixture.baseline, "delegate")
+	createMutatingReceipt(t, stateDir, binding)
+	commit := commitFixtureChange(t, fixture.worktree, "result.txt", "result", "result")
+	report := mutatingReport(binding, "model-report", "complete", commit)
+
+	for _, test := range []struct {
+		name  string
+		model any
+	}{
+		{name: "omitted"},
+		{name: "changed", model: "claude-fable-5"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := cloneJSONMap(t, report)
+			if test.model == nil {
+				delete(candidate, "model")
+			} else {
+				candidate["model"] = test.model
+			}
+			_, stderr, err := runHelper(t, stateDir, candidate, "report", "submit")
+			if err == nil || !strings.Contains(stderr, "model") {
+				t.Fatalf("model-drifted report error = %v, stderr %q", err, stderr)
+			}
+		})
+	}
+
+	receiptPath := filepath.Join(stateDir, "receipts.json")
+	before, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var store map[string]any
+	if err := json.Unmarshal(before, &store); err != nil {
+		t.Fatal(err)
+	}
+	receipt := store["receipts"].([]any)[0].(map[string]any)
+	for _, event := range receipt["events"].([]any) {
+		candidate := event.(map[string]any)
+		if candidate["kind"] == "launch_intent" {
+			candidate["model"] = "claude-fable-5"
+		}
+	}
+	drifted, err := json.Marshal(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(receiptPath, drifted, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err := runHelper(t, stateDir, report, "report", "submit")
+	if err == nil || !strings.Contains(stderr, "model") {
+		t.Fatalf("model-drifted session report error = %v, stderr %q", err, stderr)
+	}
+}
+
 func TestMutatingCapacityDecisionUsesEveryReserveAndTightestWindow(t *testing.T) {
 	t.Parallel()
 	request := map[string]any{
@@ -65,6 +230,138 @@ func TestMutatingCapacityDecisionUsesEveryReserveAndTightestWindow(t *testing.T)
 	_, stderr, err = runHelper(t, t.TempDir(), knownLowWithUnknown, "capacity", "decide-mutating")
 	if err == nil || !strings.Contains(stderr, "hard reserve floor") {
 		t.Fatalf("unknown capacity bypassed known hard floor: %v, stderr %q", err, stderr)
+	}
+}
+
+func TestStageAUnknownCapacityActionBindsExactRequestAndExpires(t *testing.T) {
+	t.Parallel()
+	request := stageACapacityRequest(map[string]any{
+		"capacity":                      map[string]any{"status": "unavailable", "windows": []any{}},
+		"reserve_floors":                map[string]any{"five_hour": 20, "weekly": 20, "model_specific": map[string]any{}},
+		"acknowledged_unknown_capacity": false,
+	}, "delegation-stage-a", "private-task-sentinel")
+	stdout, stderr, err := runHelper(t, t.TempDir(), request, "capacity", "decide-mutating")
+	if err != nil {
+		t.Fatalf("Stage A acknowledgement action: %v: %s", err, stderr)
+	}
+	required := decodeJSONMap(t, stdout)
+	action, ok := required["owner_action"].(map[string]any)
+	if !ok || action["acknowledged_unknown_capacity"] != true || action["acknowledgement_of"] != required["decision_digest"] {
+		t.Fatalf("privacy-safe owner action = %#v", required["owner_action"])
+	}
+	if len(action) != 3 {
+		t.Fatalf("owner action contains unexpected fields: %#v", action)
+	}
+	if _, exists := action["capacity"]; exists {
+		t.Fatalf("owner action exposed capacity payload: %#v", action)
+	}
+	if strings.Contains(stdout+stderr, "private-task-sentinel") {
+		t.Fatalf("capacity decision exposed private task identity: %s%s", stdout, stderr)
+	}
+	request["acknowledged_unknown_capacity"] = true
+	request["acknowledgement_of"] = action["acknowledgement_of"]
+	request["acknowledgement_expires_at"] = action["acknowledgement_expires_at"]
+	stdout, stderr, err = runHelper(t, t.TempDir(), request, "capacity", "decide-mutating")
+	if err != nil || !strings.Contains(stdout, `"decision":"explicit_acknowledgement"`) || strings.Contains(stdout, `"autonomous_selection":true`) {
+		t.Fatalf("exact Stage A acknowledgement: %v: %s%s", err, stdout, stderr)
+	}
+
+	for _, field := range []string{"model", "delegation_id", "task_id", "capacity_pool_evidence", "charge_route_evidence", "admitted_impact_evidence"} {
+		changed := cloneJSONMap(t, request)
+		changed[field] = "changed"
+		_, _, err := runHelper(t, t.TempDir(), changed, "capacity", "decide-mutating")
+		if err == nil {
+			t.Fatalf("changed %s reused acknowledgement", field)
+		}
+	}
+	changedFloor := cloneJSONMap(t, request)
+	changedFloor["reserve_floors"].(map[string]any)["weekly"] = float64(30)
+	if _, _, err := runHelper(t, t.TempDir(), changedFloor, "capacity", "decide-mutating"); err == nil {
+		t.Fatal("changed floor reused acknowledgement")
+	}
+	missingFloor := cloneJSONMap(t, request)
+	delete(missingFloor["reserve_floors"].(map[string]any), "weekly")
+	if _, stderr, err := runHelper(t, t.TempDir(), missingFloor, "capacity", "decide-mutating"); err == nil || !strings.Contains(stderr, "weekly reserve floor") {
+		t.Fatalf("missing floor became acknowledgement-eligible: %v: %s", err, stderr)
+	}
+	knownViolation := cloneJSONMap(t, request)
+	knownViolation["capacity"] = map[string]any{
+		"status": "supported", "provider": "claude", "source": "unknown", "confidence": "unknown",
+		"windows": []any{
+			map[string]any{"name": "primary", "used_percent": 90, "window_minutes": 300, "resets_at": futureCapacityReset(300)},
+			map[string]any{"name": "secondary", "used_percent": 10, "window_minutes": 10080, "resets_at": futureCapacityReset(10080)},
+		},
+	}
+	if _, stderr, err := runHelper(t, t.TempDir(), knownViolation, "capacity", "decide-mutating"); err == nil || !strings.Contains(stderr, "hard reserve floor") {
+		t.Fatalf("known floor violation became acknowledgement-eligible: %v: %s", err, stderr)
+	}
+	changedObservation := cloneJSONMap(t, request)
+	changedObservation["capacity"].(map[string]any)["status"] = "different"
+	if _, _, err := runHelper(t, t.TempDir(), changedObservation, "capacity", "decide-mutating"); err == nil {
+		t.Fatal("changed observation reused acknowledgement")
+	}
+	expired := cloneJSONMap(t, request)
+	expired["acknowledgement_expires_at"] = "2020-01-01T00:00:00Z"
+	_, stderr, err = runHelper(t, t.TempDir(), expired, "capacity", "decide-mutating")
+	if err == nil || !strings.Contains(stderr, "expired") {
+		t.Fatalf("expired acknowledgement error = %v, stderr %q", err, stderr)
+	}
+}
+
+func TestStageAAcknowledgementConsumptionRejectsReplay(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import importlib.util, pathlib, sys, tempfile
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+ack = "a" * 64
+store = {"receipts":[{"events":[]}, {"events":[]}]}
+module.require_unconsumed_stage_a_acknowledgement(store, ack)
+store["receipts"][0]["events"].append({
+    "kind":"launch_intent", "capacity_acknowledgement_of":ack,
+})
+try: module.require_unconsumed_stage_a_acknowledgement(store, ack)
+except module.HelperError as error: assert "already consumed" in str(error), error
+else: raise AssertionError("Stage A acknowledgement replay was accepted")
+module.require_unconsumed_stage_a_acknowledgement(store, "b" * 64)
+
+# The canonical lifecycle registry makes consumption exclusive across stores too.
+root = pathlib.Path(tempfile.mkdtemp())
+lifecycle_dir, current_dir, remote_dir = root / "lifecycle", root / "current", root / "remote"
+current = module.ReceiptStore(current_dir, lifecycle_dir)
+remote = module.ReceiptStore(remote_dir, lifecycle_dir)
+binding = {
+    "protocol_version":1, "delegation_id":"remote", "nonce":"1" * 64,
+    "task_id":"task", "question_message_id":"question", "origin_thread":"T-origin",
+    "repository":"zainfathoni/amux", "base":"base", "workdir":"/tmp/read-only",
+    "producer_role":"thinker", "authority":"read_only", "task_reference":"task",
+    "packet_digest":"2" * 64, "launch_policy_digest":"3" * 64,
+    "launch_command_digest":"4" * 64,
+}
+remote.commit({"schema_version":1, "receipts":[{
+    "binding":binding, "routing":{"target":"machine_local_inbox"}, "state":"created",
+    "report_message_id":"", "created_at":"2026-07-20T12:00:00Z",
+    "updated_at":"2026-07-20T12:00:01Z", "events":[
+        {"event_id":"created", "kind":"created"},
+        {"event_id":"intent", "kind":"launch_intent", "capacity_acknowledgement_of":ack},
+    ],
+}]})
+lifecycle = current.lifecycle.load()
+lifecycle["stores"] = sorted([str(current_dir.resolve()), str(remote_dir.resolve())])
+current.lifecycle.commit(lifecycle)
+try: module.require_unconsumed_stage_a_acknowledgement(
+    {"schema_version":1, "receipts":[]}, ack, current)
+except module.HelperError as error: assert "already consumed" in str(error), error
+else: raise AssertionError("cross-store Stage A acknowledgement replay was accepted")
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil || string(output) != "ok\n" {
+		t.Fatalf("Stage A acknowledgement consumption: %v: %s", err, output)
 	}
 }
 
@@ -823,6 +1120,41 @@ func TestMutatingReportRequiresCompletedAcquiredMutatingSession(t *testing.T) {
 	}
 }
 
+func TestMutatingPreSemanticProviderBlockersPreserveAcquiredNoReportState(t *testing.T) {
+	for _, blocker := range []string{"authentication", "entitlement", "quota", "credit", "model-availability"} {
+		t.Run(blocker, func(t *testing.T) {
+			fixture := newMutatingGitFixture(t)
+			stateDir := t.TempDir()
+			binding := mutatingBinding("pre-semantic-"+blocker, fixture.worktree, fixture.baseline, "delegate")
+			createMutatingReceipt(t, stateDir, binding)
+			path := filepath.Join(stateDir, "receipts.json")
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := map[string]any{
+				"delegation_id": binding["delegation_id"], "event_id": "retire-" + blocker,
+				"origin_thread": binding["origin_thread"],
+				"authorization": map[string]any{
+					"terminal_state": "closed_terminal", "report_sha256": strings.Repeat("1", 64),
+					"coordinator_authorization_sha256": strings.Repeat("2", 64),
+				},
+			}
+			stdout, stderr, err := runHelper(t, stateDir, request, "lifecycle", "retire-live-acquired-no-report-pair")
+			if err == nil || (!strings.Contains(stderr, "exact acquired no-report") && !strings.Contains(stdout, `"outcome":"blocked"`)) {
+				t.Fatalf("pre-semantic blocker gained retry authority: %v: %s%s", err, stdout, stderr)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, before) || bytes.Contains(after, []byte(`"kind":"input_request"`)) {
+				t.Fatalf("pre-semantic blocker changed acquired evidence:\nbefore: %s\nafter: %s", before, after)
+			}
+		})
+	}
+}
+
 func TestMutatingLaunchIsAnExplicitSeparateWriterPolicy(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("experimental Claude launch is Darwin-only")
@@ -849,11 +1181,9 @@ func TestMutatingLaunchIsAnExplicitSeparateWriterPolicy(t *testing.T) {
 		"reserve_floors":                map[string]any{"five_hour": 20, "weekly": 20, "model_specific": map[string]any{}},
 		"acknowledged_unknown_capacity": false,
 	}
-	_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, capacityRequest, "capacity", "decide-mutating")
-	if err != nil {
-		t.Fatalf("capacity decision: %v: %s", err, stderr)
-	}
+	capacityRequest = acknowledgeStageACapacity(t, fixture.stateDir, fixture.environment, capacityRequest, fixture.request["delegation_id"].(string), "task-session-preflight")
 	fixture.request["workflow"] = "mutating"
+	fixture.request["model"] = "claude-opus-4-8"
 	delete(fixture.request, "expected_launch_policy_digest")
 	fixture.request["baseline_branch"] = "delegate"
 	fixture.request["writer_owner"] = "claude_mutating_delegate"
@@ -878,6 +1208,7 @@ func TestMutatingLaunchIsAnExplicitSeparateWriterPolicy(t *testing.T) {
 		t.Fatalf("tampered capacity decision error = %v, stderr %q", err, stderr)
 	}
 	binding := mutatingBinding("delegation-session-preflight", fixture.request["workdir"].(string), fixture.request["base"].(string), "delegate")
+	binding["task_id"] = capacityRequest["task_id"]
 	binding["packet_digest"] = plan["packet_digest"]
 	binding["launch_policy_digest"] = plan["launch_policy_digest"]
 	binding["launch_command_digest"] = plan["launch_command_digest"]
@@ -950,9 +1281,22 @@ func TestMutatingLaunchIsAnExplicitSeparateWriterPolicy(t *testing.T) {
 		t.Fatalf("mutating launch environment removal = %#v", transport.RemoveEnvironment)
 	}
 	transportedArgv := strings.Join(transport.Argv, " ")
-	for _, want := range []string{"--tools Read,Grep,Glob,Bash,Edit,Write", "Bash(git push:*)", "Bash(gh:*)", "Bash(git worktree:*)"} {
+	for _, want := range []string{"--model claude-opus-4-8", "--tools Read,Grep,Glob,Bash,Edit,Write", "Bash(git push:*)", "Bash(gh:*)", "Bash(git worktree:*)"} {
 		if !strings.Contains(transportedArgv, want) {
 			t.Errorf("mutating launch transport missing %q", want)
+		}
+	}
+	receiptBytes, err := os.ReadFile(filepath.Join(fixture.stateDir, "receipts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"model":"claude-opus-4-8"`,
+		`"capacity_acknowledgement_of":"` + capacityRequest["acknowledgement_of"].(string) + `"`,
+		`"capacity_request_digest":`,
+	} {
+		if !bytes.Contains(receiptBytes, []byte(want)) {
+			t.Errorf("mutating receipt missing exact Stage A provenance %s: %s", want, receiptBytes)
 		}
 	}
 }
@@ -976,7 +1320,9 @@ func TestMutatingLaunchRevalidatesTheLeasedBaselineBeforeRecordingIntent(t *test
 		"reserve_floors":                map[string]any{"five_hour": 20, "weekly": 20, "model_specific": map[string]any{}},
 		"acknowledged_unknown_capacity": false,
 	}
+	capacityRequest = acknowledgeStageACapacity(t, fixture.stateDir, fixture.environment, capacityRequest, fixture.request["delegation_id"].(string), "task-baseline-revalidation")
 	fixture.request["workflow"] = "mutating"
+	fixture.request["model"] = "claude-opus-4-8"
 	delete(fixture.request, "expected_launch_policy_digest")
 	fixture.request["baseline_branch"] = "delegate"
 	fixture.request["writer_owner"] = "claude_mutating_delegate"
@@ -992,6 +1338,7 @@ func TestMutatingLaunchRevalidatesTheLeasedBaselineBeforeRecordingIntent(t *test
 	}
 	plan := decodeJSONMap(t, stdout)
 	binding := mutatingBinding("delegation-session-preflight", fixture.request["workdir"].(string), fixture.request["base"].(string), "delegate")
+	binding["task_id"] = capacityRequest["task_id"]
 	binding["packet_digest"] = plan["packet_digest"]
 	binding["launch_policy_digest"] = plan["launch_policy_digest"]
 	binding["launch_command_digest"] = plan["launch_command_digest"]
@@ -1104,6 +1451,7 @@ func mutatingBinding(delegationID, workdir, baseline, branch string) map[string]
 	binding["integration_owner"] = "amp_coordinator"
 	binding["handoff"] = "one_clean_local_commit"
 	binding["capacity_decision_digest"] = strings.Repeat("e", 64)
+	binding["model"] = "claude-opus-4-8"
 	return binding
 }
 
@@ -1133,7 +1481,7 @@ func recordMutatingSessionFixture(t *testing.T, stateDir, delegationID string) {
 	launchIdentity := map[string]any{"session": "Claude", "window": "delegate", "window_id": "@30", "pane_id": "%30"}
 	sessionIdentity := map[string]any{"claude_session_id": "session-fixture", "pane_id": "%30"}
 	receipt["events"] = append(receipt["events"].([]any),
-		map[string]any{"event_id": "launch-fixture", "kind": "launch_intent", "workflow": "mutating", "at": "2026-07-18T12:00:00Z"},
+		map[string]any{"event_id": "launch-fixture", "kind": "launch_intent", "workflow": "mutating", "model": "claude-opus-4-8", "at": "2026-07-18T12:00:00Z"},
 		map[string]any{"event_id": "amux:launch-fixture", "kind": "launch_completed", "operation_event_id": "launch-fixture", "identity": launchIdentity, "at": "2026-07-18T12:00:01Z"},
 		map[string]any{"event_id": "acquire-fixture", "kind": "session_acquired", "identity": sessionIdentity, "at": "2026-07-18T12:00:02Z"},
 	)
@@ -1173,6 +1521,7 @@ func mutatingReport(binding map[string]any, messageID, status, handoffCommit str
 	delete(message, "")
 	message["producer_role"] = "mutating_delegate"
 	message["authority"] = "exclusive_writer"
+	message["model"] = "claude-opus-4-8"
 	return message
 }
 
@@ -1199,4 +1548,34 @@ func decodeJSONMap(t *testing.T, value string) map[string]any {
 
 func futureCapacityReset(windowMinutes int) string {
 	return time.Now().UTC().Add(time.Duration(windowMinutes/2) * time.Minute).Format(time.RFC3339)
+}
+
+func stageACapacityRequest(request map[string]any, delegationID, taskID string) map[string]any {
+	request["provider"] = "claude"
+	request["model"] = "claude-opus-4-8"
+	request["workflow"] = "mutating"
+	request["delegation_id"] = delegationID
+	request["task_id"] = taskID
+	request["capacity_pool_evidence"] = "unknown"
+	request["charge_route_evidence"] = "unknown"
+	request["admitted_impact_evidence"] = "unknown"
+	return request
+}
+
+func acknowledgeStageACapacity(t *testing.T, stateDir string, environment []string, request map[string]any, delegationID, taskID string) map[string]any {
+	t.Helper()
+	request = stageACapacityRequest(request, delegationID, taskID)
+	stdout, stderr, err := runHelperEnv(t, stateDir, environment, request, "capacity", "decide-mutating")
+	if err != nil {
+		t.Fatalf("Stage A capacity decision: %v: %s", err, stderr)
+	}
+	action := decodeJSONMap(t, stdout)["owner_action"].(map[string]any)
+	for key, value := range action {
+		request[key] = value
+	}
+	stdout, stderr, err = runHelperEnv(t, stateDir, environment, request, "capacity", "decide-mutating")
+	if err != nil || !strings.Contains(stdout, `"decision":"explicit_acknowledgement"`) {
+		t.Fatalf("Stage A capacity acknowledgement: %v: %s%s", err, stdout, stderr)
+	}
+	return request
 }
