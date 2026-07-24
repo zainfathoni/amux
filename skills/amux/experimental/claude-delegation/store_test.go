@@ -4332,6 +4332,7 @@ func TestLinuxLaunchDoesNotClaimMutatingDelegation(t *testing.T) {
 	fixture := newLaunchFixture(t)
 	request := cloneJSONMap(t, fixture.request)
 	request["workflow"] = "mutating"
+	request["model"] = "claude-opus-4-8"
 	delete(request, "expected_launch_policy_digest")
 	request["baseline_branch"] = "delegate"
 	request["writer_owner"] = "claude"
