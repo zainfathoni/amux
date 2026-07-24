@@ -4340,7 +4340,9 @@ func TestLinuxLaunchDoesNotClaimMutatingDelegation(t *testing.T) {
 	request["coordinator_write_frozen"] = true
 	request["shared_writable"] = false
 	request["handoff"] = "one_clean_local_commit"
-	request["capacity_request"] = map[string]any{}
+	request["capacity_request"] = stageACapacityRequest(
+		map[string]any{}, request["delegation_id"].(string), "task-linux-boundary",
+	)
 	_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, request, "launch", "plan")
 	if err == nil || !strings.Contains(stderr, "mutating Claude launch remains available only on Darwin") {
 		t.Fatalf("Linux mutating launch error = %v, stderr %q", err, stderr)
