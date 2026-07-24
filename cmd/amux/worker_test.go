@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"math/big"
 	"os"
 	"os/exec"
@@ -3744,6 +3747,312 @@ func TestWorkerLaunchPreflightsEveryWorkdirBeforeTmuxMutation(t *testing.T) {
 	if _, err := os.Stat(called); !os.IsNotExist(err) {
 		t.Fatalf("bulk launch mutated before complete workdir preflight: %v", err)
 	}
+}
+
+func TestThreadArchiveStatusesBoundsAmpThreadsListFailures(t *testing.T) {
+	oldTimeout := ampThreadsListTimeout
+	oldLimit := ampThreadsListOutputLimit
+	t.Cleanup(func() {
+		ampThreadsListTimeout = oldTimeout
+		ampThreadsListOutputLimit = oldLimit
+	})
+	ampThreadsListTimeout = 50 * time.Millisecond
+	ampThreadsListOutputLimit = 64
+	rows := []config.Row{{Workspace: "alpha", Window: "worker", Workdir: "/tmp/worker", Thread: "T-worker"}}
+
+	for _, test := range []struct {
+		name      string
+		behavior  func([]string) (string, string)
+		want      string
+		wantCalls int
+		limit     int
+	}{
+		{
+			name:      "active timeout",
+			behavior:  func([]string) (string, string) { return "timeout", "" },
+			want:      "active thread inventory: amp threads list timed out after 50ms",
+			wantCalls: 1,
+		},
+		{
+			name: "archive timeout",
+			behavior: func(args []string) (string, string) {
+				if slicesContain(args, "--include-archived") {
+					return "timeout", ""
+				}
+				return "output", `[{"id":"T-worker"}]`
+			},
+			want:      "archived thread inventory: amp threads list timed out after 50ms",
+			wantCalls: 2,
+		},
+		{
+			name:      "nonzero exit",
+			behavior:  func([]string) (string, string) { return "nonzero", "" },
+			want:      "active thread inventory: amp threads list failed with exit code 7",
+			wantCalls: 1,
+		},
+		{
+			name:      "malformed JSON",
+			behavior:  func([]string) (string, string) { return "malformed", "" },
+			want:      "active thread inventory: amp threads list returned malformed JSON",
+			wantCalls: 1,
+		},
+		{
+			name:      "output overflow",
+			behavior:  func([]string) (string, string) { return "overflow", "" },
+			want:      "active thread inventory: amp threads list output exceeded 64-byte limit",
+			wantCalls: 1,
+		},
+		{
+			name:      "stderr overflow",
+			behavior:  func([]string) (string, string) { return "stderr-overflow", "" },
+			want:      "active thread inventory: amp threads list output exceeded 64-byte limit",
+			wantCalls: 1,
+		},
+		{
+			name: "archive nonzero exit",
+			behavior: func(args []string) (string, string) {
+				if slicesContain(args, "--include-archived") {
+					return "nonzero", ""
+				}
+				return "output", `[{"id":"T-worker"}]`
+			},
+			want:      "archived thread inventory: amp threads list failed with exit code 7",
+			wantCalls: 2,
+		},
+		{
+			name: "archive malformed JSON",
+			behavior: func(args []string) (string, string) {
+				if slicesContain(args, "--include-archived") {
+					return "malformed", ""
+				}
+				return "output", `[{"id":"T-worker"}]`
+			},
+			want:      "archived thread inventory: amp threads list returned malformed JSON",
+			wantCalls: 2,
+		},
+		{
+			name: "archive output overflow",
+			behavior: func(args []string) (string, string) {
+				if slicesContain(args, "--include-archived") {
+					return "overflow", ""
+				}
+				return "output", `[{"id":"T-worker"}]`
+			},
+			want:      "archived thread inventory: amp threads list output exceeded 64-byte limit",
+			wantCalls: 2,
+		},
+		{
+			name:      "overflow followed by stall",
+			behavior:  func([]string) (string, string) { return "overflow-stall", "" },
+			want:      "active thread inventory: amp threads list output exceeded 64-byte limit",
+			wantCalls: 1,
+		},
+		{
+			name: "pagination timeout",
+			behavior: func(args []string) (string, string) {
+				if len(args) > 0 && args[len(args)-1] == "500" {
+					return "timeout", ""
+				}
+				page := make([]map[string]string, 500)
+				for i := range page {
+					page[i] = map[string]string{"id": fmt.Sprintf("T-page-%d", i)}
+				}
+				encoded, _ := json.Marshal(page)
+				return "output", string(encoded)
+			},
+			want:      "active thread inventory: amp threads list timed out after 50ms",
+			wantCalls: 2,
+			limit:     32 << 10,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ampThreadsListOutputLimit = test.limit
+			if ampThreadsListOutputLimit == 0 {
+				ampThreadsListOutputLimit = 64
+			}
+			calls := injectAmpThreadsListProcess(t, test.behavior)
+			started := time.Now()
+			_, err := threadArchiveStatuses(rows)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("threadArchiveStatuses error = %v, want %q", err, test.want)
+			}
+			if strings.Contains(err.Error(), "synthetic-private-output") {
+				t.Fatalf("threadArchiveStatuses leaked subprocess output: %v", err)
+			}
+			if *calls != test.wantCalls {
+				t.Fatalf("amp threads list calls = %d, want %d", *calls, test.wantCalls)
+			}
+			if time.Since(started) > time.Second {
+				t.Fatalf("bounded failure took %s", time.Since(started))
+			}
+		})
+	}
+}
+
+func TestScopedWorkerDoctorReusesOneThreadInventory(t *testing.T) {
+	dir := t.TempDir()
+	rows := []config.Row{
+		{Workspace: "alpha", Window: "b", Workdir: "/tmp/b", Thread: "T-b"},
+		{Workspace: "alpha", Window: "a", Workdir: "/tmp/a", Thread: "T-a"},
+		{Workspace: "beta", Window: "c", Workdir: "/tmp/c", Thread: "T-c"},
+	}
+	writeWorkerRegistry(t, dir, rows[0].String()+"\n"+rows[1].String()+"\n"+rows[2].String()+"\n")
+	installWorkerDoctorTmux(t, rows)
+	calls := injectAmpThreadsListProcess(t, func([]string) (string, string) {
+		return "output", `[{"id":"T-a"},{"id":"T-b"},{"id":"T-c"}]`
+	})
+
+	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "doctor", "--workspace", "alpha")
+	if *calls != 2 {
+		t.Fatalf("amp threads list calls = %d, want one active and one archive inventory", *calls)
+	}
+	if len(got.Successful) != 2 || got.Successful[0].Resource.Thread != "T-a" || got.Successful[1].Resource.Thread != "T-b" || len(got.Failed) != 0 {
+		t.Fatalf("scoped worker doctor = %+v", got)
+	}
+}
+
+func TestWorkerDoctorInventoryFailureProducesOrderedIndependentOutcomes(t *testing.T) {
+	dir := t.TempDir()
+	rows := []config.Row{
+		{Workspace: "alpha", Window: "b", Workdir: "/tmp/b", Thread: "T-b"},
+		{Workspace: "alpha", Window: "a", Workdir: "/tmp/a", Thread: "T-a"},
+	}
+	writeWorkerRegistry(t, dir, rows[0].String()+"\n"+rows[1].String()+"\n")
+	before, err := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	installWorkerDoctorTmux(t, rows)
+	calls := injectAmpThreadsListProcess(t, func([]string) (string, string) { return "nonzero", "" })
+
+	got, err := executeWorkerJSONResult(t, "--json", "--config-dir", dir, "worker", "doctor", "--all")
+	if err == nil || result.ErrorKindOf(err) != result.ErrorRuntime {
+		t.Fatalf("worker doctor error = %v", err)
+	}
+	if *calls != 1 {
+		t.Fatalf("amp threads list calls = %d, want one failed shared inventory", *calls)
+	}
+	if len(got.Successful) != 2 || got.Successful[0].Resource.Thread != "T-a" || got.Successful[1].Resource.Thread != "T-b" {
+		t.Fatalf("ordered worker outcomes = %+v", got)
+	}
+	for _, out := range got.Successful {
+		if !strings.Contains(out.Message, "remote=unknown") {
+			t.Fatalf("worker local diagnostic = %+v", out)
+		}
+	}
+	if len(got.Failed) != 1 || got.Failed[0].Resource.Kind != "command" || got.Failed[0].Error == nil || got.Failed[0].Error.Message != "active thread inventory: amp threads list failed with exit code 7" {
+		t.Fatalf("shared inventory failure = %+v", got)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("worker doctor changed registry: err=%v\nbefore=%s\nafter=%s", err, before, after)
+	}
+}
+
+func TestAmpThreadsListDescendantIsBoundedAndStopped(t *testing.T) {
+	oldTimeout := ampThreadsListTimeout
+	oldWaitDelay := ampThreadsListWaitDelay
+	t.Cleanup(func() {
+		ampThreadsListTimeout = oldTimeout
+		ampThreadsListWaitDelay = oldWaitDelay
+	})
+	ampThreadsListTimeout = 100 * time.Millisecond
+	ampThreadsListWaitDelay = 50 * time.Millisecond
+	marker := filepath.Join(t.TempDir(), "descendant-survived")
+	calls := injectAmpThreadsListProcess(t, func([]string) (string, string) { return "descendant", marker })
+
+	started := time.Now()
+	_, err := threadArchiveStatuses([]config.Row{{Workspace: "alpha", Window: "worker", Workdir: "/tmp/worker", Thread: "T-worker"}})
+	if err == nil || !strings.Contains(err.Error(), "amp threads list timed out after 100ms") {
+		t.Fatalf("descendant inventory error = %v", err)
+	}
+	if *calls != 1 || time.Since(started) > time.Second {
+		t.Fatalf("descendant inventory calls=%d duration=%s", *calls, time.Since(started))
+	}
+	time.Sleep(400 * time.Millisecond)
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("amp threads list descendant survived process-group cancellation: %v", statErr)
+	}
+}
+
+func TestAmpThreadsListSyntheticProcess(t *testing.T) {
+	if os.Getenv("AMUX_AMP_THREADS_LIST_TEST_PROCESS") != "1" {
+		return
+	}
+	if os.Getenv("AMUX_AMP_THREADS_LIST_TEST_DESCENDANT") == "1" {
+		time.Sleep(300 * time.Millisecond)
+		_ = os.WriteFile(os.Getenv("AMUX_AMP_THREADS_LIST_TEST_OUTPUT"), []byte("survived"), 0o600)
+		os.Exit(0)
+	}
+	switch os.Getenv("AMUX_AMP_THREADS_LIST_TEST_SCENARIO") {
+	case "timeout":
+		time.Sleep(10 * time.Second)
+	case "nonzero":
+		fmt.Fprint(os.Stderr, "synthetic-private-output")
+		os.Exit(7)
+	case "malformed":
+		fmt.Fprint(os.Stdout, `{"title":"synthetic-private-output"`)
+	case "overflow":
+		_, _ = io.WriteString(os.Stdout, strings.Repeat("synthetic-private-output", 20))
+	case "stderr-overflow":
+		_, _ = io.WriteString(os.Stderr, strings.Repeat("synthetic-private-output", 20))
+	case "overflow-stall":
+		_, _ = io.WriteString(os.Stdout, strings.Repeat("synthetic-private-output", 20))
+		time.Sleep(10 * time.Second)
+	case "descendant":
+		cmd := exec.Command(os.Args[0], "-test.run=^TestAmpThreadsListSyntheticProcess$")
+		cmd.Env = append(os.Environ(), "AMUX_AMP_THREADS_LIST_TEST_DESCENDANT=1")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Start(); err != nil {
+			os.Exit(8)
+		}
+	case "output":
+		fmt.Fprint(os.Stdout, os.Getenv("AMUX_AMP_THREADS_LIST_TEST_OUTPUT"))
+	default:
+		os.Exit(9)
+	}
+	os.Exit(0)
+}
+
+func injectAmpThreadsListProcess(t *testing.T, behavior func([]string) (string, string)) *int {
+	t.Helper()
+	oldCommand := ampThreadsListCommand
+	t.Cleanup(func() { ampThreadsListCommand = oldCommand })
+	calls := 0
+	ampThreadsListCommand = func(ctx context.Context, args ...string) *exec.Cmd {
+		calls++
+		scenario, output := behavior(args)
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestAmpThreadsListSyntheticProcess$")
+		cmd.Env = append(os.Environ(),
+			"AMUX_AMP_THREADS_LIST_TEST_PROCESS=1",
+			"AMUX_AMP_THREADS_LIST_TEST_SCENARIO="+scenario,
+			"AMUX_AMP_THREADS_LIST_TEST_OUTPUT="+output,
+		)
+		return cmd
+	}
+	return &calls
+}
+
+func installWorkerDoctorTmux(t *testing.T, rows []config.Row) {
+	t.Helper()
+	var panes strings.Builder
+	for i, row := range rows {
+		identity := teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}
+		fmt.Fprintf(&panes, "%s\\t@%d\\t%s\\n", row.Window, i+1, teardownExpectedStartCommand(identity, row))
+	}
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ncase \"$1\" in\n  has-session) exit 0 ;;\n  list-panes) printf %b "+shellSingleQuote(panes.String())+" ;;\n  *) exit 99 ;;\nesac\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func slicesContain(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func TestCanonicalWorkerCompletionsAreLeafSpecific(t *testing.T) {

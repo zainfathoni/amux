@@ -426,14 +426,16 @@ func TestAggregateReconcilePlansWorkerAndMissingRunnerWithoutMutation(t *testing
 func TestAggregateDoctorDiagnosesBothModes(t *testing.T) {
 	dir := t.TempDir()
 	runnerDir := t.TempDir()
-	workerDir := t.TempDir()
+	workerDirA := t.TempDir()
+	workerDirB := t.TempDir()
 	runnerWindow := config.RunnerWindow(runnerDir)
-	workerRow := config.Row{Workspace: "alpha", Window: "worker", Workdir: workerDir, Thread: "T-worker"}
-	workerStart := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "worker", Thread: "T-worker"}, workerRow)
+	workerRowA := config.Row{Workspace: "alpha", Window: "a", Workdir: workerDirA, Thread: "T-a"}
+	workerRowB := config.Row{Workspace: "alpha", Window: "b", Workdir: workerDirB, Thread: "T-b"}
+	workerStartA := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "a", Thread: "T-a"}, workerRowA)
+	workerStartB := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "b", Thread: "T-b"}, workerRowB)
 	writeRunnerRegistry(t, dir, "alpha\t"+runnerDir+"\n")
-	writeWorkerRegistry(t, dir, workerRow.String()+"\n")
+	writeWorkerRegistry(t, dir, workerRowB.String()+"\n"+workerRowA.String()+"\n")
 	bin := t.TempDir()
-	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\nprintf '%s\\n' '[{\"id\":\"T-worker\"}]'\n")
 	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
 case "$1" in
   has-session) exit 0 ;;
@@ -441,16 +443,75 @@ case "$1" in
     if echo "$*" | grep -q pane_current_path; then
       printf 'alpha\t`+runnerWindow+`\t@1\t%%1\t`+runnerDir+`\tamp\t%s\t0\n' `+shellSingleQuote(runnerStartCommand(runnerDir))+`
     else
-      printf 'worker\t@2\t%s\n' `+shellSingleQuote(workerStart)+`
+      printf 'a\t@2\t%s\nb\t@3\t%s\n' `+shellSingleQuote(workerStartA)+` `+shellSingleQuote(workerStartB)+`
     fi ;;
   *) exit 99 ;;
 esac
 `)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	calls := injectAmpThreadsListProcess(t, func([]string) (string, string) {
+		return "output", `[{"id":"T-a"},{"id":"T-b"}]`
+	})
 
 	got := executeAggregateJSON(t, "--json", "--config-dir", dir, "doctor", "--workspace", "alpha")
-	if keys := aggregateResourceKeys(got.Successful); strings.Join(keys, ",") != "runner:"+runnerDir+",worker:T-worker" {
+	if *calls != 2 {
+		t.Fatalf("aggregate doctor amp threads list calls = %d, want one active and one archive inventory", *calls)
+	}
+	if keys := aggregateResourceKeys(got.Successful); strings.Join(keys, ",") != "runner:"+runnerDir+",worker:T-a,worker:T-b" {
 		t.Fatalf("aggregate doctor = %+v", got)
+	}
+}
+
+func TestAggregateDoctorPreservesRunnerAndWorkerResultsWhenInventoryFails(t *testing.T) {
+	dir := t.TempDir()
+	runnerDir := t.TempDir()
+	workerDirA := t.TempDir()
+	workerDirB := t.TempDir()
+	runnerWindow := config.RunnerWindow(runnerDir)
+	workerRowA := config.Row{Workspace: "alpha", Window: "a", Workdir: workerDirA, Thread: "T-a"}
+	workerRowB := config.Row{Workspace: "alpha", Window: "b", Workdir: workerDirB, Thread: "T-b"}
+	workerStartA := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "a", Thread: "T-a"}, workerRowA)
+	workerStartB := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "b", Thread: "T-b"}, workerRowB)
+	writeRunnerRegistry(t, dir, "alpha\t"+runnerDir+"\n")
+	writeWorkerRegistry(t, dir, workerRowB.String()+"\n"+workerRowA.String()+"\n")
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) exit 0 ;;
+  list-panes)
+    if echo "$*" | grep -q pane_current_path; then
+      printf 'alpha\t`+runnerWindow+`\t@1\t%%1\t`+runnerDir+`\tamp\t%s\t0\n' `+shellSingleQuote(runnerStartCommand(runnerDir))+`
+    else
+      printf 'a\t@2\t%s\nb\t@3\t%s\n' `+shellSingleQuote(workerStartA)+` `+shellSingleQuote(workerStartB)+`
+    fi ;;
+  *) exit 99 ;;
+esac
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	calls := injectAmpThreadsListProcess(t, func([]string) (string, string) { return "nonzero", "" })
+
+	var stdout bytes.Buffer
+	err := (app{stdout: &stdout}).execute([]string{"--json", "--config-dir", dir, "doctor", "--workspace", "alpha"})
+	if err == nil || result.ErrorKindOf(err) != result.ErrorRuntime {
+		t.Fatalf("aggregate doctor error = %v output=%s", err, stdout.String())
+	}
+	var got result.Envelope
+	if decodeErr := json.NewDecoder(&stdout).Decode(&got); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if *calls != 1 {
+		t.Fatalf("aggregate doctor amp threads list calls = %d, want one failed shared inventory", *calls)
+	}
+	if keys := aggregateResourceKeys(got.Successful); strings.Join(keys, ",") != "runner:"+runnerDir+",worker:T-a,worker:T-b" {
+		t.Fatalf("aggregate partial result ordering = %+v", got)
+	}
+	for _, out := range got.Successful[1:] {
+		if !strings.Contains(out.Message, "remote=unknown") {
+			t.Fatalf("aggregate worker local diagnostic = %+v", out)
+		}
+	}
+	if len(got.Failed) != 1 || got.Failed[0].Resource.Kind != "command" || got.Failed[0].Error == nil || strings.Contains(got.Failed[0].Error.Message, "synthetic-private-output") {
+		t.Fatalf("aggregate shared inventory failure = %+v", got)
 	}
 }
 

@@ -554,7 +554,7 @@ exit 0
 	if err == nil {
 		t.Fatal("list --shelved succeeded without confirmed Amp thread status")
 	}
-	if !strings.Contains(err.Error(), "confirm Amp thread status before filtering list") || !strings.Contains(err.Error(), "offline") {
+	if !strings.Contains(err.Error(), "confirm Amp thread status before filtering list") || !strings.Contains(err.Error(), "amp threads list failed with exit code 2") || strings.Contains(err.Error(), "offline") {
 		t.Fatalf("got error %q, want fail-closed thread-status diagnostic", err)
 	}
 }
@@ -6659,7 +6659,7 @@ exit 0
 	if err == nil {
 		t.Fatal("prune-archived succeeded when Amp thread list was unavailable")
 	}
-	if !strings.Contains(err.Error(), "confirm archived Amp threads") || !strings.Contains(err.Error(), "offline") {
+	if !strings.Contains(err.Error(), "confirm archived Amp threads") || !strings.Contains(err.Error(), "amp threads list failed with exit code 2") || strings.Contains(err.Error(), "offline") {
 		t.Fatalf("got error %q, want unavailable-thread-list diagnostic", err)
 	}
 	configBytes, readErr := os.ReadFile(configPath)

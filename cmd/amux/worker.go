@@ -156,6 +156,11 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			inspections[row.Thread] = inspection
 		}
 	}
+	var doctorStatuses map[string]threadStatus
+	var doctorStatusErr error
+	if in.Command.Name == "doctor" && !in.Options.DryRun {
+		doctorStatuses, doctorStatusErr = threadArchiveStatuses(rows)
+	}
 	for _, thread := range shelfOnly {
 		resource, _ := result.WorkerResource(thread)
 		out := result.Outcome{Resource: resource, Action: "remove"}
@@ -295,13 +300,13 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			}
 			changed = err == nil
 		case "doctor":
-			status, statusErr := threadArchiveStatuses([]config.Row{row})
-			err = statusErr
-			if err == nil {
-				out.Message = fmt.Sprintf("local=%s remote=%s intent=%t", inspections[row.Thread].state, status[row.Thread], shelved[row.Thread])
-				env.Successful = append(env.Successful, out)
-				continue
+			remote := "unknown"
+			if doctorStatusErr == nil {
+				remote = string(doctorStatuses[canonicalThreadID(row.Thread)])
 			}
+			out.Message = fmt.Sprintf("local=%s remote=%s intent=%t", inspections[row.Thread].state, remote, shelved[row.Thread])
+			env.Successful = append(env.Successful, out)
+			continue
 		case "reconcile":
 			if shelved[row.Thread] {
 				err = archiveAmpThread(row.Thread)
@@ -326,6 +331,13 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			out.Message = "already in desired state"
 			env.Skipped = append(env.Skipped, out)
 		}
+	}
+	if doctorStatusErr != nil {
+		env.Failed = append(env.Failed, result.Outcome{
+			Resource: result.CommandResource(),
+			Action:   "doctor",
+			Error:    &result.Failure{Kind: result.ErrorRuntime, Message: doctorStatusErr.Error()},
+		})
 	}
 	if len(env.Failed) > 0 {
 		return &env, result.Runtime(errors.New("one or more worker operations failed"))

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/zainfathoni/amux/internal/config"
@@ -25,12 +28,19 @@ const (
 	terminalLauncherEnv  = "AMUX_TERMINAL_LAUNCHER"
 	spawnPollInterval    = 100 * time.Millisecond
 	maxSpawnMessageBytes = 1 << 20
+	ampThreadsListLimit  = 64 << 10
 )
 
 var (
-	version = "dev"
-	commit  = ""
-	built   = ""
+	version                   = "dev"
+	commit                    = ""
+	built                     = ""
+	ampThreadsListTimeout     = 10 * time.Second
+	ampThreadsListWaitDelay   = time.Second
+	ampThreadsListOutputLimit = ampThreadsListLimit
+	ampThreadsListCommand     = func(ctx context.Context, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "amp", args...)
+	}
 )
 
 type options struct {
@@ -3191,19 +3201,21 @@ const (
 )
 
 func threadArchiveStatuses(rows []config.Row) (map[string]threadStatus, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), ampThreadsListTimeout)
+	defer cancel()
 	targets := make(map[string]bool, len(rows))
 	for _, row := range rows {
 		if id := canonicalThreadID(row.Thread); id != "" {
 			targets[id] = true
 		}
 	}
-	active, err := ampThreadIDSet(false, targets)
+	active, err := ampThreadIDSet(ctx, false, targets)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("active thread inventory: %w", err)
 	}
-	includingArchived, err := ampThreadIDSet(true, targets)
+	includingArchived, err := ampThreadIDSet(ctx, true, targets)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("archived thread inventory: %w", err)
 	}
 	statuses := make(map[string]threadStatus, len(rows))
 	for _, row := range rows {
@@ -3220,7 +3232,7 @@ func threadArchiveStatuses(rows []config.Row) (map[string]threadStatus, error) {
 	return statuses, nil
 }
 
-func ampThreadIDSet(includeArchived bool, targets map[string]bool) (map[string]bool, error) {
+func ampThreadIDSet(ctx context.Context, includeArchived bool, targets map[string]bool) (map[string]bool, error) {
 	ids := make(map[string]bool)
 	for offset := 0; ; offset += 500 {
 		args := []string{"threads", "list", "--json"}
@@ -3228,18 +3240,13 @@ func ampThreadIDSet(includeArchived bool, targets map[string]bool) (map[string]b
 			args = append(args, "--include-archived")
 		}
 		args = append(args, "--limit", "500", "--offset", strconv.Itoa(offset))
-		cmd := exec.Command("amp", args...)
-		out, err := cmd.CombinedOutput()
+		out, err := runAmpThreadsList(ctx, args...)
 		if err != nil {
-			message := strings.TrimSpace(string(out))
-			if message == "" {
-				return nil, err
-			}
-			return nil, fmt.Errorf("%w: %s", err, message)
+			return nil, err
 		}
 		var payload any
 		if err := json.Unmarshal(out, &payload); err != nil {
-			return nil, fmt.Errorf("parse amp threads list: %w", err)
+			return nil, errors.New("amp threads list returned malformed JSON")
 		}
 		pageIDs := collectThreadIDs(payload)
 		for _, id := range pageIDs {
@@ -3255,6 +3262,92 @@ func ampThreadIDSet(includeArchived bool, targets map[string]bool) (map[string]b
 			return ids, nil
 		}
 	}
+}
+
+type outputBudget struct {
+	mu        sync.Mutex
+	remaining int
+	overflow  bool
+	cancel    context.CancelFunc
+}
+
+type cappedOutput struct {
+	buffer bytes.Buffer
+	budget *outputBudget
+}
+
+func (w *cappedOutput) Write(p []byte) (int, error) {
+	w.budget.mu.Lock()
+	remaining := w.budget.remaining
+	if remaining > 0 {
+		if remaining > len(p) {
+			remaining = len(p)
+		}
+		_, _ = w.buffer.Write(p[:remaining])
+		w.budget.remaining -= remaining
+	}
+	cancel := false
+	if len(p) > remaining {
+		cancel = !w.budget.overflow
+		w.budget.overflow = true
+	}
+	w.budget.mu.Unlock()
+	if cancel {
+		w.budget.cancel()
+	}
+	return len(p), nil
+}
+
+func (b *outputBudget) exceeded() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.overflow
+}
+
+func runAmpThreadsList(ctx context.Context, args ...string) ([]byte, error) {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return nil, fmt.Errorf("amp threads list timed out after %s", ampThreadsListTimeout)
+	}
+	cmdCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	budget := outputBudget{remaining: ampThreadsListOutputLimit, cancel: cancel}
+	stdout := cappedOutput{budget: &budget}
+	stderr := cappedOutput{budget: &budget}
+	cmd := ampThreadsListCommand(cmdCtx, args...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.WaitDelay = ampThreadsListWaitDelay
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		return nil
+	}
+	err := cmd.Run()
+	if err != nil {
+		_ = cmd.Cancel()
+	}
+	if budget.exceeded() {
+		return nil, fmt.Errorf("amp threads list output exceeded %d-byte limit", ampThreadsListOutputLimit)
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, exec.ErrWaitDelay) {
+		return nil, fmt.Errorf("amp threads list timed out after %s", ampThreadsListTimeout)
+	}
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return nil, fmt.Errorf("amp threads list failed with exit code %d", exitErr.ExitCode())
+		}
+		return nil, errors.New("amp threads list failed to start")
+	}
+	return stdout.buffer.Bytes(), nil
 }
 
 func containsAllThreadIDs(ids, targets map[string]bool) bool {
