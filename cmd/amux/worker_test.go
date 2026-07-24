@@ -882,6 +882,598 @@ exit 2
 	}
 }
 
+func TestWorkerSpawnReconcileRetriesExactPreSubmissionFailureOnProvisionedThread(t *testing.T) {
+	for _, submission := range []config.OperationSubmissionStatus{
+		config.OperationSubmissionComposerUnavailable,
+		config.OperationSubmissionComposerCaptureUnknown,
+		config.OperationSubmissionInputNotVisible,
+		config.OperationSubmissionInputVisibilityUnknown,
+	} {
+		t.Run(string(submission), func(t *testing.T) {
+			dir := t.TempDir()
+			workdir := t.TempDir()
+			bin := t.TempDir()
+			logPath := filepath.Join(bin, "calls.log")
+			pasted := filepath.Join(bin, "pasted")
+			delivered := filepath.Join(bin, "delivered")
+			wrongTarget := filepath.Join(bin, "wrong-target")
+			messagePath := filepath.Join(dir, "assignment.md")
+			message := "Paragraph A\n\nParagraph B\n"
+			if err := os.WriteFile(messagePath, []byte(message), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			request := strings.Join([]string{"alpha", "worker", workdir, "", message, "groups", "issue-248"}, "\x00")
+			sum := sha256.Sum256([]byte(request))
+			now := time.Now().UTC()
+			errorMessage := "multiline composer visibility unavailable before submission; Enter not attempted"
+			switch submission {
+			case config.OperationSubmissionComposerCaptureUnknown:
+				errorMessage = "multiline composer visibility unknown before submission; Enter not attempted"
+			case config.OperationSubmissionInputNotVisible:
+				errorMessage = "multiline input not visible before submission; Enter not attempted"
+			case config.OperationSubmissionInputVisibilityUnknown:
+				errorMessage = "multiline input visibility unknown before submission; Enter not attempted"
+			}
+			record := config.OperationRecord{
+				Key:              "retry-pre-submission-" + string(submission),
+				Kind:             "worker-spawn",
+				RequestHash:      hex.EncodeToString(sum[:]),
+				MessageSource:    config.OperationMessageSourceFile,
+				SubmissionStatus: submission,
+				DeliveryStatus:   config.OperationDeliveryUnknown,
+				State:            config.OperationIndeterminate,
+				Phase:            config.OperationPhaseDeliveryStarted,
+				Resource:         config.OperationResource{Kind: "worker", Thread: "T-provisioned"},
+				Error:            errorMessage,
+				CreatedAt:        now,
+				UpdatedAt:        now,
+			}
+			operationPath := filepath.Join(dir, config.OperationsFile)
+			if _, err := config.StoreOperation(operationPath, record); err != nil {
+				t.Fatal(err)
+			}
+			if err := config.WriteGroups(filepath.Join(dir, config.GroupsFile), []config.GroupMembership{{Group: "issue-248", Thread: "T-provisioned", Role: config.GroupMember}}); err != nil {
+				t.Fatal(err)
+			}
+			row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-provisioned"}
+			start := teardownExpectedStartCommand(teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}, row)
+			writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+echo "amp $*" >> "`+logPath+`"
+if [ "$1 $2" = "threads new" ]; then exit 91; fi
+if [ "$1 $2" = "threads list" ]; then printf '%s\n' '[{"id":"T-provisioned"}]'; exit 0; fi
+if [ "$1 $2 $3" = "threads export T-provisioned" ]; then
+  if [ -e "`+delivered+`" ]; then printf '%s\n' '{"id":"T-provisioned","env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[{"role":"user","content":"Paragraph A\n\nParagraph B"}]}' ;
+  else printf '%s\n' '{"id":"T-provisioned","env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[]}' ; fi
+  exit 0
+fi
+exit 2
+`)
+			writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "tmux $*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then exit 0; fi
+if [ "$1 $2" = "list-panes -a" ]; then case "$*" in *pane_id*) printf 'alpha\tworker\t@1\t%%1\t%s\n' `+shellSingleQuote(start)+`;; *) printf 'alpha\tworker\t@1\t%s\n' `+shellSingleQuote(start)+`;; esac; exit 0; fi
+if [ "$1" = list-panes ]; then case "$*" in *pane_id*) printf 'alpha\tworker\t@1\t%%1\t%s\n' `+shellSingleQuote(start)+`;; *) printf 'worker\t@1\t%s\n' `+shellSingleQuote(start)+`;; esac; exit 0; fi
+if [ "$1" = display-message ]; then exit 44; fi
+if [ "$1" = capture-pane ]; then
+  if [ "$5" != %1 ]; then touch "`+wrongTarget+`"; fi
+  if [ -e "`+delivered+`" ]; then printf ' ┃ Paragraph A\n ┃\n ┃ Paragraph B\n╭ composer ─╮\n│           │\n╰────────────╯\n';
+  elif [ -e "`+pasted+`" ]; then printf '╭ composer ─╮\n│ Paragraph A │\n│ │\n│ Paragraph B │\n╰────────────╯\n';
+  else printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; fi
+  exit 0
+fi
+if [ "$1" = load-buffer ]; then cat >/dev/null; exit 0; fi
+if [ "$1" = paste-buffer ]; then if [ "$6" != %1 ]; then touch "`+wrongTarget+`"; fi; touch "`+pasted+`"; exit 0; fi
+if [ "$1" = send-keys ]; then if [ "$3" != %1 ]; then touch "`+wrongTarget+`"; fi; if [ "$4" = Enter ]; then touch "`+delivered+`"; fi; exit 0; fi
+exit 2
+`)
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+			installSupportedGroupAmp(t, func([]string) ([]byte, error) { return nil, nil })
+
+			got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--group", "issue-248", "--message-file", messagePath, "--idempotency-key", record.Key, "--reconcile")
+			if len(got.Successful) != 2 || got.Successful[0].Resource.Thread != "T-provisioned" || got.Successful[1].Resource.Thread != "T-provisioned" {
+				t.Fatalf("pre-submission reconciliation result = %+v", got)
+			}
+			completed, found, err := config.LoadOperation(operationPath, record.Key)
+			if err != nil || !found || completed.State != config.OperationSucceeded || completed.Phase != config.OperationPhaseGrouped || completed.Resource.Thread != "T-provisioned" || completed.DeliveryStatus != config.OperationDeliveryPersisted {
+				t.Fatalf("completed pre-submission operation = %+v found=%t err=%v", completed, found, err)
+			}
+			rows, err := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
+			if err != nil || len(rows) != 1 || rows[0] != row {
+				t.Fatalf("pre-submission worker rows = %+v err=%v", rows, err)
+			}
+			memberships, err := config.LoadGroupsReadOnly(filepath.Join(dir, config.GroupsFile))
+			if err != nil || len(memberships) != 1 || memberships[0].Thread != "T-provisioned" || memberships[0].Group != "issue-248" {
+				t.Fatalf("pre-submission memberships = %+v err=%v", memberships, err)
+			}
+			log, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(log), "threads new") {
+				t.Fatalf("pre-submission reconciliation created a second thread:\n%s", log)
+			}
+			if strings.Contains(string(log), "display-message") {
+				t.Fatalf("pre-submission reconciliation dynamically resolved the active pane:\n%s", log)
+			}
+			if _, statErr := os.Stat(wrongTarget); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("pre-submission reconciliation targeted a window or different pane: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestWorkerSpawnReconcileConsumesPreSubmissionRetryBeforeComposerInput(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	mutated := filepath.Join(bin, "mutated")
+	messagePath := filepath.Join(dir, "assignment.md")
+	message := "Paragraph A\n\nParagraph B\n"
+	if err := os.WriteFile(messagePath, []byte(message), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := strings.Join([]string{"alpha", "worker", workdir, "", message}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Now().UTC()
+	record := config.OperationRecord{
+		Key: "consume-pre-submission-retry", Kind: "worker-spawn", RequestHash: hex.EncodeToString(sum[:]),
+		MessageSource: config.OperationMessageSourceFile, SubmissionStatus: config.OperationSubmissionInputNotVisible,
+		DeliveryStatus: config.OperationDeliveryUnknown, State: config.OperationIndeterminate, Phase: config.OperationPhaseDeliveryStarted,
+		Resource: config.OperationResource{Kind: "worker", Thread: "T-provisioned"}, Error: "multiline input not visible before submission; Enter not attempted",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	operationPath := filepath.Join(dir, config.OperationsFile)
+	if _, err := config.StoreOperation(operationPath, record); err != nil {
+		t.Fatal(err)
+	}
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-provisioned"}
+	start := teardownExpectedStartCommand(teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}, row)
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+echo "amp $*" >> "`+logPath+`"
+if [ "$1 $2" = "threads list" ]; then printf '%s\n' '[{"id":"T-provisioned"}]'; exit 0; fi
+if [ "$1 $2 $3" = "threads export T-provisioned" ]; then printf '%s\n' '{"id":"T-provisioned","env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[]}' ; exit 0; fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "tmux $*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then exit 0; fi
+if [ "$1 $2" = "list-panes -a" ]; then case "$*" in *pane_id*) printf 'alpha\tworker\t@1\t%%1\t%s\n' `+shellSingleQuote(start)+`;; *) printf 'alpha\tworker\t@1\t%s\n' `+shellSingleQuote(start)+`;; esac; exit 0; fi
+if [ "$1" = list-panes ]; then case "$*" in *pane_id*) printf 'alpha\tworker\t@1\t%%1\t%s\n' `+shellSingleQuote(start)+`;; *) printf 'worker\t@1\t%s\n' `+shellSingleQuote(start)+`;; esac; exit 0; fi
+if [ "$1" = display-message ]; then echo %9; exit 0; fi
+if [ "$1" = capture-pane ]; then if [ "$5" = %9 ]; then printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; else printf 'starting Amp\n'; fi; exit 0; fi
+if [ "$1" = load-buffer ]; then cat >/dev/null; exit 0; fi
+if [ "$1" = paste-buffer ] || [ "$1" = send-keys ]; then touch "`+mutated+`"; exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+	args := []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message-file", messagePath, "--idempotency-key", record.Key, "--reconcile"}
+
+	firstErr := executeWorkerJSONError(t, args...)
+	if firstErr == nil || !strings.Contains(firstErr.Error(), "visibility was unavailable") {
+		t.Fatalf("first pre-submission retry error = %v", firstErr)
+	}
+	consumed, found, err := config.LoadOperation(operationPath, record.Key)
+	if err != nil || !found || consumed.State != config.OperationIndeterminate || consumed.Phase != config.OperationPhaseDeliveryStarted || consumed.SubmissionStatus != config.OperationSubmissionComposerUnavailable || consumed.DeliveryStatus != config.OperationDeliveryUnknown || consumed.Error != config.OperationErrorPreSubmissionRetryConsumed {
+		t.Fatalf("consumed pre-submission retry = %+v found=%t err=%v", consumed, found, err)
+	}
+	if _, statErr := os.Stat(mutated); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("pre-submission retry mutated the dynamically selected active pane: %v", statErr)
+	}
+	beforeReplay, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondErr := executeWorkerJSONError(t, args...)
+	if secondErr == nil || !strings.Contains(secondErr.Error(), "requires an existing identical operation") {
+		t.Fatalf("second pre-submission retry error = %v", secondErr)
+	}
+	afterReplay, err := os.ReadFile(logPath)
+	if err != nil || !bytes.Equal(afterReplay, beforeReplay) {
+		t.Fatalf("second pre-submission retry performed external work: err=%v\nbefore=%s\nafter=%s", err, beforeReplay, afterReplay)
+	}
+	if strings.Contains(string(beforeReplay), "send-keys -t %1 Enter") {
+		t.Fatalf("pre-submission retry pressed Enter without exact composer visibility:\n%s", beforeReplay)
+	}
+}
+
+func TestWorkerSpawnReconcileConsumesRetryBeforeCreatingMissingPane(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	bin := t.TempDir()
+	createCount := filepath.Join(bin, "create-count")
+	messagePath := filepath.Join(dir, "assignment.md")
+	message := "Paragraph A\n\nParagraph B\n"
+	if err := os.WriteFile(messagePath, []byte(message), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := strings.Join([]string{"alpha", "worker", workdir, "", message}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Now().UTC()
+	record := config.OperationRecord{
+		Key: "consume-before-create", Kind: "worker-spawn", RequestHash: hex.EncodeToString(sum[:]),
+		MessageSource: config.OperationMessageSourceFile, SubmissionStatus: config.OperationSubmissionComposerUnavailable,
+		DeliveryStatus: config.OperationDeliveryUnknown, State: config.OperationIndeterminate, Phase: config.OperationPhaseDeliveryStarted,
+		Resource: config.OperationResource{Kind: "worker", Thread: "T-provisioned"}, Error: "multiline composer visibility unavailable before submission; Enter not attempted",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	operationPath := filepath.Join(dir, config.OperationsFile)
+	if _, err := config.StoreOperation(operationPath, record); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+if [ "$1 $2" = "threads list" ]; then printf '%s\n' '[{"id":"T-provisioned"}]'; exit 0; fi
+if [ "$1 $2 $3" = "threads export T-provisioned" ]; then printf '%s\n' '{"id":"T-provisioned","env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[]}' ; exit 0; fi
+exit 2
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then exit 1; fi
+if [ "$1 $2" = "list-panes -a" ]; then exit 0; fi
+if [ "$1" = new-session ]; then
+  count=0; if [ -f "`+createCount+`" ]; then count=$(cat "`+createCount+`"); fi
+  count=$((count + 1)); printf '%s\n' "$count" > "`+createCount+`"
+  exit 42
+fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+	args := []string{"--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message-file", messagePath, "--idempotency-key", record.Key, "--reconcile"}
+
+	if firstErr := executeWorkerJSONError(t, args...); firstErr == nil {
+		t.Fatal("missing pane creation failure was accepted")
+	}
+	consumed, found, err := config.LoadOperation(operationPath, record.Key)
+	if err != nil || !found || consumed.State != config.OperationIndeterminate || consumed.Phase != config.OperationPhaseDeliveryStarted || consumed.Error != config.OperationErrorPreSubmissionRetryConsumed {
+		t.Fatalf("post-create-failure operation = %+v found=%t err=%v", consumed, found, err)
+	}
+	if secondErr := executeWorkerJSONError(t, args...); secondErr == nil || !strings.Contains(secondErr.Error(), "requires an existing identical operation") {
+		t.Fatalf("replay after pane creation failure = %v", secondErr)
+	}
+	count, err := os.ReadFile(createCount)
+	if err != nil || strings.TrimSpace(string(count)) != "1" {
+		t.Fatalf("missing pane creation count = %q err=%v, want one consumed attempt", count, err)
+	}
+}
+
+func TestWorkerSpawnReconcileLeavesArmedRetryUnchangedWhenReadOnlySnapshotFails(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	messagePath := filepath.Join(dir, "assignment.md")
+	message := "Paragraph A\n\nParagraph B\n"
+	if err := os.WriteFile(messagePath, []byte(message), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := strings.Join([]string{"alpha", "worker", workdir, "", message}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Now().UTC()
+	record := config.OperationRecord{
+		Key: "armed-read-only-failure", Kind: "worker-spawn", RequestHash: hex.EncodeToString(sum[:]),
+		MessageSource: config.OperationMessageSourceFile, State: config.OperationStarted, Phase: config.OperationPhaseRetryArmed,
+		Resource: config.OperationResource{Kind: "worker", Thread: "T-provisioned"}, Error: config.OperationErrorPreSubmissionRetryArmed,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	operationPath := filepath.Join(dir, config.OperationsFile)
+	if _, err := config.StoreOperation(operationPath, record); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(operationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+echo "amp $*" >> "`+logPath+`"
+if [ "$1 $2" = "threads list" ]; then case "$*" in *include-archived*) exit 43;; *) printf '%s\n' '[{"id":"T-provisioned"}]'; exit 0;; esac; fi
+if [ "$1 $2 $3" = "threads export T-provisioned" ]; then printf '%s\n' '{"id":"T-provisioned","env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":[]}' ; exit 0; fi
+exit 2
+`)
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-provisioned"}
+	start := teardownExpectedStartCommand(teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}, row)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "tmux $*" >> "`+logPath+`"
+if [ "$1" = has-session ]; then exit 0; fi
+if [ "$1 $2" = "list-panes -a" ]; then printf 'alpha\tworker\t@1\t%s\n' `+shellSingleQuote(start)+`; exit 0; fi
+if [ "$1" = list-panes ]; then printf 'worker\t@1\t%s\n' `+shellSingleQuote(start)+`; exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	err = executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message-file", messagePath, "--idempotency-key", record.Key, "--reconcile")
+	if err == nil || !strings.Contains(err.Error(), "snapshot Amp threads") {
+		t.Fatalf("armed read-only snapshot error = %v", err)
+	}
+	after, err := os.ReadFile(operationPath)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("armed operation changed during read-only failure: err=%v\nbefore=%s\nafter=%s", err, before, after)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mutation := range []string{"new-session", "new-window", "load-buffer", "paste-buffer", "send-keys"} {
+		if strings.Contains(string(log), mutation) {
+			t.Fatalf("read-only failure performed tmux mutation %q:\n%s", mutation, log)
+		}
+	}
+}
+
+func TestWorkerSpawnReconcileRejectsSingleLineInputNotVisibleWithoutExternalMutation(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	message := "synthetic single line"
+	request := strings.Join([]string{"alpha", "worker", workdir, "", message}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	now := time.Now().UTC()
+	record := config.OperationRecord{
+		Key: "single-line-input-not-visible", Kind: "worker-spawn", RequestHash: hex.EncodeToString(sum[:]),
+		MessageSource: config.OperationMessageSourceMessage, SubmissionStatus: config.OperationSubmissionInputNotVisible,
+		DeliveryStatus: config.OperationDeliveryUnknown, State: config.OperationIndeterminate, Phase: config.OperationPhaseDeliveryStarted,
+		Resource: config.OperationResource{Kind: "worker", Thread: "T-provisioned"}, Error: "multiline input not visible before submission; Enter not attempted",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if _, err := config.StoreOperation(filepath.Join(dir, config.OperationsFile), record); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+echo "amp $*" >> "`+logPath+`"
+exit 97
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "tmux $*" >> "`+logPath+`"
+exit 98
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	err := executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", message, "--idempotency-key", record.Key, "--reconcile")
+	if err == nil || !strings.Contains(err.Error(), "requires an existing identical operation") {
+		t.Fatalf("single-line reconciliation error = %v", err)
+	}
+	if calls, readErr := os.ReadFile(logPath); !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatalf("single-line reconciliation performed external mutation: calls=%s err=%v", calls, readErr)
+	}
+}
+
+func TestWorkerSpawnReconcileRevalidatesRetryIdentityBeforeFirstInput(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		paneRace          bool
+		threadRace        bool
+		afterPaste        bool
+		exactSessionGone  bool
+		globalSessionRace bool
+	}{
+		{name: "thread became nonempty", threadRace: true},
+		{name: "pane identity changed", paneRace: true},
+		{name: "thread changed before second paste", threadRace: true, afterPaste: true},
+		{name: "expected session disappeared with prefix survivor", exactSessionGone: true},
+		{name: "global ownership moved to linked session", globalSessionRace: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			workdir := t.TempDir()
+			bin := t.TempDir()
+			raced := filepath.Join(bin, "raced")
+			pasted := filepath.Join(bin, "pasted")
+			entered := filepath.Join(bin, "entered")
+			messagePath := filepath.Join(dir, "assignment.md")
+			message := "Paragraph A\n\nParagraph B\n"
+			if err := os.WriteFile(messagePath, []byte(message), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			request := strings.Join([]string{"alpha", "worker", workdir, "", message}, "\x00")
+			sum := sha256.Sum256([]byte(request))
+			now := time.Now().UTC()
+			record := config.OperationRecord{
+				Key: "retry-identity-race-" + strings.ReplaceAll(test.name, " ", "-"), Kind: "worker-spawn", RequestHash: hex.EncodeToString(sum[:]),
+				MessageSource: config.OperationMessageSourceFile, SubmissionStatus: config.OperationSubmissionComposerUnavailable,
+				DeliveryStatus: config.OperationDeliveryUnknown, State: config.OperationIndeterminate, Phase: config.OperationPhaseDeliveryStarted,
+				Resource: config.OperationResource{Kind: "worker", Thread: "T-provisioned"}, Error: "multiline composer visibility unavailable before submission; Enter not attempted",
+				CreatedAt: now, UpdatedAt: now,
+			}
+			operationPath := filepath.Join(dir, config.OperationsFile)
+			if _, err := config.StoreOperation(operationPath, record); err != nil {
+				t.Fatal(err)
+			}
+			nonemptyCondition := "false"
+			paneCondition := "false"
+			if test.threadRace {
+				nonemptyCondition = "test -e " + shellSingleQuote(raced)
+			}
+			if test.paneRace {
+				paneCondition = "test -e " + shellSingleQuote(raced)
+			}
+			raceCommand := "touch " + shellSingleQuote(raced)
+			if test.afterPaste {
+				raceCommand = "if [ -e " + shellSingleQuote(pasted) + " ]; then touch " + shellSingleQuote(raced) + "; fi"
+			}
+			writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+if [ "$1 $2" = "threads list" ]; then printf '%s\n' '[{"id":"T-provisioned"}]'; exit 0; fi
+if [ "$1 $2 $3" = "threads export T-provisioned" ]; then
+  if `+nonemptyCondition+`; then messages='[{"role":"user","content":"changed"}]'; else messages='[]'; fi
+  printf '%s\n' '{"id":"T-provisioned","env":{"initial":{"trees":[{"uri":"file://`+workdir+`"}]}},"messages":'"$messages"'}'
+  exit 0
+fi
+exit 2
+`)
+			row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-provisioned"}
+			start := teardownExpectedStartCommand(teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}, row)
+			writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then exit 0; fi
+if [ "$1 $2" = "list-panes -a" ]; then
+  if `+paneCondition+`; then window=@2; pane=%2; else window=@1; pane=%1; fi
+  session=alpha
+  if `+strconv.FormatBool(test.globalSessionRace)+` && [ -e "`+raced+`" ]; then session=alpha-linked; fi
+  case "$*" in *pane_id*) printf '%s\tworker\t%s\t%s\t%s\n' "$session" "$window" "$pane" `+shellSingleQuote(start)+`;; *) printf '%s\tworker\t%s\t%s\n' "$session" "$window" `+shellSingleQuote(start)+`;; esac
+  exit 0
+fi
+if [ "$1" = list-panes ]; then
+  if `+paneCondition+`; then window=@2; pane=%2; else window=@1; pane=%1; fi
+  case "$*" in
+    *pane_id*)
+      case "$*" in
+        *'-t =alpha'*) if `+strconv.FormatBool(test.exactSessionGone)+` && [ -e "`+raced+`" ]; then exit 44; fi; printf 'alpha\tworker\t%s\t%s\t%s\n' "$window" "$pane" `+shellSingleQuote(start)+`;;
+        *) printf 'worker\t%s\t%s\t%s\n' "$window" "$pane" `+shellSingleQuote(start)+`;;
+      esac;;
+    *) printf 'worker\t%s\t%s\n' "$window" `+shellSingleQuote(start)+`;;
+  esac
+  exit 0
+fi
+if [ "$1" = display-message ]; then echo %1; exit 0; fi
+if [ "$1" = capture-pane ]; then `+raceCommand+`; printf '╭ composer ─╮\n│           │\n╰────────────╯\n'; exit 0; fi
+if [ "$1" = load-buffer ]; then cat >/dev/null; exit 0; fi
+if [ "$1" = paste-buffer ]; then count=0; if [ -f "`+pasted+`" ]; then count=$(cat "`+pasted+`"); fi; count=$((count + 1)); printf '%s\n' "$count" > "`+pasted+`"; exit 0; fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then touch "`+entered+`"; exit 0; fi
+if [ "$1" = send-keys ]; then exit 0; fi
+exit 2
+`)
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+			err := executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message-file", messagePath, "--idempotency-key", record.Key, "--reconcile")
+			if err == nil {
+				t.Fatal("changed retry identity was accepted")
+			}
+			if _, statErr := os.Stat(entered); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("Enter was attempted after retry identity changed: %v", statErr)
+			}
+			pastes, pasteErr := os.ReadFile(pasted)
+			if test.afterPaste {
+				if pasteErr != nil || strings.TrimSpace(string(pastes)) != "1" {
+					t.Fatalf("paste count after ownership changed = %q, err=%v, want one initial paste", pastes, pasteErr)
+				}
+			} else if !errors.Is(pasteErr, os.ErrNotExist) {
+				t.Fatalf("paste was attempted after retry identity changed: count=%q err=%v", pastes, pasteErr)
+			}
+			stored, found, loadErr := config.LoadOperation(operationPath, record.Key)
+			if loadErr != nil || !found || stored.State != config.OperationIndeterminate || stored.Phase != config.OperationPhaseDeliveryStarted || stored.Error != config.OperationErrorPreSubmissionRetryConsumed {
+				t.Fatalf("guarded retry operation = %+v found=%t err=%v", stored, found, loadErr)
+			}
+			if strings.Contains(stored.Error, message) || strings.Contains(stored.Error, workdir) {
+				t.Fatalf("durable guard diagnostic contains private content: %q", stored.Error)
+			}
+		})
+	}
+}
+
+func TestPreflightPreSubmissionWorkerSpawnRetryRejectsChangedOrConflictingIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		threadExport     func(string) string
+		workers          []config.Row
+		memberships      []config.GroupMembership
+		ambiguousPanes   bool
+		otherWorkdirOnly bool
+		want             string
+	}{
+		{
+			name: "non-empty provisioned thread",
+			threadExport: func(workdir string) string {
+				return `{"id":"T-provisioned","env":{"initial":{"trees":[{"uri":"file://` + workdir + `"}]}},"messages":[{"role":"user","content":"changed"}]}`
+			},
+			want: "changed or does not match",
+		},
+		{
+			name: "changed remote workdir",
+			threadExport: func(string) string {
+				return `{"id":"T-provisioned","env":{"initial":{"trees":[{"uri":"file:///different"}]}},"messages":[]}`
+			},
+			want: "changed or does not match",
+		},
+		{
+			name: "mismatched exported thread",
+			threadExport: func(workdir string) string {
+				return `{"id":"T-other","env":{"initial":{"trees":[{"uri":"file://` + workdir + `"}]}},"messages":[]}`
+			},
+			want: "different thread identity",
+		},
+		{
+			name:    "conflicting worker row",
+			workers: []config.Row{{Workspace: "alpha", Window: "worker", Thread: "T-other"}},
+			want:    "configured for thread T-other",
+		},
+		{
+			name:        "conflicting group ownership",
+			memberships: []config.GroupMembership{{Group: "other-group", Thread: "T-provisioned", Role: config.GroupMember}},
+			want:        "conflicting group ownership",
+		},
+		{
+			name:             "same thread in another workdir",
+			otherWorkdirOnly: true,
+			want:             "ambiguous tmux ownership",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := config.Directory{Path: t.TempDir()}
+			workdir := t.TempDir()
+			requested := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-provisioned"}
+			for i := range test.workers {
+				if test.workers[i].Workdir == "" {
+					test.workers[i].Workdir = workdir
+				}
+				if _, err := config.Store(dir.WorkersPath(), test.workers[i]); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(test.memberships) != 0 {
+				if err := config.WriteGroups(dir.GroupsPath(), test.memberships); err != nil {
+					t.Fatal(err)
+				}
+			}
+			bin := t.TempDir()
+			export := `{"id":"T-provisioned","env":{"initial":{"trees":[{"uri":"file://` + workdir + `"}]}},"messages":[]}`
+			if test.threadExport != nil {
+				export = test.threadExport(workdir)
+			}
+			writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+if [ "$1 $2 $3" = "threads export T-provisioned" ]; then printf '%s\n' '`+export+`'; exit 0; fi
+if [ "$1 $2" = "threads list" ]; then printf '%s\n' '[{"id":"T-provisioned"}]'; exit 0; fi
+exit 2
+`)
+			start := teardownExpectedStartCommand(teardownIdentity{Workspace: requested.Workspace, Session: requested.Workspace, Window: requested.Window, Thread: requested.Thread}, requested)
+			allPanes := "printf 'alpha\\tworker\\t@1\\t%s\\n' " + shellSingleQuote(start)
+			windowPanes := "printf 'worker\\t@1\\t%s\\n' " + shellSingleQuote(start)
+			if test.ambiguousPanes {
+				other := requested
+				other.Window = "other"
+				otherStart := teardownExpectedStartCommand(teardownIdentity{Workspace: other.Workspace, Session: other.Workspace, Window: other.Window, Thread: other.Thread}, other)
+				allPanes = "printf 'alpha\\tworker\\t@1\\t%s\\nalpha\\tother\\t@2\\t%s\\n' " + shellSingleQuote(start) + " " + shellSingleQuote(otherStart)
+			}
+			if test.otherWorkdirOnly {
+				other := requested
+				other.Window = "other"
+				other.Workdir = t.TempDir()
+				otherStart := teardownExpectedStartCommand(teardownIdentity{Workspace: other.Workspace, Session: other.Workspace, Window: other.Window, Thread: other.Thread}, other)
+				allPanes = "printf 'alpha\\tother\\t@2\\t%s\\n' " + shellSingleQuote(otherStart)
+				windowPanes = "printf 'other\\t@2\\t%s\\n' " + shellSingleQuote(otherStart)
+			}
+			writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = has-session ]; then exit 0; fi
+if [ "$1 $2" = "list-panes -a" ]; then `+allPanes+`; exit 0; fi
+if [ "$1" = list-panes ]; then `+windowPanes+`; exit 0; fi
+exit 2
+`)
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			operation := config.OperationRecord{Resource: config.OperationResource{Kind: "worker", Thread: requested.Thread}}
+			err := preflightPreSubmissionWorkerSpawnRetry(dir, operation, requested, []string{"issue-248"})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("preflight error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestResolveSpawnReceivingThreadRechecksProvisionedThreadAfterSlowFreshThreadDiscovery(t *testing.T) {
 	bin := t.TempDir()
 	messagePath := filepath.Join(bin, "assignment")
@@ -1606,7 +2198,7 @@ func TestWorkerSpawnReconcileRejectsOrdinaryPartialPhasesWithoutExternalWork(t *
 			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
 			err = executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", message, "--idempotency-key", record.Key, "--reconcile")
-			if err == nil || !strings.Contains(err.Error(), "recoverable exact provisioned-thread timeout state") {
+			if err == nil || !strings.Contains(err.Error(), "recoverable exact provisioned-thread state") {
 				t.Fatalf("partial-phase reconciliation error = %v", err)
 			}
 			after, err := os.ReadFile(operationPath)
@@ -1624,7 +2216,7 @@ func TestWorkerSpawnReconcileRequiresExistingIdenticalOperation(t *testing.T) {
 	dir := t.TempDir()
 	workdir := t.TempDir()
 	err := executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "spawn", "--workspace", "alpha", "--window", "worker", "--workdir", workdir, "--message", "assignment", "--idempotency-key", "missing-reconciliation", "--reconcile")
-	if err == nil || !strings.Contains(err.Error(), "requires an existing identical operation in the recoverable exact provisioned-thread timeout state") {
+	if err == nil || !strings.Contains(err.Error(), "requires an existing identical operation in the recoverable exact provisioned-thread state") {
 		t.Fatalf("missing reconciliation operation error = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, config.OperationsFile)); !os.IsNotExist(err) {

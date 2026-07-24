@@ -28,6 +28,7 @@ const (
 const (
 	OperationPhaseCreatingThread  OperationPhase = "creating_thread"
 	OperationPhaseThreadBound     OperationPhase = "thread_bound"
+	OperationPhaseRetryArmed      OperationPhase = "pre_submission_retry_armed"
 	OperationPhaseDeliveryStarted OperationPhase = "delivery_started"
 	OperationPhaseMessageVerified OperationPhase = "message_verified"
 	OperationPhaseConfigured      OperationPhase = "configured"
@@ -58,6 +59,11 @@ const (
 	OperationDeliveryAlternateReceiver OperationDeliveryStatus = "alternate_receiver"
 	OperationDeliveryMissing           OperationDeliveryStatus = "missing"
 	OperationDeliveryUnknown           OperationDeliveryStatus = "unknown"
+)
+
+const (
+	OperationErrorPreSubmissionRetryArmed    = "pre-submission retry armed; Enter not attempted"
+	OperationErrorPreSubmissionRetryConsumed = "pre-submission retry consumed; no further retry authorized"
 )
 
 type OperationResource struct {
@@ -280,6 +286,81 @@ func RecoverIndeterminateWorkerSpawn(path, key, provisionedThread string) (Opera
 	return OperationRecord{}, fmt.Errorf("idempotency key %q was not found", key)
 }
 
+func RetryPreSubmissionWorkerSpawn(path, key, requestHash, provisionedThread string, multiline bool) (OperationRecord, error) {
+	if !multiline {
+		return OperationRecord{}, errors.New("pre-submission worker spawn retry requires a multiline request")
+	}
+	provisionedThread, err := CanonicalThreadID(provisionedThread)
+	if err != nil {
+		return OperationRecord{}, err
+	}
+	operations, err := loadOperations(path)
+	if err != nil {
+		return OperationRecord{}, err
+	}
+	for i, operation := range operations {
+		if operation.Key != key {
+			continue
+		}
+		if operation.Kind != "worker-spawn" || operation.State != OperationIndeterminate || operation.Phase != OperationPhaseDeliveryStarted || operation.ThreadAdoption != nil {
+			return OperationRecord{}, fmt.Errorf("idempotency key %q is not an indeterminate pre-submission worker spawn", key)
+		}
+		if operation.Resource.Thread != provisionedThread {
+			return OperationRecord{}, fmt.Errorf("idempotency key %q is bound to thread %s, not provisioned thread %s", key, operation.Resource.Thread, provisionedThread)
+		}
+		if operation.RequestHash != requestHash {
+			return OperationRecord{}, fmt.Errorf("idempotency key %q no longer matches the exact spawn request", key)
+		}
+		if !preSubmissionRetryStatus(operation.SubmissionStatus) || operation.DeliveryStatus != OperationDeliveryUnknown {
+			return OperationRecord{}, fmt.Errorf("idempotency key %q does not prove that Enter was not attempted", key)
+		}
+		operation.State = OperationStarted
+		operation.Phase = OperationPhaseRetryArmed
+		operation.SubmissionStatus = ""
+		operation.DeliveryStatus = ""
+		operation.Error = OperationErrorPreSubmissionRetryArmed
+		operation.UpdatedAt = time.Now().UTC()
+		return writeOperationMutation(path, operations, i, operation)
+	}
+	return OperationRecord{}, fmt.Errorf("idempotency key %q was not found", key)
+}
+
+func ConsumePreSubmissionWorkerSpawnRetry(path, key, requestHash, provisionedThread string) (OperationRecord, error) {
+	provisionedThread, err := CanonicalThreadID(provisionedThread)
+	if err != nil {
+		return OperationRecord{}, err
+	}
+	operations, err := loadOperations(path)
+	if err != nil {
+		return OperationRecord{}, err
+	}
+	for i, operation := range operations {
+		if operation.Key != key {
+			continue
+		}
+		if operation.Kind != "worker-spawn" || operation.State != OperationStarted || operation.Phase != OperationPhaseRetryArmed || operation.ThreadAdoption != nil || operation.SubmissionStatus != "" || operation.DeliveryStatus != "" || operation.Error != OperationErrorPreSubmissionRetryArmed {
+			return OperationRecord{}, fmt.Errorf("idempotency key %q is not an armed pre-submission worker spawn retry", key)
+		}
+		if operation.Resource.Thread != provisionedThread || operation.RequestHash != requestHash {
+			return OperationRecord{}, fmt.Errorf("idempotency key %q no longer matches the exact provisioned spawn request", key)
+		}
+		operation.Phase = OperationPhaseDeliveryStarted
+		operation.Error = OperationErrorPreSubmissionRetryConsumed
+		operation.UpdatedAt = time.Now().UTC()
+		return writeOperationMutation(path, operations, i, operation)
+	}
+	return OperationRecord{}, fmt.Errorf("idempotency key %q was not found", key)
+}
+
+func preSubmissionRetryStatus(status OperationSubmissionStatus) bool {
+	switch status {
+	case OperationSubmissionComposerUnavailable, OperationSubmissionComposerCaptureUnknown, OperationSubmissionInputNotVisible, OperationSubmissionInputVisibilityUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
 func writeOperationMutation(path string, operations []OperationRecord, index int, operation OperationRecord) (OperationRecord, error) {
 	canonical, err := canonicalOperation(operation)
 	if err != nil {
@@ -318,7 +399,7 @@ func canonicalOperation(operation OperationRecord) (OperationRecord, error) {
 		return operation, fmt.Errorf("invalid operation state %q", operation.State)
 	}
 	switch operation.Phase {
-	case "", OperationPhaseCreatingThread, OperationPhaseThreadBound, OperationPhaseDeliveryStarted, OperationPhaseMessageVerified, OperationPhaseConfigured, OperationPhaseGroupIntent, OperationPhaseGrouped:
+	case "", OperationPhaseCreatingThread, OperationPhaseThreadBound, OperationPhaseRetryArmed, OperationPhaseDeliveryStarted, OperationPhaseMessageVerified, OperationPhaseConfigured, OperationPhaseGroupIntent, OperationPhaseGrouped:
 	default:
 		return operation, fmt.Errorf("invalid operation phase %q", operation.Phase)
 	}
@@ -394,6 +475,12 @@ func canonicalOperation(operation OperationRecord) (OperationRecord, error) {
 		if operation.Resource.Thread != provisioned && operation.Resource.Thread != receiving {
 			return operation, errors.New("worker operation resource must match one thread-adoption identity")
 		}
+	}
+	if operation.Error == OperationErrorPreSubmissionRetryArmed && (operation.Kind != "worker-spawn" || operation.State != OperationStarted || operation.Phase != OperationPhaseRetryArmed || operation.SubmissionStatus != "" || operation.DeliveryStatus != "" || operation.ThreadAdoption != nil || operation.Resource.Thread == "") {
+		return operation, errors.New("armed pre-submission retry has inconsistent operation evidence")
+	}
+	if operation.Error == OperationErrorPreSubmissionRetryConsumed && (operation.Kind != "worker-spawn" || operation.State != OperationStarted && operation.State != OperationIndeterminate || operation.Phase != OperationPhaseDeliveryStarted || operation.ThreadAdoption != nil || operation.Resource.Thread == "") {
+		return operation, errors.New("consumed pre-submission retry has inconsistent operation evidence")
 	}
 	switch operation.Resource.Kind {
 	case "worker":

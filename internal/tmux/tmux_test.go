@@ -356,6 +356,57 @@ exit 2
 	}
 }
 
+func TestWindowPanesWithPaneIDRequiresExactReturnedSessionAndWindow(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "calls.log")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ]; then
+  printf 'alpha-prefix\tworker\t@1\t%%1\texec amp threads continue T-provisioned\n'
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if _, err := (Runner{}).WindowPanesWithPaneID("alpha", "worker"); err == nil || !strings.Contains(err.Error(), "exact session/window") {
+		t.Fatalf("mismatched returned session error = %v", err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "list-panes -t =alpha:=worker -F #{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_start_command}"
+	if got := strings.TrimSpace(string(logBytes)); got != want {
+		t.Fatalf("WindowPanesWithPaneID sent %q, want %q", got, want)
+	}
+}
+
+func TestWindowPanesWithPaneIDSelectsOneExactWindowInMultiWindowSession(t *testing.T) {
+	tmp := t.TempDir()
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1 $2" = "list-panes -t" ] && [ "$3" = '=alpha:=worker' ]; then
+  printf 'alpha\tworker\t@1\t%%1\texec amp threads continue T-provisioned\n'
+  exit 0
+fi
+if [ "$1" = list-panes ]; then
+  printf 'alpha\tworker\t@1\t%%1\texec amp threads continue T-provisioned\n'
+  printf 'alpha\trunner\t@2\t%%2\texec amp --no-tui\n'
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	panes, err := (Runner{}).WindowPanesWithPaneID("alpha", "worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(panes) != 1 || panes[0].Session != "alpha" || panes[0].Window != "worker" || panes[0].PaneID != "%1" {
+		t.Fatalf("exact worker panes = %+v", panes)
+	}
+}
+
 func TestSelectAndAttachInvokesAttachAfterSelectingWindow(t *testing.T) {
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "calls.log")
