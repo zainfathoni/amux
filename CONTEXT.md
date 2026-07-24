@@ -66,3 +66,23 @@ _Avoid_: Session when referring to the configured lifecycle group
 **Workspace scope** — Every configured worker and runner belonging to one workspace and its same-named tmux session.
 
 **Window scope** — One configured interactive window within a workspace.
+
+## Delegation admission
+
+**Capacity observation** — A time-bounded report of provider usage limits and remaining availability, with enough provenance to determine which capacity it describes. An observation is evidence about current capacity, not permission to launch.
+
+**Capacity pool** — One provider-governed allowance against which related model use is charged. A pool has a stable, non-secret identity that is distinct from an account label, credential, organization name, or displayed usage window.
+
+**Charge route** — The provider-governed path that determines which capacity pool or billing mechanism a model invocation consumes. Authentication method, entitlement, and model selection constrain a charge route but do not individually prove it.
+
+**Reserve floor** — The minimum capacity that must remain in a capacity window after an admitted operation's maximum impact. A floor protects owner capacity; it is not a target for utilization.
+
+**Admitted impact** — A conservative upper bound on how much of each governing capacity window an admitted operation may consume, expressed in the same authoritative unit as that window.
+
+**Autonomous admission** — Permission to begin a delegation without a contemporaneous owner capacity decision because trusted evidence proves every reserve floor remains protected after admitted impact.
+
+**Unknown-capacity acknowledgement** — A fresh owner decision accepting that one exact delegation may have unquantified reserve impact. It never turns unknown capacity into trusted evidence or overrides a known reserve-floor violation.
+
+**Exact model binding** — The guarantee that one explicitly selected provider model remains unchanged across admission, execution, evidence, and lifecycle handling. Aliases, defaults, normalization, fallback, and substitution do not satisfy exact binding.
+
+**Frozen handoff** — A delegation result whose writer authority has ended and whose declared artifact state is preserved for independent review. A frozen handoff is neither acceptance nor integration authorization.
