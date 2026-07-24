@@ -4332,6 +4332,7 @@ func TestLinuxLaunchDoesNotClaimMutatingDelegation(t *testing.T) {
 	fixture := newLaunchFixture(t)
 	request := cloneJSONMap(t, fixture.request)
 	request["workflow"] = "mutating"
+	request["model"] = "claude-opus-4-8"
 	delete(request, "expected_launch_policy_digest")
 	request["baseline_branch"] = "delegate"
 	request["writer_owner"] = "claude"
@@ -4339,7 +4340,9 @@ func TestLinuxLaunchDoesNotClaimMutatingDelegation(t *testing.T) {
 	request["coordinator_write_frozen"] = true
 	request["shared_writable"] = false
 	request["handoff"] = "one_clean_local_commit"
-	request["capacity_request"] = map[string]any{}
+	request["capacity_request"] = stageACapacityRequest(
+		map[string]any{}, request["delegation_id"].(string), "task-linux-boundary",
+	)
 	_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, request, "launch", "plan")
 	if err == nil || !strings.Contains(stderr, "mutating Claude launch remains available only on Darwin") {
 		t.Fatalf("Linux mutating launch error = %v, stderr %q", err, stderr)
@@ -5407,16 +5410,23 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 	}
 	mutatingRequest := cloneJSONMap(t, fixture.request)
 	mutatingRequest["workflow"] = "mutating"
+	delete(mutatingRequest, "expected_launch_policy_digest")
 	mutatingRequest["model"] = "claude-fable-5"
-	if _, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, mutatingRequest, "launch", "plan"); err == nil || !strings.Contains(stderr, "unknown fields") || !strings.Contains(stderr, "model") {
+	if _, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, mutatingRequest, "launch", "plan"); err == nil || !strings.Contains(stderr, "claude-opus-4-8") {
 		t.Fatalf("mutating launch model error = %v, stderr %q", err, stderr)
 	}
 	mutatingBinding := testBinding("mutating-model-rejected")
 	mutatingBinding["producer_role"] = "mutating_delegate"
+	mutatingBinding["authority"] = "exclusive_writer"
+	mutatingBinding["baseline_branch"] = "delegate"
+	mutatingBinding["writer_owner"] = "claude_mutating_delegate"
+	mutatingBinding["integration_owner"] = "amp_coordinator"
+	mutatingBinding["handoff"] = "one_clean_local_commit"
+	mutatingBinding["capacity_decision_digest"] = strings.Repeat("e", 64)
 	mutatingBinding["model"] = "claude-fable-5"
 	if _, stderr, err := runHelper(t, t.TempDir(), map[string]any{
 		"binding": mutatingBinding, "routing": map[string]any{"target": "machine_local_inbox"},
-	}, "receipt", "create"); err == nil || !strings.Contains(stderr, "unknown fields: model") {
+	}, "receipt", "create"); err == nil || !strings.Contains(stderr, "claude-opus-4-8") {
 		t.Fatalf("mutating binding model error = %v, stderr %q", err, stderr)
 	}
 
@@ -5572,6 +5582,34 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 		if readErr != nil || !bytes.Equal(currentLog, launchLog) {
 			t.Fatalf("%s model-drifted replay mutated tmux: %v\n%s", test.name, readErr, currentLog)
 		}
+	}
+}
+
+func TestReadOnlyExplicitModelSemanticEnvelopesRemainCompatible(t *testing.T) {
+	for _, kind := range []string{"report", "input"} {
+		t.Run(kind, func(t *testing.T) {
+			stateDir := t.TempDir()
+			binding := testBinding("explicit-model-" + kind)
+			binding["model"] = "claude-opus-4-8"
+			assertHelperOutcome(t, stateDir, "recorded", map[string]any{
+				"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+			}, "receipt", "create")
+			if kind == "report" {
+				message := testMessage(binding, "explicit-model-report", "thinker_report", map[string]any{
+					"accepted_role": true, "accepted_exclusions": true, "status": "complete",
+					"verdict": "Compatible.", "rationale": "Model provenance remains in the immutable binding.",
+					"evidence": []any{}, "assumptions": []any{}, "unsupported_claims": []any{},
+					"blockers": []any{}, "verification": []any{}, "changed_artifacts": []any{}, "references": []any{},
+				})
+				assertHelperOutcome(t, stateDir, "recorded", message, "report", "submit")
+				return
+			}
+			message := testMessage(binding, "explicit-model-input", "input_request", map[string]any{
+				"request_type": "missing_evidence", "question": "What evidence is available?",
+				"blocking_reason": "Synthetic compatibility check.",
+			})
+			assertHelperOutcome(t, stateDir, "recorded", message, "input", "submit")
+		})
 	}
 }
 
@@ -5771,7 +5809,7 @@ exit 2
 case "$1" in
   --version) printf '%s\n' '2.1.212 (Claude Code)' ;;
   --help)
-    printf '%s\n' '--allowed-tools --disable-slash-commands --disallowed-tools --mcp-config --no-chrome --permission-mode --prompt-suggestions --session-id --setting-sources --settings --strict-mcp-config --tools'
+    printf '%s\n' '--allowed-tools --disable-slash-commands --disallowed-tools --mcp-config --model --no-chrome --permission-mode --prompt-suggestions --session-id --setting-sources --settings --strict-mcp-config --tools'
     if [ -e "$DISAPPEAR_AFTER_CHECK" ]; then
       rm "$DISAPPEAR_AFTER_CHECK" "$TMUX_SESSION"
     fi

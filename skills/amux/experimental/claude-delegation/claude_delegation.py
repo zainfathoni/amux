@@ -59,6 +59,7 @@ REQUIRED_CLAUDE_FLAGS = [
     "--setting-sources", "--settings", "--strict-mcp-config", "--tools",
 ]
 APPROVED_READ_ONLY_MODELS = {"claude-fable-5", "claude-opus-4-8"}
+MUTATING_MODEL = "claude-opus-4-8"
 
 
 class HelperError(Exception):
@@ -123,7 +124,7 @@ def decode_receipt_store(raw: bytes) -> dict[str, Any]:
         if not isinstance(binding, dict):
             raise HelperError("invalid receipt binding")
         try:
-            binding = validate_binding(binding)
+            binding = validate_binding(binding, allow_historical_mutating=True)
         except HelperError as error:
             raise HelperError("invalid receipt binding") from error
         delegation_id = binding["delegation_id"]
@@ -241,6 +242,21 @@ class ReceiptStore:
         with os.fdopen(descriptor, "r+") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             yield
+
+    @contextlib.contextmanager
+    def launch_intent_mutation_lock(self, stage_a: bool) -> Iterator[None]:
+        if not stage_a:
+            with self.mutation_lock():
+                yield
+            return
+        with self.lifecycle.mutation_lock():
+            store_lock = (
+                contextlib.nullcontext()
+                if self.lifecycle.state_dir == self.state_dir
+                else self.mutation_lock()
+            )
+            with store_lock:
+                yield
 
     @contextlib.contextmanager
     def launch_gate(self, delegation_id: str, timeout_seconds: float | None = None) -> Iterator[None]:
@@ -1268,7 +1284,11 @@ class ReceiptStore:
             require_receipt_mutable(receipt)
             if expected_kind == "report":
                 expected_kind = "mutating_report" if receipt["binding"]["producer_role"] == "mutating_delegate" else "thinker_report"
-            envelope = validate_envelope(request, expected_kind)
+            envelope = validate_envelope(
+                request,
+                expected_kind,
+                receipt["binding"]["producer_role"] == "mutating_delegate",
+            )
             validate_envelope_binding(envelope, receipt["binding"])
             event_id = envelope["message_id"]
             kind = "valid_report" if expected_kind in {"thinker_report", "mutating_report"} else "input_request"
@@ -1684,6 +1704,26 @@ def optional_read_only_model(value: dict[str, Any]) -> str | None:
     return model
 
 
+def exact_mutating_model(value: dict[str, Any]) -> str:
+    model = value.get("model")
+    if model != MUTATING_MODEL:
+        raise HelperError(f"mutating model must be the exact literal {MUTATING_MODEL}")
+    return model
+
+
+def validate_stage_a_capacity_context(request: dict[str, Any]) -> None:
+    if request.get("provider") != "claude":
+        raise HelperError("Stage A provider must be the exact literal claude")
+    exact_mutating_model(request)
+    if request.get("workflow") != "mutating":
+        raise HelperError("Stage A workflow must be the exact literal mutating")
+    protocol_id(request, "delegation_id")
+    protocol_id(request, "task_id")
+    for field in ("capacity_pool_evidence", "charge_route_evidence", "admitted_impact_evidence"):
+        if request.get(field) not in {"unknown", "unsupported"}:
+            raise HelperError(f"Stage A {field} must remain unknown or unsupported")
+
+
 def help_exposes_option(help_text: str, option: str) -> bool:
     for line in help_text.splitlines():
         stripped = line.lstrip()
@@ -1702,7 +1742,7 @@ def internal_event_id(kind: str, event_id: str) -> str:
     return f"{INTERNAL_EVENT_PREFIX}{kind}:{hashlib.sha256(event_id.encode()).hexdigest()}"
 
 
-def validate_binding(value: Any) -> dict[str, Any]:
+def validate_binding(value: Any, allow_historical_mutating: bool = False) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise HelperError("binding must be an object")
     allowed = {
@@ -1730,7 +1770,7 @@ def validate_binding(value: Any) -> dict[str, Any]:
         "capacity_decision_digest",
     }
     if value.get("producer_role") == "mutating_delegate":
-        allowed |= mutating_fields
+        allowed |= mutating_fields | {"model"}
     elif value.get("producer_role") == "thinker":
         allowed.add("model")
     reject_unknown(value, allowed, "binding")
@@ -1752,6 +1792,10 @@ def validate_binding(value: Any) -> dict[str, Any]:
             raise HelperError("mutating binding has invalid exclusive writer or integration ownership")
         if value["handoff"] != "one_clean_local_commit":
             raise HelperError("mutating binding permits only one_clean_local_commit handoff")
+        if "model" in value:
+            exact_mutating_model(value)
+        elif not allow_historical_mutating:
+            exact_mutating_model(value)
     else:
         raise HelperError("producer_role must be thinker or mutating_delegate")
     for key in ("nonce", "packet_digest", "launch_policy_digest", "launch_command_digest"):
@@ -1786,7 +1830,7 @@ def writer_leases_match(left: str, right: str) -> bool:
         raise HelperError("cannot safely compare mutating writer lease identities") from error
 
 
-def validate_envelope(value: Any, expected_kind: str) -> dict[str, Any]:
+def validate_envelope(value: Any, expected_kind: str, mutating: bool = False) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise HelperError("message must be an object")
     payload_key = "report" if expected_kind in {"thinker_report", "mutating_report"} else "input_request"
@@ -1808,11 +1852,15 @@ def validate_envelope(value: Any, expected_kind: str) -> dict[str, Any]:
         "created_at",
         payload_key,
     }
+    if mutating:
+        common.add("model")
     reject_unknown(value, common, "message")
     if value.get("protocol_version") != PROTOCOL_VERSION or value.get("kind") != expected_kind:
         raise HelperError("message protocol_version or kind is invalid")
-    for key in common - {"protocol_version", payload_key}:
+    for key in common - {"protocol_version", payload_key, "model"}:
         required_string(value, key, 2048 if key == "workdir" else 256)
+    if mutating:
+        exact_mutating_model(value)
     for key in ("delegation_id", "message_id", "in_reply_to"):
         protocol_id(value, key)
     try:
@@ -1848,6 +1896,9 @@ def validate_envelope_binding(envelope: dict[str, Any], binding: dict[str, Any])
             raise HelperError(f"message {message_key} does not match immutable receipt binding")
     if envelope["in_reply_to"] != binding["question_message_id"]:
         raise HelperError("message in_reply_to does not match the immutable question")
+    if binding.get("producer_role") == "mutating_delegate":
+        if envelope.get("model") != exact_mutating_model(binding):
+            raise HelperError("message model does not match immutable receipt binding")
 
 
 def validate_report(value: Any) -> dict[str, Any]:
@@ -1976,9 +2027,12 @@ def require_mutating_session(receipt: dict[str, Any]) -> None:
     completed = [event for event in receipt["events"] if event.get("kind") == "launch_completed"]
     acquired = [event for event in receipt["events"] if event.get("kind") == "session_acquired"]
     identity = receipt.get("session_identity")
+    if len(intents) == 1 and intents[0].get("model") != exact_mutating_model(receipt["binding"]):
+        raise HelperError("mutating session model differs from immutable receipt binding")
     if (
         len(intents) != 1
         or intents[0].get("workflow") != "mutating"
+        or intents[0].get("model") != exact_mutating_model(receipt["binding"])
         or len(completed) != 1
         or completed[0].get("operation_event_id") != intents[0].get("event_id")
         or len(acquired) != 1
@@ -3088,7 +3142,7 @@ def validate_launch_request(value: Any) -> dict[str, Any]:
     }
     workflow = value.get("workflow", "read_only")
     if workflow == "mutating":
-        fields |= mutating_fields
+        fields |= mutating_fields | {"model"}
     else:
         fields |= {"expected_launch_policy_digest", "model"}
     reject_unknown(value, fields, "launch request")
@@ -3111,6 +3165,7 @@ def validate_launch_request(value: Any) -> dict[str, Any]:
             raise HelperError("expected_launch_policy_digest must be a lowercase SHA-256 value")
         result["expected_launch_policy_digest"] = expected_policy_digest
     if result["workflow"] == "mutating":
+        result["model"] = exact_mutating_model(value)
         for key in ("baseline_branch", "writer_owner", "integration_owner", "handoff"):
             result[key] = required_string(value, key, 256)
         for key in ("coordinator_write_frozen", "shared_writable"):
@@ -3120,6 +3175,11 @@ def validate_launch_request(value: Any) -> dict[str, Any]:
         if not isinstance(value.get("capacity_request"), dict):
             raise HelperError("capacity_request must be an object")
         result["capacity_request"] = copy.deepcopy(value["capacity_request"])
+        validate_stage_a_capacity_context(result["capacity_request"])
+        if result["capacity_request"]["model"] != result["model"]:
+            raise HelperError("Stage A capacity model does not match the mutating launch model")
+        if result["capacity_request"]["delegation_id"] != result["delegation_id"]:
+            raise HelperError("Stage A capacity delegation does not match the mutating launch request")
     protocol_id(result, "delegation_id")
     protocol_id(result, "event_id")
     protocol_id(result, "claude_session_id")
@@ -3211,6 +3271,7 @@ def launch_policy(workflow: str, model: str | None = None) -> dict[str, Any]:
     }
     if mutating:
         policy["workflow"] = "mutating"
+        policy["model"] = exact_mutating_model({"model": model})
         policy["removed_credential_environment"] = ["GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN"]
     elif model is not None:
         policy["model"] = model
@@ -3750,11 +3811,42 @@ def plan_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
     }
     if components["workflow"] == "mutating":
         result["workflow"] = "mutating"
+        result["model"] = components["request"]["model"]
         result["capacity_decision"] = components["capacity_decision"]
         result["capabilities"].update({"writer_authority": "exclusive", "handoff": "one_clean_local_commit"})
     elif components["request"].get("model") is not None:
         result["model"] = components["request"]["model"]
     return result
+
+
+def require_unconsumed_stage_a_acknowledgement(
+    receipt_store: dict[str, Any], acknowledgement_of: str, store: ReceiptStore | None = None
+) -> None:
+    stores = [receipt_store]
+    if store is not None:
+        lifecycle = store.lifecycle.load()
+        current_path = str(store.state_dir.resolve())
+        for state_path in sorted(set(lifecycle["stores"])):
+            if state_path == current_path:
+                continue
+            owner = ReceiptStore(pathlib.Path(state_path), store.lifecycle.state_dir)
+            stores.append(
+                load_registered_receipt_store(
+                    owner,
+                    state_path,
+                    lifecycle["legacy_store_objects"].get(state_path),
+                    require_exists=True,
+                    acquire_lock=False,
+                )
+            )
+    for candidate_store in stores:
+        if any(
+            event.get("kind") == "launch_intent"
+            and event.get("capacity_acknowledgement_of") == acknowledgement_of
+            for candidate in candidate_store["receipts"]
+            for event in candidate.get("events", [])
+        ):
+            raise HelperError("Stage A capacity acknowledgement was already consumed")
 
 
 def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
@@ -3814,7 +3906,17 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
     }
     if request_data.get("model") is not None:
         intent["model"] = request_data["model"]
-    with store.mutation_lock():
+    if components["workflow"] == "mutating":
+        capacity_decision = components["capacity_decision"]
+        intent.update(
+            {
+                "capacity_decision_digest": capacity_decision["decision_digest"],
+                "capacity_acknowledgement_of": capacity_decision["acknowledgement_of"],
+                "capacity_request_digest": capacity_decision["capacity_request_digest"],
+                "capacity_acknowledgement_expires_at": capacity_decision["acknowledgement_expires_at"],
+            }
+        )
+    with store.launch_intent_mutation_lock(components["workflow"] == "mutating"):
         receipt_store = store.load_store()
         receipt = store.find(receipt_store, delegation_id)
         require_receipt_mutable(receipt)
@@ -3828,6 +3930,11 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
             raise HelperError("launch workflow does not match immutable receipt authority")
         if components["workflow"] == "mutating" and receipt["binding"].get("capacity_decision_digest") != components["capacity_decision_digest"]:
             raise HelperError("launch capacity decision does not match immutable receipt binding")
+        if components["workflow"] == "mutating":
+            if receipt["binding"].get("task_id") != request_data["capacity_request"]["task_id"]:
+                raise HelperError("launch capacity task does not match immutable receipt binding")
+            acknowledgement_of = components["capacity_decision"]["acknowledgement_of"]
+            require_unconsumed_stage_a_acknowledgement(receipt_store, acknowledgement_of)
         replay = find_event(receipt, event_id)
         if replay is not None:
             raise HelperError("launch event appeared concurrently; retry the exact request")
@@ -3881,6 +3988,13 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
         )
         if platform.system() == "Darwin" and os.path.lexists(components["transport_path"].parent):
             raise HelperError("private delegation runtime already exists before launch intent")
+        if components["workflow"] == "mutating":
+            final_capacity_decision = decide_mutating_capacity(request_data["capacity_request"])
+            if final_capacity_decision != components["capacity_decision"]:
+                raise HelperError("Stage A capacity decision changed before launch intent")
+            require_unconsumed_stage_a_acknowledgement(
+                receipt_store, final_capacity_decision["acknowledgement_of"], store
+            )
         intent["at"] = utc_now()
         receipt["events"].append(intent)
         receipt["updated_at"] = intent["at"]
@@ -4249,6 +4363,8 @@ def unknown_capacity_decision(
     request_digest: str,
     source: str,
     confidence: str,
+    stage_a: bool = False,
+    acknowledgement_expires_at: Any = None,
 ) -> dict[str, Any]:
     required = {
         "decision": "acknowledgement_required",
@@ -4260,10 +4376,32 @@ def unknown_capacity_decision(
         "capacity_source": source,
         "capacity_confidence": confidence,
     }
+    if stage_a:
+        observed_at = capacity_now()
+        if acknowledged:
+            if not bounded_utc_timestamp(acknowledgement_expires_at):
+                raise HelperError("Stage A acknowledgement expiry is invalid")
+            expiry = datetime.fromisoformat(acknowledgement_expires_at[:-1] + "+00:00")
+            if expiry <= observed_at:
+                raise HelperError("Stage A acknowledgement has expired")
+            if expiry > observed_at + timedelta(minutes=5):
+                raise HelperError("Stage A acknowledgement expiry exceeds the bounded lifetime")
+        else:
+            if acknowledgement_expires_at is not None:
+                raise HelperError("acknowledgement expiry requires explicit acknowledgement")
+            expiry = observed_at + timedelta(minutes=5)
+            acknowledgement_expires_at = expiry.isoformat().replace("+00:00", "Z")
+        required["acknowledgement_expires_at"] = acknowledgement_expires_at
     required["decision_digest"] = capacity_decision_digest(required)
     if not acknowledged:
         if acknowledgement_of:
             raise HelperError("acknowledgement_of requires explicit acknowledgement")
+        if stage_a:
+            required["owner_action"] = {
+                "acknowledged_unknown_capacity": True,
+                "acknowledgement_of": required["decision_digest"],
+                "acknowledgement_expires_at": acknowledgement_expires_at,
+            }
         return required
     if acknowledgement_of != required["decision_digest"]:
         raise HelperError("explicit acknowledgement must reference the prior acknowledgement-required decision")
@@ -4275,6 +4413,9 @@ def unknown_capacity_decision(
         "reason": reason,
         "acknowledgement_of": acknowledgement_of,
     }
+    if stage_a:
+        decision["acknowledgement_expires_at"] = acknowledgement_expires_at
+        decision["capacity_request_digest"] = request_digest
     decision["decision_digest"] = capacity_decision_digest(decision)
     return decision
 
@@ -4282,7 +4423,18 @@ def unknown_capacity_decision(
 def decide_mutating_capacity(request: Any) -> dict[str, Any]:
     if not isinstance(request, dict):
         raise HelperError("capacity decision request must be an object")
-    reject_unknown(request, {"capacity", "reserve_floors", "acknowledged_unknown_capacity", "acknowledgement_of"}, "capacity decision")
+    stage_a_fields = {
+        "provider", "model", "workflow", "delegation_id", "task_id", "capacity_pool_evidence",
+        "charge_route_evidence", "admitted_impact_evidence", "acknowledgement_expires_at",
+    }
+    reject_unknown(
+        request,
+        {"capacity", "reserve_floors", "acknowledged_unknown_capacity", "acknowledgement_of"} | stage_a_fields,
+        "capacity decision",
+    )
+    stage_a = any(field in request for field in stage_a_fields)
+    if stage_a:
+        validate_stage_a_capacity_context(request)
     acknowledged = request.get("acknowledged_unknown_capacity")
     if not isinstance(acknowledged, bool):
         raise HelperError("acknowledged_unknown_capacity must be boolean")
@@ -4300,6 +4452,7 @@ def decide_mutating_capacity(request: Any) -> dict[str, Any]:
     digest_request = copy.deepcopy(request)
     digest_request["acknowledged_unknown_capacity"] = False
     digest_request.pop("acknowledgement_of", None)
+    digest_request.pop("acknowledgement_expires_at", None)
     request_digest = capacity_decision_digest(digest_request)
     reject_unknown(floors, {"five_hour", "weekly", "model_specific"}, "reserve floors")
     five_hour_floor = percentage(floors.get("five_hour"), "five_hour reserve floor")
@@ -4326,7 +4479,11 @@ def decide_mutating_capacity(request: Any) -> dict[str, Any]:
     )
     windows = capacity.get("windows")
     if not isinstance(windows, list) or not windows:
-        return unknown_capacity_decision(acknowledged, acknowledgement_of, "capacity has no available windows; reserve impact is unknown", request_digest, capacity_source, capacity_confidence)
+        return unknown_capacity_decision(
+            acknowledged, acknowledgement_of, "capacity has no available windows; reserve impact is unknown",
+            request_digest, capacity_source, capacity_confidence, stage_a,
+            request.get("acknowledgement_expires_at"),
+        )
     evaluated = []
     present_window_classes = {"five_hour": False, "weekly": False}
     present_model_windows = {name: 0 for name in model_floors}
@@ -4407,9 +4564,23 @@ def decide_mutating_capacity(request: Any) -> dict[str, Any]:
         missing_capacity = True
     if missing_capacity or not all(present_window_classes.values()):
         reason = "capacity is low-confidence; reserve impact is unknown" if not reliable else "one or more required capacity windows are missing; reserve impact is unknown"
-        return unknown_capacity_decision(acknowledged, acknowledgement_of, reason, request_digest, capacity_source, capacity_confidence)
+        return unknown_capacity_decision(
+            acknowledged, acknowledgement_of, reason, request_digest, capacity_source,
+            capacity_confidence, stage_a, request.get("acknowledgement_expires_at"),
+        )
     if governing is None:
-        return unknown_capacity_decision(acknowledged, acknowledgement_of, "capacity has no evaluable windows; reserve impact is unknown", request_digest, capacity_source, capacity_confidence)
+        return unknown_capacity_decision(
+            acknowledged, acknowledgement_of, "capacity has no evaluable windows; reserve impact is unknown",
+            request_digest, capacity_source, capacity_confidence, stage_a,
+            request.get("acknowledgement_expires_at"),
+        )
+    if stage_a:
+        return unknown_capacity_decision(
+            acknowledged, acknowledgement_of,
+            "capacity pool, charge route, or maximum admitted impact is unproved; reserve impact is unknown",
+            request_digest, capacity_source, capacity_confidence, True,
+            request.get("acknowledgement_expires_at"),
+        )
     if acknowledged or acknowledgement_of:
         raise HelperError("reliable capacity does not accept unknown-capacity acknowledgement fields")
     decision = {
@@ -4549,6 +4720,9 @@ def mcp_tools(mutating: bool = False) -> list[dict[str, Any]]:
         "created_at": {"type": "string", "maxLength": 256},
     }
     common_required = list(common_properties)
+    if mutating:
+        common_properties["model"] = {"type": "string", "const": MUTATING_MODEL}
+        common_required.append("model")
     string_list = {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 2048}}
     report_properties = dict(common_properties)
     if mutating:
@@ -4875,6 +5049,15 @@ def receipt_launch_intent(receipt: dict[str, Any]) -> dict[str, Any]:
         or optional_read_only_model(intent) != optional_read_only_model(binding)
     ):
         raise HelperError("launch intent model differs from immutable binding")
+    if binding.get("producer_role") == "mutating_delegate":
+        exact_mutating_model(intent)
+        for key in (
+            "capacity_decision_digest", "capacity_acknowledgement_of",
+            "capacity_request_digest", "capacity_acknowledgement_expires_at",
+        ):
+            required_string(intent, key, 256)
+        if intent["capacity_decision_digest"] != binding.get("capacity_decision_digest"):
+            raise HelperError("launch intent capacity decision differs from immutable binding")
     for key in (
         "expected_argv_digest", "expected_launcher_identity", "expected_executable_object_identity"
     ):
