@@ -7,7 +7,7 @@ description: "Manage local Amp worker, runner, workspace, and work-group orchest
 
 Local Amp/tmux lifecycle. **Worker** = interactive thread-bound client. **Runner** = `amp --no-tui` bound to a canonical workdir. **Workspace** = same-named tmux session grouping both.
 
-Do not edit registries when the CLI can express the change. Run `amux help [command ...]` before assuming syntax. Durable worker/coordinator rules live in [`reference/contract-v1.md`](reference/contract-v1.md)—spawned workers read that file **once**; do not paste it into prompts.
+Do not edit registries when the CLI can express the change. Run `amux help [command ...]` before assuming syntax. Durable worker/coordinator rules live in [`reference/contract-v1.md`](reference/contract-v1.md)—spawned workers read that file **once** via an **absolute** path the coordinator substitutes into the assignment; do not paste the contract into prompts or send a bare relative path.
 
 ## Preserve the agent contract
 
@@ -33,7 +33,7 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 - **Unshelve this**: `amux unshelve --current` or `--thread`. Launch separately.
 - **Restore my workspace**: `amux launch --workspace <name>` (or bare `amux` for all workers).
 - **Doctor amux**: `amux doctor --all` or scoped doctor.
-- **Spawn a worker for ...**: load [`reference/workflows.md`](reference/workflows.md); `amux spawn --mode medium ...`; message-file is task-only plus one line to read `contract-v1` once.
+- **Spawn a worker for ...**: load [`reference/workflows.md`](reference/workflows.md); `amux spawn --mode medium ...`; message-file is task-only plus one line that names the **absolute** path to the loaded skill's `reference/contract-v1.md` (read once; never a bare relative path).
 - **Coordinate issue workers**: load [`reference/workflows.md`](reference/workflows.md#coordinate-a-durable-issue-work-group).
 - **Teardown this worker**: load [`reference/workflows.md`](reference/workflows.md#teardown-a-worker). If `/amux-claude` pairs may exist, run that skill's paired lifecycle preflight first; then `amux teardown` last.
 - **/amux health**: [`workflows.md`](reference/workflows.md#health-workers-and-runners).

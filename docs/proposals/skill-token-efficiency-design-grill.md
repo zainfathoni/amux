@@ -123,7 +123,7 @@ Then reload Amp (quit/reopen TUI or restart the client) so the skill index refre
 
 **Deadline schedules:** any existing schedule still saying "Load `/amux` first" must be updated to the synthetic prompt in `reference/deadline-v1.md`.
 
-**Do not** `@`-include `contract-v1.md` from AGENTS.md (that makes the contract always-on and defeats progressive disclosure). Workers get "read contract once" from the spawn message.
+**Do not** `@`-include `contract-v1.md` from AGENTS.md (that makes the contract always-on and defeats progressive disclosure). Workers get a spawn line with the **absolute** path to the loaded skill's `reference/contract-v1.md` and read that file once.
 
 ## Tracking issues
 

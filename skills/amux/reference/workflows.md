@@ -72,7 +72,7 @@ Use explicit `--mode medium` unless the user requested another mode. Keep the wo
 
 The message must include:
 
-- one mandatory line: read once the contract file at the absolute path the coordinator resolved for the installed `/amux` skill and substituted here literally (e.g. `~/.agents/skills/amux/reference/contract-v1.md`), then follow only that contract plus this assignment; never send an unresolved relative path;
+- one mandatory line: read once the contract file at the **absolute** path the coordinator resolved for the loaded `/amux` skill's `reference/contract-v1.md` and substituted here literally (resolve the skill root Amp actually loaded—common installs include `~/.agents/skills/amux`, `~/.config/agents/skills/amux`, `~/.config/amp/skills/amux`, or a dev symlink—then append `/reference/contract-v1.md`), then follow only that contract plus this assignment; **never** send an unresolved relative path such as `reference/contract-v1.md` alone;
 - ownership of only that issue, branch, and worktree;
 - accepted contracts and native blockers to re-check, with overlap reported rather than absorbed;
 - required tests, focused commit/PR against `main`, and `Closes #<issue>`;

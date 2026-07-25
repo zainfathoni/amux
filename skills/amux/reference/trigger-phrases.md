@@ -15,7 +15,7 @@ This table is the complete activation and routing contract for [`../SKILL.md`](.
 | `Show shelved work` | `amux worker list --shelf shelved` | Local shelf intent only. |
 | `Unshelve this` | `amux unshelve --current` or `--thread <id>` | Unarchive, then remove intent; do not launch. |
 | `Restore my workspace` | `amux launch --workspace <name>` | Aggregate by default; worker route narrows. |
-| `Spawn a worker for` | workflow, then `amux spawn --mode medium ...` | Explicit medium unless user chose another mode; task-only message + read contract-v1 once. |
+| `Spawn a worker for` | workflow, then `amux spawn --mode medium ...` | Explicit medium unless user chose another mode; task-only message + absolute path to contract-v1 (read once). |
 | `Coordinate issue workers` | [`workflows.md#coordinate-a-durable-issue-work-group`](workflows.md#coordinate-a-durable-issue-work-group) | Durable group/report/auth; callback is wake-up only. |
 | `Teardown this worker` | [`workflows.md#teardown-a-worker`](workflows.md#teardown-a-worker), then `amux teardown` | Paired Claude preflight only if `/amux-claude` may apply; Amp teardown last. |
 | `Doctor amux` | aggregate or mode-specific `doctor` | Read-only diagnosis. |

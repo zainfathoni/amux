@@ -51,21 +51,50 @@ func TestTriggerChecklistMatchesSkillActivationAndRouting(t *testing.T) {
 func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
-	for _, name := range []string{
-		"commands.md",
-		"workflows.md",
-		"troubleshooting.md",
-		"trigger-phrases.md",
-		"contract-v1.md",
-		"deadline-v1.md",
-		"amp-invocation-policy.md",
+	type skillRefs struct {
+		skillDir string
+		refs     []string
+	}
+	for _, pkg := range []skillRefs{
+		{
+			skillDir: filepath.Join("skills", "amux"),
+			refs: []string{
+				"commands.md",
+				"workflows.md",
+				"troubleshooting.md",
+				"trigger-phrases.md",
+				"contract-v1.md",
+				"deadline-v1.md",
+				"amp-invocation-policy.md",
+			},
+		},
+		{
+			skillDir: filepath.Join("skills", "amux-claude"),
+			refs: []string{
+				"claude-delegation-contract.md",
+				"claude-delegation-recovery.md",
+				"claude-read-only-delegation.md",
+				"claude-mutating-delegation.md",
+				"claude-opus-orb-executor.md",
+				"trigger-phrases.md",
+			},
+		},
+		{
+			skillDir: filepath.Join("skills", "amux-pi"),
+			refs: []string{
+				"pi-spark-orb-executor.md",
+				"trigger-phrases.md",
+			},
+		},
 	} {
-		if !strings.Contains(skill, "reference/"+name) {
-			t.Errorf("SKILL.md does not link reference/%s", name)
-		}
-		if _, err := os.Stat(filepath.Join(root, "skills", "amux", "reference", name)); err != nil {
-			t.Errorf("reference/%s is missing: %v", name, err)
+		skill := readSkillFile(t, root, filepath.Join(pkg.skillDir, "SKILL.md"))
+		for _, name := range pkg.refs {
+			if !strings.Contains(skill, "reference/"+name) {
+				t.Errorf("%s/SKILL.md does not link reference/%s", pkg.skillDir, name)
+			}
+			if _, err := os.Stat(filepath.Join(root, pkg.skillDir, "reference", name)); err != nil {
+				t.Errorf("%s/reference/%s is missing: %v", pkg.skillDir, name, err)
+			}
 		}
 	}
 }
@@ -1272,6 +1301,8 @@ func TestContractV1IsProgressivelyDisclosedForWorkers(t *testing.T) {
 	for _, required := range []string{
 		"amux-contract: v1",
 		"read this file once",
+		"absolute path",
+		"never a bare relative path",
 		"ready",
 		"blocked",
 		"merged",
@@ -1294,11 +1325,54 @@ func TestContractV1IsProgressivelyDisclosedForWorkers(t *testing.T) {
 		t.Error("workflows must require task-only prompts and contract-v1 read-once")
 	}
 	for _, required := range []string{
-		"absolute path the coordinator resolved",
-		"never send an unresolved relative path",
+		"path the coordinator resolved",
+		"never** send an unresolved relative path",
+		"~/.agents/skills/amux",
+		"~/.config/agents/skills/amux",
+		"~/.config/amp/skills/amux",
+		"reference/contract-v1.md` alone",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("spawn message template must resolve the contract path for the worker: missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		"path to the loaded skill",
+		"never a bare relative path",
+	} {
+		if !strings.Contains(skill, required) {
+			t.Errorf("SKILL.md spawn routing must require absolute contract path: missing %q", required)
+		}
+	}
+	triggers := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md"))
+	if !strings.Contains(triggers, "absolute path to contract-v1") {
+		t.Error("trigger checklist must require absolute contract-v1 path on spawn")
+	}
+}
+
+func TestDescriptionCarriesNaturalLanguageSynonymTriggers(t *testing.T) {
+	t.Parallel()
+	skill := readSkillFile(t, repoRoot(t), filepath.Join("skills", "amux", "SKILL.md"))
+	descStart := strings.Index(skill, "description:")
+	if descStart < 0 {
+		t.Fatal("SKILL.md missing description frontmatter")
+	}
+	descEnd := strings.Index(skill[descStart:], "\n---")
+	if descEnd < 0 {
+		t.Fatal("SKILL.md description frontmatter is unterminated")
+	}
+	description := skill[descStart : descStart+descEnd]
+	// Phrases that are not substrings of the CLI verb list must remain matchable
+	// before skill activation. Do not require every table row in the description.
+	for _, phrase := range []string{
+		"forget this on restore",
+		"hide it for now",
+		"defer this workspace",
+		"Show shelved work",
+		"Restore my workspace",
+	} {
+		if !strings.Contains(description, phrase) {
+			t.Errorf("frontmatter description missing pre-activation synonym %q", phrase)
 		}
 	}
 }

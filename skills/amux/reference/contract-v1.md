@@ -1,6 +1,6 @@
 # amux contract-v1
 
-Durable Amp worker and coordinator protocol. Spawned workers must **read this file once** at start (path: installed skill `reference/contract-v1.md`), then follow only this contract plus their task assignment. Coordinators and wake-ups must **not** paste this text into child prompts or reload the full `/amux` skill body.
+Durable Amp worker and coordinator protocol. Spawned workers must **read this file once** at start from the **absolute path** the coordinator substituted into the assignment (the on-disk `reference/contract-v1.md` of the installed `/amux` skill—never a bare relative path), then follow only this contract plus their task assignment. Coordinators and wake-ups must **not** paste this text into child prompts or reload the full `/amux` skill body.
 
 Version marker: `amux-contract: v1`.
 
