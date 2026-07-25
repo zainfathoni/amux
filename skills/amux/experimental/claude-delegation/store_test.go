@@ -6760,6 +6760,7 @@ func main() {
     for _, argument := range os.Args[1:] { _, _ = output.Write(append([]byte(argument), 0)) }
     _ = output.Close()
   }
+  if path := os.Getenv("CLAUDE_STARTED_MARKER"); path != "" { _ = os.WriteFile(path, nil, 0600) }
   for { time.Sleep(time.Second) }
 }
 `
@@ -6801,14 +6802,8 @@ case "$1" in
     test -s "$PANE_PID_FILE"
     pane_pid=$(cat "$PANE_PID_FILE")
     kill -0 "$pane_pid"
-    if [ -n "${DRIFT_RECEIPT_MODEL:-}" ] && [ ! -e "$DRIFT_RECEIPT_SNAPSHOT" ]; then
-      counter="$DRIFT_RECEIPT_SNAPSHOT.counter"
-      count=0
-      if [ -e "$counter" ]; then count=$(cat "$counter"); fi
-      count=$((count + 1)); printf '%s' "$count" > "$counter"
-      if [ "$count" -ge 10 ]; then
-        python3 -c 'import json,os,pathlib; p=pathlib.Path(os.environ["DRIFT_RECEIPT_PATH"]); d=json.loads(p.read_text()); e=next(x for x in d["receipts"][0]["events"] if x.get("kind")=="launch_intent"); m=os.environ["DRIFT_RECEIPT_MODEL"]; e.pop("model",None) if m=="__omit__" else e.__setitem__("model",m); b=json.dumps(d,separators=(",",":")).encode(); p.write_bytes(b); pathlib.Path(os.environ["DRIFT_RECEIPT_SNAPSHOT"]).write_bytes(b)'
-      fi
+    if [ -n "${DRIFT_RECEIPT_MODEL:-}" ] && [ ! -e "$DRIFT_RECEIPT_SNAPSHOT" ] && [ -e "${CLAUDE_STARTED_MARKER:-/nonexistent}" ]; then
+      python3 -c 'import json,os,pathlib; p=pathlib.Path(os.environ["DRIFT_RECEIPT_PATH"]); d=json.loads(p.read_text()); e=next(x for x in d["receipts"][0]["events"] if x.get("kind")=="launch_intent"); m=os.environ["DRIFT_RECEIPT_MODEL"]; e.pop("model",None) if m=="__omit__" else e.__setitem__("model",m); b=json.dumps(d,separators=(",",":")).encode(); p.write_bytes(b); pathlib.Path(os.environ["DRIFT_RECEIPT_SNAPSHOT"]).write_bytes(b)'
     fi
     start_command=$(tail -n 1 "$TMUX_LOG" | sed -n 's/^.* -c [^ ]* //p')
     if [ -n "${REPORTED_START_COMMAND:-}" ]; then start_command=$REPORTED_START_COMMAND; fi
@@ -6819,7 +6814,16 @@ case "$1" in
   *) exit 2 ;;
 esac
 `)
-	*environment = append(*environment, "PANE_PID_FILE="+panePID, "PANE_OUTPUT="+paneOutput)
+	// The launch transport revalidates the receipt immediately before exec, so a
+	// receipt-drifting fixture must wait for the exec to happen. This marker is the
+	// causal signal: Claude writes it only after the transport handed control over.
+	startedMarker := filepath.Join(t.TempDir(), "claude.started")
+	*environment = append(
+		*environment,
+		"PANE_PID_FILE="+panePID,
+		"PANE_OUTPUT="+paneOutput,
+		"CLAUDE_STARTED_MARKER="+startedMarker,
+	)
 	t.Cleanup(func() {
 		data, err := os.ReadFile(panePID)
 		if err != nil {
