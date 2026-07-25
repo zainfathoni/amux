@@ -11,6 +11,8 @@ Disposable provider-specific experiment. **Not** an amux CLI resource, worker, r
 
 - **Run Pi on Spark in an Amp Orb**: only after an explicit owner request, load [`reference/pi-spark-orb-executor.md`](reference/pi-spark-orb-executor.md).
 
+Trigger checklist: [`reference/trigger-phrases.md`](reference/trigger-phrases.md).
+
 ## Safety
 
 - Exact model `openai-codex/gpt-5.3-codex-spark` through owner-operated ChatGPT Codex OAuth.

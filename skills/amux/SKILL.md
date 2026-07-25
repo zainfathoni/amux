@@ -1,6 +1,6 @@
 ---
 name: amux
-description: "Manage local Amp worker, runner, workspace, and work-group orchestration with amux. Use for pin/unpin/park/restart/shelve/unshelve/launch/spawn, doctor, teardown, /amux health, /amux sprawl, /amux finish, and coordinate issue workers. Experimental Claude or Pi delegation is a separate skill (/amux-claude, /amux-pi), not this skill."
+description: "Manage local Amp worker, runner, workspace, and work-group orchestration with amux. Use for pin/unpin/park/restart/shelve/unshelve/launch/spawn, doctor, teardown, /amux health, /amux sprawl, /amux finish, and coordinate issue workers. Also 'forget this on restore', 'hide it for now', 'defer this workspace', 'Show shelved work', and 'Restore my workspace'. Experimental Claude or Pi delegation is a separate skill (/amux-claude, /amux-pi), not this skill."
 ---
 
 # amux

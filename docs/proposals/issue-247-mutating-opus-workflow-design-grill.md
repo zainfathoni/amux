@@ -55,7 +55,7 @@ At the recorded base:
 - Mutating writer exclusion is worktree-scoped, not capacity-pool-scoped.
 - The diagnostic correctly classifies the recognized CodexBar payload as unsupported rather than treating it as autonomous capacity evidence.
 
-These facts are visible in the [delegation helper](../../skills/amux/experimental/claude-delegation/claude_delegation.py), the [shared delegation contract](../../skills/amux/reference/claude-delegation-contract.md), and the [mutating workflow reference](../../skills/amux/reference/claude-mutating-delegation.md).
+These facts are visible in the [delegation helper](../../skills/amux-claude/experimental/claude-delegation/claude_delegation.py), the [shared delegation contract](../../skills/amux-claude/reference/claude-delegation-contract.md), and the [mutating workflow reference](../../skills/amux-claude/reference/claude-mutating-delegation.md).
 
 ### Public provider evidence
 

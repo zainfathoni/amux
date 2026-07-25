@@ -1285,13 +1285,21 @@ func TestContractV1IsProgressivelyDisclosedForWorkers(t *testing.T) {
 			t.Errorf("contract-v1 missing %q", required)
 		}
 	}
-	if !strings.Contains(skill, "no Read Thread") && !strings.Contains(skill, "no Read Thread for task context") {
-		if !strings.Contains(skill, "Credit defaults") {
-			t.Error("SKILL.md must surface credit defaults including Read Thread")
+	for _, required := range []string{"Credit defaults", "no Read Thread for task context", "Oracle reviews get supplied diff/context only"} {
+		if !strings.Contains(skill, required) {
+			t.Errorf("SKILL.md must surface credit default %q", required)
 		}
 	}
 	if !strings.Contains(workflow, "contract-v1.md") || !strings.Contains(workflow, "task-only") {
 		t.Error("workflows must require task-only prompts and contract-v1 read-once")
+	}
+	for _, required := range []string{
+		"absolute path the coordinator resolved",
+		"never send an unresolved relative path",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("spawn message template must resolve the contract path for the worker: missing %q", required)
+		}
 	}
 }
 

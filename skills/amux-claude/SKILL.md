@@ -20,6 +20,7 @@ Core Amp lifecycle remains `/amux`. Paired worker teardown and finish in `/amux`
 
 - Shared contract: [`reference/claude-delegation-contract.md`](reference/claude-delegation-contract.md)
 - Recovery branches: [`reference/claude-delegation-recovery.md`](reference/claude-delegation-recovery.md)
+- Trigger checklist: [`reference/trigger-phrases.md`](reference/trigger-phrases.md)
 - Helper: `experimental/claude-delegation/claude_delegation.py` within this installed skill
 
 ## Safety

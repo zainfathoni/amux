@@ -81,7 +81,7 @@ npx skills add zainfathoni/amux --skill amux-claude --global
 npx skills add zainfathoni/amux --skill amux-pi --global
 ```
 
-`/amux` teaches canonical selectors, side-effect boundaries, skill-only health/sprawl/finish workflows, and progressive disclosure via `reference/contract-v1.md` (workers read once) and `reference/deadline-v1.md` (deadlines only). Do not paste full protocol into spawn messages or reload the full skill on wake-ups. See the [dedicated skill guide](https://amux.zainf.dev/skill/). Local symlinking is only for contributors; see [CONTRIBUTING.md](CONTRIBUTING.md#develop-the-bundled-skill).
+`/amux` teaches canonical selectors, side-effect boundaries, skill-only health/sprawl/finish workflows, and progressive disclosure via `reference/contract-v1.md` (workers read once) and `reference/deadline-v1.md` (deadlines only). Do not paste full protocol into spawn messages or reload the full skill on wake-ups. See the [dedicated skill guide](https://amux.zainf.dev/skill/). Local symlinking is only for contributors; see [CONTRIBUTING.md](CONTRIBUTING.md#develop-the-bundled-skills).
 
 `/amux-claude` is a separate unstable skill for explicit Amp-to-Claude delegation (local thinker/writer and fresh-Orb Opus). It is not an `amux` lifecycle command, worker, runner, group member, or compatibility promise. `/amux-pi` is a separate disposable Pi/Spark Orb recipe. Neither installs with core `/amux` unless requested.
 
