@@ -135,6 +135,8 @@ git worktree add -b <type>/issue-<issue>-<slug> <dedicated-worktree> origin/main
 
 Run the shared automatic-spawn preflight above before this block.
 
+The `<assignment>` file follows the same task-only message requirements as [2. Use stable issue identity](#2-use-stable-issue-identity) above—including the one mandatory line naming the **absolute** path to the loaded skill's `reference/contract-v1.md`—plus the group, report, and binding requirements below. A coordinator working only from this section must still send that contract line; it is the worker's only protocol source.
+
 ```sh
 amux --dry-run spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode "$MODE" --title-prefix '#<issue>' --work-item-id <work-item-id> --worker-ordinal <ordinal> --message-file <assignment> --idempotency-key issue-<issue>
 amux --json spawn --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --mode "$MODE" --title-prefix '#<issue>' --work-item-id <work-item-id> --worker-ordinal <ordinal> --message-file <assignment> --idempotency-key issue-<issue>

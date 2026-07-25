@@ -1344,6 +1344,22 @@ func TestContractV1IsProgressivelyDisclosedForWorkers(t *testing.T) {
 			t.Errorf("SKILL.md spawn routing must require absolute contract path: missing %q", required)
 		}
 	}
+	// The coordinator work-group route is linked directly from SKILL.md, so it must
+	// carry the mandatory contract read line itself rather than relying on a reader
+	// having scrolled through the sprawl section's message requirements.
+	coordinateAt := strings.Index(workflow, "## Coordinate a durable issue work group")
+	if coordinateAt < 0 {
+		t.Fatal("coordinator work-group workflow is missing")
+	}
+	coordinate := workflow[coordinateAt:]
+	if healthAt := strings.Index(coordinate, "## Health workers and runners"); healthAt > 0 {
+		coordinate = coordinate[:healthAt]
+	}
+	for _, required := range []string{"contract-v1.md", "only protocol source"} {
+		if !strings.Contains(coordinate, required) {
+			t.Errorf("coordinator work-group spawn must carry the contract read requirement: missing %q", required)
+		}
+	}
 	triggers := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md"))
 	if !strings.Contains(triggers, "absolute path to contract-v1") {
 		t.Error("trigger checklist must require absolute contract-v1 path on spawn")
