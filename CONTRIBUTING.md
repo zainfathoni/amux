@@ -32,19 +32,24 @@ gofmt -l .
 
 CI runs formatting, tests, a build, and a Destructive Command Guard scan.
 
-## Develop the bundled skill
+## Develop the bundled skills
 
-Normal users install the published skill globally with `skills` as documented in
-the README. Contributors editing `skills/amux` may symlink this checkout so Amp
-loads the worktree copy:
+Normal users install published skills globally with `skills` as documented in
+the README. Core lifecycle is `skills/amux`. Experimental Claude and Pi routes
+are separate packages under `skills/amux-claude` and `skills/amux-pi`.
+Contributors may symlink this checkout so Amp loads the worktree copies:
 
 ```sh
 ln -sfn "$PWD/skills/amux" ~/.agents/skills/amux
+ln -sfn "$PWD/skills/amux-claude" ~/.agents/skills/amux-claude
+ln -sfn "$PWD/skills/amux-pi" ~/.agents/skills/amux-pi
 ```
 
-Reload Amp after changing the link. Run the skill consistency tests directly
-with `go test ./scripts`; they also run as part of `go test ./...`. Do not
-document this development symlink as the primary installation path.
+Reload Amp after changing the links. Run the skill consistency tests with
+`go test ./scripts` (and experimental helper tests under
+`./skills/amux-claude/experimental/...`). They also run as part of
+`go test ./...`. Do not document these development symlinks as the primary
+installation path.
 
 ## Pull request guidelines
 

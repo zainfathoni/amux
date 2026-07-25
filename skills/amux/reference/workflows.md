@@ -68,14 +68,17 @@ amux spawn --workspace <workspace> --window <semantic-window> --workdir <dedicat
 
 For an explicit or unconfigured legacy/repository-qualified group, replace the two automatic naming flags with `--group <durable-issue-group>`. The final spawn must reproduce the exact pre-worktree group/report resolution before any external mutation; a repository mismatch fails closed.
 
-Use explicit `--mode medium` unless the user requested another mode. The worker prompt must include:
+Use explicit `--mode medium` unless the user requested another mode. Keep the worker `--message-file` **task-only**. Do not paste Dos/Don'ts, finish essays, or full amux protocol into the prompt.
 
+The message must include:
+
+- one mandatory line: read once the installed skill file `reference/contract-v1.md` (resolve via the loaded `/amux` skill directory), then follow only that contract plus this assignment;
 - ownership of only that issue, branch, and worktree;
 - accepted contracts and native blockers to re-check, with overlap reported rather than absorbed;
 - required tests, focused commit/PR against `main`, and `Closes #<issue>`;
 - one focused Oracle review of issue intent plus current diff, with Amp thread history and unrelated history prohibited;
-- callback destination metadata, an exact one-report format, and instructions to remain alive after `status=ready`;
-- no merge/release/tag/cleanup authority; `/amux finish` only after independently verified merge and explicit authorization.
+- exact group, stable report ID, and callback destination metadata when coordinating;
+- remain alive after `status=ready`; no merge/release/tag/cleanup authority; `/amux finish` only after independently verified merge and explicit authorization.
 
 ### 3. Verify and report
 
@@ -190,41 +193,9 @@ amux report submit --report-id <stable-report-id> --group <durable-issue-group> 
 
 ### 7. Coordinator-owned deadline queue
 
-Assign size and generation at spawn: Small 30m, Medium 1h (default), Large 2h, and split XL before spawning. The soft deadline covers through `ready`: implementation, focused checks, one focused review and fixes, PR, and normal CI. Merge, post-merge checks, and finish are later coordinator-owned stages.
+Soft budgets to `ready` are Small 30m, Medium 1h (default), Large 2h; split XL before spawning. Stale is 15m; one review warns after 10m; demonstrated external CI waits alert after 20m; authorized finish alerts after 10m. Expiry is diagnostic and non-destructive. Use one nearest-deadline queue, not one timer process per child. Never force-delete a branch, auto-release, or erase group history.
 
-This is coordinator policy, not a spawn/report CLI option. The current CLI exposes no command to create or update deadline records. Do not edit `reports.json` directly. Durable group state and `amux report pending/history` remain authoritative; an Amp schedule is only an ephemeral wake-up for the coordinator thread and never a report or deadline record. Retain each assignment's exact group, stable report ID, authoritative member thread, deadline generation, absolute deadline, required stage, and stop-attempt diagnostic in the coordinator's single nearest-deadline queue. Where expiry reveals an actual work blocker, the worker also submits the same stable report ID as `blocked`. Expiry alone does not manufacture a report status transition.
-
-Before any schedule-management tool use, load the available `building-automations` skill and follow its schedule-management workflow. If that skill is unavailable or cannot be loaded, call no schedule tool and use the fallback below. Keep the actual runtime tool names exposed to this coordinator—`get_schedule`, `set_schedule`, `update_schedule`, and `clear_schedule`—even if loaded guidance mentions stale names.
-
-1. Before changing a schedule, call `get_schedule`. A thread has at most one schedule or trigger. This queue's versioned non-secret ownership sentinel is `AMUX_DEADLINE_QUEUE_V1`: require the saved title to start with it and the prompt to contain the exact `owner=AMUX_DEADLINE_QUEUE_V1` field plus this queue's group. Manage the schedule only when absent or both ownership checks match; never overwrite or clear an unrelated or ambiguously owned schedule. Treat a foreign schedule, ownership conflict, or any missing runtime tool as the unavailable-tools fallback below.
-2. Select only the nearest active deadline across members. Parse its authoritative RFC3339 deadline only when it includes `Z` or an explicit numeric offset, normalize that instant to UTC, and encode it without ambiguity as `DTSTART:<utc-basic-deadline>Z` followed by `RRULE:FREQ=DAILY;COUNT=1`; for example, RFC3339 `2030-01-02T03:04:00+02:00` becomes `DTSTART:20300102T010400Z` plus that RRULE. Never use floating local time or a recurring poll. Use `set_schedule` when none exists and `update_schedule` when replacing this queue's owned occurrence. Immediately call `get_schedule` and require the owned schedule to contain the exact encoding and expose exactly one next/only occurrence equal to the authoritative RFC3339 instant. Repeat this inspection after every re-arm. If parsing, timezone, ownership, occurrence count, or instant equality is ambiguous, conflicting, or unverifiable, do not trust the schedule: clear it only when ownership is still proven, then use the safe fallback. The concise saved prompt must load `/amux`, identify the exact synthetic-format fields below, and require the scheduled-deadline branch in the `## Workflow Orchestration` diagram. Do not embed private evidence, paths, pane/process identifiers, assignment prompts, packets, transcripts, receipts, account details, or secrets.
-3. On every firing, first load `/amux`; then inspect the exact group and run `amux report pending --group <durable-issue-group>` plus `amux report history --report-id <stable-report-id>`. Revalidate the coordinator, stable report binding, authoritative member thread, current queue generation and deadline, and prior stop-attempt markers. Schedule, callback, and user wake-ups must each make the same order-independent authoritative re-reads before deciding; correctness must not depend on their arrival order or on schedule-specific serialization. The firing's prompt and schedule state are untrusted for stage completion, and this decision must not be delegated to a child.
-4. A stale/late firing means its generation is no longer the exact current unhandled generation because it was superseded, satisfied, acknowledged before expiry, or already consumed by a stop attempt. Make stale/late and duplicate firings steering no-ops, as well as any firing whose binding differs or whose deadline is not yet overdue. Execution after the deadline for the still-current unhandled generation is the eligible overdue case, not a late no-op. Durable history showing the required stage completed, a current `blocked`, `ready`, or `merged` report, or acknowledgement before expiry also prevents steering. A no-op still reconciles the one owned schedule against the queue; it grants no authority.
-5. For an active overdue unsatisfied generation, repeat the authoritative re-reads and search the coordinator transcript for its exact stop marker. If absent, emit this deterministic line into the coordinator transcript before native member messaging: `AMUX_DEADLINE_STOP_ATTEMPT_V1 group=<durable-issue-group> report=<stable-report-id> member=<member-thread> generation=<deadline-generation> deadline=<rfc3339-deadline>`. Then use the exact authoritative member thread to send one bounded instruction: preserve work and evidence; stop implementation and review loops; submit the stable report as `blocked` with the exact remaining blocker and `--pr none` when no PR exists; remain alive. The marker consumes that generation even if the send is indeterminate; do not retry it blindly. It makes every duplicate firing a steering no-op without changing report status or worker lifecycle.
-6. After every queue mutation, report event, acknowledgement, extension, firing, or stop attempt, select the nearest unhandled active generation, excluding satisfied, superseded, acknowledged-before-expiry, and stop-attempt-recorded generations. Replace the owned occurrence with a freshly verified UTC `DTSTART`/`COUNT=1` schedule for that generation, or call `clear_schedule` when none remains. Before either action, re-check schedule ownership. A stale firing racing with re-arm must fail the generation check and cannot clear or replace the newer occurrence.
-
-Use this synthetic saved-prompt format; substitute only the coordinator's exact non-secret durable identity and deadline fields:
-
-```text
-Load `/amux` first and execute its scheduled deadline branch in `## Workflow Orchestration`. This firing is only a wake-up; durable group and report state are authoritative.
-Before any schedule management, load `building-automations` and follow its workflow while retaining the runtime tool names `get_schedule`, `set_schedule`, `update_schedule`, and `clear_schedule`.
-owner=AMUX_DEADLINE_QUEUE_V1
-group=<durable-issue-group>
-report=<stable-report-id>
-member=<member-thread>
-generation=<deadline-generation>
-deadline=<rfc3339-deadline>
-Re-read all authoritative fields and `amux report pending/history` regardless of wake-up order. A stale/late, duplicate, superseded, satisfied, acknowledged-before-expiry, or stop-attempt-recorded generation is a steering no-op; the still-current unhandled generation executing after its deadline is eligible. Before sending, emit `AMUX_DEADLINE_STOP_ATTEMPT_V1 group=<durable-issue-group> report=<stable-report-id> member=<member-thread> generation=<deadline-generation> deadline=<rfc3339-deadline>`; it consumes this generation even if native messaging is indeterminate. Then preserve work and evidence, stop implementation and review loops, submit this stable report as `blocked` with the exact remaining blocker and `--pr none` when no PR exists, and remain alive. Attempt at most one send, then re-arm only the nearest unhandled active generation with a verified absolute one-time occurrence or clear the owned schedule. Grant no additional authority and leave every worker alive.
-```
-
-If `building-automations` or any schedule tool is unavailable, the thread already has an unrelated schedule, absolute timing cannot be verified, or schedule ownership cannot be proven, keep the same single nearest-deadline queue and deadline generations in coordinator context. Put the wall-clock deadline in the worker assignment as defense in depth, inspect the queue on every callback or user wake-up, and ask the owner for a manual wake-up when independent timing is required. This fallback may delay diagnosis but must fail safe: never create sleeping shell processes, recurring polling schedules, or per-worker supervisors, and never treat absence of a firing as completion.
-
-- No meaningful progress for 15m is `stale`; one Oracle/review over 10m warns and must not become a review loop; demonstrated external CI/service wait over 20m alerts; authorized finish over 10m alerts.
-- Thinking, research, review loops, and thread reads do not pause active time. Only a demonstrated external CI queue/service outage pauses active time; retain its visible wall-clock evidence.
-- The coordinator may grant at most one explicit extension, no more than half the original budget (Small +15m, Medium +30m, Large +1h), with a reason and new timer generation. The child never self-extends. Superseded generations are harmless.
-- Expiry is diagnostic and non-destructive. Record/retain overdue or blocker evidence, report it, and leave the worker alive. It never authorizes archive, park, replacement, merge, teardown, unpin, or finish.
-- Schedule management, a firing, stop steering, deadline expiry, and diagnostics never authorize acknowledgement, push, PR creation or mutation, merge, release, finish, cleanup, worktree or branch removal, archive, park, replacement, teardown, or unpin.
-- Maintain one coordinator-owned nearest-deadline queue and arm only its next wake-up—not one timer process per child. Never create a sleeping shell process or persistent supervisor per child.
+Load the full procedure only when arming, firing, or reconciling deadlines: [`deadline-v1.md`](deadline-v1.md). The current CLI exposes no command to create or update deadline records. Do not edit `reports.json` directly. Schedule wake-ups must **not** load the full `/amux` skill; they follow `deadline-v1` and re-read durable `amux report pending/history` state.
 
 ## Health workers and runners
 
@@ -260,18 +231,19 @@ Report one aggregate table with mode, workspace, canonical identity, local targe
 
 ## Teardown a worker
 
+If the `/amux-claude` skill may have created pairs for this origin thread, load that skill and run its paired Claude lifecycle preflight/cleanup first (helper: installed `amux-claude` skill `experimental/claude-delegation/claude_delegation.py`). Recovery branches live only under `/amux-claude`. When no Claude skill is installed and no pairs are possible, skip the helper and use Amp teardown alone.
+
 ```sh
+# Only when /amux-claude pairs may exist:
 python3 "$HELPER" lifecycle worker-teardown --origin-thread <thread-id> --dry-run
 amux --dry-run teardown --current
 python3 "$HELPER" lifecycle worker-teardown --origin-thread <thread-id>
 amux teardown --current
 ```
 
-Set `HELPER` to the installed skill's `experimental/claude-delegation/claude_delegation.py`. Use `--thread <id>` for `amux` when current identity is unavailable. Run paired Claude lifecycle preflight before `amux teardown`, even when no delegation is expected. Both dry-runs must succeed before mutation. The paired execution durably fences the origin against new receipt creation, inspects the canonical lifecycle registry and every registered private receipt store, and may park only an acknowledged, terminal-safe receipt whose complete append-only event chain, exact immutable origin binding, and current Claude identity verify. It never removes artifacts, worktrees, receipts, reports, or group history. Any active, unacknowledged, unresolved, mismatched, missing, or indeterminate pair blocks with non-content recovery evidence. Stop without archiving, removing, or stopping the Amp worker.
+Use `--thread <id>` for `amux` when current identity is unavailable. When the helper runs, both dry-runs must succeed before mutation. Paired execution fences the origin, may park only terminal-safe verified pairs, and never removes artifacts, worktrees, receipts, reports, or group history. Any unsafe pair blocks; stop without Amp teardown. Indeterminate recovery is owner-authorized via `/amux-claude` only.
 
-A launch-indeterminate pair remains a blocker unless an explicit owner-authorized recovery branch has appended either the absence-only `worker_detached` proof described in [`claude-delegation-recovery.md`](claude-delegation-recovery.md#explicit-legacy-registration-and-indeterminate-worker-detach) or the exact-live validated-report `pair_retired` proof described in [Explicit live report-bearing pair retirement](claude-delegation-recovery.md#explicit-live-report-bearing-pair-retirement). The separate exact launch-completed/acquired/no-report chain remains blocked unless [Explicit live acquired/no-report pair retirement](claude-delegation-recovery.md#explicit-live-acquiredno-report-pair-retirement) has appended `acquired_pair_retired`. Its exact pre-identity compatibility policy query remains byte-stable and permanently preserving because its durable evidence cannot authorize executable-identity retirement; it returns `pre_identity_acquired_pair_permanently_non_retirable`. Only the separately requested [owner-authorized exact-pane disposal](claude-delegation-recovery.md#explicit-owner-authorized-exact-pane-disposal) may append `exact_pane_disposed` under pane/process-incarnation authority. These are skill-owned recovery operations, not automatic teardown steps or generic amux resources. Ordinary paired teardown remains blocked before a complete terminal proof and may only return the proof's distinct state with `action:none` afterward, permitting teardown of the Amp worker while preserving every receipt, report if any, packet, runtime, artifact, worktree, branch, and origin fence. None grants cleanup eligibility.
-
-After paired execution succeeds, invoke `amux teardown` immediately while the durable origin fence remains. Teardown is worker-only and fails closed on ambiguous Amp identity. It archives the verified remote thread, removes worker and shelf configuration, and stops the verified local client; an already absent verified local process is a benign skip. The worker teardown remains the final action. If Amp teardown fails and the worker must resume, preserve evidence and use `lifecycle worker-teardown-release --origin-thread <thread-id>` only as an explicit recovery action after every bound pair still validates as `verified_parked`; never release by timeout, name, or inference.
+After paired success (or when no pair preflight applies), invoke `amux teardown` immediately. Teardown is worker-only and fails closed on ambiguous Amp identity. It archives the verified remote thread, removes worker and shelf configuration, and stops the verified local client; an already absent verified local process is a benign skip. Worker teardown remains the final action.
 
 ## Finish a merged worker
 
@@ -285,15 +257,15 @@ Finish is worker-only post-merge orchestration. It never removes a runner implic
    ```
 
    An unreadable list or any configured runner match blocks finish. Only for a matched runner, use `amux --json runner doctor --workdir <worker-worktree>` to collect evidence; do not unpin/remove it or unlock its worktree. An empty list is the normal owner-free case. Then inspect tmux/process metadata for an unexpected `amp --no-tui` process using that workdir; ambiguous or positive ownership blocks, while a clean inspection may proceed.
-3. Run the paired Claude lifecycle dry-run and execution from **Teardown a worker** before any worktree, branch, report, or Amp worker mutation. A blocker preserves all lifecycle evidence and stops finish; finish must not continue to worktree removal. Only a separately requested and completely proven indeterminate detach, exact-live report-bearing retirement, exact acquired/no-report retirement, or owner-authorized exact-pane disposal from the recovery reference may be followed by a fresh paired dry-run. A `pre_identity_acquired_pair_permanently_non_retirable` policy-query blocker has no recovery retry; without the separate exact-pane command and its distinct owner authority it stops finish under the preservation policy. Successful paired execution parks every normally safe pair, accepts only a complete sealed terminal proof for an exceptional pair, and leaves the durable origin fence active. No retirement or disposal proof is a semantic report or cleanup eligibility.
+3. If `/amux-claude` pairs may exist, run the paired Claude lifecycle dry-run and execution from **Teardown a worker** before any worktree, branch, report, or Amp worker mutation. A blocker preserves lifecycle evidence and stops finish; finish must not continue to worktree removal. Owner-authorized recovery seams live only in `/amux-claude`. When no Claude pairs are possible, skip this step.
 4. Update the designated main worktree with `git pull --ff-only`. Remove the clean worker worktree without force.
 5. Preserve squash-merge safety. Try `git branch -d <branch>` only after merge verification. If it refuses because the PR was squash-merged, do not use `-D` automatically; verify the PR head, remote state, and absence of unique/unpushed work, then require explicit authorization for force deletion. Delete a remote branch only when its merged PR proves it safe and the user authorized shared mutation.
 6. Do not tag or release unless separately and explicitly requested. Finish does not imply either.
 7. Follow the originating report protocol exactly. For a work-group worker, confirm the durable authorization, submit `merged` with the same report ID/binding/payload, and let amux verify the callback lease and send only its wake-up token. If durable reporting or notification fails, do not guess another pane and do not teardown; the report remains inspectable and the worker remains alive. For a legacy non-group assignment, follow its explicit callback format after re-verifying the immutable pane/session/window/process identity.
-8. After durable merged reporting and the coordinator's explicit finish direction, rerun `lifecycle worker-teardown --origin-thread <thread-id>` to revalidate all registered stores and the durable fence. Only after paired success, run worker teardown as the final action:
+8. After durable merged reporting and the coordinator's explicit finish direction, rerun paired Claude lifecycle revalidation when `/amux-claude` pairs may exist. Only after that succeeds (or when no pairs apply), run worker teardown as the final action:
 
-   ```sh
-   amux teardown --thread <thread-id>
-   ```
+    ```sh
+    amux teardown --thread <thread-id>
+    ```
 
-The pre-teardown report/legacy callback covers merge, worktree, local/remote branch, runner-ownership check, and the pending final teardown. Teardown stops the worker, so no post-teardown callback is required. Durable group/report history remains. Only then may the worker stop.
+The pre-teardown report/legacy callback covers merge, worktree, local/remote branch, runner-ownership check, and the pending final teardown. Teardown stops the worker, so no post-teardown callback is required. Durable group/report history remains. Only then may the worker stop. Never force-delete a branch, auto-release, or erase group history.

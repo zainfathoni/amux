@@ -13,13 +13,17 @@ import (
 var publicSkillFiles = []string{
 	"README.md",
 	filepath.Join("skills", "amux", "SKILL.md"),
-	filepath.Join("skills", "amux", "reference", "pi-spark-orb-executor.md"),
 	filepath.Join("skills", "amux", "reference", "commands.md"),
 	filepath.Join("skills", "amux", "reference", "trigger-phrases.md"),
 	filepath.Join("skills", "amux", "reference", "workflows.md"),
 	filepath.Join("skills", "amux", "reference", "troubleshooting.md"),
 	filepath.Join("skills", "amux", "reference", "amp-invocation-policy.md"),
-	filepath.Join("skills", "amux", "reference", "claude-opus-orb-executor.md"),
+	filepath.Join("skills", "amux", "reference", "contract-v1.md"),
+	filepath.Join("skills", "amux", "reference", "deadline-v1.md"),
+	filepath.Join("skills", "amux-claude", "SKILL.md"),
+	filepath.Join("skills", "amux-pi", "SKILL.md"),
+	filepath.Join("skills", "amux-pi", "reference", "pi-spark-orb-executor.md"),
+	filepath.Join("skills", "amux-claude", "reference", "claude-opus-orb-executor.md"),
 	filepath.Join("docs", "index.html"),
 	filepath.Join("docs", "skill", "index.html"),
 	filepath.Join("docs", "og-image.svg"),
@@ -33,8 +37,8 @@ func TestTriggerChecklistMatchesSkillActivationAndRouting(t *testing.T) {
 
 	triggerPattern := regexp.MustCompile(`(?m)^\| \x60([^\x60]+)\x60 \|`)
 	matches := triggerPattern.FindAllStringSubmatch(checklist, -1)
-	if len(matches) != 23 {
-		t.Fatalf("trigger checklist has %d routes, want 23", len(matches))
+	if len(matches) != 18 {
+		t.Fatalf("trigger checklist has %d routes, want 18", len(matches))
 	}
 	for _, match := range matches {
 		trigger := match[1]
@@ -53,12 +57,8 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 		"workflows.md",
 		"troubleshooting.md",
 		"trigger-phrases.md",
-		"claude-opus-orb-executor.md",
-		"pi-spark-orb-executor.md",
-		"claude-read-only-delegation.md",
-		"claude-mutating-delegation.md",
-		"claude-delegation-contract.md",
-		"claude-delegation-recovery.md",
+		"contract-v1.md",
+		"deadline-v1.md",
 		"amp-invocation-policy.md",
 	} {
 		if !strings.Contains(skill, "reference/"+name) {
@@ -73,9 +73,13 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 func TestExperimentalPiSparkOrbRecipeStaysProviderSpecificAndFailClosed(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
-	triggers := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md"))
-	recipe := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "pi-spark-orb-executor.md"))
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux-pi", "SKILL.md"))
+	triggers := readSkillFile(t, root, filepath.Join("skills", "amux-pi", "reference", "trigger-phrases.md"))
+	recipe := readSkillFile(t, root, filepath.Join("skills", "amux-pi", "reference", "pi-spark-orb-executor.md"))
+	core := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
+	if strings.Contains(core, "Run Pi on Spark in an Amp Orb") {
+		t.Error("core /amux skill must not route Pi/Spark triggers")
+	}
 
 	if !strings.Contains(skill, "Run Pi on Spark in an Amp Orb") || !strings.Contains(triggers, "Run Pi on Spark in an Amp Orb") {
 		t.Error("Pi/Spark trigger is missing from skill routing or trigger checklist")
@@ -209,7 +213,7 @@ func TestExperimentalPiSparkOrbRecipeStaysProviderSpecificAndFailClosed(t *testi
 func TestPiSparkResultPipelineDecodesSchemaCorrectTextDelta(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	recipe := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "pi-spark-orb-executor.md"))
+	recipe := readSkillFile(t, root, filepath.Join("skills", "amux-pi", "reference", "pi-spark-orb-executor.md"))
 	const pipeline = `jq -s '[.[] | select(.type == "message_update") | .assistantMessageEvent | select(.type == "text_delta") | .delta] | join("")' "$VALIDATED_EVENTS" | jq -r . >"$RESULT"`
 	if !strings.Contains(recipe, pipeline) {
 		t.Fatal("Pi/Spark recipe is missing the reviewed result-decoding pipeline")
@@ -245,7 +249,7 @@ func TestInvocationPolicyIsProgressivelyDisclosedWithoutChangingClaudeRoutes(t *
 	root := repoRoot(t)
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
 	policy := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "amp-invocation-policy.md"))
-	claude := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-read-only-delegation.md"))
+	claude := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-read-only-delegation.md"))
 
 	for _, required := range []string{
 		"load [`reference/amp-invocation-policy.md`]",
@@ -359,10 +363,10 @@ func TestInvocationProbeEvidenceIsReproducibleAndBounded(t *testing.T) {
 func TestExperimentalClaudeDelegationReferencesStayNarrowAndConsistent(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-read-only-delegation.md"))
-	mutating := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-mutating-delegation.md"))
-	contract := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-delegation-contract.md"))
-	recovery := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-delegation-recovery.md"))
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-read-only-delegation.md"))
+	mutating := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-mutating-delegation.md"))
+	contract := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-delegation-contract.md"))
+	recovery := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-delegation-recovery.md"))
 
 	stages := []string{"## 1. Preflight", "## 2. Create the receipt", "## 3. Launch and acquire", "## 4. Recover and deliver", "## 5. Acknowledge", "## 6. Park explicitly"}
 	last := -1
@@ -401,7 +405,7 @@ func TestExperimentalClaudeDelegationReferencesStayNarrowAndConsistent(t *testin
 func TestClaudeOpusOrbExecutorRecipeStaysProviderSpecificAndBounded(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	recipe := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-opus-orb-executor.md"))
+	recipe := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-opus-orb-executor.md"))
 
 	for _, required := range []string{
 		"CLAUDE_CODE_OAUTH_TOKEN",
@@ -891,7 +895,7 @@ func TestCoordinatorDeadlinePolicyIsConsistent(t *testing.T) {
 	root := repoRoot(t)
 	for _, relativePath := range []string{
 		"README.md",
-		filepath.Join("skills", "amux", "reference", "workflows.md"),
+		filepath.Join("skills", "amux", "reference", "deadline-v1.md"),
 		filepath.Join("docs", "skill", "index.html"),
 	} {
 		contents := readSkillFile(t, root, relativePath)
@@ -901,6 +905,12 @@ func TestCoordinatorDeadlinePolicyIsConsistent(t *testing.T) {
 			}
 		}
 	}
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	for _, required := range []string{"Small 30m", "Medium 1h", "Large 2h", "XL", "15m", "10m", "20m", "nearest-deadline queue", "deadline-v1.md"} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("workflows.md is missing deadline summary %q", required)
+		}
+	}
 }
 
 func TestCoordinatorDeadlineScheduleIsBoundedAndGenerationSafe(t *testing.T) {
@@ -908,23 +918,19 @@ func TestCoordinatorDeadlineScheduleIsBoundedAndGenerationSafe(t *testing.T) {
 	root := repoRoot(t)
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	deadline := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "deadline-v1.md"))
 
-	for _, required := range []string{
-		"## Workflow Orchestration",
-		"The firing is only a wake-up",
-		"durable group and `amux report pending/history` state",
-		"Exact active generation",
-		"acknowledged before expiry?",
-		"Stop attempt already",
-		"Record one attempt; send one",
-		"Reconcile next unhandled",
-	} {
-		if !strings.Contains(skill, required) {
-			t.Errorf("SKILL.md is missing scheduled orchestration contract %q", required)
-		}
+	if !strings.Contains(skill, "deadline-v1") {
+		t.Error("SKILL.md is missing deadline progressive disclosure pointer")
 	}
-	if strings.Contains(skill, "already acknowledged?") {
-		t.Error("SKILL.md diagram uses generic acknowledgement instead of acknowledgement before expiry")
+	if !strings.Contains(workflow, "deadline-v1.md") {
+		t.Error("workflows.md does not point at deadline-v1.md")
+	}
+	if !strings.Contains(deadline, "Do **not** load the full `/amux` skill on schedule fire") {
+		t.Error("deadline-v1 must forbid full /amux reload on schedule fire")
+	}
+	if strings.Contains(deadline, "Load `/amux` first") {
+		t.Error("deadline-v1 must not require loading full /amux")
 	}
 
 	for _, required := range []string{
@@ -963,35 +969,30 @@ func TestCoordinatorDeadlineScheduleIsBoundedAndGenerationSafe(t *testing.T) {
 		"never create sleeping shell processes, recurring polling schedules, or per-worker supervisors",
 		"never authorize acknowledgement, push, PR creation or mutation, merge, release, finish, cleanup",
 	} {
-		if !strings.Contains(workflow, required) {
-			t.Errorf("deadline workflow is missing schedule safety contract %q", required)
+		if !strings.Contains(deadline, required) {
+			t.Errorf("deadline-v1 is missing schedule safety contract %q", required)
 		}
 	}
-	deadlineStart := strings.Index(workflow, "### 7. Coordinator-owned deadline queue")
-	if deadlineStart < 0 {
-		t.Fatal("coordinator deadline workflow is missing")
-	}
-	deadlineWorkflow := workflow[deadlineStart:]
-	skillLoadAt := strings.Index(deadlineWorkflow, "load the available `building-automations` skill")
+	skillLoadAt := strings.Index(deadline, "load the available `building-automations` skill")
 	if skillLoadAt < 0 {
-		t.Fatal("deadline workflow does not load building-automations")
+		t.Fatal("deadline-v1 does not load building-automations")
 	}
 	for _, toolName := range []string{"`get_schedule`", "`set_schedule`", "`update_schedule`", "`clear_schedule`"} {
-		toolAt := strings.Index(deadlineWorkflow, toolName)
+		toolAt := strings.Index(deadline, toolName)
 		if toolAt < 0 || toolAt <= skillLoadAt {
-			t.Errorf("deadline workflow does not order building-automations load before %s management: load=%d tool=%d", toolName, skillLoadAt, toolAt)
+			t.Errorf("deadline-v1 does not order building-automations load before %s management: load=%d tool=%d", toolName, skillLoadAt, toolAt)
 		}
 	}
 
-	fixtureStart := strings.Index(workflow, "Load `/amux` first and execute its scheduled deadline branch")
+	fixtureStart := strings.Index(deadline, "Follow deadline-v1 (do not load full /amux)")
 	if fixtureStart < 0 {
 		t.Fatal("synthetic scheduled wake-up fixture is missing")
 	}
-	fixtureEnd := strings.Index(workflow[fixtureStart:], "\n```")
+	fixtureEnd := strings.Index(deadline[fixtureStart:], "\n```")
 	if fixtureEnd < 0 {
 		t.Fatal("synthetic scheduled wake-up fixture is unterminated")
 	}
-	fixture := workflow[fixtureStart : fixtureStart+fixtureEnd]
+	fixture := deadline[fixtureStart : fixtureStart+fixtureEnd]
 	for _, required := range []string{
 		"load `building-automations`",
 		"owner=AMUX_DEADLINE_QUEUE_V1",
@@ -1067,7 +1068,7 @@ func TestSkillDrivenSpawnCommandsUseExplicitMedium(t *testing.T) {
 	}
 
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
-	for _, required := range []string{"MUST pass `--mode medium`", "An explicitly requested mode always wins", "Do not infer `high` or `ultra`"} {
+	for _, required := range []string{"MUST pass `--mode medium`", "An explicitly requested mode always wins", "Do not infer `low`, `high`, or `ultra`"} {
 		if !strings.Contains(skill, required) {
 			t.Errorf("SKILL.md is missing spawn policy %q", required)
 		}
@@ -1122,16 +1123,16 @@ func TestClaudePairTeardownIsFailClosedAndRunsBeforeWorkerTeardown(t *testing.T)
 	t.Parallel()
 	root := repoRoot(t)
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
-	contract := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-delegation-contract.md"))
+	contract := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-delegation-contract.md"))
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
-	recovery := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-delegation-recovery.md"))
+	recovery := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-delegation-recovery.md"))
 
 	for _, required := range []string{
 		"lifecycle worker-teardown --origin-thread <thread-id> --dry-run",
 		"lifecycle worker-teardown --origin-thread <thread-id>",
-		"active, unacknowledged, unresolved, mismatched, missing, or indeterminate",
-		"before `amux teardown`",
-		"worker teardown remains the final action",
+		"stop without Amp teardown",
+		"Worker teardown remains the final action",
+		"/amux-claude",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("worker lifecycle workflow is missing %q", required)
@@ -1152,8 +1153,8 @@ func TestClaudePairTeardownIsFailClosedAndRunsBeforeWorkerTeardown(t *testing.T)
 	if !strings.Contains(recovery, "paired worker teardown") || !strings.Contains(recovery, "preserve the Amp worker") {
 		t.Error("Claude recovery does not preserve worker and evidence on paired teardown blockers")
 	}
-	if !strings.Contains(skill, "paired Claude lifecycle preflight") {
-		t.Error("SKILL.md does not route teardown through paired Claude lifecycle preflight")
+	if !strings.Contains(skill, "/amux-claude") {
+		t.Error("SKILL.md does not gate teardown through /amux-claude when pairs may exist")
 	}
 	for _, required := range []string{
 		"register-legacy-store --origin-thread <thread-id> --store-path <exact-private-store>",
@@ -1178,12 +1179,17 @@ func TestClaudePairTeardownIsFailClosedAndRunsBeforeWorkerTeardown(t *testing.T)
 			t.Errorf("indeterminate detach progressive disclosure is missing %q", required)
 		}
 	}
-	if !strings.Contains(skill, "Recover indeterminate Claude worker evidence") || !strings.Contains(readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md")), "Recover indeterminate Claude worker evidence") {
-		t.Error("indeterminate recovery trigger is not routed at both skill tiers")
+	claudeSkill := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "SKILL.md"))
+	claudeTriggers := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "trigger-phrases.md"))
+	if !strings.Contains(claudeSkill, "Recover indeterminate Claude worker evidence") || !strings.Contains(claudeTriggers, "Recover indeterminate Claude worker evidence") {
+		t.Error("indeterminate recovery trigger is not routed in amux-claude")
 	}
-	pairAdmission := strings.Index(workflow, "Run the paired Claude lifecycle dry-run and execution")
+	if strings.Contains(skill, "Recover indeterminate Claude worker evidence") {
+		t.Error("core /amux skill must not own Claude recovery triggers")
+	}
+	pairAdmission := strings.Index(workflow, "If `/amux-claude` pairs may exist, run the paired Claude lifecycle dry-run")
 	worktreeRemoval := strings.Index(workflow, "Remove the clean worker worktree")
-	finalRevalidation := strings.Index(workflow, "rerun `lifecycle worker-teardown")
+	finalRevalidation := strings.Index(workflow, "rerun paired Claude lifecycle revalidation")
 	finalTeardown := strings.LastIndex(workflow, "amux teardown --thread <thread-id>")
 	if pairAdmission < 0 || worktreeRemoval < 0 || pairAdmission > worktreeRemoval {
 		t.Error("finish does not admit paired Claude lifecycle before worktree removal")
@@ -1251,6 +1257,68 @@ func scanLines(t *testing.T, path string, check func(lineNumber int, line string
 	}
 	if err := scanner.Err(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestContractV1IsProgressivelyDisclosedForWorkers(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
+	contract := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "contract-v1.md"))
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	if !strings.Contains(skill, "contract-v1.md") {
+		t.Error("SKILL.md must link contract-v1")
+	}
+	for _, required := range []string{
+		"amux-contract: v1",
+		"read this file once",
+		"ready",
+		"blocked",
+		"merged",
+		"never authorize finish",
+		"/amux-claude",
+		"Do not use `low` mode",
+		"Do not Read Thread",
+		"Oracle must not Read Thread",
+	} {
+		if !strings.Contains(contract, required) {
+			t.Errorf("contract-v1 missing %q", required)
+		}
+	}
+	if !strings.Contains(skill, "no Read Thread") && !strings.Contains(skill, "no Read Thread for task context") {
+		if !strings.Contains(skill, "Credit defaults") {
+			t.Error("SKILL.md must surface credit defaults including Read Thread")
+		}
+	}
+	if !strings.Contains(workflow, "contract-v1.md") || !strings.Contains(workflow, "task-only") {
+		t.Error("workflows must require task-only prompts and contract-v1 read-once")
+	}
+}
+
+func TestExperimentalSkillsAreSeparatedFromCoreAmux(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	core := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
+	coreTriggers := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md"))
+	for _, forbidden := range []string{
+		"Delegate read-only analysis to Claude",
+		"Delegate isolated mutating work to Claude",
+		"Delegate bounded work to Claude Opus in a fresh Amp Orb",
+		"Run Pi on Spark in an Amp Orb",
+		"Recover indeterminate Claude worker evidence",
+	} {
+		if strings.Contains(coreTriggers, forbidden) {
+			t.Errorf("core trigger checklist still routes experimental %q", forbidden)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "skills", "amux-claude", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "skills", "amux-pi", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(core, "reference/claude-") || strings.Contains(core, "reference/pi-spark") {
+		t.Error("core SKILL.md must not link experimental claude/pi reference paths")
 	}
 }
 
