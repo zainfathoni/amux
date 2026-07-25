@@ -60,6 +60,7 @@ Removed commands and positional forms fail with remediation. Do not use `store`,
 - Runner selectors: canonical `--workdir`; or `--workspace`, `--current`, and explicit `--all` where help permits. Runner windows are generated implementation details.
 - Aggregate routes accept both `--thread` and `--workdir`. A workspace selection jointly preflights both modes.
 - Read-only discovery may naturally cover all configured resources. No-selector `launch` is the bulk-mutation exception; other machine-wide mutations require `--all`.
+- Registry location: `--config-dir <path>` selects the directory holding `workers.tsv`, `runners.tsv`, `shelves.tsv`, and the durable group/report state; `AMUX_CONFIG_DIR` selects the same directory by environment. The flag wins over the environment variable, which wins over the default `~/.config/amux`. Prefer a temporary directory with `--dry-run` for tests instead of mutating the default config.
 
 ## Side-effect contracts
 

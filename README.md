@@ -74,9 +74,16 @@ Install globally from the public repository with [skills.sh](https://skills.sh/)
 npx skills add zainfathoni/amux --skill amux --global
 ```
 
-The skill teaches agents the canonical selectors, side-effect boundaries, and skill-only health/sprawl/finish workflows. See the [dedicated skill guide](https://amux.zainf.dev/skill/). Local symlinking is only for contributors developing the bundled skill; see [CONTRIBUTING.md](CONTRIBUTING.md#develop-the-bundled-skill).
+Optional experimental skills (explicit owner request only):
 
-The skill also includes an explicit-only, capability-gated Darwin/Linux **experimental read-only Claude delegation** route. It is an unstable skill-owned helper, not an `amux` lifecycle command, worker, runner, group member, or compatibility promise. It launches one policy-confined interactive thinker only after explicit invocation, accepts bounded semantic reports through a strict local MCP surface, recovers them from a private machine-local receipt, and keeps notification, delivery, acknowledgement, and identity-verified parking separate. It does not provide OS-level read confinement, Linux mutation, automatic follow-up injection, autonomous selection without trustworthy capacity, teleport/adoption, synthetic Amp identity, automatic cleanup, or evidence that a real delegation pilot succeeded. Load the bundled skill's experimental workflow and contract before use.
+```sh
+npx skills add zainfathoni/amux --skill amux-claude --global
+npx skills add zainfathoni/amux --skill amux-pi --global
+```
+
+`/amux` teaches canonical selectors, side-effect boundaries, skill-only health/sprawl/finish workflows, and progressive disclosure via `reference/contract-v1.md` (workers read once) and `reference/deadline-v1.md` (deadlines only). Do not paste full protocol into spawn messages or reload the full skill on wake-ups. See the [dedicated skill guide](https://amux.zainf.dev/skill/). Local symlinking is only for contributors; see [CONTRIBUTING.md](CONTRIBUTING.md#develop-the-bundled-skills).
+
+`/amux-claude` is a separate unstable skill for explicit Amp-to-Claude delegation (local thinker/writer and fresh-Orb Opus). It is not an `amux` lifecycle command, worker, runner, group member, or compatibility promise. `/amux-pi` is a separate disposable Pi/Spark Orb recipe. Neither installs with core `/amux` unless requested.
 
 ## Quick start
 
@@ -233,13 +240,13 @@ Identical replay is a benign durable-state skip that may retry notification; con
 
 ### Coordinator workflow
 
-The bundled `/amux` skill provides the complete coordinator procedure. In summary: inspect native dependencies and active PR/branch/worktree/API overlap; fetch and create dedicated worktrees from fresh `origin/main`; use semantic issue-unprefixed windows and explicit `--mode medium` unless overridden; declare the group and register the exact verified coordinator pane; then spawn with `--group` so membership binds only after authoritative alternate-thread adoption.
+The bundled `/amux` skill provides the coordinator procedure. Worker assignments stay task-only and include the absolute path to the loaded skill's `reference/contract-v1.md` for a one-time read. In summary: inspect native dependencies and active PR/branch/worktree/API overlap; fetch and create dedicated worktrees from fresh `origin/main`; use semantic issue-unprefixed windows and explicit `--mode medium` unless overridden; declare the group and register the exact verified coordinator pane; then spawn with `--group` so membership binds only after authoritative alternate-thread adoption.
 
 Workers use one stable report ID for `blocked`, `ready`, and terminal `merged`. `ready` means implementation, tests, one review, PR, and normal CI are complete. A callback token only wakes the coordinator. The coordinator acknowledges receipt separately, independently verifies PR URL/head/scope/mergeability/closing issue, worktree and CI, merges only with separate authority, verifies post-merge CI (and Pages when triggered), and records durable finish authorization. The child then submits `merged` with the same binding/payload and runs `/amux finish` only when explicitly directed; worktree/Git safety comes first and `amux teardown` is last. Group/report history survives finish.
 
 All lifecycle mutations share one lock. Exit `2` contention writes nothing and requires waiting for the current operation before retrying the identical operation/report ID. Stale/recycled/missing callback leases fail closed and are repaired only by explicit registration; callback failure leaves the durable report pending and the worker alive. Never retry notification into a suspected busy composer: recover from durable pending/history state and acknowledge it directly. Duplicate/reordered wake-ups and coordinator restarts are likewise recovered from durable state, never inferred tmux delivery. Do not force-delete branches, auto-release, infer finish from a late callback, or repeatedly read unrelated Amp threads.
 
-Coordinator soft budgets to `ready` are Small 30m, Medium 1h (default), Large 2h; XL must be split. Stale is 15m, one review warns after 10m, demonstrated external CI waits alert after 20m, and authorized finish alerts after 10m. Only demonstrated external service waits pause active time. One coordinator-approved extension may add at most half the original budget under a new generation. Expiry is diagnostic and non-destructive; use one nearest-deadline queue, not one timer process per child. This is coordinator policy: the current CLI has no deadline mutation command, so agents must not edit `reports.json` to implement it.
+Coordinator soft budgets to `ready` are Small 30m, Medium 1h (default), Large 2h; XL must be split. Stale is 15m, one review warns after 10m, demonstrated external CI waits alert after 20m, and authorized finish alerts after 10m. Only demonstrated external service waits pause active time. One coordinator-approved extension may add at most half the original budget under a new generation. Expiry is diagnostic and non-destructive; use one nearest-deadline queue, not one timer process per child. Full deadline procedure lives in the skill's `reference/deadline-v1.md` and must not reload the entire `/amux` skill on schedule fire. This is coordinator policy: the current CLI has no deadline mutation command, so agents must not edit `reports.json` to implement it.
 
 ## Side effects
 

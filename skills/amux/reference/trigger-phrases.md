@@ -1,6 +1,6 @@
 # amux skill trigger phrase checklist
 
-This table is the complete activation and routing contract for [`../SKILL.md`](../SKILL.md). Skill-only rows must never be represented as CLI commands.
+This table is the complete activation and routing contract for [`../SKILL.md`](../SKILL.md). Skill-only rows must never be represented as CLI commands. Experimental Claude/Pi triggers live in `/amux-claude` and `/amux-pi`, not here.
 
 | Trigger phrase | Route | Contract |
 | --- | --- | --- |
@@ -15,14 +15,9 @@ This table is the complete activation and routing contract for [`../SKILL.md`](.
 | `Show shelved work` | `amux worker list --shelf shelved` | Local shelf intent only. |
 | `Unshelve this` | `amux unshelve --current` or `--thread <id>` | Unarchive, then remove intent; do not launch. |
 | `Restore my workspace` | `amux launch --workspace <name>` | Aggregate by default; worker route narrows. |
-| `Spawn a worker for` | workflow, then `amux spawn --mode medium ...` | Explicit medium unless user chose another mode. |
-| `Coordinate issue workers` | [`workflows.md#coordinate-a-durable-issue-work-group`](workflows.md#coordinate-a-durable-issue-work-group) | Durable group/report/auth workflow; callback is wake-up only. |
-| `Delegate bounded work to Claude Opus in a fresh Amp Orb` | [`claude-opus-orb-executor.md`](claude-opus-orb-executor.md) | Explicit-only provider-specific experiment; fresh-Orb OAuth preflight, exact official `claude-opus-4-8`, bounded sanitized native Amp reporting, and no provider-neutral state. |
-| `Run Pi on Spark in an Amp Orb` | [`pi-spark-orb-executor.md`](pi-spark-orb-executor.md) | Explicit-only disposable provider recipe; exact Spark model through owner-operated ChatGPT Codex OAuth, with API keys and ambiguous billing blocked. |
-| `Delegate read-only analysis to Claude` | [`claude-read-only-delegation.md`](claude-read-only-delegation.md) | Explicit-only, skill-owned local experiment; never creates an Amp worker or runs autonomously. |
-| `Delegate isolated mutating work to Claude` | [`claude-mutating-delegation.md`](claude-mutating-delegation.md) | Explicit-only separate writer experiment after Pilot 1 pass; dedicated worktree and clean commit handoff, never integration or cleanup authority. |
-| `Recover indeterminate Claude worker evidence` | [`claude-delegation-recovery.md`](claude-delegation-recovery.md) | Explicit owner-authorized absence detach, exact-live validated-report retirement, separate exact acquired/no-report retirement, or permanent-terminal pre-identity policy only; preserve unresolved evidence and fence, never rewrite, infer identity, retry launch, manufacture semantic events, park, or clean. |
-| `Teardown this worker` | paired lifecycle route in [`workflows.md`](workflows.md), then `amux teardown --current` or `--thread <id>` | Fail closed on every unsafe Claude pair; archive, remove worker/shelf config, and stop the verified worker last. |
+| `Spawn a worker for` | workflow, then `amux spawn --mode medium ...` | Explicit medium unless user chose another mode; task-only message + absolute path to contract-v1 (read once). |
+| `Coordinate issue workers` | [`workflows.md#coordinate-a-durable-issue-work-group`](workflows.md#coordinate-a-durable-issue-work-group) | Durable group/report/auth; callback is wake-up only. |
+| `Teardown this worker` | [`workflows.md#teardown-a-worker`](workflows.md#teardown-a-worker), then `amux teardown` | Paired Claude preflight only if `/amux-claude` may apply; Amp teardown last. |
 | `Doctor amux` | aggregate or mode-specific `doctor` | Read-only diagnosis. |
 | `/amux health` | [`workflows.md#health-workers-and-runners`](workflows.md#health-workers-and-runners) | Skill-only aggregate, safe mode-specific probes. |
 | `/amux sprawl` | [`workflows.md#sprawl-independent-issue-workers`](workflows.md#sprawl-independent-issue-workers) | Skill-only, worker-only fan-out. |
