@@ -629,6 +629,296 @@ func TestWorkerPinIsIdempotentAndDryRunDoesNotWrite(t *testing.T) {
 	}
 }
 
+func TestWorkerAdoptPersistsIntentBeforeTmuxAndIsIdempotentWithoutDelivery(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	running := filepath.Join(bin, "running")
+	failOnce := filepath.Join(bin, "fail-once")
+	row := config.Row{Workspace: "alpha", Window: "native", Workdir: workdir, Thread: "T-native"}
+	start := teardownExpectedStartCommand(teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}, row)
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+echo "amp $*" >> `+shellSingleQuote(logPath)+`
+if [ "$1 $2" = "threads list" ]; then printf '%s\n' '[{"id":"T-native"}]'; exit 0; fi
+if [ "$1" = version ]; then printf '%s\n' '`+minimumGroupAmpVersion+`'; exit 0; fi
+if [ "$1 $2 $3" = "threads label --help" ]; then
+  printf '%s\n' '`+groupLabelUsageLine+`' '`+groupLabelAdditiveLine+`'
+  exit 0
+fi
+if [ "$1 $2 $3 $4" = "threads label T-native native-group" ]; then exit 0; fi
+exit 97
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "tmux $*" >> `+shellSingleQuote(logPath)+`
+case "$1" in
+  has-session) [ -e `+shellSingleQuote(running)+` ] && exit 0; echo "can't find session" >&2; exit 1 ;;
+  list-panes)
+    [ -e `+shellSingleQuote(running)+` ] || exit 0
+    if [ "$2" = -a ]; then
+      printf '%s\n' `+shellSingleQuote("alpha\tnative\t@1\t"+start)+`
+    else
+      printf '%s\n' `+shellSingleQuote("native\t@1\t"+start)+`
+    fi
+    exit 0 ;;
+  new-session)
+    if [ ! -e `+shellSingleQuote(failOnce)+` ]; then touch `+shellSingleQuote(failOnce)+`; exit 42; fi
+    touch `+shellSingleQuote(running)+`; exit 0 ;;
+esac
+exit 98
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	args := []string{"--json", "--config-dir", dir, "worker", "adopt", "--thread", row.Thread, "--workspace", row.Workspace, "--window", row.Window, "--workdir", row.Workdir, "--group", "native-group"}
+
+	dry := executeWorkerJSON(t, append([]string{"--dry-run"}, args...)...)
+	if len(dry.Planned) != 5 || dry.Planned[0].Worker == nil || dry.Planned[0].Worker.ReceiptSource != nativeAdoptionReceiptSource || dry.Planned[0].Worker.Workdir != workdir || dry.Planned[3].Action != "ensure-label" || dry.Planned[4].Action != "create-client" {
+		t.Fatalf("adoption dry run = %+v", dry)
+	}
+	if _, err := os.Stat(filepath.Join(dir, config.WorkersFile)); !os.IsNotExist(err) {
+		t.Fatalf("dry-run wrote worker intent: %v", err)
+	}
+
+	interrupted, interruptionErr := executeWorkerJSONResult(t, args...)
+	if interruptionErr == nil || result.ExitCode(interruptionErr) != result.ExitRuntimeFailure || len(interrupted.Successful) != 4 || interrupted.Successful[0].Action != "bind-adoption-request" || interrupted.Successful[1].Action != "persist-worker" || interrupted.Successful[2].Action != "persist-group" || interrupted.Successful[3].Action != "attach-group" {
+		t.Fatalf("injected tmux interruption = %v, exit=%d, envelope=%+v", interruptionErr, result.ExitCode(interruptionErr), interrupted)
+	}
+	rows, err := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
+	if err != nil || len(rows) != 1 || !workerRowsEquivalent(rows[0], row) {
+		t.Fatalf("persisted worker intent = %+v, err=%v", rows, err)
+	}
+	memberships, err := config.LoadGroupsReadOnly(filepath.Join(dir, config.GroupsFile))
+	if err != nil || len(memberships) != 1 || memberships[0].Group != "native-group" || memberships[0].Thread != row.Thread {
+		t.Fatalf("persisted group intent = %+v, err=%v", memberships, err)
+	}
+	partialDry := executeWorkerJSON(t, append([]string{"--dry-run"}, args...)...)
+	if len(partialDry.Planned) != 2 || partialDry.Planned[0].Action != "ensure-label" || partialDry.Planned[1].Action != "create-client" || len(partialDry.Skipped) != 3 {
+		t.Fatalf("partial adoption dry run = %+v", partialDry)
+	}
+	changed := append([]string(nil), args...)
+	changed[len(changed)-1] = "changed-group"
+	if err := executeWorkerJSONError(t, changed...); err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), "bound to different") {
+		t.Fatalf("changed-group replay = %v, exit=%d", err, result.ExitCode(err))
+	}
+
+	completed := executeWorkerJSON(t, args...)
+	if len(completed.Successful) != 3 || completed.Successful[2].Worker == nil || completed.Successful[2].Worker.LocalState != "adopted" {
+		t.Fatalf("completed adoption = %+v", completed)
+	}
+	beforeReplay, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed := executeWorkerJSON(t, args...)
+	if len(replayed.Skipped) != 1 || replayed.Skipped[0].Message != "exact native-created thread already adopted" {
+		t.Fatalf("replayed adoption = %+v", replayed)
+	}
+	afterReplay, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(afterReplay), "amp threads label T-native native-group") != strings.Count(string(beforeReplay), "amp threads label T-native native-group") {
+		t.Fatalf("idempotent adoption repeated label mutation:\n%s", afterReplay)
+	}
+	if len(afterReplay) <= len(beforeReplay) {
+		t.Fatal("replay did not perform read-only preflight")
+	}
+	for _, forbidden := range []string{"threads new", "threads export", "threads search", "send-keys", "paste-buffer", "load-buffer", " Enter"} {
+		if strings.Contains(string(afterReplay), forbidden) {
+			t.Fatalf("adoption used forbidden delivery/TUI call %q:\n%s", forbidden, afterReplay)
+		}
+	}
+}
+
+func TestWorkerAdoptRejectsCatalogOwnershipConflictsBeforeExternalInspection(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		workers string
+		runners string
+		want    string
+	}{
+		{name: "window", workers: "alpha\tnative\t/tmp/other\tT-other\n", want: "worker window alpha/native"},
+		{name: "thread", workers: "other\tother\t/tmp/other\tT-native\n", want: "thread T-native is already configured"},
+		{name: "worker-workdir", workers: "other\tother\tWORKDIR\tT-other\n", want: "already owned by worker"},
+		{name: "runner-workdir", runners: "runner\tWORKDIR\n", want: "already owned by amux Runner"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			workdir := t.TempDir()
+			if test.workers != "" {
+				writeWorkerRegistry(t, dir, strings.ReplaceAll(test.workers, "WORKDIR", workdir))
+			}
+			if test.runners != "" {
+				if err := os.WriteFile(filepath.Join(dir, config.RunnersFile), []byte("# amux-schema: runners/v1\n"+strings.ReplaceAll(test.runners, "WORKDIR", workdir)), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			bin := t.TempDir()
+			called := filepath.Join(bin, "called")
+			writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch "+shellSingleQuote(called)+"\nexit 99\n")
+			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch "+shellSingleQuote(called)+"\nexit 99\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+			err := executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "adopt", "--thread", "T-native", "--workspace", "alpha", "--window", "native", "--workdir", workdir)
+			if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("conflict error = %v, exit=%d, want %q", err, result.ExitCode(err), test.want)
+			}
+			if _, err := os.Stat(called); !os.IsNotExist(err) {
+				t.Fatalf("catalog conflict called amp or tmux: %v", err)
+			}
+		})
+	}
+}
+
+func TestWorkerAdoptRejectsInactiveExactThreadWithoutMutation(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
+echo "amp $*" >> `+shellSingleQuote(logPath)+`
+case "$*" in
+  *--include-archived*) printf '%s\n' '[{"id":"T-native"}]' ;;
+  *) printf '%s\n' '[]' ;;
+esac
+`)
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\necho tmux >> "+shellSingleQuote(logPath)+"\nexit 99\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	err := executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "adopt", "--thread", "T-native", "--workspace", "alpha", "--window", "native", "--workdir", workdir)
+	if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), "thread T-native is archived") {
+		t.Fatalf("inactive error = %v, exit=%d", err, result.ExitCode(err))
+	}
+	if log, readErr := os.ReadFile(logPath); readErr != nil || strings.Contains(string(log), "tmux") {
+		t.Fatalf("inactive adoption reached tmux: log=%q err=%v", log, readErr)
+	}
+	if _, err := os.Stat(filepath.Join(dir, config.WorkersFile)); !os.IsNotExist(err) {
+		t.Fatalf("inactive adoption wrote worker registry: %v", err)
+	}
+}
+
+func TestWorkerAdoptRejectsShelvedAndPendingSpawnOwnershipBeforeExternalInspection(t *testing.T) {
+	for _, test := range []string{"shelved", "pending-spawn"} {
+		t.Run(test, func(t *testing.T) {
+			dir := t.TempDir()
+			workdir := t.TempDir()
+			if test == "shelved" {
+				if _, err := config.StoreShelf(filepath.Join(dir, config.ShelvesFile), "T-native"); err != nil {
+					t.Fatal(err)
+				}
+				writeWorkerRegistry(t, dir, "alpha\tnative\t"+workdir+"\tT-native\n")
+			} else {
+				now := time.Now().UTC()
+				record := config.OperationRecord{Key: "legacy-spawn", Kind: "worker-spawn", RequestHash: "hash", State: config.OperationStarted, Phase: config.OperationPhaseThreadBound, Resource: config.OperationResource{Kind: "worker", Thread: "T-native"}, CreatedAt: now, UpdatedAt: now}
+				if _, err := config.StoreOperation(filepath.Join(dir, config.OperationsFile), record); err != nil {
+					t.Fatal(err)
+				}
+			}
+			bin := t.TempDir()
+			called := filepath.Join(bin, "called")
+			writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch "+shellSingleQuote(called)+"\nexit 99\n")
+			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch "+shellSingleQuote(called)+"\nexit 99\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+			err := executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "adopt", "--thread", "T-native", "--workspace", "alpha", "--window", "native", "--workdir", workdir)
+			want := "locally shelved"
+			if test == "pending-spawn" {
+				want = "still owned by worker-spawn operation"
+			}
+			if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), want) {
+				t.Fatalf("ownership error = %v, exit=%d, want=%q", err, result.ExitCode(err), want)
+			}
+			if _, err := os.Stat(called); !os.IsNotExist(err) {
+				t.Fatalf("ownership conflict called amp or tmux: %v", err)
+			}
+		})
+	}
+}
+
+func TestWorkerAdoptPostVerifiesTmuxSuccessBeforeCompletion(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\nprintf '%s\\n' '[{\"id\":\"T-native\"}]'\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) echo "can't find session" >&2; exit 1 ;;
+  list-panes) exit 0 ;;
+  new-session) exit 0 ;;
+esac
+exit 98
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	env, err := executeWorkerJSONResult(t, "--json", "--config-dir", dir, "worker", "adopt", "--thread", "T-native", "--workspace", "alpha", "--window", "native", "--workdir", workdir)
+	if err == nil || result.ExitCode(err) != result.ExitRuntimeFailure || !strings.Contains(err.Error(), "post-verify") || len(env.Successful) != 2 {
+		t.Fatalf("unverified tmux success = %v, exit=%d, envelope=%+v", err, result.ExitCode(err), env)
+	}
+	record, found, loadErr := config.LoadOperation(filepath.Join(dir, config.OperationsFile), "worker-adopt:T-native")
+	if loadErr != nil || !found || record.State != config.OperationStarted {
+		t.Fatalf("interrupted adoption record = %+v, found=%t, err=%v", record, found, loadErr)
+	}
+}
+
+func TestWorkerAdoptRejectsCoordinatorAsMemberIntent(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	if err := config.WriteGroups(filepath.Join(dir, config.GroupsFile), []config.GroupMembership{{Group: "native-group", Thread: "T-native", Role: config.GroupCoordinator}}); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\nprintf '%s\\n' '[{\"id\":\"T-native\"}]'\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then echo \"can't find session\" >&2; exit 1; fi\nif [ \"$1\" = list-panes ]; then exit 0; fi\nexit 98\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	err := executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "adopt", "--thread", "T-native", "--workspace", "alpha", "--window", "native", "--workdir", workdir, "--group", "native-group")
+	if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), "already has coordinator role") {
+		t.Fatalf("coordinator member-intent error = %v, exit=%d", err, result.ExitCode(err))
+	}
+	if _, err := os.Stat(filepath.Join(dir, config.WorkersFile)); !os.IsNotExist(err) {
+		t.Fatalf("coordinator conflict wrote worker registry: %v", err)
+	}
+}
+
+func TestWorkerAdoptRejectsMismatchedTmuxThreadBeforeMutation(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "calls.log")
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\necho \"amp $*\" >> "+shellSingleQuote(logPath)+"\nprintf '%s\\n' '[{\"id\":\"T-native\"}]'\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "tmux $*" >> `+shellSingleQuote(logPath)+`
+case "$1" in
+  has-session) exit 0 ;;
+  list-panes)
+    if [ "$2" = -a ]; then
+      printf '%s\n' 'alpha	native	@7	cd `+workdir+` && exec amp threads continue T-other'
+    else
+      printf '%s\n' 'native	@7	cd `+workdir+` && exec amp threads continue T-other'
+    fi ;;
+esac
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	err := executeWorkerJSONError(t, "--json", "--config-dir", dir, "worker", "adopt", "--thread", "T-native", "--workspace", "alpha", "--window", "native", "--workdir", workdir)
+	if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), "conflict tmux identity") {
+		t.Fatalf("mismatched tmux error = %v, exit=%d", err, result.ExitCode(err))
+	}
+	if _, err := os.Stat(filepath.Join(dir, config.WorkersFile)); !os.IsNotExist(err) {
+		t.Fatalf("mismatched tmux adoption wrote worker registry: %v", err)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil || strings.Contains(string(log), "new-session") || strings.Contains(string(log), "new-window") {
+		t.Fatalf("mismatched tmux adoption mutated tmux: log=%q err=%v", log, err)
+	}
+}
+
 func TestWorkerPinTreatsCanonicalWorkdirAsAlreadyPinned(t *testing.T) {
 	home := t.TempDir()
 	workdir := filepath.Join(home, "project")

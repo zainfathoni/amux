@@ -145,6 +145,7 @@ func workerCommand() *commandSpec {
 		workerLeaf("park", "Park workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("restart", "Restart workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("remove", "Remove workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
+		workerLeaf("adopt", "Adopt an exact native-created thread without message delivery", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--thread, -t <id>", "--group <id>  Optional exact durable member intent"),
 		workerLeaf("spawn", "Spawn a worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--group <id>  Repeat to attach the authoritative worker thread to multiple groups; explicit groups override automatic naming", "--work-item-id <id>  Derive one configured repository-scoped group using the semantic window as its slug", "--worker-ordinal <number>  Positive worker ordinal used to derive the stable report ID", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>", "--reconcile  Recover a verified exact provisioned-thread failure without creating a second thread"),
 		workerLeaf("shelve", "Shelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("unshelve", "Unshelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
@@ -872,7 +873,7 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 			parsed.Groups = compactStrings(parsed.Groups)
 			parsed.Group = ""
 		} else if len(parsed.Groups) != 1 {
-			return errors.New("--group may be repeated only for worker spawn")
+			return errors.New("--group may be repeated only for worker spawn; worker adopt accepts one exact group")
 		}
 	}
 	if parsed.Mode != "" {
@@ -1032,7 +1033,7 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 	}
 
 	switch parsed.Command.Name {
-	case "list", "pin", "unpin", "launch", "park", "restart", "remove", "spawn", "shelve", "unshelve", "teardown", "doctor", "reconcile":
+	case "list", "pin", "unpin", "launch", "park", "restart", "remove", "adopt", "spawn", "shelve", "unshelve", "teardown", "doctor", "reconcile":
 		if strings.Join(parsed.Path, " ") == "install doctor" {
 			if len(parsed.Args) != 0 || !selectorsEmpty(parsed.Selectors) {
 				return nil, result.Request(errors.New("usage: amux install doctor"))

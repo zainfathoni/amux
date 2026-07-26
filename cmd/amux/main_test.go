@@ -175,7 +175,7 @@ func TestCompletionGeneratesShellScripts(t *testing.T) {
 				"complete -F _amux_complete amux",
 				"list launch park restart remove doctor reconcile worker runner workspace workspaces",
 				"--config-dir --json --dry-run --attach --no-attach --terminal-launcher --help -h --version",
-				"list pin unpin launch park restart remove spawn shelve unshelve teardown doctor reconcile",
+				"list pin unpin launch park restart remove adopt spawn shelve unshelve teardown doctor reconcile",
 				"compgen -W \"doctor\"",
 				"compgen -W \"declare add remove coordinator list show reconcile\"",
 				"compgen -W \"register clear\"",
