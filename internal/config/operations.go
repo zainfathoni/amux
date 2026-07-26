@@ -112,6 +112,10 @@ func LoadOperation(path, key string) (OperationRecord, bool, error) {
 	return OperationRecord{}, false, nil
 }
 
+func LoadOperationsReadOnly(path string) ([]OperationRecord, error) {
+	return loadOperations(path)
+}
+
 func StoreOperation(path string, operation OperationRecord) (bool, error) {
 	operation, err := canonicalOperation(operation)
 	if err != nil {

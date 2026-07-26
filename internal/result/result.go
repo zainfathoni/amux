@@ -138,6 +138,14 @@ type RunnerDetails struct {
 	ProcessAgeSeconds int64  `json:"process_age_seconds,omitempty"`
 }
 
+type WorkerDetails struct {
+	Workspace     string `json:"workspace"`
+	Window        string `json:"window"`
+	Workdir       string `json:"workdir"`
+	LocalState    string `json:"local_state"`
+	ReceiptSource string `json:"receipt_source,omitempty"`
+}
+
 type GroupDetails struct {
 	ID           string `json:"id,omitempty"`
 	Role         string `json:"role,omitempty"`
@@ -190,6 +198,7 @@ type Outcome struct {
 	Executable  *ExecutableDetails  `json:"executable,omitempty"`
 	Maintenance *MaintenanceDetails `json:"maintenance,omitempty"`
 	Runner      *RunnerDetails      `json:"runner,omitempty"`
+	Worker      *WorkerDetails      `json:"worker,omitempty"`
 	Group       *GroupDetails       `json:"group,omitempty"`
 	Report      *ReportDetails      `json:"report,omitempty"`
 	Callback    *CallbackDetails    `json:"callback,omitempty"`

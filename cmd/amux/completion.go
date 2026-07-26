@@ -34,6 +34,7 @@ var completionCommands = []completionCommand{
 			{Name: "park", Description: "Park workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "restart", Description: "Restart workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "remove", Description: "Remove workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
+			{Name: "adopt", Description: "Adopt a native-created thread", Flags: []string{"--workspace", "--window", "--workdir", "--thread", "--group", "-w", "-W", "-d", "-t"}},
 			{Name: "spawn", Description: "Spawn a worker", Flags: []string{"--workspace", "--window", "--workdir", "--mode", "-m", "--title-prefix", "--group", "--work-item-id", "--worker-ordinal", "--message", "--message-file", "--message-stdin", "--idempotency-key", "--reconcile", "-w", "-W", "-d"}},
 			{Name: "shelve", Description: "Shelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "unshelve", Description: "Unshelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
@@ -150,6 +151,7 @@ _amux_complete() {
         COMPREPLY=( $(compgen -W "%s" -- "$cur") )
       else
         case "$leaf" in
+		  adopt) COMPREPLY=( $(compgen -W "--workspace --window --workdir --thread --group -w -W -d -t" -- "$cur") ) ;;
           spawn) COMPREPLY=( $(compgen -W "--workspace --window --workdir --mode -m --title-prefix --group --work-item-id --worker-ordinal --message --message-file --message-stdin --idempotency-key --reconcile -w -W -d" -- "$cur") ) ;;
           pin) COMPREPLY=( $(compgen -W "--workspace --window --workdir --thread --current -w -W -d -t" -- "$cur") ) ;;
           unpin) COMPREPLY=( $(compgen -W "--thread --current -t" -- "$cur") ) ;;
@@ -328,6 +330,7 @@ case $state in
           _describe -t worker-commands 'worker command' worker_commands
         else
           case $leaf in
+		    adopt) _arguments '--workspace[workspace]:workspace:' '--window[window]:window:' '--workdir[working directory]:directory:_directories' '--thread[exact native-created thread id or URL]:thread:' '--group[optional exact durable group]:group:' '-w[workspace]:workspace:' '-W[window]:window:' '-d[working directory]:directory:_directories' '-t[thread id or URL]:thread:' ;;
             spawn) _arguments '--workspace[workspace]:workspace:' '--window[window]:window:' '--workdir[working directory]:directory:_directories' '--mode[thread mode]:mode:(low medium high ultra)' '-m[thread mode]:mode:(low medium high ultra)' '--title-prefix[window and thread title prefix]:prefix:' '*--group[durable group id]:group:' '--work-item-id[tracker-neutral work item]:id:' '--worker-ordinal[stable report ordinal]:ordinal:' '--message[initial message]:message:' '--message-file[read initial message from file]:message file:_files' '--message-stdin[read initial message from stdin]' '--idempotency-key[operation key]:key:' '--reconcile[recover exact provisioned-thread failure]' '-w[workspace]:workspace:' '-W[window]:window:' '-d[working directory]:directory:_directories' ;;
             pin) _arguments '--workspace[workspace]:workspace:' '--window[window]:window:' '--workdir[working directory]:directory:_directories' '--thread[thread id or URL]:thread:' '--current[current worker]' '-w[workspace]:workspace:' '-W[window]:window:' '-d[working directory]:directory:_directories' '-t[thread id or URL]:thread:' ;;
             unpin) _arguments '--thread[thread id or URL]:thread:' '--current[current worker]' '-t[thread id or URL]:thread:' ;;

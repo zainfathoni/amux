@@ -731,7 +731,7 @@ func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
 	stages := []string{
 		"### 1. Preflight authoritative state and bootstrap the CLI",
 		"### 2. Declare the group and register the verified coordinator lease",
-		"### 3. Spawn and attach the authoritative receiving thread",
+		"### 3. Native-create and adopt the authoritative thread",
 		"### 4. Persist ready, wake, acknowledge, and independently verify",
 		"### 5. Merge, verify post-merge CI, then authorize finish",
 		"### 6. Submit merged and run `/amux finish`",
@@ -752,7 +752,7 @@ func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
 		"issue-unprefixed semantic window",
 		"--mode medium",
 		"--group <durable-issue-group>",
-		"authoritative receiving thread",
+		"native-create → `worker adopt`",
 		"amux --json callback register --group <durable-issue-group> --thread <coordinator-thread> --pane <coordinator-pane>",
 		"amux report submit --report-id <stable-report-id> --group <durable-issue-group>",
 		"amux report pending --group <durable-issue-group>",

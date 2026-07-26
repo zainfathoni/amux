@@ -4,7 +4,18 @@ These are skill workflows. Only commands beginning with literal `amux` are CLI c
 
 ## Spawn a fresh worker
 
-Preflight, then create one interactive worker. Prefer a message file for structured assignments.
+Preflight, then create one interactive worker. The preferred architecture is one authenticated native Amp thread creation with the complete initial assignment, explicit executor, and explicit mode, followed by local adoption of the returned exact thread:
+
+```sh
+amux --dry-run --json worker adopt --thread <exact-native-thread> --workspace <workspace> --window <semantic-slug> --workdir <path> [--group <exact-group>]
+amux --json worker adopt --thread <exact-native-thread> --workspace <workspace> --window <semantic-slug> --workdir <path> [--group <exact-group>]
+```
+
+Native creation owns exactly-once creation and initial-message delivery. Select `medium` unless the owner explicitly names another mode, and select `orb`, local execution where supported, or one exact Amp runner ID without fallback. amux adoption owns only local catalog/group/tmux state: it sends no message, presses no Enter, parses no composer, and reads no transcript. If native creation is indeterminate, stop rather than creating another thread. The locally available native contract does not prove a richer receipt containing workdir, executor, mode, or delivery digest, so preserve those as caller-side intent and do not claim amux revalidated them. An exact Amp runner ID is native dispatch identity and is unrelated to amux's canonical-workdir Runner identity.
+
+The legacy `amux spawn` compatibility procedure below is not the preferred native workflow. It remains documented only until the ADR's Orb, physical Linux/Darwin, receipt, and lifecycle parity gates are complete. Prefer a message file for structured assignments only when this compatibility path is explicitly selected.
+
+### Deprecated compatibility: TUI-delivered spawn
 
 For an automatically selected mode, resolve the loaded skill directory and run its promoted gate before any dry-run or spawn command. Every automatic `amux spawn` command in this reference, including sprawl and durable coordination, inherits this shared preflight and must run it in the same shell operation as its spawn commands:
 
@@ -27,7 +38,7 @@ Every skill-driven spawn MUST pass `--mode medium` unless the user explicitly re
 
 ## Sprawl independent issue workers
 
-Sprawl is worker-only orchestration around GitHub, dedicated Git worktrees, and `amux spawn`. It does not provision runners or create runner-owned remote agents.
+Sprawl is worker-only orchestration around GitHub, dedicated Git worktrees, one native Amp creation, and explicit `worker adopt`. It does not provision runners or create runner-owned remote agents. Until native receipt/workdir and physical-runner parity are proven, the documented `amux spawn` blocks below are deprecated compatibility procedures rather than the preferred architecture; do not silently substitute them when native creation is indeterminate.
 
 ### 1. Inspect before side effects
 
@@ -126,7 +137,9 @@ amux --json callback register --group <durable-issue-group> --thread <coordinato
 
 Use only the exact group retained by step 3 naming preflight. Group declaration persists coordinator identity locally without adding the group label to that long-lived thread. Before registration, independently verify the pane belongs to the configured coordinator worker. Parse the successful callback outcome and confirm its config directory, group/thread, pane, session/window IDs, PID, generation, and registration time against fresh tmux/process metadata. Registration human output is tab-separated: `<durable-issue-group><TAB>registered<TAB><generation><TAB><pane>`. A restart or any identity change invalidates the lease; explicitly register a new generation. Never guess a pane.
 
-### 3. Spawn and attach the authoritative receiving thread
+### 3. Native-create and adopt the authoritative thread
+
+Prefer the native-create → `worker adopt` sequence at the top of this reference, passing this workflow's exact resolved explicit group to adoption. The remaining `amux spawn` sequence in this section is the preserved deprecated compatibility path; it must not be interpreted as permission to revive TUI parser investment.
 
 ```sh
 git fetch origin main

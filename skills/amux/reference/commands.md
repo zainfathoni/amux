@@ -14,6 +14,7 @@ amux park|restart|remove|doctor|reconcile [selectors]
 amux worker list|launch|park|restart|remove|doctor|reconcile [worker selectors]
 amux runner list|launch|park|restart|remove|doctor|reconcile [runner selectors]
 amux worker pin --workspace <name> --window <name> --workdir <path> --thread <id>
+amux worker adopt --workspace <name> --window <name> --workdir <path> --thread <native-created-id> [--group <id>]
 amux worker pin --current
 amux worker unpin --thread <id>
 amux worker unpin --current
@@ -70,6 +71,7 @@ Removed commands and positional forms fail with remediation. Do not use `store`,
 | `doctor` | inspect | inspect | inspect | inspect only where needed |
 | `launch` | read; skip shelved workers | read | create/verify selected clients | none |
 | mode-specific `pin` / `unpin` | pin mutates worker registry; unpin removes worker and matching shelf intent | mutate runner registry only | none | none |
+| `worker adopt` | persist exact native-created worker and optional group intent | reject canonical-workdir overlap | create/verify exact local client | inspect active status only; never send a message |
 | `park` | preserve | preserve | stop verified selected clients | none |
 | `restart` | preserve | preserve | replace verified selected clients | none |
 | `remove` | remove selected config; remove worker shelf intent | remove selected config | stop verified selected clients | none |

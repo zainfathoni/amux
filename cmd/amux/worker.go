@@ -37,6 +37,9 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 	if in.Command.Name == "spawn" {
 		return a.workerSpawn(in, dir, &env)
 	}
+	if in.Command.Name == "adopt" {
+		return a.workerAdopt(in, dir, &env)
+	}
 	rows, err := config.LoadReadOnly(dir.WorkersPath())
 	if err != nil {
 		return &env, result.Preflight(err)
@@ -343,6 +346,264 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 		return &env, result.Runtime(errors.New("one or more worker operations failed"))
 	}
 	return &env, nil
+}
+
+const nativeAdoptionReceiptSource = "amp_native_create_thread"
+
+func (a app) workerAdopt(in invocation, dir config.Directory, env *result.Envelope) (*result.Envelope, error) {
+	s := in.Selectors
+	if s.Thread == "" || s.Workspace == "" || s.Window == "" || s.Workdir == "" {
+		return env, result.Request(errors.New("worker adopt requires --thread, --workspace, --window, and --workdir"))
+	}
+	row := config.Row{Workspace: s.Workspace, Window: s.Window, Workdir: s.Workdir, Thread: s.Thread}
+	stat, err := os.Stat(row.Workdir)
+	if err != nil || !stat.IsDir() {
+		return env, result.Preflight(fmt.Errorf("missing workdir: %s", row.Workdir))
+	}
+	request := strings.Join([]string{row.Thread, row.Workspace, row.Window, row.Workdir, s.Group}, "\x00")
+	sum := sha256.Sum256([]byte(request))
+	requestHash := hex.EncodeToString(sum[:])
+	operationKey := "worker-adopt:" + row.Thread
+	operation, operationFound, err := config.LoadOperation(dir.OperationsPath(), operationKey)
+	if err != nil {
+		return env, result.Preflight(err)
+	}
+	if operationFound && (operation.Kind != "worker-adopt" || operation.RequestHash != requestHash || operation.Resource.Thread != row.Thread) {
+		return env, result.Preflight(fmt.Errorf("thread %s already has a native adoption request bound to different workspace, window, workdir, or group intent", row.Thread))
+	}
+	operations, err := config.LoadOperationsReadOnly(dir.OperationsPath())
+	if err != nil {
+		return env, result.Preflight(err)
+	}
+	for _, existing := range operations {
+		if existing.Key == operationKey || existing.State == config.OperationSucceeded || existing.State == config.OperationFailed {
+			continue
+		}
+		matchesThread := existing.Resource.Thread == row.Thread
+		if existing.ThreadAdoption != nil {
+			matchesThread = matchesThread || existing.ThreadAdoption.ProvisionedThread == row.Thread || existing.ThreadAdoption.ReceivingThread == row.Thread
+		}
+		if matchesThread {
+			return env, result.Preflight(fmt.Errorf("thread %s is still owned by %s operation %q in state %s; reconcile that operation before native adoption", row.Thread, existing.Kind, existing.Key, existing.State))
+		}
+	}
+	rows, err := config.LoadReadOnly(dir.WorkersPath())
+	if err != nil {
+		return env, result.Preflight(err)
+	}
+	runners, err := config.LoadRunnersReadOnly(dir.RunnersPath())
+	if err != nil {
+		return env, result.Preflight(err)
+	}
+	exactRow := false
+	for _, existing := range rows {
+		if workerRowsEquivalent(existing, row) {
+			exactRow = true
+			continue
+		}
+		existingWorkdir, _ := config.CanonicalWorkdir(existing.Workdir)
+		if existing.Workspace == row.Workspace && existing.Window == row.Window {
+			return env, result.Preflight(fmt.Errorf("worker window %s/%s is already configured for thread %s", row.Workspace, row.Window, existing.Thread))
+		}
+		if existing.Thread == row.Thread {
+			return env, result.Preflight(fmt.Errorf("thread %s is already configured as %s/%s", row.Thread, existing.Workspace, existing.Window))
+		}
+		if existingWorkdir == row.Workdir {
+			return env, result.Preflight(fmt.Errorf("workdir %s is already owned by worker %s/%s", row.Workdir, existing.Workspace, existing.Window))
+		}
+	}
+	for _, runner := range runners {
+		if runner.Workdir == row.Workdir {
+			return env, result.Preflight(fmt.Errorf("workdir %s is already owned by amux Runner workspace %s", row.Workdir, runner.Workspace))
+		}
+	}
+	shelves, err := config.LoadShelvesReadOnly(dir.ShelvesPath())
+	if err != nil {
+		return env, result.Preflight(err)
+	}
+	for _, thread := range shelves {
+		if thread == row.Thread {
+			return env, result.Preflight(fmt.Errorf("thread %s is locally shelved; unshelve it explicitly before native adoption", row.Thread))
+		}
+	}
+	inspection, err := verifyAdoptionThreadAndTmux(row)
+	if err != nil {
+		return env, result.Preflight(fmt.Errorf("verify exact Amp thread before adoption: %w", err))
+	}
+	memberships, err := config.LoadGroupsReadOnly(dir.GroupsPath())
+	if err != nil {
+		return env, result.Preflight(err)
+	}
+	groupExact := s.Group == ""
+	groupNeedsEnsure := false
+	var membership config.GroupMembership
+	var groupAmpPath string
+	if s.Group != "" {
+		membership = config.GroupMembership{Group: s.Group, Thread: row.Thread, Role: config.GroupMember}
+		index := membershipIndex(memberships, s.Group, row.Thread)
+		groupExact = index >= 0
+		if groupExact {
+			membership = memberships[index]
+			if membership.Role != config.GroupMember {
+				return env, result.Preflight(fmt.Errorf("thread %s already has %s role in group %s; worker adopt requires exact member intent", row.Thread, membership.Role, s.Group))
+			}
+		}
+		groupNeedsEnsure = membership.Role == config.GroupMember && (!groupExact || inspection.state == workerPaneAbsent)
+		if groupNeedsEnsure {
+			groupAmpPath, err = preflightGroupAmp()
+			if err != nil {
+				return env, result.Preflight(err)
+			}
+		}
+	}
+	localExact := exactRow && inspection.state == workerPaneExact && groupExact
+	if operationFound && operation.State == config.OperationSucceeded {
+		if !localExact {
+			return env, result.Preflight(fmt.Errorf("native adoption for thread %s already succeeded but local state changed; use worker launch or reconcile instead of replaying adoption", row.Thread))
+		}
+		out := adoptionOutcome(row, "adopt", "adopted")
+		out.Message = "exact native-created thread already adopted"
+		env.Skipped = append(env.Skipped, out)
+		return env, nil
+	}
+	if in.Options.DryRun {
+		operationOut := adoptionOutcome(row, "bind-adoption-request", "request_intent")
+		if operationFound {
+			operationOut.Message = "native adoption request already durably bound"
+			env.Skipped = append(env.Skipped, operationOut)
+		} else {
+			operationOut.Message = "would durably bind exact workspace, window, workdir, thread, and optional group before mutation"
+			env.Planned = append(env.Planned, operationOut)
+		}
+		workerOut := adoptionOutcome(row, "persist-worker", "catalog")
+		if exactRow {
+			workerOut.Message = "exact worker catalog intent already persisted"
+			env.Skipped = append(env.Skipped, workerOut)
+		} else {
+			workerOut.Message = "would persist exact worker catalog intent"
+			env.Planned = append(env.Planned, workerOut)
+		}
+		if s.Group != "" {
+			groupOut := groupOutcome(membership, "persist-group")
+			if groupExact {
+				groupOut.Message = "group intent already persisted"
+				env.Skipped = append(env.Skipped, groupOut)
+			} else {
+				groupOut.Message = "would persist exact group member intent before external mutation"
+				env.Planned = append(env.Planned, groupOut)
+			}
+			if groupNeedsEnsure {
+				labelOut := groupOutcome(membership, "ensure-label")
+				labelOut.Group.ExternalSync = "additive_ensure_planned"
+				labelOut.Message = "would add-only ensure the exact member label"
+				env.Planned = append(env.Planned, labelOut)
+			}
+		}
+		clientOut := adoptionOutcome(row, "create-client", string(inspection.state))
+		if inspection.state == workerPaneExact {
+			clientOut.Message = "exact tmux client already exists"
+			env.Skipped = append(env.Skipped, clientOut)
+		} else {
+			clientOut.Message = "would create and post-verify local tmux client; no message delivery"
+			env.Planned = append(env.Planned, clientOut)
+		}
+		return env, nil
+	}
+	if !operationFound {
+		now := time.Now().UTC()
+		operation = config.OperationRecord{Key: operationKey, Kind: "worker-adopt", RequestHash: requestHash, State: config.OperationStarted, Resource: config.OperationResource{Kind: "worker", Thread: row.Thread}, CreatedAt: now, UpdatedAt: now}
+		if _, err := config.StoreOperation(dir.OperationsPath(), operation); err != nil {
+			return env, result.Runtime(fmt.Errorf("persist exact native adoption request: %w", err))
+		}
+		operationOut := adoptionOutcome(row, "bind-adoption-request", "request_intent")
+		operationOut.Message = "durably bound exact native adoption request before mutation"
+		env.Successful = append(env.Successful, operationOut)
+	}
+	if !exactRow {
+		if _, err := config.Store(dir.WorkersPath(), row); err != nil {
+			return env, result.Runtime(fmt.Errorf("persist worker adoption intent: %w", err))
+		}
+		workerOut := adoptionOutcome(row, "persist-worker", "catalog")
+		workerOut.Message = "persisted exact worker catalog intent"
+		env.Successful = append(env.Successful, workerOut)
+	}
+	if s.Group != "" && !groupExact {
+		updated := append(append([]config.GroupMembership(nil), memberships...), membership)
+		if err := config.WriteGroups(dir.GroupsPath(), updated); err != nil {
+			return env, result.Runtime(fmt.Errorf("persist adoption group intent: %w", err))
+		}
+		groupOut := groupOutcome(membership, "persist-group")
+		groupOut.Message = "persisted exact group member intent"
+		env.Successful = append(env.Successful, groupOut)
+	}
+	revalidated, err := verifyAdoptionThreadAndTmux(row)
+	if err != nil || revalidated.state != inspection.state || revalidated.pane.WindowID != inspection.pane.WindowID {
+		if err == nil {
+			err = errors.New("active thread or tmux ownership changed after durable intent was persisted")
+		}
+		return env, result.Runtime(fmt.Errorf("revalidate native adoption before side effects: %w", err))
+	}
+	if groupNeedsEnsure {
+		groupOut := groupOutcome(membership, "attach-group")
+		if _, err := a.ensureGroupLabel(env, groupOut, groupAmpPath, membership, in.Options.JSON); err != nil {
+			return env, result.Runtime(fmt.Errorf("worker adopted and group intent retained, but label synchronization failed: %w", err))
+		}
+	}
+	if inspection.state == workerPaneAbsent {
+		if err := createWorkerPane(row); err != nil {
+			return env, result.Runtime(fmt.Errorf("create adopted worker tmux client after persisting intent: %w", err))
+		}
+		created, err := verifyAdoptionThreadAndTmux(row)
+		if err != nil || created.state != workerPaneExact {
+			if err == nil {
+				err = fmt.Errorf("created worker tmux identity is %s", created.state)
+			}
+			return env, result.Runtime(fmt.Errorf("post-verify adopted worker tmux client: %w", err))
+		}
+		clientOut := adoptionOutcome(row, "create-client", "exact")
+		clientOut.Message = "created and verified exact local tmux client without message delivery"
+		env.Successful = append(env.Successful, clientOut)
+	}
+	operation.State = config.OperationSucceeded
+	operation.UpdatedAt = time.Now().UTC()
+	if _, err := config.StoreOperation(dir.OperationsPath(), operation); err != nil {
+		return env, result.Runtime(fmt.Errorf("complete native adoption request: %w", err))
+	}
+	out := adoptionOutcome(row, "adopt", "adopted")
+	out.Message = "adopted exact native-created thread without message delivery"
+	env.Successful = append(env.Successful, out)
+	return env, nil
+}
+
+func adoptionOutcome(row config.Row, action, localState string) result.Outcome {
+	out := workerOutcome(row, action, "")
+	out.Worker = &result.WorkerDetails{Workspace: row.Workspace, Window: row.Window, Workdir: row.Workdir, LocalState: localState, ReceiptSource: nativeAdoptionReceiptSource}
+	return out
+}
+
+func verifyAdoptionThreadAndTmux(row config.Row) (workerInspection, error) {
+	statuses, err := threadArchiveStatuses([]config.Row{row})
+	if err != nil {
+		return workerInspection{}, err
+	}
+	if status := statuses[row.Thread]; status != threadStatusActive {
+		return workerInspection{}, fmt.Errorf("thread %s is %s; worker adopt requires the exact active native-created thread", row.Thread, status)
+	}
+	inspection, err := inspectWorker(row)
+	if err != nil {
+		return workerInspection{}, err
+	}
+	if inspection.state != workerPaneAbsent && inspection.state != workerPaneExact {
+		return workerInspection{}, fmt.Errorf("requested worker %s/%s has %s tmux identity", row.Workspace, row.Window, inspection.state)
+	}
+	threadPanes, err := managedThreadPanes(row.Thread)
+	if err != nil {
+		return workerInspection{}, fmt.Errorf("inspect existing tmux ownership for thread %s: %w", row.Thread, err)
+	}
+	if inspection.state == workerPaneExact && len(threadPanes) == 0 || len(threadPanes) > 1 || len(threadPanes) == 1 && (inspection.state != workerPaneExact || threadPanes[0].WindowID != inspection.pane.WindowID) {
+		return workerInspection{}, fmt.Errorf("thread %s has inconsistent tmux ownership outside requested worker %s/%s", row.Thread, row.Workspace, row.Window)
+	}
+	return inspection, nil
 }
 
 func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelope) (*result.Envelope, error) {
