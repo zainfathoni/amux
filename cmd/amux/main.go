@@ -2518,7 +2518,7 @@ func textComposerEqualsMessage(contents, message string) (bool, bool) {
 }
 
 func bottomComposerFrameRows(contents string) ([]string, bool) {
-	lines := strings.Split(strings.TrimRight(contents, "\r\n"), "\n")
+	lines := strings.Split(strings.TrimRight(contents, " \t\r\n"), "\n")
 	if len(lines) < 2 {
 		return nil, false
 	}

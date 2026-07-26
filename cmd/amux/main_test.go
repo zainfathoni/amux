@@ -2554,8 +2554,12 @@ func TestTextComposerEqualsMultilineMessage(t *testing.T) {
 	}{
 		{name: "complete normalized message", pane: "╭ composer ─╮\n│ first │\n│ second │\n╰────────────╯\n", message: "first\nsecond", want: true},
 		{name: "single terminal line ending", pane: "╭ composer ─╮\n│ first │\n│ second │\n╰────────────╯\n", message: "first\r\nsecond\r\n", want: true},
+		{name: "trailing cleared terminal rows", pane: "╭ composer ─╮\n│ first │\n│ second │\n╰────────────╯\n   \n\t\n", message: "first\nsecond", want: true},
 		{name: "literal frame characters", pane: "╭ composer ─╮\n│ corners ╭ ╰ ╮ ╯ ─ │ │\n│ second │\n╰────────────╯\n", message: "corners ╭ ╰ ╮ ╯ ─ │\nsecond", want: true},
 		{name: "partial message", pane: "╭ composer ─╮\n│ first │\n╰────────────╯\n", message: "first\nsecond"},
+		{name: "ambiguous soft wrap remains rejected", pane: "╭ composer ─╮\n│ first │\n│ second │\n╰────────────╯\n   \r\n\t\r\n", message: "firstsecond"},
+		{name: "ambiguous extra visual row remains rejected", pane: "╭ composer ─╮\n│ first │\n│ │\n│ second │\n╰────────────╯\n   \r\n\t\r\n", message: "first\nsecond"},
+		{name: "clipped viewport tail remains rejected", pane: "╭ composer ─╮\n│ second │\n│ third │\n╰────────────╯\n   \r\n\t\r\n", message: "first\nsecond\nthird"},
 		{name: "residual prefix plus complete message", pane: "╭ composer ─╮\n│ first │\n│ first │\n│ second │\n╰────────────╯\n", message: "first\nsecond"},
 		{name: "deleted blank line", pane: "╭ composer ─╮\n│ first │\n│ second │\n╰────────────╯\n", message: "first\n\nsecond"},
 		{name: "collapsed repeated spaces", pane: "╭ composer ─╮\n│ first item │\n│ second │\n╰────────────╯\n", message: "first  item\nsecond"},
@@ -2568,6 +2572,13 @@ func TestTextComposerEqualsMultilineMessage(t *testing.T) {
 				t.Fatalf("composer match = (%t, %t), want (%t, true)", got, available, test.want)
 			}
 		})
+	}
+}
+
+func TestBottomComposerFrameRowsRejectsContentBelowFrame(t *testing.T) {
+	contents := "╭ composer ─╮\n│ first │\n╰────────────╯\nstatus\n"
+	if _, available := bottomComposerFrameRows(contents); available {
+		t.Fatal("composer frame above non-whitespace terminal content was accepted")
 	}
 }
 
@@ -2757,17 +2768,17 @@ if [ "$1" = send-keys ] && [ "$4" = Enter ]; then
   touch "`+entered+`"; exit 0
 fi
 if [ "$1" = capture-pane ]; then
-  if [ -e "`+entered+`" ]; then printf ' ┃ corners repeated spaces\n ┃ absolute /synthetic/contract-v1.md\n╭──────────────── medium ─╮\n│                         │\n╰──────── synthetic/main ─╯\n'; exit 0; fi
+  if [ -e "`+entered+`" ]; then printf ' ┃ corners repeated spaces\n ┃ absolute /synthetic/contract-v1.md\n╭──────────────── medium ─╮\n│                         │\n╰──────── synthetic/main ─╯\n   \n'; exit 0; fi
   if [ -e "`+pasted+`" ]; then
     if cmp -s "`+buffer+`" "`+wantBuffer+`"; then
       touch "`+exactSeen+`"
-      printf '╭──────────────── medium ─╮\n│ corners ╭ ╰ ╮ ╯ ─ │  repeated  spaces │\n│ │\n│ absolute /synthetic/contract-v1.md │\n╰──────── synthetic/main ─╯\n'
+      printf '╭──────────────── medium ─╮\n│ corners ╭ ╰ ╮ ╯ ─ │  repeated  spaces │\n│ │\n│ absolute /synthetic/contract-v1.md │\n╰──────── synthetic/main ─╯\n   \n'
     else
       printf '╭──────────────── medium ─╮\n│ CRLF rendered as different content │\n╰──────── synthetic/main ─╯\n'
     fi
     exit 0
   fi
-  printf '╭──────────────── medium ─╮\n│                         │\n╰ ∼ Connecting ───────── ◷ ─╯\n'
+  printf '╭──────────────── medium ─╮\n│                         │\n╰ ∼ Connecting ───────── ◷ ─╯\n   \n'
   exit 0
 fi
 exit 2
