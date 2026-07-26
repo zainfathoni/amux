@@ -2736,40 +2736,46 @@ exit 2
 	}
 }
 
-func TestSubmitInitialMultilineMessageWaitsForConnectingComposer(t *testing.T) {
+func TestSubmitInitialMultilineCRLFMessageUsesCurrentComposerFrame(t *testing.T) {
 	bin := t.TempDir()
-	captures := filepath.Join(bin, "captures")
+	buffer := filepath.Join(bin, "buffer")
+	wantBuffer := filepath.Join(bin, "want-buffer")
 	pasted := filepath.Join(bin, "pasted")
-	prematurePaste := filepath.Join(bin, "premature-paste")
 	exactSeen := filepath.Join(bin, "exact-seen")
 	entered := filepath.Join(bin, "entered")
 	prematureEnter := filepath.Join(bin, "premature-enter")
+	message := "corners ╭ ╰ ╮ ╯ ─ │  repeated  spaces\r\n\r\nabsolute /synthetic/contract-v1.md\r\n"
+	want := strings.ReplaceAll(message, "\r\n", "\n")
+	if err := os.WriteFile(wantBuffer, []byte(want), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
-if [ "$1" = load-buffer ]; then cat >/dev/null; exit 0; fi
-if [ "$1" = paste-buffer ]; then
-  count=0; if [ -f "`+captures+`" ]; then count=$(cat "`+captures+`"); fi
-  if [ "$count" -lt 2 ]; then touch "`+prematurePaste+`"; fi
-  touch "`+pasted+`"; exit 0
-fi
+if [ "$1" = load-buffer ]; then cat > "`+buffer+`"; exit 0; fi
+if [ "$1" = paste-buffer ]; then touch "`+pasted+`"; exit 0; fi
 if [ "$1" = send-keys ] && [ "$4" = Enter ]; then
   if [ ! -e "`+exactSeen+`" ]; then touch "`+prematureEnter+`"; fi
   touch "`+entered+`"; exit 0
 fi
 if [ "$1" = capture-pane ]; then
-  if [ -e "`+entered+`" ]; then printf ' ┃ first\n ┃ second\n╭──────────────── medium ─╮\n│                         │\n╰──────── synthetic/main ─╯\n'; exit 0; fi
-  if [ -e "`+pasted+`" ]; then touch "`+exactSeen+`"; printf '╭──────────────── medium ─╮\n│ first                   │\n│ second                  │\n╰──────── synthetic/main ─╯\n'; exit 0; fi
-  count=0; if [ -f "`+captures+`" ]; then count=$(cat "`+captures+`"); fi
-  count=$((count + 1)); printf '%s\n' "$count" > "`+captures+`"
-  if [ "$count" -eq 1 ]; then printf '╭──────────────── medium ─╮\n│                         │\n╰ ∼ Connecting ───────── ◷ ─╯\n';
-  else printf '╭──────────────── medium ─╮\n│                         │\n╰──────── synthetic/main ─╯\n'; fi
+  if [ -e "`+entered+`" ]; then printf ' ┃ corners repeated spaces\n ┃ absolute /synthetic/contract-v1.md\n╭──────────────── medium ─╮\n│                         │\n╰──────── synthetic/main ─╯\n'; exit 0; fi
+  if [ -e "`+pasted+`" ]; then
+    if cmp -s "`+buffer+`" "`+wantBuffer+`"; then
+      touch "`+exactSeen+`"
+      printf '╭──────────────── medium ─╮\n│ corners ╭ ╰ ╮ ╯ ─ │  repeated  spaces │\n│ │\n│ absolute /synthetic/contract-v1.md │\n╰──────── synthetic/main ─╯\n'
+    else
+      printf '╭──────────────── medium ─╮\n│ CRLF rendered as different content │\n╰──────── synthetic/main ─╯\n'
+    fi
+    exit 0
+  fi
+  printf '╭──────────────── medium ─╮\n│                         │\n╰ ∼ Connecting ───────── ◷ ─╯\n'
   exit 0
 fi
 exit 2
 `)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("AMP_TMUX_SPAWN_DELAY", "20ms")
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
 
-	got, err := submitInitialMessage(tmux.Runner{}, "%1", "first\nsecond")
+	got, err := submitInitialMessage(tmux.Runner{}, "%1", message)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2782,21 +2788,51 @@ exit 2
 	if _, statErr := os.Stat(entered); statErr != nil {
 		t.Fatalf("Enter was not attempted after exact multiline visibility: %v", statErr)
 	}
-	for action, path := range map[string]string{"paste": prematurePaste, "Enter": prematureEnter} {
-		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
-			t.Fatalf("%s was attempted before its visibility guard: %v", action, statErr)
-		}
+	if _, statErr := os.Stat(prematureEnter); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Enter was attempted before exact CRLF-equivalent visibility: %v", statErr)
+	}
+	gotBuffer, err := os.ReadFile(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotBuffer, []byte(want)) {
+		t.Fatalf("pasted buffer = %q, want CRLF normalized only to %q", gotBuffer, want)
 	}
 }
 
-func TestSubmitInitialMultilineMessageClassifiesConnectingComposerAsUnavailable(t *testing.T) {
+func TestSendInitialMessageTextNormalizesOnlyCRLFPairs(t *testing.T) {
 	bin := t.TempDir()
+	buffer := filepath.Join(bin, "buffer")
 	pasted := filepath.Join(bin, "pasted")
-	entered := filepath.Join(bin, "entered")
 	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
-if [ "$1" = capture-pane ]; then printf '╭──────────────── medium ─╮\n│                         │\n╰ ∼ Connecting ───────── ◷ ─╯\n'; exit 0; fi
+if [ "$1" = load-buffer ]; then cat > "`+buffer+`"; exit 0; fi
 if [ "$1" = paste-buffer ]; then touch "`+pasted+`"; exit 0; fi
-if [ "$1" = send-keys ] && [ "$4" = Enter ]; then touch "`+entered+`"; exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	message := "a\r\nb\nc\rd ╭ │\r\n"
+	if err := sendInitialMessageText(tmux.Runner{}, "%1", message); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "a\nb\nc\rd ╭ │\n"; string(got) != want {
+		t.Fatalf("pasted buffer = %q, want %q", got, want)
+	}
+	if _, statErr := os.Stat(pasted); statErr != nil {
+		t.Fatalf("normalized buffer was not pasted to the exact target: %v", statErr)
+	}
+}
+
+func TestSubmitInitialMultilineMessageClassifiesIncompleteFrameAsComposerUnavailable(t *testing.T) {
+	bin := t.TempDir()
+	mutated := filepath.Join(bin, "mutated")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = capture-pane ]; then printf 'starting Amp\n'; exit 0; fi
+if [ "$1" = load-buffer ] || [ "$1" = paste-buffer ] || [ "$1" = send-keys ]; then touch "`+mutated+`"; exit 0; fi
 exit 2
 `)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -2809,30 +2845,8 @@ exit 2
 	if got.status != config.OperationSubmissionComposerUnavailable {
 		t.Fatalf("submission status = %q, want %q", got.status, config.OperationSubmissionComposerUnavailable)
 	}
-	for name, path := range map[string]string{"paste": pasted, "Enter": entered} {
-		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
-			t.Fatalf("%s was attempted before composer readiness: %v", name, statErr)
-		}
-	}
-}
-
-func TestHasReadyComposerFrame(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		contents string
-		want     bool
-	}{
-		{name: "incomplete frame", contents: "starting Amp\n"},
-		{name: "connecting status", contents: "╭──────── medium ─╮\n│                 │\n╰ ∼ Connecting ─ ◷ ─╯\n"},
-		{name: "ready metadata", contents: "╭──────── medium ─╮\n│                 │\n╰── synthetic/main ─╯\n", want: true},
-		{name: "metadata containing Connecting", contents: "╭──────── medium ─╮\n│                 │\n╰── feature/Connecting-state ─╯\n", want: true},
-		{name: "CRLF capture", contents: "╭──────── medium ─╮\r\n│                 │\r\n╰── synthetic/main ─╯\r\n", want: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if got := hasReadyComposerFrame(test.contents); got != test.want {
-				t.Fatalf("ready composer = %t, want %t", got, test.want)
-			}
-		})
+	if _, statErr := os.Stat(mutated); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("input mutation was attempted without a complete composer frame: %v", statErr)
 	}
 }
 
