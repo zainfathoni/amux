@@ -2290,7 +2290,7 @@ type initialMessageSubmissionGuard struct {
 
 func submitInitialMessageGuarded(runner tmux.Runner, target, message string, guard initialMessageSubmissionGuard) (initialMessageSubmission, error) {
 	multiline := strings.ContainsAny(message, "\r\n")
-	ready, captureAvailable, captureEverAvailable := waitForComposerReady(runner, target)
+	ready, captureAvailable, captureEverAvailable := waitForComposerReady(runner, target, multiline)
 	if multiline && !ready {
 		if !captureAvailable {
 			return initialMessageSubmission{status: config.OperationSubmissionComposerCaptureUnknown}, nil
@@ -2434,11 +2434,11 @@ func sendInitialMessageText(runner tmux.Runner, target, message string) error {
 	return runner.SendLiteral(target, message)
 }
 
-func waitForComposerReady(runner tmux.Runner, target string) (bool, bool, bool) {
+func waitForComposerReady(runner tmux.Runner, target string, requireEditable bool) (bool, bool, bool) {
 	deadline := time.Now().Add(spawnSubmitTimeout())
 	everAvailable := false
 	for {
-		ready, available := composerReady(runner, target)
+		ready, available := composerReady(runner, target, requireEditable)
 		everAvailable = everAvailable || available
 		if ready {
 			return true, true, true
@@ -2467,12 +2467,15 @@ func waitForComposerMessageState(runner tmux.Runner, target, message string) (bo
 	}
 }
 
-func composerReady(runner tmux.Runner, target string) (bool, bool) {
+func composerReady(runner tmux.Runner, target string, requireEditable bool) (bool, bool) {
 	contents, err := runner.CapturePane(target)
 	if err != nil {
 		return false, false
 	}
-	return hasComposerFrame(contents), true
+	if !requireEditable {
+		return hasComposerFrame(contents), true
+	}
+	return hasReadyComposerFrame(contents), true
 }
 
 func composerContainsMessage(runner tmux.Runner, target, message string) (bool, bool) {
@@ -2575,6 +2578,15 @@ func collapsePaneText(text string) string {
 func hasComposerFrame(contents string) bool {
 	_, available := bottomComposerFrameRows(contents)
 	return available
+}
+
+func hasReadyComposerFrame(contents string) bool {
+	if !hasComposerFrame(contents) {
+		return false
+	}
+	lines := strings.Split(strings.TrimRight(contents, "\r\n"), "\n")
+	bottom := strings.TrimSpace(lines[len(lines)-1])
+	return !strings.Contains(bottom, "∼ Connecting")
 }
 
 type initialMessageDeliveryStatus string

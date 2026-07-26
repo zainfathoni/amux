@@ -2736,6 +2736,106 @@ exit 2
 	}
 }
 
+func TestSubmitInitialMultilineMessageWaitsForConnectingComposer(t *testing.T) {
+	bin := t.TempDir()
+	captures := filepath.Join(bin, "captures")
+	pasted := filepath.Join(bin, "pasted")
+	prematurePaste := filepath.Join(bin, "premature-paste")
+	exactSeen := filepath.Join(bin, "exact-seen")
+	entered := filepath.Join(bin, "entered")
+	prematureEnter := filepath.Join(bin, "premature-enter")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = load-buffer ]; then cat >/dev/null; exit 0; fi
+if [ "$1" = paste-buffer ]; then
+  count=0; if [ -f "`+captures+`" ]; then count=$(cat "`+captures+`"); fi
+  if [ "$count" -lt 2 ]; then touch "`+prematurePaste+`"; fi
+  touch "`+pasted+`"; exit 0
+fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then
+  if [ ! -e "`+exactSeen+`" ]; then touch "`+prematureEnter+`"; fi
+  touch "`+entered+`"; exit 0
+fi
+if [ "$1" = capture-pane ]; then
+  if [ -e "`+entered+`" ]; then printf ' ┃ first\n ┃ second\n╭──────────────── medium ─╮\n│                         │\n╰──────── synthetic/main ─╯\n'; exit 0; fi
+  if [ -e "`+pasted+`" ]; then touch "`+exactSeen+`"; printf '╭──────────────── medium ─╮\n│ first                   │\n│ second                  │\n╰──────── synthetic/main ─╯\n'; exit 0; fi
+  count=0; if [ -f "`+captures+`" ]; then count=$(cat "`+captures+`"); fi
+  count=$((count + 1)); printf '%s\n' "$count" > "`+captures+`"
+  if [ "$count" -eq 1 ]; then printf '╭──────────────── medium ─╮\n│                         │\n╰ ∼ Connecting ───────── ◷ ─╯\n';
+  else printf '╭──────────────── medium ─╮\n│                         │\n╰──────── synthetic/main ─╯\n'; fi
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "20ms")
+
+	got, err := submitInitialMessage(tmux.Runner{}, "%1", "first\nsecond")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.status != config.OperationSubmissionTransitioned {
+		t.Fatalf("submission status = %q, want %q", got.status, config.OperationSubmissionTransitioned)
+	}
+	if _, statErr := os.Stat(pasted); statErr != nil {
+		t.Fatalf("assignment was not pasted after composer readiness: %v", statErr)
+	}
+	if _, statErr := os.Stat(entered); statErr != nil {
+		t.Fatalf("Enter was not attempted after exact multiline visibility: %v", statErr)
+	}
+	for action, path := range map[string]string{"paste": prematurePaste, "Enter": prematureEnter} {
+		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("%s was attempted before its visibility guard: %v", action, statErr)
+		}
+	}
+}
+
+func TestSubmitInitialMultilineMessageClassifiesConnectingComposerAsUnavailable(t *testing.T) {
+	bin := t.TempDir()
+	pasted := filepath.Join(bin, "pasted")
+	entered := filepath.Join(bin, "entered")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = capture-pane ]; then printf '╭──────────────── medium ─╮\n│                         │\n╰ ∼ Connecting ───────── ◷ ─╯\n'; exit 0; fi
+if [ "$1" = paste-buffer ]; then touch "`+pasted+`"; exit 0; fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then touch "`+entered+`"; exit 0; fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	got, err := submitInitialMessage(tmux.Runner{}, "%1", "first\nsecond")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.status != config.OperationSubmissionComposerUnavailable {
+		t.Fatalf("submission status = %q, want %q", got.status, config.OperationSubmissionComposerUnavailable)
+	}
+	for name, path := range map[string]string{"paste": pasted, "Enter": entered} {
+		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("%s was attempted before composer readiness: %v", name, statErr)
+		}
+	}
+}
+
+func TestHasReadyComposerFrame(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		contents string
+		want     bool
+	}{
+		{name: "incomplete frame", contents: "starting Amp\n"},
+		{name: "connecting status", contents: "╭──────── medium ─╮\n│                 │\n╰ ∼ Connecting ─ ◷ ─╯\n"},
+		{name: "ready metadata", contents: "╭──────── medium ─╮\n│                 │\n╰── synthetic/main ─╯\n", want: true},
+		{name: "metadata containing Connecting", contents: "╭──────── medium ─╮\n│                 │\n╰── feature/Connecting-state ─╯\n", want: true},
+		{name: "CRLF capture", contents: "╭──────── medium ─╮\r\n│                 │\r\n╰── synthetic/main ─╯\r\n", want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := hasReadyComposerFrame(test.contents); got != test.want {
+				t.Fatalf("ready composer = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestSubmitInitialMultilineMessageRejectsResidualPrefixAfterRetry(t *testing.T) {
 	bin := t.TempDir()
 	pasteCount := filepath.Join(bin, "paste-count")
