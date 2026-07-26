@@ -43,6 +43,35 @@ func TestSessionExistsDistinguishesAbsenceFromInspectionFailure(t *testing.T) {
 	}
 }
 
+func TestAllWindowPanesTreatsMissingServerAsEmpty(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		message   string
+		wantError bool
+	}{
+		{name: "missing server", message: "no server running on /tmp/tmux.sock"},
+		{name: "missing server socket", message: "error connecting to /tmp/tmux-1000/default (No such file or directory)"},
+		{name: "inspection failure", message: "permission denied", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bin := t.TempDir()
+			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\necho '"+test.message+"' >&2\nexit 1\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			panes, err := (Runner{}).AllWindowPanes()
+			if test.wantError {
+				if err == nil || !strings.Contains(err.Error(), test.message) {
+					t.Fatalf("AllWindowPanes() error = %v, want %q", err, test.message)
+				}
+				return
+			}
+			if err != nil || len(panes) != 0 {
+				t.Fatalf("AllWindowPanes() panes = %+v, error = %v", panes, err)
+			}
+		})
+	}
+}
+
 func TestInspectProcessUsesLinuxAndMacOSCompatiblePSFields(t *testing.T) {
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "ps.log")

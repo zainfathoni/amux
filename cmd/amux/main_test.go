@@ -1356,8 +1356,8 @@ exit 2
 	if strings.Index(log, "new-session -d -s amux") > strings.Index(log, "new-session -d -s cafein") {
 		t.Fatalf("no-arg launch did not use sorted workspace order\nlog:\n%s", log)
 	}
-	if calls := strings.Count(log, "amp threads list"); calls != 2 {
-		t.Fatalf("no-arg launch called amp threads list %d times, want one active and one archived listing\nlog:\n%s", calls, log)
+	if calls := strings.Count(log, "amp threads list"); calls != 1 {
+		t.Fatalf("no-arg launch called amp threads list %d times, want one active listing\nlog:\n%s", calls, log)
 	}
 }
 
