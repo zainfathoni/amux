@@ -555,7 +555,9 @@ func (r Runner) CapturePane(target string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimRight(string(out), "\r\n"), nil
+	contents := strings.TrimSuffix(string(out), "\n")
+	contents = strings.TrimSuffix(contents, "\r")
+	return contents, nil
 }
 
 func (r Runner) CapturePaneHistory(target string, lines int) (string, error) {

@@ -356,6 +356,33 @@ exit 2
 	}
 }
 
+func TestCapturePaneRemovesOnlyCommandRecordTerminator(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		output string
+		want   string
+	}{
+		{name: "normal delimiter", output: "pane text\n", want: "pane text"},
+		{name: "empty row below", output: "pane text\n\n", want: "pane text\n"},
+		{name: "spaces row below", output: "pane text\n   \n", want: "pane text\n   "},
+		{name: "CRLF empty row below", output: "pane text\r\n\r\n", want: "pane text\r\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			writeExecutable(t, filepath.Join(tmp, "tmux"), "#!/bin/sh\nprintf '%s' "+shellQuote(test.output)+"\n")
+			t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			got, err := (Runner{}).CapturePane("%1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("CapturePane returned %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestWindowPanesWithPaneIDRequiresExactReturnedSessionAndWindow(t *testing.T) {
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "calls.log")

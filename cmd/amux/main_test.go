@@ -2553,13 +2553,13 @@ func TestTextComposerEqualsMultilineMessage(t *testing.T) {
 		want    bool
 	}{
 		{name: "complete normalized message", pane: "╭ composer ─╮\n│ first │\n│ second │\n╰────────────╯\n", message: "first\nsecond", want: true},
+		{name: "ordinary frame retains per-row surrounding whitespace", pane: " \t╭ composer ─╮\t \n\t│ first │ \n  ╰────────────╯  \n", message: "first", want: true},
 		{name: "single terminal line ending", pane: "╭ composer ─╮\n│ first │\n│ second │\n╰────────────╯\n", message: "first\r\nsecond\r\n", want: true},
-		{name: "trailing cleared terminal rows", pane: "╭ composer ─╮\n│ first │\n│ second │\n╰────────────╯\n   \n\t\n", message: "first\nsecond", want: true},
 		{name: "literal frame characters", pane: "╭ composer ─╮\n│ corners ╭ ╰ ╮ ╯ ─ │ │\n│ second │\n╰────────────╯\n", message: "corners ╭ ╰ ╮ ╯ ─ │\nsecond", want: true},
 		{name: "partial message", pane: "╭ composer ─╮\n│ first │\n╰────────────╯\n", message: "first\nsecond"},
-		{name: "ambiguous soft wrap remains rejected", pane: "╭ composer ─╮\n│ first │\n│ second │\n╰────────────╯\n   \r\n\t\r\n", message: "firstsecond"},
-		{name: "ambiguous extra visual row remains rejected", pane: "╭ composer ─╮\n│ first │\n│ │\n│ second │\n╰────────────╯\n   \r\n\t\r\n", message: "first\nsecond"},
-		{name: "clipped viewport tail remains rejected", pane: "╭ composer ─╮\n│ second │\n│ third │\n╰────────────╯\n   \r\n\t\r\n", message: "first\nsecond\nthird"},
+		{name: "ambiguous soft wrap remains rejected", pane: "╭ composer ─╮\n│ first │\n│ second │\n╰────────────╯\n", message: "firstsecond"},
+		{name: "ambiguous extra visual row remains rejected", pane: "╭ composer ─╮\n│ first │\n│ │\n│ second │\n╰────────────╯\n", message: "first\nsecond"},
+		{name: "clipped viewport tail remains rejected", pane: "╭ composer ─╮\n│ second │\n│ third │\n╰────────────╯\n", message: "first\nsecond\nthird"},
 		{name: "residual prefix plus complete message", pane: "╭ composer ─╮\n│ first │\n│ first │\n│ second │\n╰────────────╯\n", message: "first\nsecond"},
 		{name: "deleted blank line", pane: "╭ composer ─╮\n│ first │\n│ second │\n╰────────────╯\n", message: "first\n\nsecond"},
 		{name: "collapsed repeated spaces", pane: "╭ composer ─╮\n│ first item │\n│ second │\n╰────────────╯\n", message: "first  item\nsecond"},
@@ -2567,7 +2567,7 @@ func TestTextComposerEqualsMultilineMessage(t *testing.T) {
 		{name: "lost literal box character", pane: "╭ composer ─╮\n│ first marker │\n│ second │\n╰────────────╯\n", message: "first │ marker\nsecond"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			got, available := textComposerEqualsMessage(test.pane, test.message)
+			got, available := textComposerEqualsMessage(strings.TrimSuffix(test.pane, "\n"), test.message)
 			if got != test.want || !available {
 				t.Fatalf("composer match = (%t, %t), want (%t, true)", got, available, test.want)
 			}
@@ -2576,9 +2576,190 @@ func TestTextComposerEqualsMultilineMessage(t *testing.T) {
 }
 
 func TestBottomComposerFrameRowsRejectsContentBelowFrame(t *testing.T) {
-	contents := "╭ composer ─╮\n│ first │\n╰────────────╯\nstatus\n"
-	if _, available := bottomComposerFrameRows(contents); available {
-		t.Fatal("composer frame above non-whitespace terminal content was accepted")
+	for name, contents := range map[string]string{
+		"empty row":        "╭ composer ─╮\n│ first │\n╰────────────╯\n",
+		"spaces row":       "╭ composer ─╮\n│ first │\n╰────────────╯\n   ",
+		"CRLF empty row":   "╭ composer ─╮\r\n│ first │\r\n╰────────────╯\r\n",
+		"nonempty content": "╭ composer ─╮\n│ first │\n╰────────────╯\nstatus",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, available := bottomComposerFrameRows(contents); available {
+				t.Fatal("composer frame above another terminal row was accepted")
+			}
+		})
+	}
+}
+
+func TestBottomComposerFrameRowsAcceptsNestedLayoutFrame(t *testing.T) {
+	contents := strings.Join([]string{
+		"                                   │╭───────────────────────── xxxxx ─ xxxxxx ─╮",
+		"                                   ││                                          │",
+		"                                   ││                                          │",
+		"                                   ││                                          │",
+		"                                   │╰────────────────── ◷ ─ xx xxx xxx xxxxxx ─╯",
+	}, "\n")
+	for index, line := range strings.Split(contents, "\n") {
+		if width := len([]rune(line)); width != 80 {
+			t.Fatalf("sanitized fixture row %d width = %d, want 80", index+20, width)
+		}
+	}
+	rows, available := bottomComposerFrameRows(contents)
+	if !available || len(rows) != 3 {
+		t.Fatalf("nested composer rows = %q, available=%t, want three available rows", rows, available)
+	}
+	for _, row := range rows {
+		if row != "│                                          │" {
+			t.Fatalf("nested composer row = %q", row)
+		}
+	}
+}
+
+func TestTextComposerEqualsNestedLiteralFrameContent(t *testing.T) {
+	contents := "     │╭────────╮\n     ││╭──────╮│\n     │╰────────╯"
+	matched, available := textComposerEqualsMessage(contents, "╭──────╮")
+	if !matched || !available {
+		t.Fatalf("nested literal frame match = (%t, %t), want (true, true)", matched, available)
+	}
+}
+
+func TestTextComposerEqualsNestedMultilineContentExactly(t *testing.T) {
+	row := func(content string) string {
+		return "     ││ " + content + strings.Repeat(" ", 21-len([]rune(content))) + "│"
+	}
+	contents := strings.Join([]string{
+		"     │╭──────────────────────╮",
+		row("first  item"),
+		row(""),
+		row("corners ╭ ╰ ╮ ╯ ─ │"),
+		"     │╰──────────────────────╯",
+	}, "\n")
+	message := "first  item\n\ncorners ╭ ╰ ╮ ╯ ─ │"
+	matched, available := textComposerEqualsMessage(contents, message)
+	if !matched || !available {
+		t.Fatalf("nested multiline match = (%t, %t), want (true, true)", matched, available)
+	}
+	if changed, _ := textComposerEqualsMessage(contents, strings.Replace(message, "first  item", "first item", 1)); changed {
+		t.Fatal("nested multiline composer accepted collapsed repeated spaces")
+	}
+}
+
+func TestBottomComposerFrameRowsRejectsMalformedNestedLayout(t *testing.T) {
+	valid := []string{
+		"     │╭────────╮",
+		"     ││        │",
+		"     ││        │",
+		"     │╰────────╯",
+	}
+	for _, test := range []struct {
+		name  string
+		lines []string
+	}{
+		{name: "column drift", lines: []string{valid[0], "    ││        │", valid[2], valid[3]}},
+		{name: "missing outer border", lines: []string{valid[0], "      │        │", valid[2], valid[3]}},
+		{name: "extra outer border", lines: []string{valid[0], "     │││        │", valid[2], valid[3]}},
+		{name: "top column drift", lines: []string{"    │╭────────╮", valid[1], valid[2], valid[3]}},
+		{name: "top missing outer border", lines: []string{"      ╭────────╮", valid[1], valid[2], valid[3]}},
+		{name: "top extra outer border", lines: []string{"     ││╭────────╮", valid[1], valid[2], valid[3]}},
+		{name: "semantic prefix", lines: []string{"state│╭────────╮", "state││        │", "state││        │", "state│╰────────╯"}},
+		{name: "mismatched width", lines: []string{valid[0], "     ││       │", valid[2], valid[3]}},
+		{name: "decoy nested frame", lines: []string{"     ││╭──────╮", "     │││      │", "     ││╰──────╯"}},
+		{name: "clipped row", lines: []string{valid[0], "     ││        │", "     ││", valid[3]}},
+		{name: "top right suffix", lines: []string{valid[0] + " x", valid[1], valid[2], valid[3]}},
+		{name: "body right suffix", lines: []string{valid[0], valid[1] + " x", valid[2], valid[3]}},
+		{name: "bottom right suffix", lines: []string{valid[0], valid[1], valid[2], valid[3] + " x"}},
+		{name: "content below", lines: append(append([]string{}, valid...), "status")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if rows, available := bottomComposerFrameRows(strings.Join(test.lines, "\n")); available {
+				t.Fatalf("malformed nested frame accepted with rows %q", rows)
+			}
+		})
+	}
+}
+
+func TestSubmitInitialMultilineMessageUsesNestedLayoutFrame(t *testing.T) {
+	bin := t.TempDir()
+	beforeInput := filepath.Join(bin, "before-input")
+	prematurePaste := filepath.Join(bin, "premature-paste")
+	pasted := filepath.Join(bin, "pasted")
+	exactSeen := filepath.Join(bin, "exact-seen")
+	beforeEnter := filepath.Join(bin, "before-enter")
+	entered := filepath.Join(bin, "entered")
+	prematureEnter := filepath.Join(bin, "premature-enter")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = load-buffer ]; then cat >/dev/null; exit 0; fi
+if [ "$1" = paste-buffer ]; then if [ ! -e "`+beforeInput+`" ]; then touch "`+prematurePaste+`"; fi; touch "`+pasted+`"; exit 0; fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then
+  if [ ! -e "`+exactSeen+`" ] || [ ! -e "`+beforeEnter+`" ]; then touch "`+prematureEnter+`"; fi
+  touch "`+entered+`"; exit 0
+fi
+if [ "$1" = capture-pane ]; then
+  if [ -e "`+entered+`" ]; then printf ' ┃ first\n ┃ second\n     │╭────────────╮\n     ││            │\n     ││            │\n     │╰────────────╯\n'; exit 0; fi
+  if [ -e "`+pasted+`" ]; then touch "`+exactSeen+`"; printf '     │╭────────────╮\n     ││ first      │\n     ││ second     │\n     │╰────────────╯\n'; exit 0; fi
+  printf '     │╭────────────╮\n     ││            │\n     ││            │\n     │╰────────────╯\n'
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	got, err := submitInitialMessageGuarded(tmux.Runner{}, "%1", "first\r\nsecond", initialMessageSubmissionGuard{
+		beforeInput: func() error {
+			return os.WriteFile(beforeInput, nil, 0o600)
+		},
+		beforeEnter: func() error {
+			if _, err := os.Stat(exactSeen); err != nil {
+				return errors.New("exact nested composer was not observed")
+			}
+			return os.WriteFile(beforeEnter, nil, 0o600)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.status != config.OperationSubmissionTransitioned {
+		t.Fatalf("submission status = %q, want %q", got.status, config.OperationSubmissionTransitioned)
+	}
+	if _, statErr := os.Stat(entered); statErr != nil {
+		t.Fatalf("Enter was not attempted after exact nested composer visibility: %v", statErr)
+	}
+	if _, statErr := os.Stat(prematureEnter); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Enter was attempted before exact nested composer visibility: %v", statErr)
+	}
+	if _, statErr := os.Stat(prematurePaste); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("paste was attempted before the guarded nested composer mutation: %v", statErr)
+	}
+}
+
+func TestSubmitInitialMultilineMessageRejectsAlteredNestedLayoutContent(t *testing.T) {
+	bin := t.TempDir()
+	pasted := filepath.Join(bin, "pasted")
+	entered := filepath.Join(bin, "entered")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+if [ "$1" = load-buffer ]; then cat >/dev/null; exit 0; fi
+if [ "$1" = paste-buffer ]; then touch "`+pasted+`"; exit 0; fi
+if [ "$1" = send-keys ] && [ "$4" = Enter ]; then touch "`+entered+`"; exit 0; fi
+if [ "$1" = send-keys ] && [ "$4" = C-u ]; then exit 0; fi
+if [ "$1" = capture-pane ]; then
+  if [ -e "`+pasted+`" ]; then printf '     │╭────────────╮\n     ││ first      │\n     ││ changed    │\n     │╰────────────╯\n';
+  else printf '     │╭────────────╮\n     ││            │\n     ││            │\n     │╰────────────╯\n'; fi
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMP_TMUX_SPAWN_DELAY", "0")
+
+	got, err := submitInitialMessage(tmux.Runner{}, "%1", "first\nsecond")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.status != config.OperationSubmissionInputNotVisible {
+		t.Fatalf("submission status = %q, want %q", got.status, config.OperationSubmissionInputNotVisible)
+	}
+	if _, statErr := os.Stat(entered); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Enter was attempted for altered nested composer content: %v", statErr)
 	}
 }
 
@@ -2768,17 +2949,17 @@ if [ "$1" = send-keys ] && [ "$4" = Enter ]; then
   touch "`+entered+`"; exit 0
 fi
 if [ "$1" = capture-pane ]; then
-  if [ -e "`+entered+`" ]; then printf ' ┃ corners repeated spaces\n ┃ absolute /synthetic/contract-v1.md\n╭──────────────── medium ─╮\n│                         │\n╰──────── synthetic/main ─╯\n   \n'; exit 0; fi
+  if [ -e "`+entered+`" ]; then printf ' ┃ corners repeated spaces\n ┃ absolute /synthetic/contract-v1.md\n╭──────────────── medium ─╮\n│                         │\n╰──────── synthetic/main ─╯\n'; exit 0; fi
   if [ -e "`+pasted+`" ]; then
     if cmp -s "`+buffer+`" "`+wantBuffer+`"; then
       touch "`+exactSeen+`"
-      printf '╭──────────────── medium ─╮\n│ corners ╭ ╰ ╮ ╯ ─ │  repeated  spaces │\n│ │\n│ absolute /synthetic/contract-v1.md │\n╰──────── synthetic/main ─╯\n   \n'
+      printf '╭──────────────── medium ─╮\n│ corners ╭ ╰ ╮ ╯ ─ │  repeated  spaces │\n│ │\n│ absolute /synthetic/contract-v1.md │\n╰──────── synthetic/main ─╯\n'
     else
       printf '╭──────────────── medium ─╮\n│ CRLF rendered as different content │\n╰──────── synthetic/main ─╯\n'
     fi
     exit 0
   fi
-  printf '╭──────────────── medium ─╮\n│                         │\n╰ ∼ Connecting ───────── ◷ ─╯\n   \n'
+  printf '╭──────────────── medium ─╮\n│                         │\n╰ ∼ Connecting ───────── ◷ ─╯\n'
   exit 0
 fi
 exit 2

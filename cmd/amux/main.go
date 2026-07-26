@@ -2518,10 +2518,69 @@ func textComposerEqualsMessage(contents, message string) (bool, bool) {
 }
 
 func bottomComposerFrameRows(contents string) ([]string, bool) {
-	lines := strings.Split(strings.TrimRight(contents, " \t\r\n"), "\n")
+	lines := strings.Split(contents, "\n")
 	if len(lines) < 2 {
 		return nil, false
 	}
+	if rows, nested := bottomNestedComposerFrameRows(lines); nested {
+		return rows, true
+	}
+	return bottomOrdinaryComposerFrameRows(lines)
+}
+
+func bottomNestedComposerFrameRows(lines []string) ([]string, bool) {
+	end := len(lines) - 1
+	prefix, bottom, ok := nestedComposerBottom(lines[end])
+	if !ok {
+		return nil, false
+	}
+	frameWidth := len([]rune(bottom))
+	for start := end - 1; start >= 0; start-- {
+		_, ok := nestedComposerSegment(lines[start], prefix, "╭", "╮", frameWidth)
+		if !ok {
+			continue
+		}
+		rows := make([]string, 0, end-start-1)
+		for _, line := range lines[start+1 : end] {
+			row, ok := nestedComposerSegment(line, prefix, "│", "│", frameWidth)
+			if !ok {
+				return nil, false
+			}
+			rows = append(rows, row)
+		}
+		return rows, true
+	}
+	return nil, false
+}
+
+func nestedComposerBottom(line string) (string, string, bool) {
+	line = strings.TrimSuffix(line, "\r")
+	indent := line[:len(line)-len(strings.TrimLeft(line, " "))]
+	remainder := strings.TrimPrefix(line, indent)
+	if !strings.HasPrefix(remainder, "│╰") {
+		return "", "", false
+	}
+	prefix := indent + "│"
+	remainder = strings.TrimPrefix(remainder, "│")
+	if !strings.HasPrefix(remainder, "╰") || !strings.HasSuffix(remainder, "╯") {
+		return "", "", false
+	}
+	return prefix, remainder, true
+}
+
+func nestedComposerSegment(line, prefix, left, right string, width int) (string, bool) {
+	line = strings.TrimSuffix(line, "\r")
+	if !strings.HasPrefix(line, prefix) {
+		return "", false
+	}
+	segment := strings.TrimPrefix(line, prefix)
+	if !strings.HasPrefix(segment, left) || !strings.HasSuffix(segment, right) || len([]rune(segment)) != width {
+		return "", false
+	}
+	return segment, true
+}
+
+func bottomOrdinaryComposerFrameRows(lines []string) ([]string, bool) {
 	end := len(lines) - 1
 	bottom := strings.TrimSpace(lines[end])
 	if !strings.HasPrefix(bottom, "╰") || !strings.HasSuffix(bottom, "╯") {
