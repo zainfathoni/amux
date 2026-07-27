@@ -166,6 +166,8 @@ Create the thread and deliver its initial assignment with Amp's native thread cr
 amux worker adopt --thread <thread> --workspace <workspace> --window <window> --workdir <workdir>
 ```
 
+Native creation owns execution placement; adoption owns only local catalog, group, workdir, and tmux state. Adoption never re-homes the thread or proves where future turns run. New adoption canonicalizes its owner-supplied workdir before storing or launching it. `worker doctor` reports preserved catalog spelling unchanged, so a legacy relative value is not a canonical or physical-location claim. Adoption and doctor report native executor, runner ID, and execution affinity as `unknown` rather than inferring them from the local pane. Create directly on the exact executor/workdir required for future work, and name an exact physical runner ID and owner-supplied canonical workdir whenever physical state matters. Orb-create → physical-adopt is not migration.
+
 The tombstones do not read message files or stdin, resolve or migrate configuration, acquire the mutation lock, invoke Amp/tmux, or write operations. Preserved legacy spawn operation records remain immutable diagnostic evidence and are never retried or reconciled.
 
 ```sh
@@ -236,7 +238,9 @@ Identical replay is a benign durable-state skip that may retry notification; con
 
 ### Coordinator workflow
 
-The bundled `/amux` skill provides the coordinator procedure. Worker assignments stay task-only and include the absolute path to the loaded skill's `reference/contract-v1.md` for a one-time read. In summary: inspect native dependencies and active PR/branch/worktree/API overlap; fetch and create dedicated worktrees from fresh `origin/main`; use semantic issue-unprefixed windows and explicit `medium` mode unless overridden; declare the group and register the exact verified coordinator pane; then create the thread natively and adopt its exact returned identity with `--group`.
+The bundled `/amux` skill provides the coordinator procedure. Worker assignments stay task-only and include the absolute path to the loaded skill's `reference/contract-v1.md` for a one-time read. In summary: inspect native dependencies and active PR/branch/worktree/API overlap; fetch and create dedicated worktrees from fresh `origin/main`; use semantic issue-unprefixed windows and explicit `medium` mode unless overridden; declare the group and register the exact verified coordinator pane; then create the thread directly on its required executor/workdir and adopt its exact returned identity with `--group`.
+
+Every durable task-group Lead thread title begins with `🎖️ `; reserve that prefix for Leads and never deliberately apply it to member workers. After coordination preflight, set the Lead title explicitly with `amp threads rename <lead-thread> "🎖️ <task-title>"`. On rename failure, preserve the exact native identity and caller-side receipt, create no replacement, and stop before group/adoption mutations. This is presentation only and is independent of executor identity: it implies neither placement nor authoritative group role.
 
 Workers use one stable report ID for `blocked`, `ready`, and terminal `merged`. `ready` means implementation, tests, one review, PR, and normal CI are complete. A callback token only wakes the coordinator. The coordinator acknowledges receipt separately, independently verifies PR URL/head/scope/mergeability/closing issue, worktree and CI, merges only with separate authority, verifies post-merge CI (and Pages when triggered), and records durable finish authorization. The child then submits `merged` with the same binding/payload and runs `/amux finish` only when explicitly directed; worktree/Git safety comes first and `amux teardown` is last. Group/report history survives finish.
 

@@ -300,6 +300,38 @@ func TestInvocationPolicyIsProgressivelyDisclosedWithoutChangingClaudeRoutes(t *
 	}
 }
 
+func TestNativeAdoptionDoesNotClaimExecutorMigration(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	adr := readSkillFile(t, root, filepath.Join("docs", "adr", "0003-native-thread-creation-and-explicit-adoption.md"))
+	readme := readSkillFile(t, root, "README.md")
+	for path, check := range map[string]struct {
+		contents string
+		required []string
+	}{
+		"workflow": {workflow, []string{"Orb creation followed by physical adoption as migration", "Adoption neither changes nor verifies continued affinity", "owner-supplied workdir", "preserves legacy catalog spelling", "execution affinity as `unknown`"}},
+		"ADR 0003": {adr, []string{"Adoption does not re-home, migrate, or retarget", "does not verify continued affinity", "admission-canonicalized workdir", "authoritative catalog spelling unchanged", "execution affinity as `unknown`"}},
+		"README":   {readme, []string{"Adoption never re-homes the thread or proves where future turns run", "legacy relative value is not a canonical or physical-location claim", "owner-supplied canonical workdir", "execution affinity as `unknown`"}},
+	} {
+		for _, required := range check.required {
+			if !strings.Contains(check.contents, required) {
+				t.Errorf("%s is missing explicit native-affinity boundary %q", path, required)
+			}
+		}
+	}
+}
+
+func TestDurableTaskGroupLeadTitleGuidanceIsPresent(t *testing.T) {
+	t.Parallel()
+	workflow := readSkillFile(t, repoRoot(t), filepath.Join("skills", "amux", "reference", "workflows.md"))
+	for _, required := range []string{"Every durable task-group Lead title starts with `🎖️ `", "never deliberately apply it to member workers", "presentation only", "neither executor placement nor authoritative group role", "amp threads rename", "create no replacement", "stop before group or adoption mutations"} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("durable task-group Lead title guidance is missing %q", required)
+		}
+	}
+}
+
 func TestReadThreadDiscrepancyRecoveryContractStaysAligned(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
