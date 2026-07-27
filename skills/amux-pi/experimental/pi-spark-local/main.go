@@ -44,6 +44,7 @@ var fixedArgs = []string{
 var (
 	extraProcessEnvironment func() []string
 	postApplyCheck          = requireExactDiff
+	signalProcessGroup      = func(pgid int) error { return syscall.Kill(-pgid, syscall.SIGKILL) }
 )
 
 type options struct {
@@ -473,6 +474,7 @@ func execute(o options, argv []string, prompt []byte, agentDir string) ([]byte, 
 	guardian := exec.Command("/bin/cat")
 	guardian.Dir = privateDir
 	guardian.Stdin = guardianInput
+	guardian.Env = []string{"LANG=C", "LC_ALL=C"}
 	guardian.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := guardian.Start(); err != nil {
 		guardianInput.Close()
@@ -502,14 +504,18 @@ func execute(o options, argv []string, prompt []byte, agentDir string) ([]byte, 
 	}
 	stdoutPipe, stdoutChild, err := os.Pipe()
 	if err != nil {
-		terminateGuardian(guardian, guardianHold)
+		if cleanupErr := terminateGuardian(guardian, guardianHold); cleanupErr != nil {
+			return nil, nil, cleanupErr
+		}
 		return nil, nil, errors.New("Pi stdout cannot be captured")
 	}
 	stderrPipe, stderrChild, err := os.Pipe()
 	if err != nil {
 		stdoutPipe.Close()
 		stdoutChild.Close()
-		terminateGuardian(guardian, guardianHold)
+		if cleanupErr := terminateGuardian(guardian, guardianHold); cleanupErr != nil {
+			return nil, nil, cleanupErr
+		}
 		return nil, nil, errors.New("Pi stderr cannot be captured")
 	}
 	cmd.Stdout = stdoutChild
@@ -520,7 +526,9 @@ func execute(o options, argv []string, prompt []byte, agentDir string) ([]byte, 
 		stdoutChild.Close()
 		stderrPipe.Close()
 		stderrChild.Close()
-		terminateGuardian(guardian, guardianHold)
+		if cleanupErr := terminateGuardian(guardian, guardianHold); cleanupErr != nil {
+			return nil, nil, cleanupErr
+		}
 		return nil, nil, errors.New("Pi failed to start")
 	}
 	stdoutChild.Close()
@@ -561,23 +569,35 @@ func execute(o options, argv []string, prompt []byte, agentDir string) ([]byte, 
 cleanup:
 	// The guardian remains live and unreaped, so it owns and reserves the PGID
 	// while every terminal path removes Pi and any descendants from that group.
-	killErr := syscall.Kill(-guardianPID, syscall.SIGKILL)
+	groupErr := signalProcessGroup(guardianPID)
+	groupCovered := groupErr == nil
+	if groupErr != nil {
+		if !waitCollected {
+			_ = cmd.Process.Kill()
+		}
+		_ = guardian.Process.Kill()
+		groupCovered = signalProcessGroup(guardianPID) == nil
+	}
+	// All group operations are complete. Closing this also lets the inert
+	// guardian exit if its exact kill failed; do not touch the PGID afterward.
 	guardianHold.Close()
-	var cleanupStreamErr error
+	streamsCollected := len(streamErrors) == 2
+	var graceTimer *time.Timer
 	if len(streamErrors) < 2 {
 		cleanupTimer := time.NewTimer(2 * time.Second)
-		cleanupTimerC := cleanupTimer.C
 		for len(streamErrors) < 2 {
 			select {
 			case streamErr := <-streamDone:
 				streamErrors = append(streamErrors, streamErr)
-			case <-cleanupTimerC:
+			case waitErr = <-waitDone:
+				waitCollected = true
+			case <-cleanupTimer.C:
 				_ = stdoutPipe.Close()
 				_ = stderrPipe.Close()
-				cleanupStreamErr = errors.New("Pi process streams did not close after group termination")
-				cleanupTimerC = nil
+				goto streamGrace
 			}
 		}
+		streamsCollected = true
 		if !cleanupTimer.Stop() {
 			select {
 			case <-cleanupTimer.C:
@@ -585,25 +605,75 @@ cleanup:
 			}
 		}
 	}
-	if !waitCollected {
-		waitErr = <-waitDone
-		waitCollected = true
+	goto streamsDone
+
+streamGrace:
+	graceTimer = time.NewTimer(250 * time.Millisecond)
+	for len(streamErrors) < 2 {
+		select {
+		case streamErr := <-streamDone:
+			streamErrors = append(streamErrors, streamErr)
+		case waitErr = <-waitDone:
+			waitCollected = true
+		case <-graceTimer.C:
+			goto streamsDone
+		}
 	}
-	guardianErr := guardian.Wait()
-	if killErr != nil {
+	streamsCollected = true
+	if !graceTimer.Stop() {
+		select {
+		case <-graceTimer.C:
+		default:
+		}
+	}
+
+streamsDone:
+	if !waitCollected {
+		waitTimer := time.NewTimer(2 * time.Second)
+		select {
+		case waitErr = <-waitDone:
+			waitCollected = true
+		case <-waitTimer.C:
+		}
+		if !waitTimer.Stop() {
+			select {
+			case <-waitTimer.C:
+			default:
+			}
+		}
+	}
+	guardianDone := make(chan error, 1)
+	go func() { guardianDone <- guardian.Wait() }()
+	guardianCollected := false
+	guardianTimer := time.NewTimer(2 * time.Second)
+	select {
+	case <-guardianDone:
+		guardianCollected = true
+	case <-guardianTimer.C:
+	}
+	if !guardianTimer.Stop() {
+		select {
+		case <-guardianTimer.C:
+		default:
+		}
+	}
+	if !groupCovered {
 		return nil, nil, errors.New("Pi process-group termination could not be verified")
 	}
-	if !killedBySignal(guardianErr, syscall.SIGKILL) {
+	if !waitCollected {
+		return nil, nil, errors.New("Pi termination and reaping could not be verified")
+	}
+	if !guardianCollected {
 		return nil, nil, errors.New("process-group guardian termination could not be verified")
+	}
+	if !streamsCollected {
+		return nil, nil, errors.New("Pi process streams did not close after group termination")
 	}
 	if stdout.overflow || stderr.overflow {
 		return nil, nil, errors.New("Pi output exceeded its configured bound")
 	}
 	if timedOut {
 		return nil, nil, fmt.Errorf("Pi timed out after %s", o.timeout)
-	}
-	if cleanupStreamErr != nil {
-		return nil, nil, cleanupStreamErr
 	}
 	for _, streamErr := range streamErrors {
 		if streamErr != nil {
@@ -623,19 +693,29 @@ cleanup:
 	return stdout.b.Bytes(), stderr.b.Bytes(), nil
 }
 
-func terminateGuardian(guardian *exec.Cmd, hold *os.File) {
-	_ = syscall.Kill(-guardian.Process.Pid, syscall.SIGKILL)
-	_ = hold.Close()
-	_ = guardian.Wait()
-}
-
-func killedBySignal(err error, signal syscall.Signal) bool {
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		return false
+func terminateGuardian(guardian *exec.Cmd, hold *os.File) error {
+	groupCovered := signalProcessGroup(guardian.Process.Pid) == nil
+	if !groupCovered {
+		_ = guardian.Process.Kill()
+		groupCovered = signalProcessGroup(guardian.Process.Pid) == nil
 	}
-	status, ok := exitErr.Sys().(syscall.WaitStatus)
-	return ok && status.Signaled() && status.Signal() == signal
+	_ = hold.Close()
+	done := make(chan struct{}, 1)
+	go func() {
+		_ = guardian.Wait()
+		done <- struct{}{}
+	}()
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		return errors.New("process-group guardian termination could not be verified")
+	}
+	if !groupCovered {
+		return errors.New("Pi process-group termination could not be verified")
+	}
+	return nil
 }
 
 func parseReplacement(data []byte) (replacement, error) {

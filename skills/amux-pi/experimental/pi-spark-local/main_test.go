@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -389,12 +390,139 @@ func TestBoundsOutputAndTimeoutAndTerminatesProcessGroup(t *testing.T) {
 func requirePIDGone(t *testing.T, pid int) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
-	for syscall.Kill(pid, 0) == nil && time.Now().Before(deadline) {
+	for processIsLive(pid) && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if err := syscall.Kill(pid, 0); err == nil {
+	if processIsLive(pid) {
 		t.Fatalf("descendant %d survived anchored process-group termination", pid)
 	}
+}
+
+func processIsLive(pid int) bool {
+	if syscall.Kill(pid, 0) != nil {
+		return false
+	}
+	if runtime.GOOS != "linux" {
+		return true
+	}
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return !errors.Is(err, os.ErrNotExist)
+	}
+	closingParen := bytes.LastIndexByte(stat, ')')
+	return closingParen < 0 || len(stat) <= closingParen+2 || stat[closingParen+2] != 'Z'
+}
+
+func TestRequirePIDGoneAcceptsLinuxZombie(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux /proc process-state regression")
+	}
+	cmd := exec.Command("/bin/true")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Wait() })
+	deadline := time.Now().Add(time.Second)
+	for processIsLive(cmd.Process.Pid) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if processIsLive(cmd.Process.Pid) {
+		t.Fatal("fixture process did not reach zombie state")
+	}
+	requirePIDGone(t, cmd.Process.Pid)
+}
+
+func TestGroupKillFailureUsesBoundedExactProcessFallback(t *testing.T) {
+	t.Run("first group kill fails", func(t *testing.T) {
+		f := newFixture(t)
+		childPIDFile := filepath.Join(f.root, "child.pid")
+		t.Setenv("FAKE_PI_MODE", "sleep")
+		t.Setenv("FAKE_PI_PID_FILE", childPIDFile)
+		originalSignal := signalProcessGroup
+		calls := 0
+		guardianPID := 0
+		signalProcessGroup = func(pgid int) error {
+			calls++
+			guardianPID = pgid
+			if calls == 1 {
+				return syscall.EPERM
+			}
+			return originalSignal(pgid)
+		}
+		t.Cleanup(func() { signalProcessGroup = originalSignal })
+		err := run(f.args("--task", "edit", "--timeout", "100ms"), &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "timed out") || calls != 2 {
+			t.Fatalf("err=%v group-kill calls=%d", err, calls)
+		}
+		childPID, parseErr := strconv.Atoi(strings.TrimSpace(string(mustRead(t, childPIDFile))))
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		requirePIDGone(t, childPID)
+		requirePIDGone(t, guardianPID)
+	})
+
+	t.Run("both group kills fail", func(t *testing.T) {
+		f := newFixture(t)
+		leaderPIDFile := filepath.Join(f.root, "leader.pid")
+		t.Setenv("FAKE_PI_MODE", "hang")
+		t.Setenv("FAKE_PI_LEADER_PID_FILE", leaderPIDFile)
+		originalSignal := signalProcessGroup
+		calls := 0
+		guardianPID := 0
+		signalProcessGroup = func(pgid int) error {
+			calls++
+			guardianPID = pgid
+			return syscall.EPERM
+		}
+		t.Cleanup(func() { signalProcessGroup = originalSignal })
+		started := time.Now()
+		err := run(f.args("--task", "edit", "--timeout", "100ms"), &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "process-group termination could not be verified") || calls != 2 {
+			t.Fatalf("err=%v group-kill calls=%d", err, calls)
+		}
+		if elapsed := time.Since(started); elapsed > 3*time.Second {
+			t.Fatalf("failed group-kill cleanup was not bounded: %s", elapsed)
+		}
+		leaderPID, parseErr := strconv.Atoi(strings.TrimSpace(string(mustRead(t, leaderPIDFile))))
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		requirePIDGone(t, leaderPID)
+		requirePIDGone(t, guardianPID)
+	})
+}
+
+func TestGuardianOnlyCleanupIsBoundedWhenGroupKillsFail(t *testing.T) {
+	input, hold, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	guardian := exec.Command("/bin/cat")
+	guardian.Stdin = input
+	guardian.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := guardian.Start(); err != nil {
+		hold.Close()
+		t.Fatal(err)
+	}
+	guardianPID := guardian.Process.Pid
+	originalSignal := signalProcessGroup
+	calls := 0
+	signalProcessGroup = func(int) error {
+		calls++
+		return syscall.EPERM
+	}
+	t.Cleanup(func() { signalProcessGroup = originalSignal })
+	started := time.Now()
+	err = terminateGuardian(guardian, hold)
+	if err == nil || !strings.Contains(err.Error(), "process-group termination could not be verified") || calls != 2 {
+		t.Fatalf("err=%v group-kill calls=%d", err, calls)
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("guardian-only cleanup was not bounded: %s", elapsed)
+	}
+	requirePIDGone(t, guardianPID)
 }
 
 func TestRejectsPiWorktreeMutationAndOutOfScopeDiff(t *testing.T) {
@@ -804,6 +932,7 @@ case "${FAKE_PI_MODE:-success}" in
   sleep) sleep 60 & child=$!; printf '%s\n' "$child" >"$FAKE_PI_PID_FILE"; wait "$child" ;;
   close-hang) exec 1>&- 2>&-; sleep 60 ;;
   overflow-close-hang) printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; exec 1>&- 2>&-; sleep 60 ;;
+  hang) exec sleep 60 ;;
   normal-descendant) sleep 60 >/dev/null 2>&1 & child=$!; printf '%s\n' "$child" >"$FAKE_PI_PID_FILE"; printf '%s' "$FAKE_PI_OUTPUT" ;;
   signal) printf '%s' "$FAKE_PI_OUTPUT"; kill -TERM $$ ;;
   sigkill) printf '%s' "$FAKE_PI_OUTPUT"; kill -KILL $$ ;;
