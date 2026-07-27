@@ -208,13 +208,14 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			}
 		}
 	}
+	doctorWorkdirs := make(map[string]string, len(rows))
 	if in.Command.Name == "doctor" {
-		for i := range rows {
-			workdir, canonicalErr := config.CanonicalWorkdir(rows[i].Workdir)
+		for _, row := range rows {
+			workdir, canonicalErr := config.CanonicalWorkdir(row.Workdir)
 			if canonicalErr != nil {
 				return &env, result.Preflight(canonicalErr)
 			}
-			rows[i].Workdir = workdir
+			doctorWorkdirs[row.Thread] = workdir
 		}
 	}
 	if workerCommandNeedsTmux(in.Command.Name) {
@@ -380,7 +381,9 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			if doctorStatusErr == nil {
 				remote = string(doctorStatuses[canonicalThreadID(row.Thread)])
 			}
-			out.Worker = workerPlacementDetails(row, string(inspections[row.Thread].state))
+			reportedRow := row
+			reportedRow.Workdir = doctorWorkdirs[row.Thread]
+			out.Worker = workerPlacementDetails(reportedRow, string(inspections[row.Thread].state))
 			out.Message = fmt.Sprintf("local=%s remote=%s intent=%t native_executor=unknown native_runner_id=unknown execution_affinity=unknown", inspections[row.Thread].state, remote, shelved[row.Thread])
 			env.Successful = append(env.Successful, out)
 			continue

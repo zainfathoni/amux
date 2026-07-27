@@ -1043,10 +1043,9 @@ func TestThreadArchiveStatusesBoundsAmpThreadsListFailures(t *testing.T) {
 
 func TestScopedWorkerDoctorReusesOneThreadInventory(t *testing.T) {
 	dir := t.TempDir()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	nonCanonical := filepath.Join("relative", "..", "b")
 	rows := []config.Row{
-		{Workspace: "alpha", Window: "b", Workdir: "~/b", Thread: "T-b"},
+		{Workspace: "alpha", Window: "b", Workdir: nonCanonical, Thread: "T-b"},
 		{Workspace: "alpha", Window: "a", Workdir: "/tmp/a", Thread: "T-a"},
 		{Workspace: "beta", Window: "c", Workdir: "/tmp/c", Thread: "T-c"},
 	}
@@ -1068,8 +1067,12 @@ func TestScopedWorkerDoctorReusesOneThreadInventory(t *testing.T) {
 			t.Fatalf("worker doctor placement diagnostic = %+v", out)
 		}
 	}
-	if got.Successful[1].Worker.Workdir != filepath.Join(home, "b") {
-		t.Fatalf("worker doctor workdir = %q, want canonical path", got.Successful[1].Worker.Workdir)
+	wantWorkdir, err := config.CanonicalWorkdir(nonCanonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Successful[1].Worker.LocalState != "exact" || got.Successful[1].Worker.Workdir != wantWorkdir || !strings.Contains(got.Successful[1].Message, "local=exact") {
+		t.Fatalf("worker doctor preserved-spelling inspection = %+v, want canonical workdir %q", got.Successful[1], wantWorkdir)
 	}
 }
 

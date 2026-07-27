@@ -306,25 +306,28 @@ func TestNativeAdoptionDoesNotClaimExecutorMigration(t *testing.T) {
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
 	adr := readSkillFile(t, root, filepath.Join("docs", "adr", "0003-native-thread-creation-and-explicit-adoption.md"))
 	readme := readSkillFile(t, root, "README.md")
-	for path, contents := range map[string]string{
-		"workflow": workflow,
-		"ADR 0003": adr,
-		"README":   readme,
+	for path, check := range map[string]struct {
+		contents string
+		required []string
+	}{
+		"workflow": {workflow, []string{"Orb creation followed by physical adoption as migration", "Adoption neither changes nor verifies continued affinity", "exact physical runner ID", "execution affinity as `unknown`"}},
+		"ADR 0003": {adr, []string{"Adoption does not re-home, migrate, or retarget", "does not verify continued affinity", "Orb creation followed by physical adoption is never an execution-migration mechanism", "execution affinity as `unknown`"}},
+		"README":   {readme, []string{"Adoption never re-homes the thread or proves where future turns run", "Orb-create → physical-adopt is not migration", "execution affinity as `unknown`"}},
 	} {
-		for _, required := range []string{"adoption", "unknown", "physical", "workdir"} {
-			if !strings.Contains(contents, required) {
-				t.Errorf("%s is missing native-affinity boundary %q", path, required)
+		for _, required := range check.required {
+			if !strings.Contains(check.contents, required) {
+				t.Errorf("%s is missing explicit native-affinity boundary %q", path, required)
 			}
 		}
 	}
-	for _, required := range []string{"Orb-create → physical-adopt", "exact physical runner", "does not re-home", "execution affinity"} {
+}
+
+func TestDurableTaskGroupLeadTitleGuidanceIsPresent(t *testing.T) {
+	t.Parallel()
+	workflow := readSkillFile(t, repoRoot(t), filepath.Join("skills", "amux", "reference", "workflows.md"))
+	for _, required := range []string{"Every durable task-group Lead title starts with `🎖️ `", "never deliberately apply it to member workers", "presentation only", "neither executor placement nor authoritative group role", "amp threads rename", "create no replacement", "stop before group or adoption mutations"} {
 		if !strings.Contains(workflow, required) {
-			t.Errorf("native workflow is missing migration guard %q", required)
-		}
-	}
-	for _, required := range []string{"Every task Lead title starts with `🎖️ `", "member worker titles do not", "presentation only", "neither executor placement nor authoritative group role", "amp threads rename"} {
-		if !strings.Contains(workflow, required) {
-			t.Errorf("native workflow is missing Lead presentation rule %q", required)
+			t.Errorf("durable task-group Lead title guidance is missing %q", required)
 		}
 	}
 }

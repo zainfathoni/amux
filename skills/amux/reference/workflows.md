@@ -4,7 +4,7 @@ These are skill workflows. Only commands beginning with literal `amux` are CLI c
 
 ## Spawn a fresh worker
 
-Create one thread with Amp's authenticated native creation, delivering the complete task-only assignment in that creation request. Select `medium` unless the owner explicitly names another mode, and select `orb`, local execution where supported, or one exact Amp runner ID without fallback. Create it directly on the executor and workdir where future turns must run. When physical files or local state matter, the assignment names the exact physical runner ID and canonical workdir; do not use Orb creation followed by physical adoption as migration. Include one line naming the absolute path to the loaded skill's `reference/contract-v1.md` for a one-time read.
+Create one thread with Amp's authenticated native creation, delivering the complete task-only assignment in that creation request. Select `medium` unless the owner explicitly names another mode, and select `orb`, local execution where supported, or one exact Amp runner ID without fallback. Create it directly on the executor and workdir intended for the work. When physical files or local state matter, the assignment names the exact physical runner ID and canonical workdir; do not use Orb creation followed by physical adoption as migration. Adoption neither changes nor verifies continued affinity. Include one line naming the absolute path to the loaded skill's `reference/contract-v1.md` for a one-time read.
 
 Then adopt the exact returned thread:
 
@@ -29,13 +29,13 @@ Use an issue-bearing branch/worktree and an issue-unprefixed semantic window. Cr
 
 Durable group, report, and callback stores—not tmux text—are authoritative.
 
-Every task Lead title starts with `🎖️ ` and member worker titles do not. The task Lead is the exact thread coordinating this task, independent of the group's authoritative coordinator role. The marker is presentation only: it conveys neither executor placement nor authoritative group role. Apply this convention independently of executor choice.
+Every durable task-group Lead title starts with `🎖️ `. Reserve that prefix for Leads and never deliberately apply it to member workers. The task Lead is the exact thread coordinating this task, independent of the group's authoritative coordinator role. The marker is presentation only: it conveys neither executor placement nor authoritative group role. Apply this convention independently of executor choice.
 
 ### 1. Preflight authoritative state and bootstrap the CLI
 
 Fetch `origin/main`; read issue bodies/comments and native parent/sub-issue/blocked-by/blocking relationships; compare active branches, PRs, worktrees, and likely file/API overlap. Establish one exact durable group and stable report ID before mutation. Resolve the loaded skill's `reference/contract-v1.md` to an absolute path (including installed roots such as `~/.agents/skills/amux`, `~/.config/agents/skills/amux`, or `~/.config/amp/skills/amux`); never send an unresolved relative path. Verify current help contains `group`, `callback`, `report`, and `worker adopt`; if not, build one absolute CLI path from a fresh `origin/main` archive and use it consistently—do not fall back to stale bare `amux`. Do not hand-edit registries. Treat the resolved group/report identity as immutable coordination input. No thread, worktree, group, callback, label, or report mutation may precede this step. Create branches/worktrees only after identity is fixed, and serialize mutations protected by the machine lock.
 
-After this preflight succeeds, set the exact task Lead title with `amp threads rename <lead-thread> "🎖️ <task-title>"`; do not rely on a generated title, and stop if the rename fails.
+After this preflight succeeds, set the exact durable task-group Lead title with `amp threads rename <lead-thread> "🎖️ <task-title>"`; do not rely on a generated title. If rename fails, preserve the exact native thread identity and caller-side receipt, create no replacement, and stop before group or adoption mutations.
 
 ### 2. Declare the group and register the verified coordinator lease
 
@@ -48,7 +48,7 @@ Independently verify the coordinator pane and returned lease identity. A restart
 
 ### 3. Native-create and adopt the authoritative thread
 
-Create a dedicated worktree from fresh `origin/main`. Native-create one thread on the executor/workdir where all future turns must run, with the task-only assignment naming any required physical runner ID and canonical workdir, explicit mode, exact group/report binding, and the absolute path to `reference/contract-v1.md`. Then adopt the exact returned identity. For dirty physical-worktree recovery, create on that exact physical runner or make a separate explicit handoff that preserves immutable physical-worker ownership; never imply that Orb-create → physical-adopt migrates execution.
+Create a dedicated worktree from fresh `origin/main`. Native-create one thread on the executor/workdir intended for the work, with the task-only assignment naming any required physical runner ID and canonical workdir, explicit mode, exact group/report binding, and the absolute path to `reference/contract-v1.md`. Then adopt the exact returned identity; adoption neither changes nor verifies continued affinity. For dirty physical-worktree recovery, create on that exact physical runner or make a separate explicit handoff that preserves immutable physical-worker ownership; never imply that Orb-create → physical-adopt migrates execution.
 
 ```sh
 amux --dry-run --json worker adopt --thread <member-thread> --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --group <durable-issue-group>
