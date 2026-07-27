@@ -25,6 +25,8 @@ const (
 	packageVersion = "0.80.10"
 	model          = "openai-codex/gpt-5.3-codex-spark"
 	maxInputBytes  = 64 << 10
+	maxTaskBytes   = 16 << 10
+	maxPromptBytes = 256 << 10
 	gitPath        = "/usr/bin/git"
 )
 
@@ -35,7 +37,10 @@ var fixedArgs = []string{
 	"-p",
 }
 
-var extraProcessEnvironment func() []string
+var (
+	extraProcessEnvironment func() []string
+	postApplyCheck          = requireExactDiff
+)
 
 type options struct {
 	pi, piSHA256, node, nodeSHA256 string
@@ -73,7 +78,7 @@ type result struct {
 	Status                    string   `json:"status"`
 	Package                   string   `json:"package"`
 	Version                   string   `json:"version"`
-	Model                     string   `json:"model"`
+	RequestedModel            string   `json:"requested_model"`
 	Executable                string   `json:"executable"`
 	ExecutableSHA256          string   `json:"executable_sha256"`
 	Node                      string   `json:"node"`
@@ -120,6 +125,9 @@ func run(args []string, output io.Writer) error {
 	if !utf8.ValidString(o.task) {
 		return errors.New("task must be valid UTF-8")
 	}
+	if len([]byte(o.task)) > maxTaskBytes {
+		return fmt.Errorf("task exceeds %d-byte limit", maxTaskBytes)
+	}
 	if o.expectedReplacementSHA256 != "" {
 		decoded, err := hex.DecodeString(o.expectedReplacementSHA256)
 		if err != nil || len(decoded) != sha256.Size {
@@ -156,8 +164,8 @@ func run(args []string, output io.Writer) error {
 		return err
 	}
 
-	argv := append(append([]string{node, pi}, fixedArgs...), prompt)
-	stdout, stderr, err := execute(o, argv, agentDir)
+	argv := append([]string{node, pi}, fixedArgs...)
+	stdout, stderr, err := execute(o, argv, prompt, agentDir)
 	if err != nil {
 		return err
 	}
@@ -166,6 +174,9 @@ func run(args []string, output io.Writer) error {
 	}
 	if currentNode, currentDigest, err := admitExecutable(o.node, o.nodeSHA256, "Node"); err != nil || currentNode != node || currentDigest != nodeDigest {
 		return errors.New("Node executable identity changed during execution")
+	}
+	if currentAgentDir, err := admitAgentMetadata(); err != nil || currentAgentDir != agentDir {
+		return errors.New("Pi agent admission changed during execution")
 	}
 	parsed, err := parseReplacement(stdout)
 	if err != nil {
@@ -180,14 +191,21 @@ func run(args []string, output io.Writer) error {
 	if o.expectedReplacementSHA256 != "" && digest([]byte(parsed.Replacement)) != o.expectedReplacementSHA256 {
 		return errors.New("replacement does not match expected SHA-256")
 	}
+	replacementBytes := []byte(parsed.Replacement)
+	if bytes.Equal(replacementBytes, before) {
+		return errors.New("replacement is unchanged")
+	}
 	if err := requireUnchanged(workdir, target, before); err != nil {
 		return err
 	}
-	if err := replaceFile(target, []byte(parsed.Replacement)); err != nil {
+	if err := replaceFile(target, replacementBytes); err != nil {
 		return err
 	}
-	if err := requireExactDiff(workdir, relative); err != nil {
-		return err
+	if current, err := os.ReadFile(target); err != nil || !bytes.Equal(current, replacementBytes) {
+		return rollbackAfterApply(workdir, target, before, errors.New("replacement read-back verification failed"))
+	}
+	if err := postApplyCheck(workdir, relative); err != nil {
+		return rollbackAfterApply(workdir, target, before, fmt.Errorf("post-apply validation failed: %w", err))
 	}
 
 	stderrSummary := "empty"
@@ -198,13 +216,22 @@ func run(args []string, output io.Writer) error {
 	if o.expectedReplacementSHA256 != "" {
 		status = "replacement_applied_expected"
 	}
-	return json.NewEncoder(output).Encode(result{
+	receipt := result{
 		Status: status, Package: packageName, Version: packageVersion,
-		Model: model, Executable: pi, ExecutableSHA256: piDigest, Node: node, NodeSHA256: nodeDigest,
+		RequestedModel: model, Executable: pi, ExecutableSHA256: piDigest, Node: node, NodeSHA256: nodeDigest,
 		Argv:        append([]string{node, pi}, fixedArgs...),
 		ChangedPath: relative, StdoutBytes: len(stdout), StderrBytes: len(stderr), Stderr: stderrSummary,
 		ExpectedReplacementSHA256: o.expectedReplacementSHA256,
-	})
+	}
+	encodedReceipt, err := json.Marshal(receipt)
+	if err != nil {
+		return rollbackAfterApply(workdir, target, before, errors.New("receipt serialization failed"))
+	}
+	encodedReceipt = append(encodedReceipt, '\n')
+	if written, err := output.Write(encodedReceipt); err != nil || written != len(encodedReceipt) {
+		return rollbackAfterApply(workdir, target, before, errors.New("receipt output failed"))
+	}
+	return nil
 }
 
 func admitPi(argument, expectedDigest string) (string, string, error) {
@@ -293,7 +320,7 @@ func admitAgentMetadata() (string, error) {
 		settings.Compaction.Enabled == nil || *settings.Compaction.Enabled {
 		return "", errors.New("Pi settings do not disable agent retry, provider retry, and compaction")
 	}
-	for _, overlay := range []string{"models.json", "package.json"} {
+	for _, overlay := range []string{"models.json", "package.json", "models-store.json", "SYSTEM.md", "APPEND_SYSTEM.md"} {
 		if _, err := os.Lstat(filepath.Join(agentDir, overlay)); err == nil || !errors.Is(err, os.ErrNotExist) {
 			return "", fmt.Errorf("Pi agent %s is present or ambiguous", overlay)
 		}
@@ -315,6 +342,9 @@ func admitWorktree(argument, relative string) (string, string, string, []byte, e
 	root, err := git(workdir, "rev-parse", "--show-toplevel")
 	if err != nil || strings.TrimSpace(string(root)) != workdir {
 		return "", "", "", nil, errors.New("--workdir is not the canonical Git worktree root")
+	}
+	if err := requireVisibleIndex(workdir); err != nil {
+		return "", "", "", nil, err
 	}
 	status, err := git(workdir, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 	if err != nil || len(status) != 0 {
@@ -339,7 +369,7 @@ func admitWorktree(argument, relative string) (string, string, string, []byte, e
 	return workdir, filepath.ToSlash(relative), target, before, nil
 }
 
-func buildPrompt(task, path, originalDigest string, contents []byte) (string, error) {
+func buildPrompt(task, path, originalDigest string, contents []byte) ([]byte, error) {
 	packet := struct {
 		Task           string `json:"task"`
 		Path           string `json:"path"`
@@ -348,9 +378,13 @@ func buildPrompt(task, path, originalDigest string, contents []byte) (string, er
 	}{task, path, originalDigest, string(contents)}
 	encoded, err := json.Marshal(packet)
 	if err != nil {
-		return "", errors.New("task packet cannot be encoded")
+		return nil, errors.New("task packet cannot be encoded")
 	}
-	return "You are a bounded replacement generator. Do not use tools, sessions, files, network publishing, delegation, retries, or external context. Return only one JSON object with exactly these string fields: path, original_sha256, replacement. Preserve path and original_sha256 exactly; replacement is the complete new file. Task packet: " + string(encoded), nil
+	prompt := append([]byte("You are a bounded replacement generator. Do not use tools, sessions, files, network publishing, delegation, retries, or external context. Return only one JSON object with exactly these string fields: path, original_sha256, replacement. Preserve path and original_sha256 exactly; replacement is the complete new file. Task packet: "), encoded...)
+	if len(prompt) > maxPromptBytes {
+		return nil, fmt.Errorf("generated prompt exceeds %d-byte limit", maxPromptBytes)
+	}
+	return prompt, nil
 }
 
 type cappedWriter struct {
@@ -381,7 +415,7 @@ func (w *cappedWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func execute(o options, argv []string, agentDir string) ([]byte, []byte, error) {
+func execute(o options, argv []string, prompt []byte, agentDir string) ([]byte, []byte, error) {
 	ctx, timeoutCancel := context.WithTimeout(context.Background(), o.timeout)
 	defer timeoutCancel()
 	ctx, cancel := context.WithCancel(ctx)
@@ -395,6 +429,7 @@ func execute(o options, argv []string, agentDir string) ([]byte, []byte, error) 
 	defer os.RemoveAll(privateDir)
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = privateDir
+	cmd.Stdin = bytes.NewReader(prompt)
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, nil, errors.New("owner home is unavailable")
@@ -441,8 +476,11 @@ func execute(o options, argv []string, agentDir string) ([]byte, []byte, error) 
 	if stdout.overflow || stderr.overflow {
 		return nil, nil, errors.New("Pi output exceeded its configured bound")
 	}
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, exec.ErrWaitDelay) {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return nil, nil, fmt.Errorf("Pi timed out after %s", o.timeout)
+	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		return nil, nil, errors.New("Pi process streams did not close after termination")
 	}
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -520,6 +558,9 @@ func parseReplacement(data []byte) (replacement, error) {
 }
 
 func requireUnchanged(workdir, target string, before []byte) error {
+	if err := requireVisibleIndex(workdir); err != nil {
+		return err
+	}
 	status, err := git(workdir, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 	if err != nil || len(status) != 0 {
 		return errors.New("Pi changed the worktree; refusing to apply its replacement")
@@ -556,29 +597,72 @@ func replaceFile(target string, contents []byte) error {
 }
 
 func requireExactDiff(workdir, relative string) error {
+	if err := requireVisibleIndex(workdir); err != nil {
+		return err
+	}
 	status, err := git(workdir, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 	expected := []byte(" M " + relative + "\x00")
 	if err != nil || !bytes.Equal(status, expected) {
 		return errors.New("resulting Git diff is not exactly the one allowed file")
 	}
-	changed, err := git(workdir, "diff", "--name-only", "-z", "--no-ext-diff")
+	changed, err := git(workdir, "diff", "--name-only", "-z", "--no-ext-diff", "--no-textconv")
 	if err != nil || !bytes.Equal(changed, []byte(relative+"\x00")) {
 		return errors.New("Git diff scope verification failed")
 	}
-	staged, err := git(workdir, "diff", "--cached", "--name-only", "-z", "--no-ext-diff")
+	staged, err := git(workdir, "diff", "--cached", "--name-only", "-z", "--no-ext-diff", "--no-textconv")
 	if err != nil || len(staged) != 0 {
 		return errors.New("unexpected staged diff after replacement")
 	}
 	return nil
 }
 
+func requireVisibleIndex(workdir string) error {
+	entries, err := git(workdir, "ls-files", "-v", "-z")
+	if err != nil {
+		return errors.New("Git index visibility could not be verified")
+	}
+	for _, entry := range bytes.Split(entries, []byte{0}) {
+		if len(entry) == 0 {
+			continue
+		}
+		if len(entry) < 3 || entry[1] != ' ' {
+			return errors.New("Git index visibility output is malformed")
+		}
+		tag := entry[0]
+		if tag == 'S' || (tag >= 'a' && tag <= 'z') {
+			return errors.New("Git index contains skip-worktree or assume-unchanged entries")
+		}
+	}
+	return nil
+}
+
+func rollbackAfterApply(workdir, target string, before []byte, cause error) error {
+	if err := replaceFile(target, before); err != nil {
+		return fmt.Errorf("indeterminate: replacement may remain applied; rollback failed after %v: %w", cause, err)
+	}
+	current, readErr := os.ReadFile(target)
+	if readErr != nil || !bytes.Equal(current, before) {
+		return fmt.Errorf("indeterminate: replacement may remain applied; rollback read-back failed after %v", cause)
+	}
+	if err := requireVisibleIndex(workdir); err != nil {
+		return fmt.Errorf("indeterminate: original bytes restored but clean state is unverified after %v: %w", cause, err)
+	}
+	status, err := git(workdir, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	if err != nil || len(status) != 0 {
+		return fmt.Errorf("indeterminate: original bytes restored but worktree is not clean after %v", cause)
+	}
+	return fmt.Errorf("%w; replacement rolled back", cause)
+}
+
 func git(workdir string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, gitPath, append([]string{"-C", workdir}, args...)...)
+	gitArgs := []string{"--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", workdir}
+	cmd := exec.CommandContext(ctx, gitPath, append(gitArgs, args...)...)
 	cmd.Env = []string{
 		"HOME=/nonexistent", "PATH=/usr/bin:/bin", "LANG=C.UTF-8", "LC_ALL=C.UTF-8",
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_LITERAL_PATHSPECS=1",
+		"GIT_PAGER=cat", "GIT_OPTIONAL_LOCKS=0",
 	}
 	return cmd.Output()
 }

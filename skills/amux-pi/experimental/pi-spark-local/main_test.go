@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,13 +36,60 @@ func TestAppliesOneExactReplacementInPrintMode(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != "replacement_applied_untrusted" || got.Model != model || got.Version != packageVersion || got.Stderr != "empty" {
+	if got.Status != "replacement_applied_untrusted" || got.RequestedModel != model || got.Version != packageVersion || got.Stderr != "empty" {
 		t.Fatalf("result=%+v", got)
 	}
 	wantArgs := append([]string{f.node, f.pi}, fixedArgs...)
 	if strings.Join(got.Argv, "\x00") != strings.Join(wantArgs, "\x00") {
 		t.Fatalf("argv=%q, want %q", got.Argv, wantArgs)
 	}
+}
+
+func TestPromptUsesBoundedStdinAndFixedArgv(t *testing.T) {
+	f := newFixture(t)
+	stdinPath := filepath.Join(f.root, "pi.stdin")
+	t.Setenv("FAKE_PI_STDIN_FILE", stdinPath)
+	before := mustRead(t, f.target)
+	reply := replacement{Path: "target.txt", OriginalSHA256: digest(before), Replacement: "after\n"}
+	t.Setenv("FAKE_PI_OUTPUT", marshal(t, reply))
+	var output bytes.Buffer
+	if err := run(f.args("--task", "stdin-only task"), &output); err != nil {
+		t.Fatal(err)
+	}
+	wantPrompt, err := buildPrompt("stdin-only task", "target.txt", digest(before), before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mustRead(t, stdinPath); !bytes.Equal(got, wantPrompt) {
+		t.Fatalf("stdin packet mismatch: got %d bytes, want %d", len(got), len(wantPrompt))
+	}
+	var got result
+	if err := json.Unmarshal(output.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Argv) != 2+len(fixedArgs) || got.Argv[len(got.Argv)-1] != "-p" {
+		t.Fatalf("argv contains prompt or missing fixed switches: %q", got.Argv)
+	}
+}
+
+func TestPromptBounds(t *testing.T) {
+	t.Run("task", func(t *testing.T) {
+		f := newFixture(t)
+		err := run(f.args("--task", strings.Repeat("x", maxTaskBytes+1)), &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "task exceeds") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+	t.Run("generated packet", func(t *testing.T) {
+		f := newFixture(t)
+		mustWrite(t, f.target, bytes.Repeat([]byte{0}, maxInputBytes), 0o644)
+		gitRun(t, f.workdir, "add", "target.txt")
+		gitRun(t, f.workdir, "commit", "-qm", "large fixture")
+		err := run(f.args("--task", "edit"), &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "generated prompt exceeds") {
+			t.Fatalf("err=%v", err)
+		}
+	})
 }
 
 func TestExpectedReplacementSHA256Gate(t *testing.T) {
@@ -135,6 +184,41 @@ func TestRejectsRetryOrCompactionDefaults(t *testing.T) {
 	}
 }
 
+func TestRejectsAgentOverlaysBeforeLaunch(t *testing.T) {
+	for _, overlay := range []string{"models.json", "package.json", "models-store.json", "SYSTEM.md", "APPEND_SYSTEM.md"} {
+		t.Run(overlay, func(t *testing.T) {
+			f := newFixture(t)
+			mustWrite(t, filepath.Join(f.root, "agent", overlay), []byte("fixture"), 0o600)
+			err := run(f.args("--task", "edit"), &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), overlay) {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestRejectsAgentAdmissionDriftAfterAttempt(t *testing.T) {
+	for _, tc := range []struct{ name, mode string }{
+		{"overlay", "agent-overlay"},
+		{"settings", "agent-settings"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			t.Setenv("FAKE_PI_MODE", tc.mode)
+			t.Setenv("FAKE_PI_AGENT", filepath.Join(f.root, "agent"))
+			reply := replacement{Path: "target.txt", OriginalSHA256: digest(mustRead(t, f.target)), Replacement: "after\n"}
+			t.Setenv("FAKE_PI_OUTPUT", marshal(t, reply))
+			err := run(f.args("--task", "edit"), &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), "agent admission changed") {
+				t.Fatalf("err=%v", err)
+			}
+			if got := string(mustRead(t, f.target)); got != "before\n" {
+				t.Fatalf("post-run drift changed target: %q", got)
+			}
+		})
+	}
+}
+
 func TestRejectsMalformedOrUnboundFinalOutput(t *testing.T) {
 	for _, tc := range []struct{ name, output, want string }{
 		{"not-json", "hello\n", "envelope"},
@@ -206,20 +290,116 @@ func TestRejectsPiWorktreeMutationAndOutOfScopeDiff(t *testing.T) {
 	}
 }
 
-func TestAuthIsMetadataOnlyAndPreserved(t *testing.T) {
+func TestGitHardeningDisablesRepositoryFSMonitor(t *testing.T) {
+	f := newFixture(t)
+	marker := filepath.Join(f.root, "fsmonitor-invoked")
+	hook := filepath.Join(f.root, "fsmonitor")
+	mustWrite(t, hook, []byte(fmt.Sprintf("#!/bin/sh\nprintf invoked >%q\nprintf '{}'\n", marker)), 0o755)
+	gitRun(t, f.workdir, "config", "core.fsmonitor", hook)
+	before := mustRead(t, f.target)
+	reply := replacement{Path: "target.txt", OriginalSHA256: digest(before), Replacement: "after\n"}
+	t.Setenv("FAKE_PI_OUTPUT", marshal(t, reply))
+	if err := run(f.args("--task", "edit"), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("repository fsmonitor executed: %v", err)
+	}
+}
+
+func TestRejectsHiddenIndexEntries(t *testing.T) {
+	for _, tc := range []struct{ name, flag string }{
+		{"assume-unchanged", "--assume-unchanged"},
+		{"skip-worktree", "--skip-worktree"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			hidden := filepath.Join(f.workdir, "hidden.txt")
+			mustWrite(t, hidden, []byte("before\n"), 0o644)
+			gitRun(t, f.workdir, "add", "hidden.txt")
+			gitRun(t, f.workdir, "commit", "-qm", "hidden fixture")
+			gitRun(t, f.workdir, "update-index", tc.flag, "hidden.txt")
+			mustWrite(t, hidden, []byte("hidden mutation\n"), 0o644)
+			err := run(f.args("--task", "edit"), &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), "skip-worktree or assume-unchanged") {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestTransactionalApplyRollsBackFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(*testing.T) io.Writer
+		want    string
+	}{
+		{
+			name: "post-apply validation",
+			prepare: func(t *testing.T) io.Writer {
+				postApplyCheck = func(string, string) error { return errors.New("forced postcondition") }
+				t.Cleanup(func() { postApplyCheck = requireExactDiff })
+				return &bytes.Buffer{}
+			},
+			want: "post-apply validation failed",
+		},
+		{
+			name:    "receipt output",
+			prepare: func(*testing.T) io.Writer { return failingWriter{} },
+			want:    "receipt output failed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			before := mustRead(t, f.target)
+			reply := replacement{Path: "target.txt", OriginalSHA256: digest(before), Replacement: "after\n"}
+			t.Setenv("FAKE_PI_OUTPUT", marshal(t, reply))
+			err := run(f.args("--task", "edit"), tc.prepare(t))
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "replacement rolled back") {
+				t.Fatalf("err=%v", err)
+			}
+			if !bytes.Equal(mustRead(t, f.target), before) {
+				t.Fatal("failed transaction did not restore original bytes")
+			}
+			if status, statusErr := git(f.workdir, "status", "--porcelain=v1", "-z", "--untracked-files=all"); statusErr != nil || len(status) != 0 {
+				t.Fatalf("failed transaction did not restore clean state: %q, %v", status, statusErr)
+			}
+		})
+	}
+}
+
+func TestRejectsUnchangedReplacement(t *testing.T) {
+	f := newFixture(t)
+	before := mustRead(t, f.target)
+	reply := replacement{Path: "target.txt", OriginalSHA256: digest(before), Replacement: string(before)}
+	t.Setenv("FAKE_PI_OUTPUT", marshal(t, reply))
+	err := run(f.args("--task", "edit"), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "replacement is unchanged") {
+		t.Fatalf("err=%v", err)
+	}
+	if status, statusErr := git(f.workdir, "status", "--porcelain=v1", "-z", "--untracked-files=all"); statusErr != nil || len(status) != 0 {
+		t.Fatalf("unchanged replacement dirtied worktree: %q, %v", status, statusErr)
+	}
+}
+
+func TestAuthMetadataAllowsContentRefresh(t *testing.T) {
 	f := newFixture(t)
 	auth := filepath.Join(f.root, "agent", "auth.json")
-	secretFixture := []byte(`{"openai-codex":{"type":"oauth","secret":"fixture-only"}}`)
-	mustWrite(t, auth, secretFixture, 0o600)
+	t.Setenv("FAKE_PI_MODE", "auth-refresh")
+	t.Setenv("FAKE_PI_AUTH", auth)
 	reply := replacement{Path: "target.txt", OriginalSHA256: digest(mustRead(t, f.target)), Replacement: "after\n"}
 	t.Setenv("FAKE_PI_OUTPUT", marshal(t, reply))
 	if err := run(f.args("--task", "edit"), &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(mustRead(t, auth), secretFixture) {
-		t.Fatal("auth bytes changed")
+	if got := string(mustRead(t, auth)); got != "refreshed-fixture" {
+		t.Fatalf("auth refresh was not preserved: %q", got)
 	}
 }
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("forced output failure") }
 
 func newFixture(t *testing.T) fixture {
 	t.Helper()
@@ -233,7 +413,7 @@ func newFixture(t *testing.T) fixture {
 	t.Setenv("PI_CODING_AGENT_DIR", agent)
 	extraProcessEnvironment = func() []string {
 		var environment []string
-		for _, name := range []string{"FAKE_PI_MODE", "FAKE_PI_OUTPUT", "FAKE_PI_PID_FILE", "FAKE_PI_MUTATE", "FAKE_PI_SELF"} {
+		for _, name := range []string{"FAKE_PI_MODE", "FAKE_PI_OUTPUT", "FAKE_PI_PID_FILE", "FAKE_PI_MUTATE", "FAKE_PI_SELF", "FAKE_PI_STDIN_FILE", "FAKE_PI_AGENT", "FAKE_PI_AUTH"} {
 			if value, present := os.LookupEnv(name); present {
 				environment = append(environment, name+"="+value)
 			}
@@ -261,12 +441,22 @@ test "$8" = "--no-themes"
 test "$9" = "--no-context-files"
 test "${10}" = "--no-approve"
 test "${11}" = "-p"
-test -n "${12}"
+test "$#" = 11
+if [ -n "${FAKE_PI_STDIN_FILE:-}" ]; then
+  cat >"$FAKE_PI_STDIN_FILE"
+  test -s "$FAKE_PI_STDIN_FILE"
+else
+  prompt=$(cat)
+  test -n "$prompt"
+fi
 case "${FAKE_PI_MODE:-success}" in
   overflow) while :; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; done ;;
   sleep) sleep 60 & child=$!; printf '%s\n' "$child" >"$FAKE_PI_PID_FILE"; wait "$child" ;;
   mutate) printf 'bad\n' >"$FAKE_PI_MUTATE"; printf '%s' "$FAKE_PI_OUTPUT" ;;
   mutate-pi) printf '# changed\n' >>"$FAKE_PI_SELF"; printf '%s' "$FAKE_PI_OUTPUT" ;;
+  agent-overlay) printf fixture >"$FAKE_PI_AGENT/SYSTEM.md"; printf '%s' "$FAKE_PI_OUTPUT" ;;
+  agent-settings) printf '{}' >"$FAKE_PI_AGENT/settings.json"; chmod 600 "$FAKE_PI_AGENT/settings.json"; printf '%s' "$FAKE_PI_OUTPUT" ;;
+  auth-refresh) printf refreshed-fixture >"$FAKE_PI_AUTH"; chmod 600 "$FAKE_PI_AUTH"; printf '%s' "$FAKE_PI_OUTPUT" ;;
   *) printf '%s' "$FAKE_PI_OUTPUT" ;;
 esac
 `), 0o755)
