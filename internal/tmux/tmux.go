@@ -256,11 +256,16 @@ func (r Runner) SessionExists(session string) (bool, error) {
 		return false, fmt.Errorf("tmux has-session: %w", err)
 	}
 	message := strings.TrimSpace(stderr.String())
-	if message == "" || strings.Contains(message, "can't find session") || strings.Contains(message, "no server running") ||
-		(strings.Contains(message, "error connecting to ") && strings.Contains(message, "No such file or directory")) {
+	if message == "" || strings.Contains(message, "can't find session") || missingServerMessage(message) {
 		return false, nil
 	}
 	return false, fmt.Errorf("tmux has-session: %s", message)
+}
+
+func missingServerMessage(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "no server running") ||
+		strings.Contains(message, "error connecting to ") && strings.Contains(message, "no such file or directory")
 }
 
 func (r Runner) WindowNames(session string) ([]string, error) {
@@ -362,6 +367,9 @@ func (r Runner) AllWindowPanes() ([]WindowPane, error) {
 	}
 	out, err := tmuxOutput("list-panes", "-a", "-F", "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_start_command}")
 	if err != nil {
+		if missingServerMessage(err.Error()) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	text := strings.TrimSuffix(string(out), "\n")
@@ -376,6 +384,50 @@ func (r Runner) AllWindowPanes() ([]WindowPane, error) {
 			return nil, fmt.Errorf("unexpected tmux pane row %q", line)
 		}
 		panes = append(panes, WindowPane{Session: fields[0], Window: fields[1], WindowID: fields[2], StartCommand: fields[3]})
+	}
+	return panes, nil
+}
+
+func (r Runner) WindowPanesWithPaneID(session, window string) ([]WindowPane, error) {
+	target := exactSessionTarget(session) + ":=" + window
+	out, err := tmuxOutput("list-panes", "-t", target, "-F", "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_start_command}")
+	if err != nil {
+		return nil, err
+	}
+	text := strings.TrimSuffix(string(out), "\n")
+	if text == "" {
+		return nil, nil
+	}
+	var panes []WindowPane
+	for _, line := range strings.Split(text, "\n") {
+		fields := strings.SplitN(line, "\t", 5)
+		if len(fields) != 5 {
+			return nil, fmt.Errorf("unexpected tmux pane identity row %q", line)
+		}
+		if fields[0] != session || fields[1] != window {
+			return nil, fmt.Errorf("tmux pane identity row did not match exact session/window")
+		}
+		panes = append(panes, WindowPane{Session: fields[0], Window: fields[1], WindowID: fields[2], PaneID: fields[3], StartCommand: fields[4]})
+	}
+	return panes, nil
+}
+
+func (r Runner) AllWindowPanesWithPaneID() ([]WindowPane, error) {
+	out, err := tmuxOutput("list-panes", "-a", "-F", "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_start_command}")
+	if err != nil {
+		return nil, err
+	}
+	text := strings.TrimSuffix(string(out), "\n")
+	if text == "" {
+		return nil, nil
+	}
+	var panes []WindowPane
+	for _, line := range strings.Split(text, "\n") {
+		fields := strings.SplitN(line, "\t", 5)
+		if len(fields) != 5 {
+			return nil, fmt.Errorf("unexpected tmux global pane identity row %q", line)
+		}
+		panes = append(panes, WindowPane{Session: fields[0], Window: fields[1], WindowID: fields[2], PaneID: fields[3], StartCommand: fields[4]})
 	}
 	return panes, nil
 }
@@ -456,22 +508,6 @@ func (r Runner) SendLiteral(target, text string) error {
 	return tmuxRun(args...)
 }
 
-func (r Runner) PasteLiteral(target, text string) error {
-	bufferName := fmt.Sprintf("amux-spawn-message-%d", os.Getpid())
-	loadArgs := []string{"load-buffer", "-b", bufferName, "-"}
-	if r.DryRun {
-		fmt.Printf("tmux %s\n", shellJoin(loadArgs))
-	} else if err := tmuxRunInput(text, loadArgs...); err != nil {
-		return err
-	}
-	pasteArgs := []string{"paste-buffer", "-dpr", "-b", bufferName, "-t", target}
-	if r.DryRun {
-		fmt.Printf("tmux %s\n", shellJoin(pasteArgs))
-		return nil
-	}
-	return tmuxRun(pasteArgs...)
-}
-
 func (r Runner) SendEnter(target string) error {
 	args := []string{"send-keys", "-t", target, "Enter"}
 	if r.DryRun {
@@ -487,15 +523,6 @@ func (r Runner) Notify(target, text string) error {
 	args := []string{"send-keys", "-t", target, text, "Enter"}
 	if r.DryRun {
 		fmt.Fprintf(r.output(), "tmux %s\n", shellJoin(args))
-		return nil
-	}
-	return tmuxRun(args...)
-}
-
-func (r Runner) ClearLine(target string) error {
-	args := []string{"send-keys", "-t", target, "C-u"}
-	if r.DryRun {
-		fmt.Printf("tmux %s\n", shellJoin(args))
 		return nil
 	}
 	return tmuxRun(args...)
@@ -732,20 +759,6 @@ func displayMessageForTarget(target, format string) (string, error) {
 func tmuxRun(args ...string) error {
 	_, err := tmuxOutput(args...)
 	return err
-}
-
-func tmuxRunInput(input string, args ...string) error {
-	cmd := exec.Command("tmux", args...)
-	cmd.Stdin = strings.NewReader(input)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if err != nil {
-		return commandError(args, stdout.Bytes(), stderr.Bytes(), err)
-	}
-	return nil
 }
 
 func tmuxOutput(args ...string) ([]byte, error) {

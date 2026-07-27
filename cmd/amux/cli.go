@@ -18,6 +18,8 @@ import (
 
 var mutationLockWait = 2 * time.Second
 
+const spawnMigrationGuidance = "amux spawn and amux worker spawn were removed; create the thread natively in Amp, then run `amux worker adopt --thread <thread> --workspace <workspace> --window <window> --workdir <workdir>`"
+
 type cliOptions struct {
 	ConfigDir        string
 	JSON             bool
@@ -97,7 +99,7 @@ var rootCommand = &commandSpec{
 		reportCommand(),
 		installCommand(),
 		lifecycleCommand("workspaces", "Exact alias for workspace list", false, "--mode, -m <worker|runner>"),
-		lifecycleCommand("spawn", "Spawn an interactive worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--group <id>  Repeat to attach the authoritative worker thread to multiple groups; explicit groups override automatic naming", "--work-item-id <id>  Derive one configured repository-scoped group using the semantic window as its slug", "--worker-ordinal <number>  Positive worker ordinal used to derive the stable report ID", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>", "--reconcile  Recover a verified exact provisioned-thread timeout without resubmitting"),
+		{Name: "spawn", Summary: "Removed: create a native Amp thread, then adopt it", Usage: spawnMigrationGuidance, FoundationOnly: true},
 		lifecycleCommand("shelve", "Shelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		lifecycleCommand("unshelve", "Unshelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		lifecycleCommand("teardown", "Teardown workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
@@ -145,7 +147,8 @@ func workerCommand() *commandSpec {
 		workerLeaf("park", "Park workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("restart", "Restart workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("remove", "Remove workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
-		workerLeaf("spawn", "Spawn a worker", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--mode, -m <mode>", "--title-prefix <prefix>  An exact #<number> prefix owns issue identity; window must be an issue-unprefixed semantic slug", "--group <id>  Repeat to attach the authoritative worker thread to multiple groups; explicit groups override automatic naming", "--work-item-id <id>  Derive one configured repository-scoped group using the semantic window as its slug", "--worker-ordinal <number>  Positive worker ordinal used to derive the stable report ID", "--message <text>", "--message-file <path>", "--message-stdin", "--idempotency-key <key>", "--reconcile  Recover a verified exact provisioned-thread timeout without resubmitting"),
+		workerLeaf("adopt", "Adopt an exact native-created thread without message delivery", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--thread, -t <id>", "--group <id>  Optional exact durable member intent"),
+		{Name: "spawn", Summary: "Removed: create a native Amp thread, then adopt it", Usage: spawnMigrationGuidance, FoundationOnly: true},
 		workerLeaf("shelve", "Shelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("unshelve", "Unshelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("teardown", "Teardown workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
@@ -267,6 +270,10 @@ func (a app) execute(args []string) error {
 	if a.stderr == nil {
 		a.stderr = io.Discard
 	}
+	if spawnTombstoneRequested(args) {
+		parsed := invocation{Options: cliOptions{JSON: spawnTombstoneFlagRequested(args, "--json", "-j")}, Path: spawnTombstonePath(args)}
+		return a.finishInvocation(parsed, nil, result.Request(errors.New(spawnMigrationGuidance)))
+	}
 
 	wantsJSON := globalFlagRequested(args, "--json", "-j")
 	parsed, err := parseInvocation(args)
@@ -279,6 +286,52 @@ func (a app) execute(args []string) error {
 		err = a.attachAfterAggregateLaunch(parsed)
 	}
 	return a.finishInvocation(parsed, envelope, err)
+}
+
+// spawnTombstonePath recognizes the removed aliases without parsing any of
+// their arguments. In particular, message sources remain completely unread.
+func spawnTombstonePath(args []string) []string {
+	words := make([]string, 0, 2)
+	for i := 0; i < len(args) && len(words) < 2; i++ {
+		arg := args[i]
+		switch arg {
+		case "--config-dir", "-c", "--terminal-launcher":
+			i++
+			continue
+		case "--json", "-j", "--dry-run", "-n", "--help", "-h", "--attach", "--no-attach":
+			continue
+		}
+		if strings.HasPrefix(arg, "--config-dir=") || strings.HasPrefix(arg, "-c=") || strings.HasPrefix(arg, "--terminal-launcher=") {
+			continue
+		}
+		words = append(words, arg)
+	}
+	if len(words) > 0 && words[0] == "spawn" {
+		return []string{"spawn"}
+	}
+	if len(words) > 1 && words[0] == "worker" && words[1] == "spawn" {
+		return []string{"worker", "spawn"}
+	}
+	return nil
+}
+
+func spawnTombstoneRequested(args []string) bool { return len(spawnTombstonePath(args)) != 0 }
+
+func spawnTombstoneFlagRequested(args []string, names ...string) bool {
+	wanted := make(map[string]bool, len(names))
+	for _, name := range names {
+		wanted[name] = true
+	}
+	for i := 0; i < len(args); i++ {
+		name, _, inline := splitFlag(args[i])
+		if wanted[name] {
+			return true
+		}
+		if commandOptionRequiresValue(args[i]) || !inline && (name == "--config-dir" || name == "-c" || name == "--terminal-launcher") {
+			i++
+		}
+	}
+	return false
 }
 
 func (a app) finishInvocation(parsed invocation, envelope *result.Envelope, err error) error {
@@ -872,7 +925,7 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 			parsed.Groups = compactStrings(parsed.Groups)
 			parsed.Group = ""
 		} else if len(parsed.Groups) != 1 {
-			return errors.New("--group may be repeated only for worker spawn")
+			return errors.New("--group may be repeated only for worker spawn; worker adopt accepts one exact group")
 		}
 	}
 	if parsed.Mode != "" {
@@ -1032,7 +1085,7 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 	}
 
 	switch parsed.Command.Name {
-	case "list", "pin", "unpin", "launch", "park", "restart", "remove", "spawn", "shelve", "unshelve", "teardown", "doctor", "reconcile":
+	case "list", "pin", "unpin", "launch", "park", "restart", "remove", "adopt", "spawn", "shelve", "unshelve", "teardown", "doctor", "reconcile":
 		if strings.Join(parsed.Path, " ") == "install doctor" {
 			if len(parsed.Args) != 0 || !selectorsEmpty(parsed.Selectors) {
 				return nil, result.Request(errors.New("usage: amux install doctor"))

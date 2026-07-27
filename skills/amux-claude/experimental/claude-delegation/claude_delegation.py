@@ -16,6 +16,7 @@ import math
 import os
 import pathlib
 import platform
+import re
 import secrets
 import selectors
 import shlex
@@ -45,6 +46,7 @@ PRE_IDENTITY_LAUNCH_INTENT_COMPATIBILITY = "pre_identity_launch_intent_v1"
 HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY = (
     "historical_modern_read_only_launch_intent_v1"
 )
+PRE_IDENTITY_ACQUIRED_NO_REPORT_COMPATIBILITY = "pre_identity_acquired_no_report_v1"
 EXEC_BUDGET_MARGIN_BYTES = 32 * 1024
 STARTUP_TIMEOUT_SECONDS = 4.0
 STARTUP_STABILITY_SECONDS = 1.5
@@ -56,7 +58,8 @@ REQUIRED_CLAUDE_FLAGS = [
     "--no-chrome", "--permission-mode", "--prompt-suggestions", "--session-id",
     "--setting-sources", "--settings", "--strict-mcp-config", "--tools",
 ]
-APPROVED_READ_ONLY_MODELS = {"claude-fable-5"}
+APPROVED_READ_ONLY_MODELS = {"claude-fable-5", "claude-opus-4-8"}
+MUTATING_MODEL = "claude-opus-4-8"
 
 
 class HelperError(Exception):
@@ -82,6 +85,10 @@ def reject_duplicate_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise HelperError("JSON input contains a duplicated field")
         value[key] = nested
     return value
+
+
+def reject_json_constant(_value: str) -> None:
+    raise HelperError("JSON input contains an unsupported constant")
 
 
 def read_input() -> dict[str, Any]:
@@ -117,7 +124,7 @@ def decode_receipt_store(raw: bytes) -> dict[str, Any]:
         if not isinstance(binding, dict):
             raise HelperError("invalid receipt binding")
         try:
-            binding = validate_binding(binding)
+            binding = validate_binding(binding, allow_historical_mutating=True)
         except HelperError as error:
             raise HelperError("invalid receipt binding") from error
         delegation_id = binding["delegation_id"]
@@ -237,6 +244,21 @@ class ReceiptStore:
             yield
 
     @contextlib.contextmanager
+    def launch_intent_mutation_lock(self, stage_a: bool) -> Iterator[None]:
+        if not stage_a:
+            with self.mutation_lock():
+                yield
+            return
+        with self.lifecycle.mutation_lock():
+            store_lock = (
+                contextlib.nullcontext()
+                if self.lifecycle.state_dir == self.state_dir
+                else self.mutation_lock()
+            )
+            with store_lock:
+                yield
+
+    @contextlib.contextmanager
     def launch_gate(self, delegation_id: str, timeout_seconds: float | None = None) -> Iterator[None]:
         protocol_id({"delegation_id": delegation_id}, "delegation_id")
         self.prepare()
@@ -273,9 +295,23 @@ class ReceiptStore:
                             if time.monotonic() >= deadline:
                                 raise LaunchGateBusy("launch gate is busy") from error
                             time.sleep(0.01)
-                os.set_inheritable(gate_file.fileno(), True)
+                os.set_inheritable(gate_file.fileno(), False)
             except OSError as error:
                 raise HelperError("launch gate is unavailable") from error
+            yield
+
+    @contextlib.contextmanager
+    def live_retirement_exclusion(self, delegation_id: str) -> Iterator[None]:
+        stack = contextlib.ExitStack()
+        try:
+            stack.enter_context(self.launch_gate(delegation_id, timeout_seconds=0.2))
+        except LaunchGateBusy:
+            # Callers already retain lifecycle and receipt locks plus a durable origin fence. A
+            # busy holder may be a legacy post-exec target or a pre-exec transport, but the latter
+            # cannot pass final authorization while these locks are held and will observe the fence
+            # after release. Callers must still prove one exact live target before intent or stop.
+            pass
+        with stack:
             yield
 
     def load_store(self, require_exists: bool = False) -> dict[str, Any]:
@@ -600,7 +636,7 @@ class ReceiptStore:
                     self, delegation_id, compatibility
                 )
                 try:
-                    with self.launch_gate(delegation_id, timeout_seconds=0.2):
+                    with self.live_retirement_exclusion(delegation_id):
                         if existing is None:
                             if recover:
                                 raise HelperError("retirement recovery requires a durable retirement intent")
@@ -689,7 +725,10 @@ class ReceiptStore:
         compatibility = request.get("compatibility")
         if (
             compatibility is not None
-            and compatibility != HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY
+            and compatibility not in {
+                HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY,
+                PRE_IDENTITY_ACQUIRED_NO_REPORT_COMPATIBILITY,
+            }
         ):
             raise HelperError("acquired no-report pair retirement compatibility is unsupported")
         recover = request.get("recover", False)
@@ -726,6 +765,16 @@ class ReceiptStore:
                 receipt = self.find(store, delegation_id)
                 if receipt["binding"].get("origin_thread") != origin_thread:
                     raise HelperError("receipt immutable origin does not match acquired retirement authority")
+                if compatibility == PRE_IDENTITY_ACQUIRED_NO_REPORT_COMPATIBILITY:
+                    if recover:
+                        raise HelperError("pre-identity acquired policy has no mutable outcome to recover")
+                    if not valid_pre_identity_acquired_no_report_candidate(receipt):
+                        raise HelperError(
+                            "permanent-terminal policy requires the exact pre-identity acquired no-report chain"
+                        )
+                    return pre_identity_acquired_permanent_terminal_result(
+                        origin_sha256, pair_sha256
+                    )
                 terminal = find_event(receipt, result_id)
                 existing = find_event(receipt, event_id)
                 acquired_intents = [
@@ -756,7 +805,7 @@ class ReceiptStore:
                     self, delegation_id, compatibility
                 )
                 try:
-                    with self.launch_gate(delegation_id, timeout_seconds=0.2):
+                    with self.live_retirement_exclusion(delegation_id):
                         if existing is None:
                             if recover:
                                 raise HelperError("acquired retirement recovery requires a durable intent")
@@ -860,6 +909,189 @@ class ReceiptStore:
             origin_sha256, pair_sha256, "retired", compatibility
         )
 
+    def dispose_exact_pre_identity_acquired_pair(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        delegation_id = protocol_id(request, "delegation_id")
+        event_id = protocol_id(request, "event_id")
+        origin_thread = required_string(request, "origin_thread", 256)
+        authorization = validate_terminal_amp_authorization(request.get("authorization"))
+        owner_authorization = validate_exact_pane_owner_authorization(
+            request.get("owner_authorization")
+        )
+        compatibility = request.get("compatibility")
+        if compatibility != PRE_IDENTITY_ACQUIRED_NO_REPORT_COMPATIBILITY:
+            raise HelperError("exact-pane disposal requires its explicit compatibility selector")
+        recover = request.get("recover", False)
+        if not isinstance(recover, bool):
+            raise HelperError("exact-pane disposal recover must be boolean")
+        reject_unknown(
+            request,
+            {
+                "delegation_id", "event_id", "origin_thread", "authorization",
+                "owner_authorization", "compatibility", "recover",
+            },
+            "exact pre-identity pane disposal",
+        )
+        origin_sha256 = hashlib.sha256(origin_thread.encode()).hexdigest()
+        pair_sha256 = hashlib.sha256(delegation_id.encode()).hexdigest()
+        result_id = internal_event_id("exact-pane-disposal-result", event_id)
+        with self.lifecycle.mutation_lock():
+            lifecycle = self.lifecycle.load()
+            state_path = str(self.state_dir.resolve())
+            if state_path not in lifecycle["stores"]:
+                raise HelperError("receipt store is not registered in the canonical lifecycle registry")
+            verify_registered_store_object(
+                state_path, lifecycle["legacy_store_objects"].get(state_path)
+            )
+            if origin_thread not in lifecycle["teardown_fences"]:
+                lifecycle["teardown_fences"][origin_thread] = {
+                    "operation_id": hashlib.sha256(
+                        f"worker-teardown\0{origin_thread}".encode()
+                    ).hexdigest(),
+                    "created_at": utc_now(),
+                }
+                self.lifecycle.commit(lifecycle)
+            store_lock = (
+                contextlib.nullcontext()
+                if self.lifecycle.state_dir == self.state_dir
+                else self.mutation_lock()
+            )
+            with store_lock:
+                store = load_registered_receipt_store(
+                    self,
+                    state_path,
+                    lifecycle["legacy_store_objects"].get(state_path),
+                    acquire_lock=False,
+                )
+                receipt = self.find(store, delegation_id)
+                if receipt["binding"].get("origin_thread") != origin_thread:
+                    raise HelperError("receipt immutable origin does not match exact-pane authority")
+                terminal = find_event(receipt, result_id)
+                existing = find_event(receipt, event_id)
+                intents = [
+                    event
+                    for event in receipt.get("events", [])
+                    if isinstance(event, dict)
+                    and event.get("kind") == "exact_pane_disposal_intent"
+                ]
+                if len(intents) > 1 or (intents and intents[0].get("event_id") != event_id):
+                    raise HelperError("receipt already has a different exact-pane disposal operation")
+                if terminal is not None:
+                    if existing is None or not valid_exact_pane_disposal_chain(receipt):
+                        raise HelperError("terminal exact-pane disposal proof is invalid")
+                    validate_exact_pane_disposal_operation(
+                        existing, authorization, owner_authorization, event_id
+                    )
+                    return exact_pane_disposal_result(
+                        origin_sha256, pair_sha256, "duplicate"
+                    )
+                if not valid_exact_pane_disposal_candidate(
+                    receipt, authorization, owner_authorization, event_id
+                ):
+                    raise HelperError(
+                        "exact-pane disposal requires the exact pre-identity acquired no-report chain"
+                    )
+                durable_identity = receipt["session_identity"]
+                try:
+                    with self.live_retirement_exclusion(delegation_id):
+                        with TmuxControlConnection(durable_identity["session"]) as control:
+                            if existing is None:
+                                if recover:
+                                    raise HelperError(
+                                        "exact-pane disposal recovery requires a durable intent"
+                                    )
+                                identity = inspect_exact_pre_identity_target(
+                                    control, durable_identity
+                                )
+                                disposal_intent = {
+                                    "event_id": event_id,
+                                    "kind": "exact_pane_disposal_intent",
+                                    "terminal_state": authorization["terminal_state"],
+                                    "report_sha256": authorization["report_sha256"],
+                                    "coordinator_authorization_sha256": authorization[
+                                        "coordinator_authorization_sha256"
+                                    ],
+                                    "owner_authorization": copy.deepcopy(owner_authorization),
+                                    "compatibility": compatibility,
+                                    "identity": identity,
+                                    "at": utc_now(),
+                                }
+                                receipt["events"].append(disposal_intent)
+                                receipt["exact_pane_disposal_intent"] = copy.deepcopy(
+                                    disposal_intent
+                                )
+                                receipt["updated_at"] = disposal_intent["at"]
+                                self.commit(store)
+                                current = inspect_exact_pre_identity_target(
+                                    control, durable_identity
+                                )
+                                if current != identity:
+                                    return exact_pane_disposal_blocked(
+                                        origin_sha256,
+                                        pair_sha256,
+                                        "exact_pane_identity_changed",
+                                    )
+                                stop_exact_pre_identity_target(control, identity)
+                            else:
+                                if not recover:
+                                    raise HelperError(
+                                        "exact-pane disposal outcome is indeterminate; explicit recovery is required"
+                                    )
+                                validate_exact_pane_disposal_operation(
+                                    existing, authorization, owner_authorization, event_id
+                                )
+                                identity = copy.deepcopy(existing.get("identity"))
+                                if not exact_pane_disposal_identity_matches(
+                                    identity, durable_identity
+                                ):
+                                    raise HelperError("durable exact-pane disposal identity is invalid")
+                                absence = confirm_exact_pre_identity_target_absent(
+                                    control, identity
+                                )
+                                if absence != "exact_pane_process_incarnation_absent":
+                                    if absence != "exact_pane_process_incarnation_still_live":
+                                        return exact_pane_disposal_blocked(
+                                            origin_sha256, pair_sha256, absence
+                                        )
+                                    current = inspect_exact_pre_identity_target(
+                                        control, durable_identity
+                                    )
+                                    if current != identity:
+                                        return exact_pane_disposal_blocked(
+                                            origin_sha256,
+                                            pair_sha256,
+                                            "exact_pane_identity_changed",
+                                        )
+                                    stop_exact_pre_identity_target(control, identity)
+                            absence = confirm_exact_pre_identity_target_absent(control, identity)
+                            if absence != "exact_pane_process_incarnation_absent":
+                                return exact_pane_disposal_blocked(
+                                    origin_sha256, pair_sha256, absence
+                                )
+                            result = {
+                                "event_id": result_id,
+                                "kind": "exact_pane_disposed",
+                                "operation_event_id": event_id,
+                                "absence_code": absence,
+                                "at": utc_now(),
+                            }
+                            receipt["events"].append(result)
+                            receipt["exact_pane_disposed"] = copy.deepcopy(result)
+                            receipt["updated_at"] = result["at"]
+                            if not valid_exact_pane_disposal_chain(receipt):
+                                raise HelperError(
+                                    "terminal exact-pane disposal proof did not seal exactly"
+                                )
+                            self.commit(store)
+                except LaunchGateBusy:
+                    return exact_pane_disposal_blocked(
+                        origin_sha256,
+                        pair_sha256,
+                        "launch_transport_active_or_indeterminate",
+                    )
+        return exact_pane_disposal_result(origin_sha256, pair_sha256, "disposed")
+
     def worker_teardown(self, origin_thread: str, dry_run: bool) -> dict[str, Any]:
         required_string({"origin_thread": origin_thread}, "origin_thread", 256)
         origin_thread_sha256 = hashlib.sha256(origin_thread.encode()).hexdigest()
@@ -908,6 +1140,8 @@ class ReceiptStore:
                 public_state = "pair_retired"
             elif valid_acquired_no_report_pair_retirement_chain(receipt):
                 public_state = "acquired_pair_retired"
+            elif valid_exact_pane_disposal_chain(receipt):
+                public_state = "exact_pane_disposed"
             pair = {"pair_sha256": pair_id, "state": public_state}
             blocker = worker_teardown_receipt_blocker(receipt)
             if blocker is not None:
@@ -929,6 +1163,10 @@ class ReceiptStore:
                 pairs.append(pair)
                 continue
             if valid_acquired_no_report_pair_retirement_chain(receipt):
+                pair["action"] = "none"
+                pairs.append(pair)
+                continue
+            if valid_exact_pane_disposal_chain(receipt):
                 pair["action"] = "none"
                 pairs.append(pair)
                 continue
@@ -1046,7 +1284,11 @@ class ReceiptStore:
             require_receipt_mutable(receipt)
             if expected_kind == "report":
                 expected_kind = "mutating_report" if receipt["binding"]["producer_role"] == "mutating_delegate" else "thinker_report"
-            envelope = validate_envelope(request, expected_kind)
+            envelope = validate_envelope(
+                request,
+                expected_kind,
+                receipt["binding"]["producer_role"] == "mutating_delegate",
+            )
             validate_envelope_binding(envelope, receipt["binding"])
             event_id = envelope["message_id"]
             kind = "valid_report" if expected_kind in {"thinker_report", "mutating_report"} else "input_request"
@@ -1462,6 +1704,26 @@ def optional_read_only_model(value: dict[str, Any]) -> str | None:
     return model
 
 
+def exact_mutating_model(value: dict[str, Any]) -> str:
+    model = value.get("model")
+    if model != MUTATING_MODEL:
+        raise HelperError(f"mutating model must be the exact literal {MUTATING_MODEL}")
+    return model
+
+
+def validate_stage_a_capacity_context(request: dict[str, Any]) -> None:
+    if request.get("provider") != "claude":
+        raise HelperError("Stage A provider must be the exact literal claude")
+    exact_mutating_model(request)
+    if request.get("workflow") != "mutating":
+        raise HelperError("Stage A workflow must be the exact literal mutating")
+    protocol_id(request, "delegation_id")
+    protocol_id(request, "task_id")
+    for field in ("capacity_pool_evidence", "charge_route_evidence", "admitted_impact_evidence"):
+        if request.get(field) not in {"unknown", "unsupported"}:
+            raise HelperError(f"Stage A {field} must remain unknown or unsupported")
+
+
 def help_exposes_option(help_text: str, option: str) -> bool:
     for line in help_text.splitlines():
         stripped = line.lstrip()
@@ -1480,7 +1742,7 @@ def internal_event_id(kind: str, event_id: str) -> str:
     return f"{INTERNAL_EVENT_PREFIX}{kind}:{hashlib.sha256(event_id.encode()).hexdigest()}"
 
 
-def validate_binding(value: Any) -> dict[str, Any]:
+def validate_binding(value: Any, allow_historical_mutating: bool = False) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise HelperError("binding must be an object")
     allowed = {
@@ -1508,7 +1770,7 @@ def validate_binding(value: Any) -> dict[str, Any]:
         "capacity_decision_digest",
     }
     if value.get("producer_role") == "mutating_delegate":
-        allowed |= mutating_fields
+        allowed |= mutating_fields | {"model"}
     elif value.get("producer_role") == "thinker":
         allowed.add("model")
     reject_unknown(value, allowed, "binding")
@@ -1530,6 +1792,10 @@ def validate_binding(value: Any) -> dict[str, Any]:
             raise HelperError("mutating binding has invalid exclusive writer or integration ownership")
         if value["handoff"] != "one_clean_local_commit":
             raise HelperError("mutating binding permits only one_clean_local_commit handoff")
+        if "model" in value:
+            exact_mutating_model(value)
+        elif not allow_historical_mutating:
+            exact_mutating_model(value)
     else:
         raise HelperError("producer_role must be thinker or mutating_delegate")
     for key in ("nonce", "packet_digest", "launch_policy_digest", "launch_command_digest"):
@@ -1564,7 +1830,7 @@ def writer_leases_match(left: str, right: str) -> bool:
         raise HelperError("cannot safely compare mutating writer lease identities") from error
 
 
-def validate_envelope(value: Any, expected_kind: str) -> dict[str, Any]:
+def validate_envelope(value: Any, expected_kind: str, mutating: bool = False) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise HelperError("message must be an object")
     payload_key = "report" if expected_kind in {"thinker_report", "mutating_report"} else "input_request"
@@ -1586,11 +1852,15 @@ def validate_envelope(value: Any, expected_kind: str) -> dict[str, Any]:
         "created_at",
         payload_key,
     }
+    if mutating:
+        common.add("model")
     reject_unknown(value, common, "message")
     if value.get("protocol_version") != PROTOCOL_VERSION or value.get("kind") != expected_kind:
         raise HelperError("message protocol_version or kind is invalid")
-    for key in common - {"protocol_version", payload_key}:
+    for key in common - {"protocol_version", payload_key, "model"}:
         required_string(value, key, 2048 if key == "workdir" else 256)
+    if mutating:
+        exact_mutating_model(value)
     for key in ("delegation_id", "message_id", "in_reply_to"):
         protocol_id(value, key)
     try:
@@ -1626,6 +1896,9 @@ def validate_envelope_binding(envelope: dict[str, Any], binding: dict[str, Any])
             raise HelperError(f"message {message_key} does not match immutable receipt binding")
     if envelope["in_reply_to"] != binding["question_message_id"]:
         raise HelperError("message in_reply_to does not match the immutable question")
+    if binding.get("producer_role") == "mutating_delegate":
+        if envelope.get("model") != exact_mutating_model(binding):
+            raise HelperError("message model does not match immutable receipt binding")
 
 
 def validate_report(value: Any) -> dict[str, Any]:
@@ -1754,9 +2027,12 @@ def require_mutating_session(receipt: dict[str, Any]) -> None:
     completed = [event for event in receipt["events"] if event.get("kind") == "launch_completed"]
     acquired = [event for event in receipt["events"] if event.get("kind") == "session_acquired"]
     identity = receipt.get("session_identity")
+    if len(intents) == 1 and intents[0].get("model") != exact_mutating_model(receipt["binding"]):
+        raise HelperError("mutating session model differs from immutable receipt binding")
     if (
         len(intents) != 1
         or intents[0].get("workflow") != "mutating"
+        or intents[0].get("model") != exact_mutating_model(receipt["binding"])
         or len(completed) != 1
         or completed[0].get("operation_event_id") != intents[0].get("event_id")
         or len(acquired) != 1
@@ -2866,7 +3142,7 @@ def validate_launch_request(value: Any) -> dict[str, Any]:
     }
     workflow = value.get("workflow", "read_only")
     if workflow == "mutating":
-        fields |= mutating_fields
+        fields |= mutating_fields | {"model"}
     else:
         fields |= {"expected_launch_policy_digest", "model"}
     reject_unknown(value, fields, "launch request")
@@ -2889,6 +3165,7 @@ def validate_launch_request(value: Any) -> dict[str, Any]:
             raise HelperError("expected_launch_policy_digest must be a lowercase SHA-256 value")
         result["expected_launch_policy_digest"] = expected_policy_digest
     if result["workflow"] == "mutating":
+        result["model"] = exact_mutating_model(value)
         for key in ("baseline_branch", "writer_owner", "integration_owner", "handoff"):
             result[key] = required_string(value, key, 256)
         for key in ("coordinator_write_frozen", "shared_writable"):
@@ -2898,6 +3175,11 @@ def validate_launch_request(value: Any) -> dict[str, Any]:
         if not isinstance(value.get("capacity_request"), dict):
             raise HelperError("capacity_request must be an object")
         result["capacity_request"] = copy.deepcopy(value["capacity_request"])
+        validate_stage_a_capacity_context(result["capacity_request"])
+        if result["capacity_request"]["model"] != result["model"]:
+            raise HelperError("Stage A capacity model does not match the mutating launch model")
+        if result["capacity_request"]["delegation_id"] != result["delegation_id"]:
+            raise HelperError("Stage A capacity delegation does not match the mutating launch request")
     protocol_id(result, "delegation_id")
     protocol_id(result, "event_id")
     protocol_id(result, "claude_session_id")
@@ -2989,6 +3271,7 @@ def launch_policy(workflow: str, model: str | None = None) -> dict[str, Any]:
     }
     if mutating:
         policy["workflow"] = "mutating"
+        policy["model"] = exact_mutating_model({"model": model})
         policy["removed_credential_environment"] = ["GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN"]
     elif model is not None:
         policy["model"] = model
@@ -3528,11 +3811,42 @@ def plan_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
     }
     if components["workflow"] == "mutating":
         result["workflow"] = "mutating"
+        result["model"] = components["request"]["model"]
         result["capacity_decision"] = components["capacity_decision"]
         result["capabilities"].update({"writer_authority": "exclusive", "handoff": "one_clean_local_commit"})
     elif components["request"].get("model") is not None:
         result["model"] = components["request"]["model"]
     return result
+
+
+def require_unconsumed_stage_a_acknowledgement(
+    receipt_store: dict[str, Any], acknowledgement_of: str, store: ReceiptStore | None = None
+) -> None:
+    stores = [receipt_store]
+    if store is not None:
+        lifecycle = store.lifecycle.load()
+        current_path = str(store.state_dir.resolve())
+        for state_path in sorted(set(lifecycle["stores"])):
+            if state_path == current_path:
+                continue
+            owner = ReceiptStore(pathlib.Path(state_path), store.lifecycle.state_dir)
+            stores.append(
+                load_registered_receipt_store(
+                    owner,
+                    state_path,
+                    lifecycle["legacy_store_objects"].get(state_path),
+                    require_exists=True,
+                    acquire_lock=False,
+                )
+            )
+    for candidate_store in stores:
+        if any(
+            event.get("kind") == "launch_intent"
+            and event.get("capacity_acknowledgement_of") == acknowledgement_of
+            for candidate in candidate_store["receipts"]
+            for event in candidate.get("events", [])
+        ):
+            raise HelperError("Stage A capacity acknowledgement was already consumed")
 
 
 def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
@@ -3592,7 +3906,17 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
     }
     if request_data.get("model") is not None:
         intent["model"] = request_data["model"]
-    with store.mutation_lock():
+    if components["workflow"] == "mutating":
+        capacity_decision = components["capacity_decision"]
+        intent.update(
+            {
+                "capacity_decision_digest": capacity_decision["decision_digest"],
+                "capacity_acknowledgement_of": capacity_decision["acknowledgement_of"],
+                "capacity_request_digest": capacity_decision["capacity_request_digest"],
+                "capacity_acknowledgement_expires_at": capacity_decision["acknowledgement_expires_at"],
+            }
+        )
+    with store.launch_intent_mutation_lock(components["workflow"] == "mutating"):
         receipt_store = store.load_store()
         receipt = store.find(receipt_store, delegation_id)
         require_receipt_mutable(receipt)
@@ -3606,6 +3930,11 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
             raise HelperError("launch workflow does not match immutable receipt authority")
         if components["workflow"] == "mutating" and receipt["binding"].get("capacity_decision_digest") != components["capacity_decision_digest"]:
             raise HelperError("launch capacity decision does not match immutable receipt binding")
+        if components["workflow"] == "mutating":
+            if receipt["binding"].get("task_id") != request_data["capacity_request"]["task_id"]:
+                raise HelperError("launch capacity task does not match immutable receipt binding")
+            acknowledgement_of = components["capacity_decision"]["acknowledgement_of"]
+            require_unconsumed_stage_a_acknowledgement(receipt_store, acknowledgement_of)
         replay = find_event(receipt, event_id)
         if replay is not None:
             raise HelperError("launch event appeared concurrently; retry the exact request")
@@ -3659,6 +3988,13 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
         )
         if platform.system() == "Darwin" and os.path.lexists(components["transport_path"].parent):
             raise HelperError("private delegation runtime already exists before launch intent")
+        if components["workflow"] == "mutating":
+            final_capacity_decision = decide_mutating_capacity(request_data["capacity_request"])
+            if final_capacity_decision != components["capacity_decision"]:
+                raise HelperError("Stage A capacity decision changed before launch intent")
+            require_unconsumed_stage_a_acknowledgement(
+                receipt_store, final_capacity_decision["acknowledgement_of"], store
+            )
         intent["at"] = utc_now()
         receipt["events"].append(intent)
         receipt["updated_at"] = intent["at"]
@@ -3750,7 +4086,10 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
     with store.mutation_lock():
         receipt_store = store.load_store()
         receipt = store.find(receipt_store, delegation_id)
-        if not valid_indeterminate_detach_candidate(receipt) or find_event(receipt, event_id) != intent:
+        if (
+            not valid_indeterminate_detach_candidate(receipt)
+            or receipt_launch_intent(receipt) != intent
+        ):
             raise HelperError("receipt changed while launch completion was being verified")
         receipt["events"].append(result)
         receipt["updated_at"] = result["at"]
@@ -3807,21 +4146,43 @@ def diagnostics() -> dict[str, Any]:
     capacity: dict[str, Any] = {"status": "unavailable", "windows": []}
     try:
         diagnostic_environment = exact_launch_environment(["GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN"])
-        raw = json.loads(
-            read_capacity_source(
-                ["codexbar", "usage", "--provider", "claude", "--format", "json"],
-                diagnostic_environment,
-            ),
-            object_pairs_hook=reject_duplicate_json_pairs,
+        encoded_capacity = read_capacity_source(
+            ["codexbar", "usage", "--provider", "claude", "--format", "json"],
+            diagnostic_environment,
         )
-        validate_codexbar_capacity_payload(raw)
-        capacity = {"status": "unavailable", "reason": "capacity source payload has no supported versioned contract", "windows": []}
-    except (HelperError, json.JSONDecodeError, KeyError, RecursionError, TypeError):
-        capacity = {"status": "unavailable", "reason": "capacity source is unavailable", "windows": []}
+    except HelperError:
+        capacity = {"status": "unavailable", "reason": "capacity source command or execution failed", "windows": []}
+    else:
+        try:
+            raw = json.loads(
+                encoded_capacity,
+                object_pairs_hook=reject_duplicate_json_pairs,
+                parse_constant=reject_json_constant,
+            )
+        except (HelperError, UnicodeDecodeError, ValueError, RecursionError, TypeError):
+            capacity = {"status": "unavailable", "reason": "capacity source returned malformed JSON", "windows": []}
+        else:
+            if not is_recognized_codexbar_capacity_payload(raw):
+                capacity = {"status": "unavailable", "reason": "capacity source payload is unrecognized", "windows": []}
+            else:
+                try:
+                    validate_codexbar_capacity_payload(raw)
+                except (HelperError, KeyError, TypeError, UnicodeError, OverflowError):
+                    capacity = {
+                        "status": "unavailable",
+                        "reason": "recognized CodexBar capacity payload has unsupported schema or version",
+                        "windows": [],
+                    }
+                else:
+                    capacity = {
+                        "status": "unavailable",
+                        "reason": "capacity source payload has no supported versioned contract",
+                        "windows": [],
+                    }
     return {"experimental": True, "capabilities": capabilities, "capacity": capacity}
 
 
-def read_capacity_source(arguments: list[str], environment: dict[str, str]) -> str:
+def read_capacity_source(arguments: list[str], environment: dict[str, str]) -> bytes:
     try:
         process = subprocess.Popen(
             arguments,
@@ -3853,8 +4214,8 @@ def read_capacity_source(arguments: list[str], environment: dict[str, str]) -> s
         process.wait(timeout=max(0.001, deadline - time.monotonic()))
         if process.returncode != 0:
             raise HelperError("capacity source is unavailable")
-        return output.decode("utf-8")
-    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as error:
+        return bytes(output)
+    except (OSError, subprocess.TimeoutExpired) as error:
         raise HelperError("capacity source is unavailable") from error
     finally:
         selector.close()
@@ -3900,6 +4261,16 @@ def read_bounded_command(arguments: list[str], limit: int) -> str:
         process.wait()
         if process.stdout is not None:
             process.stdout.close()
+
+
+def is_recognized_codexbar_capacity_payload(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == 1
+        and isinstance(value[0], dict)
+        and value[0].get("provider") == "claude"
+        and "usage" in value[0]
+    )
 
 
 def validate_codexbar_capacity_payload(value: Any) -> None:
@@ -3992,6 +4363,8 @@ def unknown_capacity_decision(
     request_digest: str,
     source: str,
     confidence: str,
+    stage_a: bool = False,
+    acknowledgement_expires_at: Any = None,
 ) -> dict[str, Any]:
     required = {
         "decision": "acknowledgement_required",
@@ -4003,10 +4376,32 @@ def unknown_capacity_decision(
         "capacity_source": source,
         "capacity_confidence": confidence,
     }
+    if stage_a:
+        observed_at = capacity_now()
+        if acknowledged:
+            if not bounded_utc_timestamp(acknowledgement_expires_at):
+                raise HelperError("Stage A acknowledgement expiry is invalid")
+            expiry = datetime.fromisoformat(acknowledgement_expires_at[:-1] + "+00:00")
+            if expiry <= observed_at:
+                raise HelperError("Stage A acknowledgement has expired")
+            if expiry > observed_at + timedelta(minutes=5):
+                raise HelperError("Stage A acknowledgement expiry exceeds the bounded lifetime")
+        else:
+            if acknowledgement_expires_at is not None:
+                raise HelperError("acknowledgement expiry requires explicit acknowledgement")
+            expiry = observed_at + timedelta(minutes=5)
+            acknowledgement_expires_at = expiry.isoformat().replace("+00:00", "Z")
+        required["acknowledgement_expires_at"] = acknowledgement_expires_at
     required["decision_digest"] = capacity_decision_digest(required)
     if not acknowledged:
         if acknowledgement_of:
             raise HelperError("acknowledgement_of requires explicit acknowledgement")
+        if stage_a:
+            required["owner_action"] = {
+                "acknowledged_unknown_capacity": True,
+                "acknowledgement_of": required["decision_digest"],
+                "acknowledgement_expires_at": acknowledgement_expires_at,
+            }
         return required
     if acknowledgement_of != required["decision_digest"]:
         raise HelperError("explicit acknowledgement must reference the prior acknowledgement-required decision")
@@ -4018,6 +4413,9 @@ def unknown_capacity_decision(
         "reason": reason,
         "acknowledgement_of": acknowledgement_of,
     }
+    if stage_a:
+        decision["acknowledgement_expires_at"] = acknowledgement_expires_at
+        decision["capacity_request_digest"] = request_digest
     decision["decision_digest"] = capacity_decision_digest(decision)
     return decision
 
@@ -4025,7 +4423,18 @@ def unknown_capacity_decision(
 def decide_mutating_capacity(request: Any) -> dict[str, Any]:
     if not isinstance(request, dict):
         raise HelperError("capacity decision request must be an object")
-    reject_unknown(request, {"capacity", "reserve_floors", "acknowledged_unknown_capacity", "acknowledgement_of"}, "capacity decision")
+    stage_a_fields = {
+        "provider", "model", "workflow", "delegation_id", "task_id", "capacity_pool_evidence",
+        "charge_route_evidence", "admitted_impact_evidence", "acknowledgement_expires_at",
+    }
+    reject_unknown(
+        request,
+        {"capacity", "reserve_floors", "acknowledged_unknown_capacity", "acknowledgement_of"} | stage_a_fields,
+        "capacity decision",
+    )
+    stage_a = any(field in request for field in stage_a_fields)
+    if stage_a:
+        validate_stage_a_capacity_context(request)
     acknowledged = request.get("acknowledged_unknown_capacity")
     if not isinstance(acknowledged, bool):
         raise HelperError("acknowledged_unknown_capacity must be boolean")
@@ -4043,6 +4452,7 @@ def decide_mutating_capacity(request: Any) -> dict[str, Any]:
     digest_request = copy.deepcopy(request)
     digest_request["acknowledged_unknown_capacity"] = False
     digest_request.pop("acknowledgement_of", None)
+    digest_request.pop("acknowledgement_expires_at", None)
     request_digest = capacity_decision_digest(digest_request)
     reject_unknown(floors, {"five_hour", "weekly", "model_specific"}, "reserve floors")
     five_hour_floor = percentage(floors.get("five_hour"), "five_hour reserve floor")
@@ -4069,7 +4479,11 @@ def decide_mutating_capacity(request: Any) -> dict[str, Any]:
     )
     windows = capacity.get("windows")
     if not isinstance(windows, list) or not windows:
-        return unknown_capacity_decision(acknowledged, acknowledgement_of, "capacity has no available windows; reserve impact is unknown", request_digest, capacity_source, capacity_confidence)
+        return unknown_capacity_decision(
+            acknowledged, acknowledgement_of, "capacity has no available windows; reserve impact is unknown",
+            request_digest, capacity_source, capacity_confidence, stage_a,
+            request.get("acknowledgement_expires_at"),
+        )
     evaluated = []
     present_window_classes = {"five_hour": False, "weekly": False}
     present_model_windows = {name: 0 for name in model_floors}
@@ -4150,9 +4564,23 @@ def decide_mutating_capacity(request: Any) -> dict[str, Any]:
         missing_capacity = True
     if missing_capacity or not all(present_window_classes.values()):
         reason = "capacity is low-confidence; reserve impact is unknown" if not reliable else "one or more required capacity windows are missing; reserve impact is unknown"
-        return unknown_capacity_decision(acknowledged, acknowledgement_of, reason, request_digest, capacity_source, capacity_confidence)
+        return unknown_capacity_decision(
+            acknowledged, acknowledgement_of, reason, request_digest, capacity_source,
+            capacity_confidence, stage_a, request.get("acknowledgement_expires_at"),
+        )
     if governing is None:
-        return unknown_capacity_decision(acknowledged, acknowledgement_of, "capacity has no evaluable windows; reserve impact is unknown", request_digest, capacity_source, capacity_confidence)
+        return unknown_capacity_decision(
+            acknowledged, acknowledgement_of, "capacity has no evaluable windows; reserve impact is unknown",
+            request_digest, capacity_source, capacity_confidence, stage_a,
+            request.get("acknowledgement_expires_at"),
+        )
+    if stage_a:
+        return unknown_capacity_decision(
+            acknowledged, acknowledgement_of,
+            "capacity pool, charge route, or maximum admitted impact is unproved; reserve impact is unknown",
+            request_digest, capacity_source, capacity_confidence, True,
+            request.get("acknowledgement_expires_at"),
+        )
     if acknowledged or acknowledgement_of:
         raise HelperError("reliable capacity does not accept unknown-capacity acknowledgement fields")
     decision = {
@@ -4292,6 +4720,9 @@ def mcp_tools(mutating: bool = False) -> list[dict[str, Any]]:
         "created_at": {"type": "string", "maxLength": 256},
     }
     common_required = list(common_properties)
+    if mutating:
+        common_properties["model"] = {"type": "string", "const": MUTATING_MODEL}
+        common_required.append("model")
     string_list = {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 2048}}
     report_properties = dict(common_properties)
     if mutating:
@@ -4493,6 +4924,23 @@ def validate_terminal_amp_authorization(value: Any) -> dict[str, str]:
     return copy.deepcopy(value)
 
 
+def validate_exact_pane_owner_authorization(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise HelperError("exact-pane disposal owner authorization must be an object")
+    fields = {
+        "decision", "executable_identity_acknowledgement", "authorization_sha256",
+    }
+    reject_unknown(value, fields, "exact-pane disposal owner authorization")
+    if value.get("decision") != "dispose_exact_pane_process_incarnation":
+        raise HelperError("exact-pane disposal owner decision is not explicit")
+    if value.get("executable_identity_acknowledgement") != "unproved":
+        raise HelperError("exact-pane disposal must acknowledge unproved executable identity")
+    digest = required_string(value, "authorization_sha256", 64)
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise HelperError("exact-pane disposal owner authorization must be a lowercase SHA-256 value")
+    return copy.deepcopy(value)
+
+
 def reject_unknown(value: dict[str, Any], allowed: set[str], label: str) -> None:
     unknown = sorted(set(value) - allowed)
     if unknown:
@@ -4514,6 +4962,8 @@ def require_receipt_mutable(receipt: dict[str, Any]) -> None:
         or receipt.get("pair_retired") is not None
         or receipt.get("acquired_retirement_intent") is not None
         or receipt.get("acquired_pair_retired") is not None
+        or receipt.get("exact_pane_disposal_intent") is not None
+        or receipt.get("exact_pane_disposed") is not None
         or (
         isinstance(events, list)
         and any(
@@ -4521,12 +4971,20 @@ def require_receipt_mutable(receipt: dict[str, Any]) -> None:
             and event.get("kind") in {
                 "worker_detached", "retirement_intent", "pair_retired",
                 "acquired_retirement_intent", "acquired_pair_retired",
+                "exact_pane_disposal_intent", "exact_pane_disposed",
             }
             for event in events
         )
         )
     ):
         raise HelperError("terminal receipt is sealed against further mutation")
+    if isinstance(events, list) and any(
+        isinstance(event, dict)
+        and event.get("kind") == "launch_intent"
+        and "expected_argv_digest" in event
+        for event in events
+    ):
+        receipt_launch_intent(receipt)
 
 
 def require_launch_transport_allowed(store: ReceiptStore, delegation_id: str) -> None:
@@ -4585,6 +5043,21 @@ def receipt_launch_intent(receipt: dict[str, Any]) -> dict[str, Any]:
     if len(intents) != 1:
         raise HelperError("session identity requires one immutable launch intent")
     intent = intents[0]
+    binding = receipt.get("binding")
+    if (
+        not isinstance(binding, dict)
+        or optional_read_only_model(intent) != optional_read_only_model(binding)
+    ):
+        raise HelperError("launch intent model differs from immutable binding")
+    if binding.get("producer_role") == "mutating_delegate":
+        exact_mutating_model(intent)
+        for key in (
+            "capacity_decision_digest", "capacity_acknowledgement_of",
+            "capacity_request_digest", "capacity_acknowledgement_expires_at",
+        ):
+            required_string(intent, key, 256)
+        if intent["capacity_decision_digest"] != binding.get("capacity_decision_digest"):
+            raise HelperError("launch intent capacity decision differs from immutable binding")
     for key in (
         "expected_argv_digest", "expected_launcher_identity", "expected_executable_object_identity"
     ):
@@ -4634,8 +5107,11 @@ def worker_teardown_receipt_blocker(receipt: dict[str, Any]) -> str | None:
         valid_worker_detach_chain(receipt)
         or valid_pair_retirement_chain(receipt)
         or valid_acquired_no_report_pair_retirement_chain(receipt)
+        or valid_exact_pane_disposal_chain(receipt)
     ):
         return None
+    if valid_pre_identity_acquired_no_report_candidate(receipt):
+        return "pre_identity_acquired_pair_permanently_non_retirable"
     if receipt.get("input_state") in {"pending", "seen"}:
         return "unresolved_input"
     events = receipt.get("events", [])
@@ -5023,6 +5499,269 @@ def valid_live_acquired_no_report_retirement_candidate(
     return True
 
 
+def valid_pre_identity_acquired_no_report_candidate(receipt: dict[str, Any]) -> bool:
+    events = receipt.get("events")
+    if (
+        not isinstance(events, list)
+        or any(not isinstance(event, dict) for event in events)
+        or [event.get("kind") for event in events]
+        != ["created", "launch_intent", "launch_completed", "session_acquired"]
+        or receipt.get("state") != "created"
+        or receipt.get("report_message_id") != ""
+        or set(receipt) != {
+            "binding", "routing", "state", "report_message_id", "created_at", "updated_at", "events",
+            "session_identity",
+        }
+    ):
+        return False
+    created, launch_intent, launch_completed, acquired = events
+    binding = receipt.get("binding", {})
+    identity = receipt.get("session_identity")
+    historical_identity_fields = {
+        "claude_session_id", "session", "window", "window_id", "pane_id", "pane_pid", "workdir",
+        "current_command", "process_name", "process_identity", "process_command_digest",
+        "launch_command_digest",
+    }
+    if (
+        set(created) != {"event_id", "kind", "at", "routing"}
+        or created.get("event_id") != f"create:{binding.get('delegation_id', '')}"
+        or not bounded_utc_timestamp(created.get("at"))
+        or receipt.get("created_at") != created.get("at")
+        or receipt.get("updated_at") != acquired.get("at")
+        or set(launch_completed)
+        != {"event_id", "kind", "operation_event_id", "identity", "at"}
+        or launch_completed.get("event_id")
+        != internal_event_id("launch-result", launch_intent.get("event_id", ""))
+        or launch_completed.get("operation_event_id") != launch_intent.get("event_id")
+        or not bounded_utc_timestamp(launch_completed.get("at"))
+        or not isinstance(launch_completed.get("identity"), dict)
+        or set(launch_completed["identity"]) != {"session", "window", "window_id", "pane_id"}
+        or set(acquired) != {"event_id", "kind", "identity", "at"}
+        or not bounded_utc_timestamp(acquired.get("at"))
+        or not isinstance(identity, dict)
+        or set(identity) != historical_identity_fields
+        or acquired.get("identity") != identity
+        or any(
+            not isinstance(identity.get(key), str) or not identity[key]
+            for key in historical_identity_fields - {"pane_pid"}
+        )
+        or type(identity.get("pane_pid")) is not int
+        or identity["pane_pid"] <= 0
+        or any(
+            launch_completed["identity"].get(key) != identity.get(key)
+            for key in ("session", "window", "window_id", "pane_id")
+        )
+        or not re.fullmatch(r"@[0-9]+", identity["window_id"])
+        or not re.fullmatch(r"%[0-9]+", identity["pane_id"])
+        or any(
+            len(identity[key]) != 64
+            or any(character not in "0123456789abcdef" for character in identity[key])
+            for key in ("process_command_digest", "launch_command_digest")
+        )
+    ):
+        return False
+    try:
+        protocol_id(acquired, "event_id")
+        protocol_id(identity, "claude_session_id")
+        for key in ("session", "window", "window_id", "pane_id", "current_command", "process_name", "process_identity"):
+            required_string(identity, key, 256)
+        required_string(identity, "workdir", 2048)
+        intent = pre_identity_launch_intent(receipt)
+        if validate_binding(binding) != binding:
+            return False
+        routing = validate_routing(receipt.get("routing"))
+    except (HelperError, KeyError, OSError):
+        return False
+    return (
+        routing == receipt.get("routing")
+        and created.get("routing") == routing
+        and identity["session"] == intent["tmux_session"]
+        and identity["window"] == intent["tmux_window"]
+        and identity["claude_session_id"] == intent["claude_session_id"]
+        and identity["workdir"] == binding.get("workdir")
+        and identity["launch_command_digest"] == binding.get("launch_command_digest")
+    )
+
+
+def exact_pane_disposal_identity_matches(identity: Any, acquired_identity: Any) -> bool:
+    if not isinstance(identity, dict) or not isinstance(acquired_identity, dict):
+        return False
+    try:
+        expected_start = acquired_identity.get("process_start_identity")
+        if expected_start is None:
+            expected_start = process_start_identity_from_process_identity(
+                acquired_identity.get("process_identity", "")
+            )
+        expected_fields = (
+            set(acquired_identity) - {"process_identity"}
+        ) | {"session_id", "process_start_identity"}
+        return (
+            set(identity) == expected_fields
+            and all(
+                identity.get(key) == value
+                for key, value in acquired_identity.items()
+                if key not in {"process_identity", "process_start_identity"}
+            )
+            and isinstance(identity.get("session_id"), str)
+            and re.fullmatch(r"\$[0-9]+", identity["session_id"]) is not None
+            and identity.get("process_start_identity") == expected_start
+        )
+    except (HelperError, KeyError, TypeError):
+        return False
+
+
+def valid_exact_pane_disposal_source_candidate(receipt: dict[str, Any]) -> bool:
+    if not valid_pre_identity_acquired_no_report_candidate(receipt):
+        return False
+    binding = receipt.get("binding")
+    historical_read_only_binding_fields = {
+        "protocol_version", "delegation_id", "nonce", "task_id", "question_message_id",
+        "origin_thread", "repository", "base", "workdir", "producer_role", "authority",
+        "task_reference", "packet_digest", "launch_policy_digest", "launch_command_digest",
+    }
+    intents = [
+        event
+        for event in receipt.get("events", [])
+        if isinstance(event, dict) and event.get("kind") == "launch_intent"
+    ]
+    return (
+        isinstance(binding, dict)
+        and set(binding) == historical_read_only_binding_fields
+        and binding.get("producer_role") == "thinker"
+        and binding.get("authority") == "read_only"
+        and len(intents) == 1
+        and intents[0].get("workflow") == "read_only"
+    )
+
+
+def validate_exact_pane_disposal_operation(
+    event: dict[str, Any],
+    authorization: dict[str, str],
+    owner_authorization: dict[str, str],
+    operation_event_id: str,
+) -> None:
+    fields = {
+        "event_id", "kind", "terminal_state", "report_sha256",
+        "coordinator_authorization_sha256", "owner_authorization", "compatibility", "identity",
+        "at",
+    }
+    if (
+        set(event) != fields
+        or event.get("kind") != "exact_pane_disposal_intent"
+        or event.get("event_id") != operation_event_id
+        or event.get("compatibility") != PRE_IDENTITY_ACQUIRED_NO_REPORT_COMPATIBILITY
+        or not bounded_utc_timestamp(event.get("at"))
+        or any(event.get(key) != authorization[key] for key in authorization)
+        or event.get("owner_authorization") != owner_authorization
+    ):
+        raise HelperError("exact-pane disposal operation conflicts with durable intent")
+
+
+def valid_exact_pane_disposal_candidate(
+    receipt: dict[str, Any],
+    authorization: dict[str, str],
+    owner_authorization: dict[str, str],
+    operation_event_id: str,
+) -> bool:
+    events = receipt.get("events")
+    if not isinstance(events, list):
+        return False
+    intents = [
+        event
+        for event in events
+        if isinstance(event, dict) and event.get("kind") == "exact_pane_disposal_intent"
+    ]
+    if not intents:
+        return valid_exact_pane_disposal_source_candidate(receipt)
+    if len(intents) != 1 or events[-1] != intents[0]:
+        return False
+    intent = intents[0]
+    if receipt.get("exact_pane_disposal_intent") != intent:
+        return False
+    if set(receipt) != {
+        "binding", "routing", "state", "report_message_id", "created_at", "updated_at", "events",
+        "session_identity", "exact_pane_disposal_intent",
+    } or receipt.get("updated_at") != intent.get("at"):
+        return False
+    try:
+        validate_exact_pane_disposal_operation(
+            intent, authorization, owner_authorization, operation_event_id
+        )
+    except HelperError:
+        return False
+    if not exact_pane_disposal_identity_matches(
+        intent.get("identity"), receipt.get("session_identity")
+    ):
+        return False
+    prior = copy.deepcopy(receipt)
+    prior.pop("exact_pane_disposal_intent", None)
+    prior["events"] = prior["events"][:-1]
+    prior["updated_at"] = prior["events"][-1]["at"]
+    return valid_exact_pane_disposal_source_candidate(prior)
+
+
+def valid_exact_pane_disposal_chain(receipt: dict[str, Any]) -> bool:
+    events = receipt.get("events")
+    intent = receipt.get("exact_pane_disposal_intent")
+    result = receipt.get("exact_pane_disposed")
+    if not isinstance(events, list) or not isinstance(intent, dict) or not isinstance(result, dict):
+        return False
+    intents = [
+        event
+        for event in events
+        if isinstance(event, dict) and event.get("kind") == "exact_pane_disposal_intent"
+    ]
+    results = [
+        event
+        for event in events
+        if isinstance(event, dict) and event.get("kind") == "exact_pane_disposed"
+    ]
+    if (
+        len(intents) != 1
+        or len(results) != 1
+        or intents[0] != intent
+        or results[0] != result
+        or events[-2:] != [intent, result]
+    ):
+        return False
+    if set(receipt) != {
+        "binding", "routing", "state", "report_message_id", "created_at", "updated_at", "events",
+        "session_identity", "exact_pane_disposal_intent", "exact_pane_disposed",
+    }:
+        return False
+    if (
+        set(result) != {"event_id", "kind", "operation_event_id", "absence_code", "at"}
+        or result.get("event_id")
+        != internal_event_id("exact-pane-disposal-result", intent.get("event_id", ""))
+        or result.get("operation_event_id") != intent.get("event_id")
+        or result.get("absence_code") != "exact_pane_process_incarnation_absent"
+        or not bounded_utc_timestamp(result.get("at"))
+        or receipt.get("updated_at") != result.get("at")
+    ):
+        return False
+    authorization = {
+        key: intent.get(key)
+        for key in ("terminal_state", "report_sha256", "coordinator_authorization_sha256")
+    }
+    try:
+        validate_terminal_amp_authorization(authorization)
+        owner_authorization = validate_exact_pane_owner_authorization(
+            intent.get("owner_authorization")
+        )
+        validate_exact_pane_disposal_operation(
+            intent, authorization, owner_authorization, intent.get("event_id", "")
+        )
+    except HelperError:
+        return False
+    prior = copy.deepcopy(receipt)
+    prior.pop("exact_pane_disposed", None)
+    prior["events"] = prior["events"][:-1]
+    prior["updated_at"] = intent["at"]
+    return valid_exact_pane_disposal_candidate(
+        prior, authorization, owner_authorization, intent["event_id"]
+    )
+
+
 def validate_acquired_retirement_operation(
     event: dict[str, Any],
     authorization: dict[str, str],
@@ -5159,6 +5898,50 @@ def acquired_pair_retirement_blocked(
         "pair_sha256": pair_sha256,
         "outcome": "blocked",
         "blocker": blocker,
+        "fence": "retained",
+    }
+
+
+def pre_identity_acquired_permanent_terminal_result(
+    origin_sha256: str, pair_sha256: str
+) -> dict[str, str]:
+    return {
+        "action": "live_acquired_no_report_pair_retirement",
+        "origin_thread_sha256": origin_sha256,
+        "pair_sha256": pair_sha256,
+        "outcome": "blocked",
+        "blocker": "pre_identity_acquired_pair_permanently_non_retirable",
+        "policy": "preserve_receipt_runtime_artifacts_and_origin_fence",
+        "remediation": "paired_worker_teardown_prohibited",
+        "compatibility": PRE_IDENTITY_ACQUIRED_NO_REPORT_COMPATIBILITY,
+        "fence": "retained",
+    }
+
+
+def exact_pane_disposal_result(
+    origin_sha256: str, pair_sha256: str, outcome: str
+) -> dict[str, str]:
+    return {
+        "action": "exact_pre_identity_pane_disposal",
+        "origin_thread_sha256": origin_sha256,
+        "pair_sha256": pair_sha256,
+        "outcome": outcome,
+        "absence_code": "exact_pane_process_incarnation_absent",
+        "compatibility": PRE_IDENTITY_ACQUIRED_NO_REPORT_COMPATIBILITY,
+        "fence": "retained",
+    }
+
+
+def exact_pane_disposal_blocked(
+    origin_sha256: str, pair_sha256: str, blocker: str
+) -> dict[str, str]:
+    return {
+        "action": "exact_pre_identity_pane_disposal",
+        "origin_thread_sha256": origin_sha256,
+        "pair_sha256": pair_sha256,
+        "outcome": "blocked",
+        "blocker": blocker,
+        "compatibility": PRE_IDENTITY_ACQUIRED_NO_REPORT_COMPATIBILITY,
         "fence": "retained",
     }
 
@@ -5341,6 +6124,137 @@ def inspect_live_indeterminate_target(
     if not valid_retirement_identity(identity, launch_intent, binding):
         raise HelperError("retirement target does not match complete launch identity")
     return identity
+
+
+def inspect_exact_pre_identity_target(
+    control: TmuxControlConnection, durable_identity: dict[str, Any]
+) -> dict[str, Any]:
+    formats = [
+        "session_name", "session_id", "window_name", "window_id", "pane_id", "pane_pid",
+        "pane_current_path", "pane_current_command", "pane_start_command",
+    ]
+    values: list[str] = []
+    for format_value in formats:
+        token = secrets.token_hex(32)
+        response = control.command([
+            "display-message", "-p", "-t", durable_identity["pane_id"],
+            f"{token}:{tmux_single_line_format(format_value)}",
+        ])
+        prefix = f"{token}:"
+        if len(response) != 1 or not response[0].startswith(prefix):
+            raise HelperError("exact-pane tmux control snapshot is ambiguous")
+        values.append(decode_tmux_command_argument(response[0][len(prefix) :]))
+    try:
+        pane_pid = int(values[5])
+    except ValueError as error:
+        raise HelperError("exact-pane snapshot has invalid process identity") from error
+    try:
+        workdir = str(pathlib.Path(values[6]).resolve(strict=True))
+    except OSError as error:
+        raise HelperError("exact-pane workdir identity is unavailable") from error
+    start_command = values[8]
+    if start_command.startswith('"') and start_command.endswith('"'):
+        try:
+            decoded = ast.literal_eval(start_command)
+        except (SyntaxError, ValueError) as error:
+            raise HelperError("exact-pane launch command has invalid tmux quoting") from error
+        if not isinstance(decoded, str):
+            raise HelperError("exact-pane launch command has invalid tmux quoting")
+        start_command = decoded
+    process_name, process_identity, process_args, process_command_digest = exact_process_identity(
+        pane_pid
+    )
+    if platform.system() == "Darwin":
+        final_name, final_identity, final_args, final_digest = exact_process_identity(pane_pid)
+        if (
+            final_name != process_name
+            or final_identity != process_identity
+            or final_args != process_args
+            or final_digest != process_command_digest
+        ):
+            raise HelperError("Darwin exact-pane process changed during identity inspection")
+    identity = {
+        "claude_session_id": durable_identity["claude_session_id"],
+        "session": values[0],
+        "session_id": values[1],
+        "window": values[2],
+        "window_id": values[3],
+        "pane_id": values[4],
+        "pane_pid": pane_pid,
+        "workdir": workdir,
+        "current_command": values[7],
+        "process_name": process_name,
+        "process_start_identity": process_start_identity_from_process_identity(process_identity),
+        "process_command_digest": process_command_digest,
+        "launch_command_digest": hashlib.sha256(start_command.encode()).hexdigest(),
+    }
+    if not exact_pane_disposal_identity_matches(identity, durable_identity):
+        raise HelperError("live target does not match the exact durable pane/process incarnation")
+    return identity
+
+
+def stop_exact_pre_identity_target(
+    control: TmuxControlConnection, identity: dict[str, Any]
+) -> None:
+    if inspect_exact_pre_identity_target(control, identity) != identity:
+        raise HelperError("exact-pane target changed immediately before exact stop")
+    token = secrets.token_hex(32)
+    responses = control.command_sequence([
+        ["kill-pane", "-t", identity["pane_id"]],
+        ["display-message", "-p", f"exact-pane-disposal:{token}"],
+    ])
+    if responses != [[], [f"exact-pane-disposal:{token}"]]:
+        raise HelperError("exact-pane stop returned ambiguous output")
+
+
+def confirm_exact_pre_identity_target_absent(
+    control: TmuxControlConnection, identity: dict[str, Any]
+) -> str:
+    deadline = time.monotonic() + 2.0
+    confirmed = 0
+    while time.monotonic() < deadline:
+        token = secrets.token_hex(32)
+        try:
+            response = control.command([
+                "list-panes", "-a", "-F", f"{token}:#{{pane_id}}",
+            ])
+        except HelperError:
+            return "tmux_control_connection_unavailable"
+        prefix = f"{token}:"
+        if (
+            len(response) > MAX_ABSENCE_PANES
+            or any(
+                not row.startswith(prefix)
+                or re.fullmatch(r"%[0-9]+", row[len(prefix) :]) is None
+                for row in response
+            )
+        ):
+            return "tmux_inspection_ambiguous"
+        panes = [row[len(prefix) :] for row in response]
+        if len(panes) != len(set(panes)):
+            return "tmux_inspection_ambiguous"
+        if identity["pane_id"] in panes:
+            return "exact_pane_process_incarnation_still_live"
+        try:
+            _, process_identity, _, _ = exact_process_identity(identity["pane_pid"])
+        except HelperError:
+            if not process_pid_is_absent(identity["pane_pid"]):
+                return "process_inspection_unavailable"
+            confirmed += 1
+            if confirmed >= 2:
+                return "exact_pane_process_incarnation_absent"
+            time.sleep(STARTUP_POLL_SECONDS)
+            continue
+        if (
+            process_start_identity_from_process_identity(process_identity)
+            == identity["process_start_identity"]
+        ):
+            return "exact_pane_process_incarnation_still_live"
+        confirmed += 1
+        if confirmed >= 2:
+            return "exact_pane_process_incarnation_absent"
+        time.sleep(STARTUP_POLL_SECONDS)
+    return "exact_pane_absence_unconfirmed"
 
 
 def stop_exact_retirement_target(
@@ -5648,6 +6562,11 @@ def valid_worker_lifecycle_chain(receipt: dict[str, Any], parked: bool) -> bool:
     acquired = exactly_one("session_acquired")
     if launch_intent is None or launch_completed is None or acquired is None:
         return False
+    try:
+        if receipt_launch_intent(receipt) != launch_intent[1]:
+            return False
+    except HelperError:
+        return False
     if not (launch_intent[0] < launch_completed[0] < acquired[0]):
         return False
     if launch_completed[1].get("operation_event_id") != launch_intent[1].get("event_id"):
@@ -5781,6 +6700,7 @@ def parser() -> argparse.ArgumentParser:
     lifecycle_commands.add_parser("detach-indeterminate-worker")
     lifecycle_commands.add_parser("retire-live-indeterminate-pair")
     lifecycle_commands.add_parser("retire-live-acquired-no-report-pair")
+    lifecycle_commands.add_parser("dispose-exact-pre-identity-acquired-pair")
     commands.add_parser("diagnose")
     return root
 
@@ -5860,6 +6780,21 @@ def main() -> int:
                 "action": "live_acquired_no_report_pair_retirement",
                 "outcome": "blocked",
                 "blocker": "retirement_proof_invalid_or_unavailable",
+                "fence": "unchanged_or_retained",
+            }
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 2 if result["outcome"] == "blocked" else 0
+    if (
+        arguments.area == "lifecycle"
+        and arguments.command == "dispose-exact-pre-identity-acquired-pair"
+    ):
+        try:
+            result = store.dispose_exact_pre_identity_acquired_pair(read_input())
+        except HelperError:
+            result = {
+                "action": "exact_pre_identity_pane_disposal",
+                "outcome": "blocked",
+                "blocker": "exact_pane_disposal_proof_invalid_or_unavailable",
                 "fence": "unchanged_or_retained",
             }
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))

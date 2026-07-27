@@ -43,6 +43,35 @@ func TestSessionExistsDistinguishesAbsenceFromInspectionFailure(t *testing.T) {
 	}
 }
 
+func TestAllWindowPanesTreatsMissingServerAsEmpty(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		message   string
+		wantError bool
+	}{
+		{name: "missing server", message: "no server running on /tmp/tmux.sock"},
+		{name: "missing server socket", message: "error connecting to /tmp/tmux-1000/default (No such file or directory)"},
+		{name: "inspection failure", message: "permission denied", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bin := t.TempDir()
+			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\necho '"+test.message+"' >&2\nexit 1\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			panes, err := (Runner{}).AllWindowPanes()
+			if test.wantError {
+				if err == nil || !strings.Contains(err.Error(), test.message) {
+					t.Fatalf("AllWindowPanes() error = %v, want %q", err, test.message)
+				}
+				return
+			}
+			if err != nil || len(panes) != 0 {
+				t.Fatalf("AllWindowPanes() panes = %+v, error = %v", panes, err)
+			}
+		})
+	}
+}
+
 func TestInspectProcessUsesLinuxAndMacOSCompatiblePSFields(t *testing.T) {
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "ps.log")
@@ -302,31 +331,6 @@ test "$1" = send-keys
 	}
 }
 
-func TestClearLineUsesTmuxControlU(t *testing.T) {
-	tmp := t.TempDir()
-	logPath := filepath.Join(tmp, "calls.log")
-	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
-printf '%s\n' "$*" >> "`+logPath+`"
-if [ "$1" = send-keys ]; then
-  exit 0
-fi
-exit 2
-`)
-	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	if err := (Runner{}).ClearLine("%1"); err != nil {
-		t.Fatal(err)
-	}
-
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := strings.TrimSpace(string(logBytes)), "send-keys -t %1 C-u"; got != want {
-		t.Fatalf("ClearLine sent %q, want %q", got, want)
-	}
-}
-
 func TestCapturePaneJoinsWrappedLines(t *testing.T) {
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "calls.log")
@@ -353,6 +357,57 @@ exit 2
 	}
 	if got, want := strings.TrimSpace(string(logBytes)), "capture-pane -J -p -t %1"; got != want {
 		t.Fatalf("CapturePane sent %q, want %q", got, want)
+	}
+}
+
+func TestWindowPanesWithPaneIDRequiresExactReturnedSessionAndWindow(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "calls.log")
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+printf '%s\n' "$*" >> "`+logPath+`"
+if [ "$1" = list-panes ]; then
+  printf 'alpha-prefix\tworker\t@1\t%%1\texec amp threads continue T-provisioned\n'
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if _, err := (Runner{}).WindowPanesWithPaneID("alpha", "worker"); err == nil || !strings.Contains(err.Error(), "exact session/window") {
+		t.Fatalf("mismatched returned session error = %v", err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "list-panes -t =alpha:=worker -F #{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_start_command}"
+	if got := strings.TrimSpace(string(logBytes)); got != want {
+		t.Fatalf("WindowPanesWithPaneID sent %q, want %q", got, want)
+	}
+}
+
+func TestWindowPanesWithPaneIDSelectsOneExactWindowInMultiWindowSession(t *testing.T) {
+	tmp := t.TempDir()
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1 $2" = "list-panes -t" ] && [ "$3" = '=alpha:=worker' ]; then
+  printf 'alpha\tworker\t@1\t%%1\texec amp threads continue T-provisioned\n'
+  exit 0
+fi
+if [ "$1" = list-panes ]; then
+  printf 'alpha\tworker\t@1\t%%1\texec amp threads continue T-provisioned\n'
+  printf 'alpha\trunner\t@2\t%%2\texec amp --no-tui\n'
+  exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	panes, err := (Runner{}).WindowPanesWithPaneID("alpha", "worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(panes) != 1 || panes[0].Session != "alpha" || panes[0].Window != "worker" || panes[0].PaneID != "%1" {
+		t.Fatalf("exact worker panes = %+v", panes)
 	}
 }
 

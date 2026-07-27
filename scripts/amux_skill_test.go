@@ -13,14 +13,18 @@ import (
 var publicSkillFiles = []string{
 	"README.md",
 	filepath.Join("skills", "amux", "SKILL.md"),
-	filepath.Join("skills", "amux", "reference", "pi-spark-orb-executor.md"),
-	filepath.Join("skills", "amux", "reference", "pi-spark-local-executor.md"),
 	filepath.Join("skills", "amux", "reference", "commands.md"),
 	filepath.Join("skills", "amux", "reference", "trigger-phrases.md"),
 	filepath.Join("skills", "amux", "reference", "workflows.md"),
 	filepath.Join("skills", "amux", "reference", "troubleshooting.md"),
 	filepath.Join("skills", "amux", "reference", "amp-invocation-policy.md"),
-	filepath.Join("skills", "amux", "reference", "claude-opus-orb-executor.md"),
+	filepath.Join("skills", "amux", "reference", "contract-v1.md"),
+	filepath.Join("skills", "amux", "reference", "deadline-v1.md"),
+	filepath.Join("skills", "amux-claude", "SKILL.md"),
+	filepath.Join("skills", "amux-pi", "SKILL.md"),
+	filepath.Join("skills", "amux-pi", "reference", "pi-spark-orb-executor.md"),
+	filepath.Join("skills", "amux-pi", "reference", "pi-spark-local-executor.md"),
+	filepath.Join("skills", "amux-claude", "reference", "claude-opus-orb-executor.md"),
 	filepath.Join("docs", "index.html"),
 	filepath.Join("docs", "skill", "index.html"),
 	filepath.Join("docs", "og-image.svg"),
@@ -34,8 +38,8 @@ func TestTriggerChecklistMatchesSkillActivationAndRouting(t *testing.T) {
 
 	triggerPattern := regexp.MustCompile(`(?m)^\| \x60([^\x60]+)\x60 \|`)
 	matches := triggerPattern.FindAllStringSubmatch(checklist, -1)
-	if len(matches) != 24 {
-		t.Fatalf("trigger checklist has %d routes, want 24", len(matches))
+	if len(matches) != 18 {
+		t.Fatalf("trigger checklist has %d routes, want 18", len(matches))
 	}
 	for _, match := range matches {
 		trigger := match[1]
@@ -48,26 +52,51 @@ func TestTriggerChecklistMatchesSkillActivationAndRouting(t *testing.T) {
 func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
-	for _, name := range []string{
-		"commands.md",
-		"workflows.md",
-		"troubleshooting.md",
-		"trigger-phrases.md",
-		"claude-opus-orb-executor.md",
-		"pi-spark-orb-executor.md",
-		"pi-spark-local-executor.md",
-		"claude-read-only-delegation.md",
-		"claude-mutating-delegation.md",
-		"claude-delegation-contract.md",
-		"claude-delegation-recovery.md",
-		"amp-invocation-policy.md",
+	type skillRefs struct {
+		skillDir string
+		refs     []string
+	}
+	for _, pkg := range []skillRefs{
+		{
+			skillDir: filepath.Join("skills", "amux"),
+			refs: []string{
+				"commands.md",
+				"workflows.md",
+				"troubleshooting.md",
+				"trigger-phrases.md",
+				"contract-v1.md",
+				"deadline-v1.md",
+				"amp-invocation-policy.md",
+			},
+		},
+		{
+			skillDir: filepath.Join("skills", "amux-claude"),
+			refs: []string{
+				"claude-delegation-contract.md",
+				"claude-delegation-recovery.md",
+				"claude-read-only-delegation.md",
+				"claude-mutating-delegation.md",
+				"claude-opus-orb-executor.md",
+				"trigger-phrases.md",
+			},
+		},
+		{
+			skillDir: filepath.Join("skills", "amux-pi"),
+			refs: []string{
+				"pi-spark-orb-executor.md",
+				"pi-spark-local-executor.md",
+				"trigger-phrases.md",
+			},
+		},
 	} {
-		if !strings.Contains(skill, "reference/"+name) {
-			t.Errorf("SKILL.md does not link reference/%s", name)
-		}
-		if _, err := os.Stat(filepath.Join(root, "skills", "amux", "reference", name)); err != nil {
-			t.Errorf("reference/%s is missing: %v", name, err)
+		skill := readSkillFile(t, root, filepath.Join(pkg.skillDir, "SKILL.md"))
+		for _, name := range pkg.refs {
+			if !strings.Contains(skill, "reference/"+name) {
+				t.Errorf("%s/SKILL.md does not link reference/%s", pkg.skillDir, name)
+			}
+			if _, err := os.Stat(filepath.Join(root, pkg.skillDir, "reference", name)); err != nil {
+				t.Errorf("%s/reference/%s is missing: %v", pkg.skillDir, name, err)
+			}
 		}
 	}
 }
@@ -75,9 +104,13 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 func TestExperimentalPiSparkOrbRecipeStaysProviderSpecificAndFailClosed(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
-	triggers := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md"))
-	recipe := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "pi-spark-orb-executor.md"))
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux-pi", "SKILL.md"))
+	triggers := readSkillFile(t, root, filepath.Join("skills", "amux-pi", "reference", "trigger-phrases.md"))
+	recipe := readSkillFile(t, root, filepath.Join("skills", "amux-pi", "reference", "pi-spark-orb-executor.md"))
+	core := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
+	if strings.Contains(core, "Run Pi on Spark in an Amp Orb") {
+		t.Error("core /amux skill must not route Pi/Spark triggers")
+	}
 
 	if !strings.Contains(skill, "Run Pi on Spark in an Amp Orb") || !strings.Contains(triggers, "Run Pi on Spark in an Amp Orb") {
 		t.Error("Pi/Spark trigger is missing from skill routing or trigger checklist")
@@ -211,10 +244,14 @@ func TestExperimentalPiSparkOrbRecipeStaysProviderSpecificAndFailClosed(t *testi
 func TestLocalPiSparkExecutorStaysProviderSpecificAndPersistentHostSafe(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
-	triggers := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md"))
-	reference := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "pi-spark-local-executor.md"))
-	helper := readSkillFile(t, root, filepath.Join("skills", "amux", "experimental", "pi-spark-local", "pi_spark_local.py"))
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux-pi", "SKILL.md"))
+	triggers := readSkillFile(t, root, filepath.Join("skills", "amux-pi", "reference", "trigger-phrases.md"))
+	reference := readSkillFile(t, root, filepath.Join("skills", "amux-pi", "reference", "pi-spark-local-executor.md"))
+	helper := readSkillFile(t, root, filepath.Join("skills", "amux-pi", "experimental", "pi-spark-local", "pi_spark_local.py"))
+	core := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
+	if strings.Contains(core, "Run a bounded local Pi Spark microtask") {
+		t.Error("core /amux skill must not route local Pi/Spark triggers")
+	}
 
 	for _, required := range []string{
 		"Run a bounded local Pi Spark microtask",
@@ -255,7 +292,7 @@ func TestLocalPiSparkExecutorStaysProviderSpecificAndPersistentHostSafe(t *testi
 func TestPiSparkResultPipelineDecodesSchemaCorrectTextDelta(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	recipe := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "pi-spark-orb-executor.md"))
+	recipe := readSkillFile(t, root, filepath.Join("skills", "amux-pi", "reference", "pi-spark-orb-executor.md"))
 	const pipeline = `jq -s '[.[] | select(.type == "message_update") | .assistantMessageEvent | select(.type == "text_delta") | .delta] | join("")' "$VALIDATED_EVENTS" | jq -r . >"$RESULT"`
 	if !strings.Contains(recipe, pipeline) {
 		t.Fatal("Pi/Spark recipe is missing the reviewed result-decoding pipeline")
@@ -291,63 +328,25 @@ func TestInvocationPolicyIsProgressivelyDisclosedWithoutChangingClaudeRoutes(t *
 	root := repoRoot(t)
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
 	policy := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "amp-invocation-policy.md"))
-	claude := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-read-only-delegation.md"))
-
-	for _, required := range []string{
-		"load [`reference/amp-invocation-policy.md`]",
-		"Never bypass a binding `ask` or `reject`",
-	} {
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	claude := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-read-only-delegation.md"))
+	for _, required := range []string{"amp-invocation-policy.md", "Never bypass a binding `ask` or `reject`"} {
 		if !strings.Contains(skill, required) {
 			t.Errorf("SKILL.md is missing invocation-policy routing %q", required)
 		}
 	}
-	for _, required := range []string{
-		"observed",
-		"instruction-only",
-		"one narrow query",
-		"Raw delegated arguments are never logged",
-		"Amp-native `runner(id)`",
-		"unknown charge route",
-		"public-safe",
-		"#147",
-		"#176",
-	} {
+	for _, required := range []string{"observed", "instruction-only", "Raw delegated arguments are never logged", "Amp-native `runner(id)`", "unknown charge route", "public-safe", "#147", "#176"} {
 		if !strings.Contains(policy, required) {
 			t.Errorf("invocation policy is missing %q", required)
 		}
 	}
+	for _, required := range []string{"explicit executor", "Select `medium`", "Amp-native `runner(id)`", "does not return a prompt digest", "do not claim exactly-once delivery"} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("native creation workflow is missing %q", required)
+		}
+	}
 	if strings.Contains(claude, "amp-invocation-policy") {
 		t.Error("independent Claude route unexpectedly loads invocation policy")
-	}
-	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
-	for _, required := range []string{
-		"resolve-amp-invocation-policy",
-		"MODE=medium",
-		`"mode":"%s"`,
-		"exact deterministic `allow` document",
-		"Every automatic `amux spawn` command in this reference",
-		"Exit nonzero stops before `amux spawn`",
-	} {
-		if !strings.Contains(workflow, required) {
-			t.Errorf("automatic spawn workflow is missing resolver preflight %q", required)
-		}
-	}
-	if count := strings.Count(workflow, "Run the shared automatic-spawn preflight above before this block."); count != 2 {
-		t.Errorf("automatic spawn route markers=%d, want 2 for sprawl and durable coordination", count)
-	}
-	spawnCommands := 0
-	scanLines(t, filepath.Join(root, "skills", "amux", "reference", "workflows.md"), func(lineNumber int, line string) {
-		command := commandText(line)
-		if !strings.HasPrefix(command, "amux ") || !strings.Contains(command, " spawn ") {
-			return
-		}
-		spawnCommands++
-		if !strings.Contains(command, `--mode "$MODE"`) {
-			t.Errorf("workflows.md:%d automatic spawn does not bind shared MODE: %s", lineNumber, strings.TrimSpace(line))
-		}
-	})
-	if spawnCommands != 8 {
-		t.Errorf("automatic spawn command coverage=%d, want 8", spawnCommands)
 	}
 }
 
@@ -360,16 +359,94 @@ func TestReadThreadDiscrepancyRecoveryContractStaysAligned(t *testing.T) {
 		filepath.Join("skills", "amux", "reference", "troubleshooting.md"),
 	} {
 		contents := readSkillFile(t, root, relativePath)
-		for _, required := range []string{
-			"authorized `/amux` lifecycle or coordination operation",
-			"concrete local/GitHub discrepancy",
-			"deterministic evidence",
-			"durable/local/GitHub evidence",
-			"one narrow query",
-			"block rather than widening or chaining",
-		} {
+		for _, required := range []string{"authorized `/amux` lifecycle or coordination operation", "concrete local/GitHub discrepancy", "deterministic evidence", "durable/local/GitHub evidence", "one narrow query", "block rather than widening or chaining"} {
 			if !strings.Contains(contents, required) {
 				t.Errorf("%s is missing discrepancy-recovery contract %q", relativePath, required)
+			}
+		}
+	}
+}
+
+func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	stages := []string{"### 1. Preflight authoritative state and bootstrap the CLI", "### 2. Declare the group and register the verified coordinator lease", "### 3. Native-create and adopt the authoritative thread", "### 4. Persist ready, wake, acknowledge, and independently verify", "### 5. Merge, verify post-merge CI, then authorize finish", "### 6. Submit merged and run `/amux finish`", "### 7. Coordinator-owned deadline queue"}
+	last := -1
+	for _, stage := range stages {
+		at := strings.Index(workflow, stage)
+		if at <= last {
+			t.Errorf("coordinator stage missing or out of order: %q", stage)
+		}
+		last = at
+	}
+	for _, required := range []string{
+		"native parent/sub-issue/blocked-by/blocking relationships", "fresh `origin/main`", "issue-unprefixed semantic window", "worker adopt", "--group <durable-issue-group>",
+		"amux --json callback register", "amux report submit --report-id <stable-report-id>", "amux report pending --group <durable-issue-group>", "amux report acknowledge --report-id <stable-report-id>",
+		"PR URL, head branch/SHA", "amux report authorize-finish --report-id <stable-report-id>", "post-merge CI", "--status merged", "amux teardown --thread <member-thread>", "Group membership and report history survive teardown",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("coordinator workflow is missing %q", required)
+		}
+	}
+}
+
+func TestIssueCoordinationPreservesAndConfiguresDurableIdentity(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	readme := readSkillFile(t, root, "README.md")
+	for _, required := range []string{"issue-bearing branch/worktree", "issue-unprefixed semantic window", "exact durable group", "stable report ID", "immutable coordination input"} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("workflow is missing durable identity rule %q", required)
+		}
+	}
+	for _, required := range []string{"amux group declare --group amux-131", "--report-id amux-133-worker-1 --group amux-133", "explicit local adoption"} {
+		if !strings.Contains(readme, required) {
+			t.Errorf("README is missing durable identity example %q", required)
+		}
+	}
+}
+
+func TestConfigurableGroupNamingSourceReferencesStayConsistent(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	current := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "commands.md")) + readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	for _, removed := range []string{"--work-item-id", "--worker-ordinal", "GROUP_NAMING<TAB>"} {
+		if strings.Contains(current, removed) {
+			t.Errorf("current native workflow still advertises removed automatic spawn naming %q", removed)
+		}
+	}
+	for _, required := range []string{"worker adopt", "exact group", "stable report ID"} {
+		if !strings.Contains(current, required) {
+			t.Errorf("current native workflow is missing explicit identity %q", required)
+		}
+	}
+}
+
+func TestWorkGroupCompletionsExposeImplementedCommands(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	checks := map[string][]string{
+		"bash": {"declare add remove coordinator list show reconcile", "register clear", "submit pending history acknowledge authorize-finish", "worker", "adopt"},
+		"zsh":  {"group_commands=(", "callback_commands=(", "report_commands=(", "--report-id", "--pane", "adopt"},
+		"fish": {"__fish_amux_group_leaf", "__fish_amux_callback_leaf", "__fish_amux_report_leaf", "authorize-finish", "report-id", "pane", "adopt"},
+	}
+	for shell, wants := range checks {
+		command := exec.Command("go", "run", "./cmd/amux", "completion", shell)
+		command.Dir = root
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("completion %s failed: %v\n%s", shell, err, output)
+		}
+		for _, want := range wants {
+			if !strings.Contains(string(output), want) {
+				t.Errorf("completion %s is missing %q", shell, want)
+			}
+		}
+		for _, removed := range []string{"--message-file", "--idempotency-key", "--work-item-id", "--worker-ordinal"} {
+			if strings.Contains(string(output), removed) {
+				t.Errorf("completion %s retains removed spawn flag %q", shell, removed)
 			}
 		}
 	}
@@ -405,10 +482,10 @@ func TestInvocationProbeEvidenceIsReproducibleAndBounded(t *testing.T) {
 func TestExperimentalClaudeDelegationReferencesStayNarrowAndConsistent(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-read-only-delegation.md"))
-	mutating := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-mutating-delegation.md"))
-	contract := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-delegation-contract.md"))
-	recovery := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-delegation-recovery.md"))
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-read-only-delegation.md"))
+	mutating := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-mutating-delegation.md"))
+	contract := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-delegation-contract.md"))
+	recovery := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-delegation-recovery.md"))
 
 	stages := []string{"## 1. Preflight", "## 2. Create the receipt", "## 3. Launch and acquire", "## 4. Recover and deliver", "## 5. Acknowledge", "## 6. Park explicitly"}
 	last := -1
@@ -447,7 +524,7 @@ func TestExperimentalClaudeDelegationReferencesStayNarrowAndConsistent(t *testin
 func TestClaudeOpusOrbExecutorRecipeStaysProviderSpecificAndBounded(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	recipe := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-opus-orb-executor.md"))
+	recipe := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-opus-orb-executor.md"))
 
 	for _, required := range []string{
 		"CLAUDE_CODE_OAUTH_TOKEN",
@@ -734,210 +811,12 @@ func TestDocumentedCommandTreeMatchesCLIHelp(t *testing.T) {
 	}
 }
 
-func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
-	t.Parallel()
-	root := repoRoot(t)
-	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
-	commands := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "commands.md"))
-	troubleshooting := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "troubleshooting.md"))
-
-	stages := []string{
-		"### 1. Preflight authoritative state and bootstrap the CLI",
-		"### 2. Declare the group and register the verified coordinator lease",
-		"### 3. Spawn and attach the authoritative receiving thread",
-		"### 4. Persist ready, wake, acknowledge, and independently verify",
-		"### 5. Merge, verify post-merge CI, then authorize finish",
-		"### 6. Submit merged and run `/amux finish`",
-		"### 7. Coordinator-owned deadline queue",
-	}
-	last := -1
-	for _, stage := range stages {
-		at := strings.Index(workflow, stage)
-		if at <= last {
-			t.Errorf("coordinator stage missing or out of order: %q", stage)
-		}
-		last = at
-	}
-
-	for _, required := range []string{
-		"native parent/sub-issue/blocked-by/blocking relationships",
-		"fresh `origin/main`",
-		"issue-unprefixed semantic window",
-		"--mode medium",
-		"--group <durable-issue-group>",
-		"authoritative receiving thread",
-		"amux --json callback register --group <durable-issue-group> --thread <coordinator-thread> --pane <coordinator-pane>",
-		"amux report submit --report-id <stable-report-id> --group <durable-issue-group>",
-		"amux report pending --group <durable-issue-group>",
-		"amux report acknowledge --report-id <stable-report-id>",
-		"PR URL, head branch/SHA, issue scope and diff, mergeability, closing-issue metadata",
-		"amux report authorize-finish --report-id <stable-report-id>",
-		"verify post-merge CI",
-		"--status merged",
-		"invokes `amux teardown --thread <member-thread>` last",
-		"Group membership and report history survive teardown",
-		"<stable-report-id><TAB>ready<TAB>recorded<TAB><member-thread>",
-		"CALLBACK<TAB><durable-issue-group><TAB><stable-report-id><TAB>notified",
-		"AMUX_REPORT group=<durable-issue-group> report=<stable-report-id>",
-		"Do not edit `reports.json` directly",
-		"current CLI exposes no command to create or update deadline records",
-	} {
-		if !strings.Contains(workflow, required) {
-			t.Errorf("coordinator workflow is missing %q", required)
-		}
-	}
-	for _, inconsistent := range []string{"--group amux-135", "--group <group>", "CALLBACK<TAB><group><TAB><stable-report-id>", "AMUX_REPORT group=<group> report=<stable-report-id>"} {
-		if strings.Contains(workflow, inconsistent) {
-			t.Errorf("coordinator workflow contains inconsistent durable issue placeholder %q", inconsistent)
-		}
-	}
-	durableStart := strings.Index(workflow, "## Coordinate a durable issue work group")
-	if durableStart < 0 {
-		t.Fatal("durable coordination workflow is missing")
-	}
-	durable := workflow[durableStart:]
-	namingPreflight := strings.Index(durable, "--workdir <verified-repository-checkout>")
-	groupDeclaration := strings.Index(durable, "amux --json group declare")
-	callbackRegistration := strings.Index(durable, "amux --json callback register")
-	worktreeCreation := strings.Index(durable, "git worktree add -b")
-	if namingPreflight < 0 || groupDeclaration < 0 || callbackRegistration < 0 || worktreeCreation < 0 || namingPreflight > groupDeclaration || namingPreflight > callbackRegistration || namingPreflight > worktreeCreation {
-		t.Errorf("durable naming preflight must precede group declaration, callback registration, and worktree creation: naming=%d group=%d callback=%d worktree=%d", namingPreflight, groupDeclaration, callbackRegistration, worktreeCreation)
-	}
-	for _, required := range []string{"Treat this result as immutable coordination input", "No thread, worktree, group, callback, label, or report mutation may precede this step", "final dry-run to reproduce byte-for-byte"} {
-		if !strings.Contains(durable, required) {
-			t.Errorf("durable naming ordering contract is missing %q", required)
-		}
-	}
-
-	for _, required := range []string{
-		"<report><TAB><status><TAB>recorded<TAB><thread>",
-		"CALLBACK<TAB><group><TAB><report><TAB>notified",
-		"AMUX_REPORT group=<group> report=<id>",
-		"external_sync: unsupported",
-		"drift: may_remain_indefinitely",
-		"Lock contention is exit `2`",
-	} {
-		if !strings.Contains(commands, required) {
-			t.Errorf("command contract is missing %q", required)
-		}
-	}
-
-	for _, required := range []string{
-		"Missing, stale, or recycled callback",
-		"Busy composer",
-		"Failed send with a verified safe pane",
-		"Duplicate or reordered wake-up",
-		"Coordinator restart",
-		"Add-only label drift",
-		"Bootstrap mismatch",
-		"retry the identical desired-state operation with the same report ID or spawn key",
-		"do not fall back to stale bare `amux`",
-	} {
-		if !strings.Contains(troubleshooting, required) {
-			t.Errorf("coordinator recovery is missing %q", required)
-		}
-	}
-}
-
-func TestIssueCoordinationPreservesAndConfiguresDurableIdentity(t *testing.T) {
-	t.Parallel()
-	root := repoRoot(t)
-	checks := map[string][]string{
-		filepath.Join("skills", "amux", "reference", "workflows.md"): {
-			"`amux-<issue-number>`",
-			"`amux-<issue-number>-worker-<ordinal>`",
-			"`<repository-slug>-<issue-number>`",
-			"`<repository-slug>-<issue-number>-worker-<ordinal>`",
-			"not a generic `amux group` validation rule",
-			"`amux-135-worker-1`",
-			"purpose-specific groups such as `pr-181-review`",
-			"`<project-prefix>-<work-item-id>-<short-slug>`",
-			"`<group-id>-worker-<ordinal>`",
-			"`host/owner/repository` identity verified from the selected workdir's `origin`",
-			"--work-item-id <work-item-id> --worker-ordinal <ordinal>",
-			"Explicit `--group` wins",
-		},
-		"README.md": {
-			"--group amux-110",
-			"--report-id amux-133-worker-1 --group amux-133",
-			"another unconfigured repository uses the equivalent `<repository-slug>-131` and `<repository-slug>-131-worker-1` explicitly",
-			"Existing `amux-*`, repository-slug, `issue-*`, purpose-specific groups such as `pr-181-review`, and explicit groups remain valid",
-			"`--work-item-id 975 --worker-ordinal 1 --window unlisted-addons`",
-			"Explicit `--group` remains authoritative",
-		},
-		filepath.Join("docs", "skill", "index.html"): {
-			"amux-&lt;issue-number&gt;",
-			"amux-&lt;issue-number&gt;-worker-&lt;ordinal&gt;",
-			"--group amux-135",
-			"--report-id amux-135-worker-1 --group amux-135",
-			"&lt;project-prefix&gt;-&lt;work-item-id&gt;-&lt;short-slug&gt;",
-			"Explicit <code>--group</code> remains authoritative",
-		},
-	}
-	for relativePath, required := range checks {
-		contents := readSkillFile(t, root, relativePath)
-		for _, want := range required {
-			if !strings.Contains(contents, want) {
-				t.Errorf("%s is missing issue identity convention %q", relativePath, want)
-			}
-		}
-		for _, obsolete := range []string{"--group issue-110", "--group issue-131", "--group issue-133", "`issue-135-worker-1`"} {
-			if strings.Contains(contents, obsolete) {
-				t.Errorf("%s still teaches obsolete issue identity %q", relativePath, obsolete)
-			}
-		}
-	}
-}
-
-func TestConfigurableGroupNamingSourceReferencesStayConsistent(t *testing.T) {
-	t.Parallel()
-	root := repoRoot(t)
-	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
-	commands := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "commands.md"))
-	readme := readSkillFile(t, root, "README.md")
-	for _, contents := range []string{workflow, commands, readme} {
-		for _, required := range []string{"group-naming.json", "--work-item-id", "--worker-ordinal", "origin", "Explicit `--group`"} {
-			if !strings.Contains(contents, required) {
-				t.Errorf("configurable naming reference is missing %q", required)
-			}
-		}
-	}
-	for _, required := range []string{"GROUP_NAMING<TAB><prefix><TAB><work-item><TAB><slug><TAB><group><TAB><report><TAB><config-source>", "before Amp, tmux, or registry mutation", "without normalization or truncation"} {
-		if !strings.Contains(commands, required) {
-			t.Errorf("command naming contract is missing %q", required)
-		}
-	}
-}
-
-func TestWorkGroupCompletionsExposeImplementedCommands(t *testing.T) {
-	t.Parallel()
-	root := repoRoot(t)
-	checks := map[string][]string{
-		"bash": {"declare add remove coordinator list show reconcile", "register clear", "submit pending history acknowledge authorize-finish", "--work-item-id --worker-ordinal"},
-		"zsh":  {"group_commands=(", "callback_commands=(", "report_commands=(", "--report-id", "--pane", "--work-item-id", "--worker-ordinal"},
-		"fish": {"__fish_amux_group_leaf", "__fish_amux_callback_leaf", "__fish_amux_report_leaf", "authorize-finish", "-l 'report-id'", "-l 'pane'", "-l 'work-item-id'", "-l 'worker-ordinal'"},
-	}
-	for shell, wants := range checks {
-		command := exec.Command("go", "run", "./cmd/amux", "completion", shell)
-		command.Dir = root
-		output, err := command.CombinedOutput()
-		if err != nil {
-			t.Fatalf("completion %s failed: %v\n%s", shell, err, output)
-		}
-		for _, want := range wants {
-			if !strings.Contains(string(output), want) {
-				t.Errorf("completion %s is missing %q", shell, want)
-			}
-		}
-	}
-}
-
 func TestCoordinatorDeadlinePolicyIsConsistent(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	for _, relativePath := range []string{
 		"README.md",
-		filepath.Join("skills", "amux", "reference", "workflows.md"),
+		filepath.Join("skills", "amux", "reference", "deadline-v1.md"),
 		filepath.Join("docs", "skill", "index.html"),
 	} {
 		contents := readSkillFile(t, root, relativePath)
@@ -946,6 +825,129 @@ func TestCoordinatorDeadlinePolicyIsConsistent(t *testing.T) {
 				t.Errorf("%s is missing deadline policy %q", relativePath, required)
 			}
 		}
+	}
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	for _, required := range []string{"Small 30m", "Medium 1h", "Large 2h", "XL", "15m", "10m", "20m", "nearest-deadline queue", "deadline-v1.md"} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("workflows.md is missing deadline summary %q", required)
+		}
+	}
+}
+
+func TestCoordinatorDeadlineScheduleIsBoundedAndGenerationSafe(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	deadline := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "deadline-v1.md"))
+
+	if !strings.Contains(skill, "deadline-v1") {
+		t.Error("SKILL.md is missing deadline progressive disclosure pointer")
+	}
+	if !strings.Contains(workflow, "deadline-v1.md") {
+		t.Error("workflows.md does not point at deadline-v1.md")
+	}
+	if !strings.Contains(deadline, "Do **not** load the full `/amux` skill on schedule fire") {
+		t.Error("deadline-v1 must forbid full /amux reload on schedule fire")
+	}
+	if strings.Contains(deadline, "Load `/amux` first") {
+		t.Error("deadline-v1 must not require loading full /amux")
+	}
+
+	for _, required := range []string{
+		"building-automations",
+		"get_schedule",
+		"set_schedule",
+		"update_schedule",
+		"clear_schedule",
+		"call no schedule tool",
+		"at most one schedule or trigger",
+		"AMUX_DEADLINE_QUEUE_V1",
+		"owner=AMUX_DEADLINE_QUEUE_V1",
+		"DTSTART:<utc-basic-deadline>Z",
+		"RRULE:FREQ=DAILY;COUNT=1",
+		"2030-01-02T03:04:00+02:00",
+		"DTSTART:20300102T010400Z",
+		"exactly one next/only occurrence equal to the authoritative RFC3339 instant",
+		"Repeat this inspection after every re-arm",
+		"ambiguous, conflicting, or unverifiable",
+		"amux report pending --group <durable-issue-group>",
+		"amux report history --report-id <stable-report-id>",
+		"order-independent authoritative re-reads",
+		"correctness must not depend on their arrival order",
+		"stale/late and duplicate",
+		"it was superseded",
+		"a current `blocked`, `ready`, or `merged` report",
+		"acknowledgement before expiry",
+		"AMUX_DEADLINE_STOP_ATTEMPT_V1",
+		"before native member messaging",
+		"consumes that generation even if the send is indeterminate",
+		"excluding satisfied, superseded, acknowledged-before-expiry, and stop-attempt-recorded generations",
+		"do not retry it blindly",
+		"freshly verified UTC `DTSTART`/`COUNT=1` schedule",
+		"unrelated schedule",
+		"manual wake-up",
+		"never create sleeping shell processes, recurring polling schedules, or per-worker supervisors",
+		"never authorize acknowledgement, push, PR creation or mutation, merge, release, finish, cleanup",
+	} {
+		if !strings.Contains(deadline, required) {
+			t.Errorf("deadline-v1 is missing schedule safety contract %q", required)
+		}
+	}
+	skillLoadAt := strings.Index(deadline, "load the available `building-automations` skill")
+	if skillLoadAt < 0 {
+		t.Fatal("deadline-v1 does not load building-automations")
+	}
+	for _, toolName := range []string{"`get_schedule`", "`set_schedule`", "`update_schedule`", "`clear_schedule`"} {
+		toolAt := strings.Index(deadline, toolName)
+		if toolAt < 0 || toolAt <= skillLoadAt {
+			t.Errorf("deadline-v1 does not order building-automations load before %s management: load=%d tool=%d", toolName, skillLoadAt, toolAt)
+		}
+	}
+
+	fixtureStart := strings.Index(deadline, "Follow deadline-v1 (do not load full /amux)")
+	if fixtureStart < 0 {
+		t.Fatal("synthetic scheduled wake-up fixture is missing")
+	}
+	fixtureEnd := strings.Index(deadline[fixtureStart:], "\n```")
+	if fixtureEnd < 0 {
+		t.Fatal("synthetic scheduled wake-up fixture is unterminated")
+	}
+	fixture := deadline[fixtureStart : fixtureStart+fixtureEnd]
+	for _, required := range []string{
+		"load `building-automations`",
+		"owner=AMUX_DEADLINE_QUEUE_V1",
+		"group=<durable-issue-group>",
+		"report=<stable-report-id>",
+		"member=<member-thread>",
+		"generation=<deadline-generation>",
+		"deadline=<rfc3339-deadline>",
+		"AMUX_DEADLINE_STOP_ATTEMPT_V1 group=<durable-issue-group> report=<stable-report-id> member=<member-thread> generation=<deadline-generation> deadline=<rfc3339-deadline>",
+		"consumes this generation even if native messaging is indeterminate",
+		"preserve work and evidence",
+		"stop implementation and review loops",
+		"submit this stable report as `blocked` with the exact remaining blocker and `--pr none` when no PR exists",
+		"remain alive",
+	} {
+		if !strings.Contains(fixture, required) {
+			t.Errorf("synthetic scheduled wake-up fixture is missing %q", required)
+		}
+	}
+	for name, forbidden := range map[string]*regexp.Regexp{
+		"real thread ID":  regexp.MustCompile(`\bT-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`),
+		"pane identifier": regexp.MustCompile(`(?:^|[[:space:]=])%[0-9]+\b`),
+		"private path":    regexp.MustCompile(`(?:/Users/|/home/|[A-Za-z]:\\Users\\)`),
+		"private field":   regexp.MustCompile(`(?i)\b(?:pane|pid|process|prompt|packet|transcript|receipt|account|secret)[[:space:]]*=`),
+	} {
+		if forbidden.MatchString(fixture) {
+			t.Errorf("synthetic scheduled wake-up fixture contains %s", name)
+		}
+	}
+	recordAt := strings.Index(fixture, "AMUX_DEADLINE_STOP_ATTEMPT_V1")
+	sendAt := strings.Index(fixture, "preserve work and evidence")
+	nextAt := strings.Index(fixture, "nearest unhandled active generation")
+	if recordAt < 0 || sendAt < 0 || nextAt < 0 || recordAt >= sendAt || sendAt >= nextAt {
+		t.Errorf("synthetic scheduled wake-up fixture does not order record, bounded send, and next-unhandled reconciliation: record=%d send=%d next=%d", recordAt, sendAt, nextAt)
 	}
 }
 
@@ -987,7 +989,7 @@ func TestSkillDrivenSpawnCommandsUseExplicitMedium(t *testing.T) {
 	}
 
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
-	for _, required := range []string{"MUST pass `--mode medium`", "An explicitly requested mode always wins", "Do not infer `high` or `ultra`"} {
+	for _, required := range []string{"MUST pass `--mode medium`", "An explicitly requested mode always wins", "Do not infer `low`, `high`, or `ultra`"} {
 		if !strings.Contains(skill, required) {
 			t.Errorf("SKILL.md is missing spawn policy %q", required)
 		}
@@ -998,16 +1000,12 @@ func TestSprawlContractUsesDedicatedSemanticWorkers(t *testing.T) {
 	t.Parallel()
 	workflow := readSkillFile(t, repoRoot(t), filepath.Join("skills", "amux", "reference", "workflows.md"))
 	for _, required := range []string{
-		"worker-only orchestration",
-		"native `blockedBy`, `blocking`, parent, and sub-issue relationships",
-		"`amux-agent-first` label",
-		"one narrow issue, one dedicated worktree, and one branch",
-		"--window <semantic-window>",
-		"--mode medium",
-		"--title-prefix '#<issue>'",
-		"--group <durable-issue-group>",
-		"focused Oracle review",
-		"callback destination metadata",
+		"native dependency",
+		"one dedicated branch/worktree",
+		"issue-unprefixed semantic window",
+		"task-only assignment",
+		"native-created thread",
+		"worker adopt",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("sprawl workflow is missing %q", required)
@@ -1042,16 +1040,16 @@ func TestClaudePairTeardownIsFailClosedAndRunsBeforeWorkerTeardown(t *testing.T)
 	t.Parallel()
 	root := repoRoot(t)
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
-	contract := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-delegation-contract.md"))
+	contract := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-delegation-contract.md"))
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
-	recovery := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "claude-delegation-recovery.md"))
+	recovery := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-delegation-recovery.md"))
 
 	for _, required := range []string{
 		"lifecycle worker-teardown --origin-thread <thread-id> --dry-run",
 		"lifecycle worker-teardown --origin-thread <thread-id>",
-		"active, unacknowledged, unresolved, mismatched, missing, or indeterminate",
-		"before `amux teardown`",
-		"worker teardown remains the final action",
+		"stop without Amp teardown",
+		"Worker teardown remains the final action",
+		"/amux-claude",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("worker lifecycle workflow is missing %q", required)
@@ -1072,17 +1070,24 @@ func TestClaudePairTeardownIsFailClosedAndRunsBeforeWorkerTeardown(t *testing.T)
 	if !strings.Contains(recovery, "paired worker teardown") || !strings.Contains(recovery, "preserve the Amp worker") {
 		t.Error("Claude recovery does not preserve worker and evidence on paired teardown blockers")
 	}
-	if !strings.Contains(skill, "paired Claude lifecycle preflight") {
-		t.Error("SKILL.md does not route teardown through paired Claude lifecycle preflight")
+	if !strings.Contains(skill, "/amux-claude") {
+		t.Error("SKILL.md does not gate teardown through /amux-claude when pairs may exist")
 	}
 	for _, required := range []string{
 		"register-legacy-store --origin-thread <thread-id> --store-path <exact-private-store>",
 		"detach-indeterminate-worker",
 		"retire-live-indeterminate-pair",
 		"retire-live-acquired-no-report-pair",
+		"dispose-exact-pre-identity-acquired-pair",
 		"historical_modern_read_only_launch_intent_v1",
+		"pre_identity_acquired_no_report_v1",
+		"pre_identity_acquired_pair_permanently_non_retirable",
+		"paired_worker_teardown_prohibited",
 		"state:pair_retired",
 		"state:acquired_pair_retired",
+		"state:exact_pane_disposed",
+		"dispose_exact_pane_process_incarnation",
+		"executable_identity_acknowledgement",
 		"terminal Amp work authorization",
 		"durable origin fence",
 		"must not continue to worktree removal",
@@ -1091,12 +1096,17 @@ func TestClaudePairTeardownIsFailClosedAndRunsBeforeWorkerTeardown(t *testing.T)
 			t.Errorf("indeterminate detach progressive disclosure is missing %q", required)
 		}
 	}
-	if !strings.Contains(skill, "Recover indeterminate Claude worker evidence") || !strings.Contains(readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md")), "Recover indeterminate Claude worker evidence") {
-		t.Error("indeterminate recovery trigger is not routed at both skill tiers")
+	claudeSkill := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "SKILL.md"))
+	claudeTriggers := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "trigger-phrases.md"))
+	if !strings.Contains(claudeSkill, "Recover indeterminate Claude worker evidence") || !strings.Contains(claudeTriggers, "Recover indeterminate Claude worker evidence") {
+		t.Error("indeterminate recovery trigger is not routed in amux-claude")
 	}
-	pairAdmission := strings.Index(workflow, "Run the paired Claude lifecycle dry-run and execution")
+	if strings.Contains(skill, "Recover indeterminate Claude worker evidence") {
+		t.Error("core /amux skill must not own Claude recovery triggers")
+	}
+	pairAdmission := strings.Index(workflow, "If `/amux-claude` pairs may exist, run the paired Claude lifecycle dry-run")
 	worktreeRemoval := strings.Index(workflow, "Remove the clean worker worktree")
-	finalRevalidation := strings.Index(workflow, "rerun `lifecycle worker-teardown")
+	finalRevalidation := strings.Index(workflow, "rerun paired Claude lifecycle revalidation")
 	finalTeardown := strings.LastIndex(workflow, "amux teardown --thread <thread-id>")
 	if pairAdmission < 0 || worktreeRemoval < 0 || pairAdmission > worktreeRemoval {
 		t.Error("finish does not admit paired Claude lifecycle before worktree removal")
@@ -1167,6 +1177,130 @@ func scanLines(t *testing.T, path string, check func(lineNumber int, line string
 	}
 }
 
+func TestContractV1IsProgressivelyDisclosedForWorkers(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
+	contract := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "contract-v1.md"))
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	if !strings.Contains(skill, "contract-v1.md") {
+		t.Error("SKILL.md must link contract-v1")
+	}
+	for _, required := range []string{
+		"amux-contract: v1",
+		"read this file once",
+		"absolute path",
+		"never a bare relative path",
+		"ready",
+		"blocked",
+		"merged",
+		"never authorize finish",
+		"/amux-claude",
+		"Do not use `low` mode",
+		"Do not Read Thread",
+		"Oracle must not Read Thread",
+	} {
+		if !strings.Contains(contract, required) {
+			t.Errorf("contract-v1 missing %q", required)
+		}
+	}
+	for _, required := range []string{"Credit defaults", "no Read Thread for task context", "Oracle reviews get supplied diff/context only"} {
+		if !strings.Contains(skill, required) {
+			t.Errorf("SKILL.md must surface credit default %q", required)
+		}
+	}
+	if !strings.Contains(workflow, "contract-v1.md") || !strings.Contains(workflow, "task-only") {
+		t.Error("workflows must require task-only prompts and contract-v1 read-once")
+	}
+	for _, required := range []string{"absolute path", "one-time read"} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("spawn message template must resolve the contract path for the worker: missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		"path to the loaded skill",
+		"never a bare relative path",
+	} {
+		if !strings.Contains(skill, required) {
+			t.Errorf("SKILL.md spawn routing must require absolute contract path: missing %q", required)
+		}
+	}
+	// The coordinator work-group route is linked directly from SKILL.md, so it must
+	// carry the mandatory contract read line itself rather than relying on a reader
+	// having scrolled through the sprawl section's message requirements.
+	coordinateAt := strings.Index(workflow, "## Coordinate a durable issue work group")
+	if coordinateAt < 0 {
+		t.Fatal("coordinator work-group workflow is missing")
+	}
+	coordinate := workflow[coordinateAt:]
+	if healthAt := strings.Index(coordinate, "## Health workers and runners"); healthAt > 0 {
+		coordinate = coordinate[:healthAt]
+	}
+	for _, required := range []string{"contract-v1.md", "task-only assignment"} {
+		if !strings.Contains(coordinate, required) {
+			t.Errorf("coordinator work-group spawn must carry the contract read requirement: missing %q", required)
+		}
+	}
+	triggers := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md"))
+	if !strings.Contains(triggers, "absolute path to contract-v1") {
+		t.Error("trigger checklist must require absolute contract-v1 path on spawn")
+	}
+}
+
+func TestDescriptionCarriesNaturalLanguageSynonymTriggers(t *testing.T) {
+	t.Parallel()
+	skill := readSkillFile(t, repoRoot(t), filepath.Join("skills", "amux", "SKILL.md"))
+	descStart := strings.Index(skill, "description:")
+	if descStart < 0 {
+		t.Fatal("SKILL.md missing description frontmatter")
+	}
+	descEnd := strings.Index(skill[descStart:], "\n---")
+	if descEnd < 0 {
+		t.Fatal("SKILL.md description frontmatter is unterminated")
+	}
+	description := skill[descStart : descStart+descEnd]
+	// Phrases that are not substrings of the CLI verb list must remain matchable
+	// before skill activation. Do not require every table row in the description.
+	for _, phrase := range []string{
+		"forget this on restore",
+		"hide it for now",
+		"defer this workspace",
+		"Show shelved work",
+		"Restore my workspace",
+	} {
+		if !strings.Contains(description, phrase) {
+			t.Errorf("frontmatter description missing pre-activation synonym %q", phrase)
+		}
+	}
+}
+
+func TestExperimentalSkillsAreSeparatedFromCoreAmux(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	core := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
+	coreTriggers := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md"))
+	for _, forbidden := range []string{
+		"Delegate read-only analysis to Claude",
+		"Delegate isolated mutating work to Claude",
+		"Delegate bounded work to Claude Opus in a fresh Amp Orb",
+		"Run Pi on Spark in an Amp Orb",
+		"Recover indeterminate Claude worker evidence",
+	} {
+		if strings.Contains(coreTriggers, forbidden) {
+			t.Errorf("core trigger checklist still routes experimental %q", forbidden)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "skills", "amux-claude", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "skills", "amux-pi", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(core, "reference/claude-") || strings.Contains(core, "reference/pi-spark") {
+		t.Error("core SKILL.md must not link experimental claude/pi reference paths")
+	}
+}
+
 func readSkillFile(t *testing.T, root, relativePath string) string {
 	t.Helper()
 	contents, err := os.ReadFile(filepath.Join(root, relativePath))
@@ -1174,4 +1308,26 @@ func readSkillFile(t *testing.T, root, relativePath string) string {
 		t.Fatal(err)
 	}
 	return string(contents)
+}
+
+func TestPublicDocsContainNoExecutableSpawnExamples(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	paths := []string{"README.md", "CONTRIBUTING.md", filepath.Join("docs", "index.html"), filepath.Join("docs", "skill", "index.html"), filepath.Join("skills", "amux", "SKILL.md")}
+	paths = append(paths,
+		filepath.Join("skills", "amux", "reference", "commands.md"),
+		filepath.Join("skills", "amux", "reference", "workflows.md"),
+		filepath.Join("skills", "amux", "reference", "troubleshooting.md"),
+		filepath.Join("skills", "amux", "reference", "trigger-phrases.md"),
+		filepath.Join("skills", "amux", "reference", "amp-invocation-policy.md"),
+	)
+	for _, path := range paths {
+		contents := readSkillFile(t, root, path)
+		for lineNumber, line := range strings.Split(contents, "\n") {
+			trimmed := strings.TrimSpace(strings.TrimPrefix(line, ">"))
+			if strings.HasPrefix(trimmed, "$ amux spawn ") || strings.HasPrefix(trimmed, "amux spawn ") || strings.HasPrefix(trimmed, "$ amux worker spawn ") || strings.HasPrefix(trimmed, "amux worker spawn ") {
+				t.Errorf("%s:%d contains executable removed spawn example: %s", path, lineNumber+1, trimmed)
+			}
+		}
+	}
 }

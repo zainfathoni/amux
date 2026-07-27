@@ -926,7 +926,7 @@
               <div class="trigger-row"><span class="trigger-say">“Shelve this”</span><code class="trigger-run">amux shelve --thread …</code></div>
               <div class="trigger-row"><span class="trigger-say">“Restore my workspace”</span><code class="trigger-run">amux launch --workspace …</code></div>
               <div class="trigger-row"><span class="trigger-say">“Doctor amux”</span><code class="trigger-run">amux doctor --workspace … (read-only)</code></div>
-              <div class="trigger-row"><span class="trigger-say">“Coordinate issue workers”</span><code class="trigger-run">skill-only · groups, callbacks, spawn --mode medium, reports</code></div>
+              <div class="trigger-row"><span class="trigger-say">“Coordinate issue workers”</span><code class="trigger-run">skill-only · native creation with medium mode, worker adopt, groups, callbacks, reports</code></div>
               <div class="trigger-row"><span class="trigger-say">“/amux health”</span><code class="trigger-run">skill-only · read-only responsiveness check</code></div>
               <div class="trigger-row"><span class="trigger-say">“/amux sprawl”</span><code class="trigger-run">skill-only · coordinated issue workers</code></div>
               <div class="trigger-row"><span class="trigger-say">“/amux finish”</span><code class="trigger-run">skill-only · authorized cleanup; teardown last</code></div>
@@ -1039,10 +1039,10 @@
         },
         spawn: {
           label: "spawn",
-          desc: "Worker-only: create an interactive worker and remote thread. It requires a stable --idempotency-key and exactly one message source.",
+          desc: "Worker creation is native to Amp; adopt the exact returned thread into local amux state.",
           domains: [0, 2, 3],
-          note: "Skill policy explicitly uses --mode medium unless overridden.",
-          script: [{ cmd: "amux spawn --workspace product --window fix-spec --workdir ~/Code/product-fix --mode medium --message-file prompt.md --idempotency-key issue-255", out: ["worker creation requested with stable retry identity"] }],
+          note: "Create and assign the thread natively with medium mode unless overridden, then adopt it.",
+          script: [{ cmd: "amux worker adopt --thread T-native --workspace product --window fix-spec --workdir ~/Code/product-fix", out: ["native thread adopted into local worker state"] }],
         },
         teardown: {
           label: "teardown",

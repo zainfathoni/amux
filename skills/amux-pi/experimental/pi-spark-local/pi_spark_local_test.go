@@ -1,3 +1,4 @@
+// Package pisparklocal_test exercises the local Pi executor as a black box.
 package pisparklocal_test
 
 import (
@@ -21,6 +22,23 @@ func TestBoundedSparkExecutionAppliesOnlyExactAllowedReplacement(t *testing.T) {
 	f := newFixture(t, "success")
 	authBefore := mustRead(t, f.auth)
 	runOK(t, f, "plan", "--packet", f.packet)
+	intent := readObject(t, filepath.Join(f.state, "intents", "success.json"))
+	argv := intent["argv"].([]any)
+	wantArgv := []string{
+		filepath.Base(argv[0].(string)), filepath.Base(argv[1].(string)), "--mode", "json",
+		"--model", "openai-codex/gpt-5.3-codex-spark", "--thinking", "high",
+		"--no-session", "--no-tools", "--no-extensions", "--no-skills",
+		"--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve",
+	}
+	for index, want := range wantArgv {
+		got := argv[index].(string)
+		if index < 2 {
+			got = filepath.Base(got)
+		}
+		if got != want {
+			t.Fatalf("argv[%d]=%q, want %q", index, got, want)
+		}
+	}
 	output := runOK(t, f, "execute", "--operation-id", "success")
 	for _, required := range []string{`"provider":"openai-codex"`, `"model":"gpt-5.3-codex-spark"`, `"status":"awaiting_quota_confirmation"`, `"result_trust":"untrusted_pending_coordinator_review_and_validation"`} {
 		if !strings.Contains(output, required) {
@@ -32,6 +50,13 @@ func TestBoundedSparkExecutionAppliesOnlyExactAllowedReplacement(t *testing.T) {
 	}
 	if got := mustRead(t, f.auth); got != authBefore {
 		t.Fatal("shared OAuth credential bytes changed")
+	}
+	receipt := readObject(t, filepath.Join(f.state, "operations", "success.json"))
+	process := receipt["process"].(map[string]any)
+	for _, field := range []string{"pid", "start_seconds", "start_microseconds", "executable", "executable_identity"} {
+		if _, ok := process[field]; !ok {
+			t.Errorf("recorded process incarnation is missing %q", field)
+		}
 	}
 	packet := readObject(t, f.packet)
 	reset := packet["quota_evidence"].(map[string]any)["reset_at"]
@@ -107,6 +132,7 @@ func TestExecutionBoundsTimeoutAndOutputOverflow(t *testing.T) {
 	for _, test := range []struct{ name, mode, want string }{{"timeout", "sleep", "timed out"}, {"overflow", "overflow", "exceeded its bound"}} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, test.name)
+			authBefore := mustRead(t, f.auth)
 			packet := readObject(t, f.packet)
 			if test.name == "timeout" {
 				packet["timeout_seconds"] = float64(1)
@@ -119,6 +145,9 @@ func TestExecutionBoundsTimeoutAndOutputOverflow(t *testing.T) {
 			runBlockedArgs(t, f, test.want, "execute", "--operation-id", test.name)
 			if got := mustRead(t, f.target); got != "before\n" {
 				t.Fatalf("failed run edited target: %q", got)
+			}
+			if got := mustRead(t, f.auth); got != authBefore {
+				t.Fatal("failed run changed shared OAuth credential bytes")
 			}
 		})
 	}
@@ -182,6 +211,7 @@ func TestExecutionRejectsRetryEventAndWillRetryCompletion(t *testing.T) {
 
 func TestRecoveryRefusesChangedLiveIdentityAndRecordsExactAbsence(t *testing.T) {
 	f := newFixture(t, "recover")
+	authBefore := mustRead(t, f.auth)
 	runOK(t, f, "plan", "--packet", f.packet)
 	receiptPath := filepath.Join(f.state, "operations", "recover.json")
 	receipt := readObject(t, receiptPath)
@@ -194,6 +224,9 @@ func TestRecoveryRefusesChangedLiveIdentityAndRecordsExactAbsence(t *testing.T) 
 	output := runOK(t, f, "recover", "--operation-id", "recover")
 	if !strings.Contains(output, `"status":"indeterminate"`) || !strings.Contains(output, "semantic completion unknown") {
 		t.Fatalf("absence recovery=%s", output)
+	}
+	if got := mustRead(t, f.auth); got != authBefore {
+		t.Fatal("recovery changed shared OAuth credential bytes")
 	}
 }
 

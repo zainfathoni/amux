@@ -7,7 +7,7 @@ decision: stop-narrow
 
 # Issue 151 mutating Claude delegation Pilot 2 evaluation
 
-This is experimental evidence from one bounded run, not an accepted contract, a merge decision, or a promotion decision. It follows the pilot sequence and evidence shape described in the [interactive delegation proposal](claude-code-interactive-delegation-pilot.md) and the [design grill](issue-147-claude-delegation-design-grill.md), and reuses the authority split defined in [`claude-mutating-delegation.md`](../../skills/amux/reference/claude-mutating-delegation.md).
+This is experimental evidence from one bounded run, not an accepted contract, a merge decision, or a promotion decision. It follows the pilot sequence and evidence shape described in the [interactive delegation proposal](claude-code-interactive-delegation-pilot.md) and the [design grill](issue-147-claude-delegation-design-grill.md), and reuses the authority split defined in [`claude-mutating-delegation.md`](../../skills/amux-claude/reference/claude-mutating-delegation.md).
 
 Claude authored the first one-clean-commit draft as `93206a45d7cb014793abca793c5d8bacacc8dc34`. Amp then independently inspected that frozen commit, ran verification, consumed and acknowledged the semantic report, explicitly parked the verified Claude client, and authored the assessment and decision recorded below. This preserves attribution while keeping integration outside delegation completion.
 

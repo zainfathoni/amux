@@ -74,9 +74,16 @@ Install globally from the public repository with [skills.sh](https://skills.sh/)
 npx skills add zainfathoni/amux --skill amux --global
 ```
 
-The skill teaches agents the canonical selectors, side-effect boundaries, and skill-only health/sprawl/finish workflows. See the [dedicated skill guide](https://amux.zainf.dev/skill/). Local symlinking is only for contributors developing the bundled skill; see [CONTRIBUTING.md](CONTRIBUTING.md#develop-the-bundled-skill).
+Optional experimental skills (explicit owner request only):
 
-The skill also includes an explicit-only, capability-gated Darwin/Linux **experimental read-only Claude delegation** route. It is an unstable skill-owned helper, not an `amux` lifecycle command, worker, runner, group member, or compatibility promise. It launches one policy-confined interactive thinker only after explicit invocation, accepts bounded semantic reports through a strict local MCP surface, recovers them from a private machine-local receipt, and keeps notification, delivery, acknowledgement, and identity-verified parking separate. It does not provide OS-level read confinement, Linux mutation, automatic follow-up injection, autonomous selection without trustworthy capacity, teleport/adoption, synthetic Amp identity, automatic cleanup, or evidence that a real delegation pilot succeeded. Load the bundled skill's experimental workflow and contract before use.
+```sh
+npx skills add zainfathoni/amux --skill amux-claude --global
+npx skills add zainfathoni/amux --skill amux-pi --global
+```
+
+`/amux` teaches canonical selectors, side-effect boundaries, skill-only health/sprawl/finish workflows, and progressive disclosure via `reference/contract-v1.md` (workers read once) and `reference/deadline-v1.md` (deadlines only). Do not paste full protocol into spawn messages or reload the full skill on wake-ups. See the [dedicated skill guide](https://amux.zainf.dev/skill/). Local symlinking is only for contributors; see [CONTRIBUTING.md](CONTRIBUTING.md#develop-the-bundled-skills).
+
+`/amux-claude` is a separate unstable skill for explicit Amp-to-Claude delegation (local thinker/writer and fresh-Orb Opus). It is not an `amux` lifecycle command, worker, runner, group member, or compatibility promise. `/amux-pi` is a separate disposable Pi/Spark Orb recipe. Neither installs with core `/amux` unless requested.
 
 ## Quick start
 
@@ -131,8 +138,8 @@ Agents should use long flags:
 | `--thread`, `-t` | canonical worker identity |
 | `--workdir`, `-d` | canonical runner identity |
 | `--workspace`, `-w` | worker/runner lifecycle group and same-named tmux session |
-| `--window`, `-W` | worker creation placement metadata |
-| `--mode`, `-m` | spawn mode or workspace-list filter |
+| `--window`, `-W` | worker pin/adoption placement metadata |
+| `--mode`, `-m` | workspace-list filter |
 | `--current` | resource owning the invoking pane/workdir |
 | `--all` | explicit machine-wide scope |
 
@@ -151,13 +158,15 @@ Removed aliases and positional forms fail with remediation. In particular, do no
 
 ## Worker-only lifecycle
 
-`spawn`, `shelve`, `unshelve`, and `teardown` are worker-only and have concise top-level routes.
+`shelve`, `unshelve`, and `teardown` are worker-only and have concise top-level routes. Both `amux spawn` and `amux worker spawn` are non-mutating migration tombstones that exit `2`.
+
+Create the thread and deliver its initial assignment with Amp's native thread creation, then adopt the exact returned identity:
 
 ```sh
-amux --dry-run spawn --workspace amux --window install-diagnostics --workdir ~/Code/amux-issue-110 --mode medium --title-prefix '#110' --group amux-110 --message-file /tmp/issue-110.md --idempotency-key issue-110
+amux worker adopt --thread <thread> --workspace <workspace> --window <window> --workdir <workdir>
 ```
 
-An exact `#<issue>` title prefix owns issue identity. The window must be an issue-unprefixed semantic slug; obvious duplicates such as `issue-110-install-diagnostics` are rejected before side effects. `--message`, `--message-file`, and `--message-stdin` are mutually exclusive. Spawn requires a stable idempotency key. If verification times out after delivery starts, rerun the complete identical spawn request with `--reconcile` only after read-only inspection identifies either the exact assignment in the provisioned thread or one unambiguous fresh active alternate receiver. amux verifies the immutable request hash, exact assignment, workdir, freshness, empty provisioned residue, and unstarted receiver; it then creates or verifies only the authoritative worker row and local tmux client without creating a thread or resubmitting the message. Alternate adoption is rejected when ownership, content, freshness, activity, or local identity is ambiguous. Other indeterminate outcomes remain terminal.
+The tombstones do not read message files or stdin, resolve or migrate configuration, acquire the mutation lock, invoke Amp/tmux, or write operations. Preserved legacy spawn operation records remain immutable diagnostic evidence and are never retried or reconciled.
 
 ```sh
 amux shelve --thread T-example
@@ -191,19 +200,13 @@ amux group remove --group amux-131 --thread T-worker
 
 Group IDs map byte-for-byte to Amp labels and must match `^[a-z0-9]+(?:-[a-z0-9]+)*$`. Generic `amux group` commands never normalize or infer them from titles, branches, issue numbers, or existing labels. Local `groups.tsv` intent is authoritative and survives worker/tmux/worktree lifecycle changes. `group list` and `group show` are deterministic local-only reads.
 
-The bundled issue-coordination workflow preserves repository-qualified defaults. For this repository, issue `#131` uses group/Amp label `amux-131`, and its first worker uses report ID `amux-131-worker-1`; another unconfigured repository uses the equivalent `<repository-slug>-131` and `<repository-slug>-131-worker-1` explicitly. A repository may instead opt into tracker-neutral automatic naming with `--work-item-id`, `--worker-ordinal`, and a semantic window slug. The same exact resolved group derives the stable report ID. This workflow feature does not narrow the generic group-ID contract. Existing `amux-*`, repository-slug, `issue-*`, purpose-specific groups such as `pr-181-review`, and explicit groups remain valid and are never migrated, renamed, removed externally, or rewritten.
+The bundled issue-coordination workflow uses explicit durable identity. For this repository, issue `#131` uses group/Amp label `amux-131`, and its first worker uses report ID `amux-131-worker-1`; another repository may use an explicit equivalent lowercase, group-safe repository slug. This workflow convention does not narrow the generic group-ID contract. Existing `amux-*`, repository-slug, `issue-*`, purpose-specific groups such as `pr-181-review`, and explicit groups remain valid and are never migrated, renamed, removed externally, or rewritten.
 
-Automatic naming is repository-scoped in the selected config directory:
+Worker adoption accepts one exact `--group <id>`. It persists local member intent for the exact native-created thread before add-only label synchronization.
 
-```json
-{"schema_version":1,"projects":[{"repository":"github.com/owner/project","prefix":"project"}]}
-```
+New workers use Amp's native thread creation and initial-message delivery followed by explicit local adoption: `amux worker adopt --thread <exact-id> --workspace <workspace> --window <window> --workdir <path> [--group <id>]`. Adoption verifies active thread and local ownership, persists catalog/group intent before creating the tmux client, and never sends input or reads a transcript. See [ADR 0003](docs/adr/0003-native-thread-creation-and-explicit-adoption.md).
 
-`repository` is the lowercase `host/owner/repository` identity verified from the spawn workdir's `origin`; amux never uses cwd basename, worktree/tmux names, or existing labels as scope. With no explicit group, `--work-item-id 975 --worker-ordinal 1 --window unlisted-addons` derives `project-975-unlisted-addons` and report ID `project-975-unlisted-addons-worker-1`. Work-item IDs are owner-supplied and tracker-neutral, so GitHub issue and Trello card identities require no tracker fetch. Inputs must already satisfy the lowercase/hyphen grammar and the final group must fit 32 characters; amux rejects missing, ambiguous, invalid, mismatched, non-canonical, or over-limit values without guessing, normalizing, or truncating. `--dry-run` returns the resolved prefix, work item, slug, group, report, and config source before Amp/tmux/config mutation. Explicit `--group` remains authoritative and bypasses automatic naming.
-
-Worker spawn accepts repeatable `--group <id>`. amux validates and deterministically sorts/deduplicates the complete set before creation, binds memberships only to the final authoritative receiving thread, persists all local intent before add-only label synchronization, and resumes a partial grouping failure with the same idempotency key without recreating or resubmitting the worker.
-
-External synchronization is deliberately add-only and member-only. Coordinator identity remains authoritative local metadata and is not projected to an Amp label, so a long-lived coordinator does not accumulate labels for every group it supervises. Member add, worker spawn, and reconcile use Amp's additive label command only after a version and exact semantic-help capability check; reconcile reports coordinator memberships as skipped. Additive failures retain local intent as visible drift. Local removal cannot remove an existing Amp label, succeeds with a warning that the external label may remain indefinitely, and never claims exact synchronization. Promoting an already-labelled member to coordinator cannot remove its prior label. Use `--dry-run` to preflight and inspect any group mutation.
+External synchronization is deliberately add-only and member-only. Coordinator identity remains authoritative local metadata and is not projected to an Amp label, so a long-lived coordinator does not accumulate labels for every group it supervises. Member add, worker adoption, and reconcile use Amp's additive label command only after a version and exact semantic-help capability check; reconcile reports coordinator memberships as skipped. Additive failures retain local intent as visible drift. Local removal cannot remove an existing Amp label, succeeds with a warning that the external label may remain indefinitely, and never claims exact synchronization. Promoting an already-labelled member to coordinator cannot remove its prior label. Use `--dry-run` to preflight and inspect any group mutation.
 
 ### Durable worker reports and finish authorization
 
@@ -233,13 +236,13 @@ Identical replay is a benign durable-state skip that may retry notification; con
 
 ### Coordinator workflow
 
-The bundled `/amux` skill provides the complete coordinator procedure. In summary: inspect native dependencies and active PR/branch/worktree/API overlap; fetch and create dedicated worktrees from fresh `origin/main`; use semantic issue-unprefixed windows and explicit `--mode medium` unless overridden; declare the group and register the exact verified coordinator pane; then spawn with `--group` so membership binds only after authoritative alternate-thread adoption.
+The bundled `/amux` skill provides the coordinator procedure. Worker assignments stay task-only and include the absolute path to the loaded skill's `reference/contract-v1.md` for a one-time read. In summary: inspect native dependencies and active PR/branch/worktree/API overlap; fetch and create dedicated worktrees from fresh `origin/main`; use semantic issue-unprefixed windows and explicit `medium` mode unless overridden; declare the group and register the exact verified coordinator pane; then create the thread natively and adopt its exact returned identity with `--group`.
 
 Workers use one stable report ID for `blocked`, `ready`, and terminal `merged`. `ready` means implementation, tests, one review, PR, and normal CI are complete. A callback token only wakes the coordinator. The coordinator acknowledges receipt separately, independently verifies PR URL/head/scope/mergeability/closing issue, worktree and CI, merges only with separate authority, verifies post-merge CI (and Pages when triggered), and records durable finish authorization. The child then submits `merged` with the same binding/payload and runs `/amux finish` only when explicitly directed; worktree/Git safety comes first and `amux teardown` is last. Group/report history survives finish.
 
 All lifecycle mutations share one lock. Exit `2` contention writes nothing and requires waiting for the current operation before retrying the identical operation/report ID. Stale/recycled/missing callback leases fail closed and are repaired only by explicit registration; callback failure leaves the durable report pending and the worker alive. Never retry notification into a suspected busy composer: recover from durable pending/history state and acknowledge it directly. Duplicate/reordered wake-ups and coordinator restarts are likewise recovered from durable state, never inferred tmux delivery. Do not force-delete branches, auto-release, infer finish from a late callback, or repeatedly read unrelated Amp threads.
 
-Coordinator soft budgets to `ready` are Small 30m, Medium 1h (default), Large 2h; XL must be split. Stale is 15m, one review warns after 10m, demonstrated external CI waits alert after 20m, and authorized finish alerts after 10m. Only demonstrated external service waits pause active time. One coordinator-approved extension may add at most half the original budget under a new generation. Expiry is diagnostic and non-destructive; use one nearest-deadline queue, not one timer process per child. This is coordinator policy: the current CLI has no deadline mutation command, so agents must not edit `reports.json` to implement it.
+Coordinator soft budgets to `ready` are Small 30m, Medium 1h (default), Large 2h; XL must be split. Stale is 15m, one review warns after 10m, demonstrated external CI waits alert after 20m, and authorized finish alerts after 10m. Only demonstrated external service waits pause active time. One coordinator-approved extension may add at most half the original budget under a new generation. Expiry is diagnostic and non-destructive; use one nearest-deadline queue, not one timer process per child. Full deadline procedure lives in the skill's `reference/deadline-v1.md` and must not reload the entire `/amux` skill on schedule fire. This is coordinator policy: the current CLI has no deadline mutation command, so agents must not edit `reports.json` to implement it.
 
 ## Side effects
 
@@ -252,7 +255,7 @@ Coordinator soft budgets to `ready` are Small 30m, Medium 1h (default), Large 2h
 | `park` / `restart` | preserve | preserve | stop/restart verified | none |
 | `remove` | remove worker/shelf | remove runner | stop verified | none |
 | `shelve` / `unshelve` | preserve worker; mutate intent | none | shelve parks only | archive/unarchive |
-| `spawn` | add worker after verification | none | create worker | create/rename |
+| `spawn` | removed tombstone; none | none | none | none |
 | `teardown` | remove worker/shelf | none | stop verified worker | archive |
 | `reconcile` | synchronize drift | repair stale ownership | verified repairs only | worker sync only |
 | `callback register` / `clear` | none; mutate machine runtime lease only | none | inspect exact pane/process | none |

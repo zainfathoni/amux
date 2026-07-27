@@ -1,4 +1,4 @@
-# Run one bounded local Pi/Spark code microtask
+# Run one bounded local Pi/Spark microtask
 
 Use this provider-specific route only when the owner explicitly asks for a local Pi Spark code microtask. It is an unstable Darwin-only persistent-host executor, not an amux worker, runner, daemon, scheduler, or provider-neutral delegation API. The exact model is `openai-codex/gpt-5.3-codex-spark`; no alias, fallback, or automatic retry is allowed.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provider-specific local Pi/Spark executor for bounded code microtasks."""
+"""Provider-specific local Pi/Spark executor for bounded amux-pi microtasks."""
 
 from __future__ import annotations
 

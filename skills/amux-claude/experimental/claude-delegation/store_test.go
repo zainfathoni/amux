@@ -1994,7 +1994,7 @@ func TestExactLivePairRetirementsAreDurableAndRecoverable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := `import copy, hashlib, importlib.util, json, pathlib, sys, tempfile
+	script := `import copy, hashlib, importlib.util, json, os, pathlib, sys, tempfile, time
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
 module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
@@ -2047,9 +2047,12 @@ def fixture(name="synthetic-live"):
     return store, bound, request
 
 # Reproduce the exact launch-completed, acquired, no-report state before exercising its separate recovery.
-def acquired_fixture(name="synthetic-acquired-no-report"):
+def acquired_fixture(name="synthetic-acquired-no-report", model=None):
     acquired, bound, request = fixture(name)
     data = acquired.load_store(); receipt = data["receipts"][0]
+    if model is not None:
+        receipt["binding"]["model"] = model
+        receipt["events"][1]["model"] = model
     acquired_identity = {key:value for key,value in bound.items() if key not in {
         "session_id", "process_start_identity", "expected_launcher_identity",
         "expected_executable_object_identity", "expected_launcher_argv0_digest"}}
@@ -2066,6 +2069,138 @@ def acquired_fixture(name="synthetic-acquired-no-report"):
     receipt["updated_at"] = "2026-07-20T12:00:02Z"; acquired.commit(data)
     request["authorization"]["report_sha256"] = "6" * 64
     return acquired, bound, request
+
+# A successful exec ends launch-gate ownership before either exact live retirement route runs.
+def assert_exec_releases_launch_gate(store, current_identity, request, retire):
+    completed = store.load_store()
+    preexec = copy.deepcopy(completed)
+    receipt = preexec["receipts"][0]
+    receipt["state"] = "created"; receipt["report_message_id"] = ""
+    receipt["events"] = receipt["events"][:2]
+    for field in ("session_identity", "acquired_retirement_intent", "acquired_pair_retired",
+                  "retirement_intent", "pair_retired"):
+        receipt.pop(field, None)
+    store.commit(preexec)
+    marker = store.state_dir / "transport-exec-complete"
+    child = os.fork()
+    if child == 0:
+        try:
+            with store.launch_gate(receipt["binding"]["delegation_id"]):
+                module.execute_authorized_launch_transport(
+                    store, receipt["binding"]["delegation_id"], sys.executable,
+                    [sys.executable, "-c",
+                     "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text('exec'); time.sleep(30)",
+                     str(marker)], dict(os.environ))
+        finally: os._exit(1)
+    reaped = False
+    try:
+        deadline = time.monotonic() + 3
+        while not marker.exists() and time.monotonic() < deadline: time.sleep(0.01)
+        assert marker.exists(), "exec target did not start"
+        store.commit(completed)
+        stops = []
+        module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+        def stop(bound, *args):
+            nonlocal reaped
+            stops.append(copy.deepcopy(bound)); os.kill(child, 15); os.waitpid(child, 0); reaped = True
+        module.stop_exact_retirement_target = stop
+        module.confirm_retirement_target_absent = lambda bound: "exact_retirement_target_absent"
+        outcome = retire(request)
+        assert outcome["outcome"] == "retired", outcome
+        assert stops == [current_identity]
+    finally:
+        if not reaped:
+            try: os.kill(child, 15)
+            except ProcessLookupError: pass
+            os.waitpid(child, 0)
+
+# A v0.2.25 target inherited the gate across successful exec. Exact post-exec durable evidence must
+# reclassify that busy gate without weakening the separate pre-exec launch-indeterminate blocker.
+def assert_legacy_exec_holder_does_not_block_retirement(store, current_identity, request, retire):
+    marker = store.state_dir / "legacy-transport-exec-complete"
+    gate_path = store.state_dir / "launch-gates" / hashlib.sha256(
+        request["delegation_id"].encode()).hexdigest()
+    gate_path.parent.mkdir(mode=0o700, exist_ok=True)
+    child = os.fork()
+    if child == 0:
+        try:
+            descriptor = os.open(gate_path, os.O_CREAT | os.O_RDWR, 0o600)
+            module.fcntl.flock(descriptor, module.fcntl.LOCK_EX)
+            os.set_inheritable(descriptor, True)
+            os.execve(sys.executable, [sys.executable, "-c",
+                "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text('exec'); time.sleep(30)",
+                str(marker)], dict(os.environ))
+        finally: os._exit(1)
+    reaped = False
+    try:
+        deadline = time.monotonic() + 3
+        while not marker.exists() and time.monotonic() < deadline: time.sleep(0.01)
+        assert marker.exists(), "legacy exec target did not start"
+        stops = []
+        module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+        def stop(bound, *args):
+            nonlocal reaped
+            stops.append(copy.deepcopy(bound)); os.kill(child, 15); os.waitpid(child, 0); reaped = True
+        module.stop_exact_retirement_target = stop
+        module.confirm_retirement_target_absent = lambda bound: "exact_retirement_target_absent"
+        outcome = retire(request)
+        assert outcome["outcome"] == "retired", outcome
+        assert stops == [current_identity]
+    finally:
+        if not reaped:
+            try: os.kill(child, 15)
+            except ProcessLookupError: pass
+            os.waitpid(child, 0)
+
+launched, current_identity, launched_request = acquired_fixture("acquired-after-transport-exec")
+assert_exec_releases_launch_gate(
+    launched, current_identity, launched_request, launched.retire_live_acquired_no_report_pair)
+launched, current_identity, launched_request = fixture("report-after-transport-exec")
+assert_exec_releases_launch_gate(
+    launched, current_identity, launched_request, launched.retire_live_indeterminate_pair)
+
+legacy, current_identity, legacy_request = acquired_fixture("acquired-after-legacy-transport-exec")
+assert_legacy_exec_holder_does_not_block_retirement(
+    legacy, current_identity, legacy_request, legacy.retire_live_acquired_no_report_pair)
+legacy, current_identity, legacy_request = fixture("report-after-legacy-transport-exec")
+assert_legacy_exec_holder_does_not_block_retirement(
+    legacy, current_identity, legacy_request, legacy.retire_live_indeterminate_pair)
+
+# A genuinely pre-exec holder may coexist with report candidate evidence, but cannot pass final
+# transport authorization or cause retirement to mutate without one exact inspected live target.
+preexec, _, preexec_request = fixture("report-with-preexec-gate-holder")
+preexec_before = preexec.path.read_bytes()
+ready_read, ready_write = os.pipe(); release_read, release_write = os.pipe()
+child = os.fork()
+if child == 0:
+    try:
+        with preexec.launch_gate(preexec_request["delegation_id"]):
+            os.write(ready_write, b"1"); os.read(release_read, 1)
+    finally: os._exit(0)
+os.close(ready_write); os.close(release_read); assert os.read(ready_read, 1) == b"1"
+try:
+    inspections = []; stops = []
+    module.inspect_live_indeterminate_target = lambda *args: (
+        inspections.append(args), (_ for _ in ()).throw(module.HelperError("no exact live target")))[1]
+    module.stop_exact_retirement_target = lambda *args: stops.append(args)
+    try: preexec.retire_live_indeterminate_pair(preexec_request)
+    except module.HelperError: pass
+    else: raise AssertionError("pre-exec holder without exact live target entered retirement")
+    assert len(inspections) == 1 and not stops and preexec.path.read_bytes() == preexec_before
+    assert "T-synthetic" in preexec.lifecycle.load()["teardown_fences"]
+finally:
+    os.write(release_write, b"1"); os.close(release_write)
+    _, status = os.waitpid(child, 0)
+assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+
+# Body exceptions release an acquired retirement gate instead of being mistaken for gate contention.
+unwound, _, _ = acquired_fixture("retirement-exclusion-unwind")
+try:
+    with unwound.live_retirement_exclusion("retirement-exclusion-unwind"):
+        raise RuntimeError("synthetic body failure")
+except RuntimeError: pass
+else: raise AssertionError("retirement exclusion swallowed a body failure")
+with unwound.launch_gate("retirement-exclusion-unwind", timeout_seconds=0.2): pass
 
 acquired, current_identity, acquired_request = acquired_fixture()
 original = copy.deepcopy(acquired.load_store()["receipts"][0]); stops = []
@@ -2098,6 +2233,60 @@ try:
 except module.HelperError: pass
 else: raise AssertionError("acquired no-report retirement did not seal later mutation")
 assert acquired.load_store() == sealed
+
+# Exact Opus selection remains immutable through pre-semantic acquired-session retirement.
+opus, current_identity, opus_request = acquired_fixture(
+    "synthetic-acquired-opus-entitlement", "claude-opus-4-8")
+original = copy.deepcopy(opus.load_store()["receipts"][0]); stops = []
+assert module.receipt_launch_intent(original)["model"] == "claude-opus-4-8"
+acknowledged = copy.deepcopy(original); acknowledged["report_message_id"] = "report"
+acknowledged["state"] = "acknowledged"
+acknowledged["events"].extend([
+    {"event_id":"report", "kind":"valid_report"},
+    {"event_id":"deliver", "kind":"delivered", "message_id":"report"},
+    {"event_id":"ack", "kind":"acknowledged", "message_id":"report"},
+])
+assert module.valid_worker_lifecycle_chain(acknowledged, False)
+parked = copy.deepcopy(acknowledged); parked["state"] = "verified_parked"
+parked["parked_at"] = "2026-07-20T12:00:03Z"
+parked["cleanup_eligible_at"] = "2026-08-19T12:00:03Z"
+parked["events"].extend([
+    {"event_id":"park", "kind":"park_intent", "identity":copy.deepcopy(parked["session_identity"])},
+    {"event_id":"parked", "kind":"verified_parked", "operation_event_id":"park",
+     "at":parked["parked_at"]},
+])
+assert module.valid_worker_lifecycle_chain(parked, True)
+for name, mutate in [
+    ("omitted", lambda receipt: receipt["events"][1].pop("model")),
+    ("changed", lambda receipt: receipt["events"][1].update(model="claude-fable-5")),
+]:
+    drifted = copy.deepcopy(parked); mutate(drifted)
+    try: module.receipt_launch_intent(drifted)
+    except module.HelperError: pass
+    else: raise AssertionError("model drift entered acquisition or parking: " + name)
+    assert not module.valid_worker_lifecycle_chain(drifted, True), name
+module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+module.stop_exact_retirement_target = lambda bound, *args: stops.append(copy.deepcopy(bound))
+module.confirm_retirement_target_absent = lambda bound: "exact_retirement_target_absent"
+assert opus.retire_live_acquired_no_report_pair(opus_request)["outcome"] == "retired"
+receipt = opus.load_store()["receipts"][0]
+assert receipt["binding"]["model"] == "claude-opus-4-8"
+assert receipt["events"][1]["model"] == "claude-opus-4-8"
+assert receipt["events"][:4] == original["events"] and stops == [current_identity]
+
+# A changed model in recovery evidence fails before inspection, stop, or durable-byte mutation.
+changed, current_identity, changed_request = acquired_fixture(
+    "synthetic-acquired-opus-changed", "claude-opus-4-8")
+data = changed.load_store(); data["receipts"][0]["events"][1]["model"] = "claude-fable-5"
+changed.commit(data); before = (changed.state_dir / "receipts.json").read_bytes()
+inspections = []; stops = []
+module.inspect_live_indeterminate_target = lambda *args: inspections.append(args)
+module.stop_exact_retirement_target = lambda *args: stops.append(args)
+try: changed.retire_live_acquired_no_report_pair(changed_request)
+except module.HelperError: pass
+else: raise AssertionError("changed acquired-session model entered retirement")
+assert (changed.state_dir / "receipts.json").read_bytes() == before
+assert not inspections and not stops
 
 # The already-bounded historical-modern selector remains explicit on this separate exact chain.
 historical, current_identity, acquired_request = acquired_fixture("synthetic-acquired-historical")
@@ -2253,16 +2442,18 @@ assert outcome["outcome"] == "blocked" and outcome["blocker"] == "retirement_abs
 receipt = blocked.load_store()["receipts"][0]
 assert len(stops) == 1 and "acquired_retirement_intent" in receipt and "acquired_pair_retired" not in receipt
 
-# A busy launch transport and mutated durable retirement evidence cannot authorize a stop or terminal proof.
-blocked, current_identity, candidate = acquired_fixture("acquired-transport-race")
+# Exact completion/acquisition allows retirement to rely on fence/lock exclusion despite a busy gate.
+blocked, current_identity, candidate = acquired_fixture("acquired-legacy-gate-holder")
 class BusyGate:
     def __enter__(self): raise module.LaunchGateBusy()
     def __exit__(self, *args): pass
 blocked.launch_gate = lambda *args, **kwargs: BusyGate(); stops = []
-module.stop_exact_retirement_target = lambda *args: stops.append(args)
+module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
+module.stop_exact_retirement_target = lambda bound, *args: stops.append(copy.deepcopy(bound))
+module.confirm_retirement_target_absent = lambda bound: "exact_retirement_target_absent"
 outcome = blocked.retire_live_acquired_no_report_pair(candidate)
-assert outcome["outcome"] == "blocked" and outcome["blocker"] == "launch_transport_active_or_indeterminate"
-assert not stops and "acquired_retirement_intent" not in blocked.load_store()["receipts"][0]
+assert outcome["outcome"] == "retired" and stops == [current_identity]
+assert "acquired_pair_retired" in blocked.load_store()["receipts"][0]
 
 blocked, current_identity, candidate = acquired_fixture("acquired-mutated-intent")
 module.inspect_live_indeterminate_target = lambda *args: copy.deepcopy(current_identity)
@@ -2666,6 +2857,462 @@ print("ok")
 			t.Fatalf("acquired retirement CLI leaked private identity %q: %s%s", forbidden, stdout, stderr)
 		}
 	}
+	private["compatibility"] = "pre_identity_acquired_no_report_v1"
+	private["owner_authorization"] = map[string]any{
+		"decision":                            "dispose_exact_pane_process_incarnation",
+		"executable_identity_acknowledgement": "unproved",
+		"authorization_sha256":                strings.Repeat("8", 64),
+	}
+	stdout, stderr, err = runHelper(
+		t, stateDir, private, "lifecycle", "dispose-exact-pre-identity-acquired-pair",
+	)
+	if err == nil || !strings.Contains(stdout, `"blocker":"exact_pane_disposal_proof_invalid_or_unavailable"`) {
+		t.Fatalf("privacy-safe exact-pane disposal CLI blocker = %v: %s%s", err, stdout, stderr)
+	}
+	for _, forbidden := range []string{"private-delegation", "private-event", "private-origin"} {
+		if strings.Contains(stdout+stderr, forbidden) {
+			t.Fatalf("exact-pane disposal CLI leaked private identity %q: %s%s", forbidden, stdout, stderr)
+		}
+	}
+}
+
+func TestPreIdentityAcquiredNoReportPairHasPermanentTerminalPolicy(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import copy, hashlib, importlib.util, pathlib, shutil, sys, tempfile
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+
+def fixture(name="synthetic-pre-identity-acquired"):
+    state = pathlib.Path(tempfile.mkdtemp()).resolve(); state.chmod(0o700)
+    workdir = pathlib.Path(tempfile.mkdtemp()).resolve()
+    store = module.ReceiptStore(state, state)
+    binding = {"protocol_version":1, "delegation_id":name, "nonce":"1" * 64, "task_id":"task",
+        "question_message_id":"question", "origin_thread":"T-synthetic", "repository":"repository",
+        "base":"2" * 40, "workdir":str(workdir), "producer_role":"thinker", "authority":"read_only",
+        "task_reference":"fixture", "packet_digest":"3" * 64, "launch_policy_digest":"4" * 64,
+        "launch_command_digest":"5" * 64}
+    assert store.create({"binding":binding, "routing":{"target":"machine_local_inbox"}}) == "recorded"
+    data = store.load_store(); receipt = data["receipts"][0]
+    intent = {"event_id":"launch", "kind":"launch_intent", "workflow":"read_only",
+        "request_digest":"8" * 64, "claude_session_id":"550e8400-e29b-41d4-a716-446655440000",
+        "tmux_session":"Synthetic", "tmux_window":"pre-identity", "packet_digest":"3" * 64,
+        "launch_policy_digest":"4" * 64, "launch_command_digest":"5" * 64,
+        "at":"2026-07-20T12:00:00Z"}
+    completed_identity = {"session":"Synthetic", "window":"pre-identity", "window_id":"@17", "pane_id":"%23"}
+    acquired_identity = {**completed_identity, "pane_pid":4242,
+        "claude_session_id":intent["claude_session_id"], "workdir":str(workdir),
+        "current_command":"claude", "process_name":"claude", "process_identity":"1750000000.000017",
+        "process_command_digest":"9" * 64, "launch_command_digest":"5" * 64}
+    receipt["events"].extend([
+        intent,
+        {"event_id":module.internal_event_id("launch-result", "launch"), "kind":"launch_completed",
+         "operation_event_id":"launch", "identity":completed_identity, "at":"2026-07-20T12:00:01Z"},
+        {"event_id":"acquired", "kind":"session_acquired", "identity":acquired_identity,
+         "at":"2026-07-20T12:00:02Z"},
+    ])
+    receipt["session_identity"] = copy.deepcopy(acquired_identity)
+    receipt["updated_at"] = "2026-07-20T12:00:02Z"; store.commit(data)
+    request = {"delegation_id":name, "event_id":"policy-stable", "origin_thread":"T-synthetic",
+        "compatibility":"pre_identity_acquired_no_report_v1",
+        "authorization":{"terminal_state":"merged", "report_sha256":"6" * 64,
+                         "coordinator_authorization_sha256":"7" * 64}}
+    store.synthetic_workdir = workdir
+    return store, request
+
+store, request = fixture(); before = store.path.read_bytes(); inspections = []; stops = []
+module.inspect_live_indeterminate_target = lambda *args: inspections.append(args)
+module.stop_exact_retirement_target = lambda *args: stops.append(args)
+result = store.retire_live_acquired_no_report_pair(request)
+assert result == {
+    "action":"live_acquired_no_report_pair_retirement",
+    "origin_thread_sha256":hashlib.sha256(b"T-synthetic").hexdigest(),
+    "pair_sha256":hashlib.sha256(b"synthetic-pre-identity-acquired").hexdigest(),
+    "outcome":"blocked", "blocker":"pre_identity_acquired_pair_permanently_non_retirable",
+    "policy":"preserve_receipt_runtime_artifacts_and_origin_fence",
+    "remediation":"paired_worker_teardown_prohibited",
+    "compatibility":"pre_identity_acquired_no_report_v1", "fence":"retained",
+}
+assert store.path.read_bytes() == before and not inspections and not stops
+assert "T-synthetic" in store.lifecycle.load()["teardown_fences"]
+assert store.retire_live_acquired_no_report_pair(request) == result
+teardown = store.worker_teardown("T-synthetic", True)
+assert teardown["outcome"] == "blocked"
+assert teardown["pairs"] == [{
+    "pair_sha256":hashlib.sha256(b"synthetic-pre-identity-acquired").hexdigest(),
+    "state":"created", "action":"block",
+    "blocker":"pre_identity_acquired_pair_permanently_non_retirable"}]
+
+# The selector is mandatory and exact; malformed, report-bearing, and modern shapes retain their old paths.
+without = copy.deepcopy(request); without.pop("compatibility")
+try: store.retire_live_acquired_no_report_pair(without)
+except module.HelperError: pass
+else: raise AssertionError("pre-identity acquired shape entered the modern route")
+for name, mutate in [
+    ("completion-expanded", lambda receipt: receipt["events"][2]["identity"].update(pane_pid=4242)),
+    ("acquired-normalized-argv", lambda receipt: receipt["session_identity"].update(normalized_argv_digest="a" * 64)),
+    ("acquired-event-drift", lambda receipt: receipt["events"][3]["identity"].update(pane_id="%99")),
+    ("report-bearing", lambda receipt: (receipt.update(state="valid_report", report_message_id="report"),
+                                         receipt["events"].append({"event_id":"report", "kind":"valid_report"}))),
+]:
+    blocked, candidate = fixture("synthetic-blocked-" + name)
+    data = blocked.load_store(); mutate(data["receipts"][0]); blocked.commit(data)
+    before = blocked.path.read_bytes(); inspections.clear(); stops.clear()
+    try: blocked.retire_live_acquired_no_report_pair(candidate)
+    except module.HelperError: pass
+    else: raise AssertionError("malformed pre-identity acquired shape accepted: " + name)
+    assert blocked.path.read_bytes() == before and not inspections and not stops, name
+
+for name, value in [("boolean-pid", True), ("oversized-process-name", "x" * 257)]:
+    blocked, candidate = fixture("synthetic-malformed-" + name)
+    data = blocked.load_store(); receipt = data["receipts"][0]
+    field = "pane_pid" if name == "boolean-pid" else "process_name"
+    receipt["session_identity"][field] = value
+    receipt["events"][3]["identity"][field] = value
+    blocked.commit(data); before = blocked.path.read_bytes()
+    try: blocked.retire_live_acquired_no_report_pair(candidate)
+    except module.HelperError: pass
+    else: raise AssertionError("malformed durable identity accepted: " + name)
+    assert blocked.path.read_bytes() == before and not inspections and not stops, name
+
+store, request = fixture("synthetic-missing-workdir"); shutil.rmtree(store.synthetic_workdir)
+result = store.retire_live_acquired_no_report_pair(request)
+assert result["blocker"] == "pre_identity_acquired_pair_permanently_non_retirable"
+assert store.worker_teardown("T-synthetic", True)["blockers"] == [{
+    "pair_sha256":hashlib.sha256(b"synthetic-missing-workdir").hexdigest(),
+    "blocker":"pre_identity_acquired_pair_permanently_non_retirable"}]
+
+store, request = fixture("synthetic-no-recovery")
+try: store.retire_live_acquired_no_report_pair(dict(request, recover=True))
+except module.HelperError: pass
+else: raise AssertionError("permanent-terminal policy accepted recovery mutation")
+assert not inspections and not stops
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil || string(output) != "ok\n" {
+		t.Fatalf("pre-identity acquired policy fixture: %v: %s", err, output)
+	}
+}
+
+func TestOwnerAuthorizedExactPreIdentityPaneDisposal(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import copy, hashlib, importlib.util, pathlib, sys, tempfile
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("claude_delegation", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+real_inspect_exact_pre_identity_target = module.inspect_exact_pre_identity_target
+real_stop_exact_pre_identity_target = module.stop_exact_pre_identity_target
+
+state = pathlib.Path(tempfile.mkdtemp()).resolve(); state.chmod(0o700)
+workdir = pathlib.Path(tempfile.mkdtemp()).resolve()
+store = module.ReceiptStore(state, state)
+binding = {"protocol_version":1, "delegation_id":"synthetic-exact-pane", "nonce":"1" * 64,
+    "task_id":"task", "question_message_id":"question", "origin_thread":"T-synthetic",
+    "repository":"repository", "base":"2" * 40, "workdir":str(workdir), "producer_role":"thinker",
+    "authority":"read_only", "task_reference":"fixture", "packet_digest":"3" * 64,
+    "launch_policy_digest":"4" * 64, "launch_command_digest":"5" * 64}
+assert store.create({"binding":binding, "routing":{"target":"machine_local_inbox"}}) == "recorded"
+data = store.load_store(); receipt = data["receipts"][0]
+intent = {"event_id":"launch", "kind":"launch_intent", "workflow":"read_only",
+    "request_digest":"8" * 64, "claude_session_id":"550e8400-e29b-41d4-a716-446655440000",
+    "tmux_session":"Synthetic", "tmux_window":"pre-identity", "packet_digest":"3" * 64,
+    "launch_policy_digest":"4" * 64, "launch_command_digest":"5" * 64,
+    "at":"2026-07-20T12:00:00Z"}
+completed = {"session":"Synthetic", "window":"pre-identity", "window_id":"@17", "pane_id":"%23"}
+acquired = {**completed, "pane_pid":4242, "claude_session_id":intent["claude_session_id"],
+    "workdir":str(workdir), "current_command":"claude", "process_name":"claude",
+    "process_identity":"1750000000.000017", "process_command_digest":"9" * 64,
+    "launch_command_digest":"5" * 64}
+receipt["events"].extend([
+    intent,
+    {"event_id":module.internal_event_id("launch-result", "launch"), "kind":"launch_completed",
+     "operation_event_id":"launch", "identity":completed, "at":"2026-07-20T12:00:01Z"},
+    {"event_id":"acquired", "kind":"session_acquired", "identity":acquired,
+     "at":"2026-07-20T12:00:02Z"},
+])
+receipt["session_identity"] = copy.deepcopy(acquired)
+receipt["updated_at"] = "2026-07-20T12:00:02Z"; store.commit(data)
+request = {"delegation_id":"synthetic-exact-pane", "event_id":"dispose-stable",
+    "origin_thread":"T-synthetic", "compatibility":"pre_identity_acquired_no_report_v1",
+    "owner_authorization":{
+        "decision":"dispose_exact_pane_process_incarnation",
+        "executable_identity_acknowledgement":"unproved",
+        "authorization_sha256":"a" * 64,
+    },
+    "authorization":{"terminal_state":"merged", "report_sha256":"6" * 64,
+                     "coordinator_authorization_sha256":"7" * 64}}
+pristine = copy.deepcopy(store.load_store()["receipts"][0])
+
+def fixture(name):
+    fixture_state = pathlib.Path(tempfile.mkdtemp()).resolve(); fixture_state.chmod(0o700)
+    candidate = module.ReceiptStore(fixture_state, fixture_state)
+    candidate_binding = copy.deepcopy(binding); candidate_binding["delegation_id"] = name
+    assert candidate.create({"binding":candidate_binding,
+                             "routing":{"target":"machine_local_inbox"}}) == "recorded"
+    candidate_data = candidate.load_store(); candidate_receipt = copy.deepcopy(pristine)
+    candidate_receipt["binding"]["delegation_id"] = name
+    candidate_receipt["events"][0]["event_id"] = "create:" + name
+    candidate_data["receipts"] = [candidate_receipt]; candidate.commit(candidate_data)
+    candidate_request = copy.deepcopy(request); candidate_request["delegation_id"] = name
+    return candidate, candidate_request
+
+live = {key:value for key,value in acquired.items() if key != "process_identity"}
+live.update(session_id="$7", process_start_identity="process-start:1750000000.000017")
+connections = []
+class FakeControl:
+    def __init__(self, session): self.session = session; connections.append(self)
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+module.TmuxControlConnection = FakeControl
+inspections = []; stops = []; absences = []
+module.inspect_exact_pre_identity_target = lambda control, durable: (
+    inspections.append((control, copy.deepcopy(durable))), copy.deepcopy(live))[1]
+module.stop_exact_pre_identity_target = lambda control, identity: stops.append((control, copy.deepcopy(identity)))
+module.confirm_exact_pre_identity_target_absent = lambda control, identity: (
+    absences.append((control, copy.deepcopy(identity))), "exact_pane_process_incarnation_absent")[1]
+
+original = copy.deepcopy(store.load_store()["receipts"][0])
+result = store.dispose_exact_pre_identity_acquired_pair(request)
+assert result["outcome"] == "disposed" and result["fence"] == "retained", result
+assert len(connections) == 1 and len(inspections) == 2 and len(stops) == 1 and len(absences) == 1
+assert all(item[0] is connections[0] for item in inspections + stops + absences)
+sealed = store.load_store()["receipts"][0]
+assert sealed["events"][:4] == original["events"]
+assert [event["kind"] for event in sealed["events"][-2:]] == [
+    "exact_pane_disposal_intent", "exact_pane_disposed"]
+assert sealed["state"] == "created" and sealed["report_message_id"] == ""
+assert "cleanup_eligible_at" not in sealed
+assert store.worker_teardown("T-synthetic", True)["pairs"] == [{
+    "pair_sha256":hashlib.sha256(b"synthetic-exact-pane").hexdigest(),
+    "state":"exact_pane_disposed", "action":"none"}]
+
+# The old permanent-preservation query remains byte-identical and performs no live action.
+policy, policy_request = fixture("synthetic-policy-stable")
+policy_request.pop("owner_authorization")
+before = policy.path.read_bytes(); connection_count = len(connections)
+policy_result = policy.retire_live_acquired_no_report_pair(policy_request)
+assert policy_result["blocker"] == "pre_identity_acquired_pair_permanently_non_retirable"
+assert policy.path.read_bytes() == before and len(connections) == connection_count
+
+# Interruption leaves durable intent. Recovery proves absence first and never stops blindly.
+interrupted, interrupted_request = fixture("synthetic-exact-pane-interrupted")
+module.inspect_exact_pre_identity_target = lambda control, durable: copy.deepcopy(live)
+module.stop_exact_pre_identity_target = lambda *args: (_ for _ in ()).throw(
+    RuntimeError("synthetic interruption"))
+try: interrupted.dispose_exact_pre_identity_acquired_pair(interrupted_request)
+except RuntimeError: pass
+else: raise AssertionError("synthetic exact-pane interruption was not exposed")
+receipt = interrupted.load_store()["receipts"][0]
+assert receipt["events"][-1]["kind"] == "exact_pane_disposal_intent"
+recovery_stops = []; recovery_inspections = []
+module.inspect_exact_pre_identity_target = lambda *args: recovery_inspections.append(args)
+module.stop_exact_pre_identity_target = lambda *args: recovery_stops.append(args)
+module.confirm_exact_pre_identity_target_absent = lambda *args: "exact_pane_process_incarnation_absent"
+assert interrupted.dispose_exact_pre_identity_acquired_pair(
+    dict(interrupted_request, recover=True))["outcome"] == "disposed"
+assert not recovery_stops and not recovery_inspections
+connections_before_duplicate = len(connections)
+assert interrupted.dispose_exact_pre_identity_acquired_pair(interrupted_request)["outcome"] == "duplicate"
+assert len(connections) == connections_before_duplicate
+
+# Selector/owner authority, exact receipt shape, and pre-stop mutation checks all fail closed.
+for name, mutate_request in [
+    ("missing-selector", lambda candidate: candidate.pop("compatibility")),
+    ("wrong-selector", lambda candidate: candidate.update(compatibility="historical_modern_read_only_launch_intent_v1")),
+    ("missing-owner", lambda candidate: candidate.pop("owner_authorization")),
+    ("wrong-owner-decision", lambda candidate: candidate["owner_authorization"].update(decision="retire_claude")),
+    ("no-acknowledgement", lambda candidate: candidate["owner_authorization"].update(
+        executable_identity_acknowledgement="proved")),
+]:
+    blocked, candidate = fixture("synthetic-authority-" + name); mutate_request(candidate)
+    before = blocked.path.read_bytes(); connection_count = len(connections)
+    try: blocked.dispose_exact_pre_identity_acquired_pair(candidate)
+    except module.HelperError: pass
+    else: raise AssertionError("invalid exact-pane authority accepted: " + name)
+    assert blocked.path.read_bytes() == before and len(connections) == connection_count, name
+
+for name, mutate_receipt in [
+    ("report-bearing", lambda candidate: (candidate.update(state="valid_report", report_message_id="report"),
+                                           candidate["events"].append({"event_id":"report", "kind":"valid_report"}))),
+    ("mixed-modern", lambda candidate: candidate["session_identity"].update(
+        normalized_argv_digest="b" * 64)),
+    ("pane-drift", lambda candidate: candidate["events"][3]["identity"].update(pane_id="%99")),
+    ("mutating-authority", lambda candidate: (
+        candidate["binding"].update(
+            producer_role="mutating_delegate", authority="exclusive_writer",
+            baseline_branch="synthetic-branch", writer_owner="claude_mutating_delegate",
+            integration_owner="amp_coordinator", handoff="one_clean_local_commit",
+            capacity_decision_digest="c" * 64),
+        candidate["events"][1].update(workflow="mutating"),
+        candidate.pop("writer_lease", None))),
+    ("thinker-model", lambda candidate: candidate["binding"].update(model="claude-opus-4-8")),
+]:
+    blocked, candidate = fixture("synthetic-shape-" + name)
+    blocked_data = blocked.load_store(); mutate_receipt(blocked_data["receipts"][0]); blocked.commit(blocked_data)
+    before = blocked.path.read_bytes(); connection_count = len(connections)
+    try: blocked.dispose_exact_pre_identity_acquired_pair(candidate)
+    except module.HelperError: pass
+    else: raise AssertionError("ineligible exact-pane shape accepted: " + name)
+    assert blocked.path.read_bytes() == before and len(connections) == connection_count, name
+
+raced, raced_request = fixture("synthetic-exact-pane-race")
+changed = copy.deepcopy(live); changed["pane_id"] = "%99"
+observations = [copy.deepcopy(live), changed]; race_stops = []
+module.inspect_exact_pre_identity_target = lambda *args: observations.pop(0)
+module.stop_exact_pre_identity_target = lambda *args: race_stops.append(args)
+result = raced.dispose_exact_pre_identity_acquired_pair(raced_request)
+assert result["outcome"] == "blocked" and result["blocker"] == "exact_pane_identity_changed"
+assert not race_stops
+receipt = raced.load_store()["receipts"][0]
+assert "exact_pane_disposal_intent" in receipt and "exact_pane_disposed" not in receipt
+
+# Interrupted recovery is bound to the exact operation and both authorization objects.
+for name, mutate in [
+    ("terminal-authorization", lambda candidate: candidate["authorization"].update(
+        coordinator_authorization_sha256="d" * 64)),
+    ("owner-authorization", lambda candidate: candidate["owner_authorization"].update(
+        authorization_sha256="e" * 64)),
+    ("competing-event", lambda candidate: candidate.update(event_id="dispose-competing")),
+]:
+    conflicting = copy.deepcopy(raced_request); conflicting["recover"] = True; mutate(conflicting)
+    before = raced.path.read_bytes(); connection_count = len(connections)
+    try: raced.dispose_exact_pre_identity_acquired_pair(conflicting)
+    except module.HelperError: pass
+    else: raise AssertionError("conflicting exact-pane recovery was accepted: " + name)
+    assert raced.path.read_bytes() == before and len(connections) == connection_count, name
+
+# Both incomplete intent and terminal proof seal every unrelated lifecycle mutation route.
+module.expected_launch_policy = lambda request: None
+lifecycle_effects = []
+module.os.execve = lambda *args: lifecycle_effects.append(("exec", args))
+module.inspect_claude_identity = lambda *args, **kwargs: lifecycle_effects.append(("inspect", args))
+module.stop_exact_retirement_target = lambda *args: lifecycle_effects.append(("stop", args))
+target = {key:"value" for key in ("origin_thread", "session", "window", "window_id", "pane_id", "workdir",
+    "current_command", "process_name", "process_identity", "process_command_digest")}
+target["pane_pid"] = 1
+def assert_lifecycle_sealed(candidate, delegation_id, label):
+    launch = {"delegation_id":delegation_id, "event_id":"second-launch", "workdir":str(candidate.state_dir),
+        "packet_file":str(candidate.state_dir / "packet"), "tmux_session":"Synthetic", "tmux_window":"second",
+        "claude_session_id":intent["claude_session_id"], "repository":"repository", "base":"2" * 40,
+        "workflow":"read_only", "expected_launch_policy_digest":"4" * 64}
+    operations = [
+        lambda: candidate.route({"delegation_id":delegation_id, "event_id":"route",
+                                 "routing":{"target":"machine_local_inbox"}}),
+        lambda: module.execute_launch(candidate, launch),
+        lambda: module.execute_launch_transport(candidate, delegation_id, "0" * 64, "0" * 64),
+        lambda: candidate.submit_message({"delegation_id":delegation_id}, "report"),
+        lambda: candidate.submit_message({"delegation_id":delegation_id}, "input_request"),
+        lambda: candidate.consume({"delegation_id":delegation_id, "event_id":"consume",
+                                   "message_id":"message"}),
+        lambda: candidate.acknowledge({"delegation_id":delegation_id, "event_id":"ack",
+                                       "message_id":"message"}),
+        lambda: candidate.accept_input({"delegation_id":delegation_id, "event_id":"input",
+                                        "message_id":"message"}),
+        lambda: candidate.acquire_session({"delegation_id":delegation_id, "event_id":"acquire",
+            "pane_id":"%1", "claude_session_id":intent["claude_session_id"]}),
+        lambda: candidate.park({"delegation_id":delegation_id, "event_id":"park"}),
+        lambda: candidate.park({"delegation_id":delegation_id, "event_id":"park", "recover":True}),
+        lambda: candidate.record_park_failure(delegation_id, "park", "failure"),
+        lambda: candidate.notify_amp({"delegation_id":delegation_id, "event_id":"notify",
+                                      "message_id":"message", "target":target}),
+    ]
+    before = candidate.path.read_bytes(); effects_before = list(lifecycle_effects)
+    for operation in operations:
+        try: operation()
+        except module.HelperError as error: assert "sealed" in str(error), (label, error)
+        else: raise AssertionError("sealed lifecycle mutation was accepted: " + label)
+        assert candidate.path.read_bytes() == before and lifecycle_effects == effects_before, label
+
+assert_lifecycle_sealed(raced, "synthetic-exact-pane-race", "incomplete-intent")
+assert_lifecycle_sealed(store, "synthetic-exact-pane", "terminal-proof")
+
+# Linux executable-bearing process_identity bytes are outside disposal authority; start is not.
+linux_durable = copy.deepcopy(acquired)
+linux_durable["process_identity"] = "linux:17:old-device:old-inode:old-path-digest"
+linux_authority = {key:value for key,value in linux_durable.items() if key != "process_identity"}
+linux_authority.update(session_id="$7", process_start_identity="linux:17")
+assert module.exact_pane_disposal_identity_matches(linux_authority, linux_durable)
+linux_substituted = copy.deepcopy(linux_durable)
+linux_substituted["process_identity"] = "linux:17:new-device:new-inode:new-path-digest"
+assert module.exact_pane_disposal_identity_matches(linux_authority, linux_substituted)
+changed_start = copy.deepcopy(linux_substituted)
+changed_start["process_identity"] = "linux:18:new-device:new-inode:new-path-digest"
+assert not module.exact_pane_disposal_identity_matches(linux_authority, changed_start)
+
+# Malformed historical identity makes the chain invalid without escaping paired teardown.
+malformed, _ = fixture("synthetic-malformed-terminal")
+malformed_data = malformed.load_store(); malformed_receipt = malformed_data["receipts"][0]
+terminal_intent = copy.deepcopy(sealed["exact_pane_disposal_intent"])
+terminal_result = copy.deepcopy(sealed["exact_pane_disposed"])
+malformed_receipt["events"].extend([terminal_intent, terminal_result])
+malformed_receipt["exact_pane_disposal_intent"] = copy.deepcopy(terminal_intent)
+malformed_receipt["exact_pane_disposed"] = copy.deepcopy(terminal_result)
+malformed_receipt["updated_at"] = terminal_result["at"]
+for durable in (malformed_receipt["session_identity"], malformed_receipt["events"][3]["identity"]):
+    durable["process_identity"] = ""
+malformed.commit(malformed_data)
+teardown = malformed.worker_teardown("T-synthetic", True)
+assert teardown["outcome"] == "blocked" and teardown["pairs"][0]["action"] == "block"
+assert "synthetic-malformed-terminal" not in repr(teardown)
+
+# Darwin must never authorize a hybrid argv/process observation across its two kernel reads.
+snapshot_workdir = pathlib.Path(tempfile.mkdtemp()).resolve()
+start_command = "synthetic-start-command"
+darwin_durable = copy.deepcopy(acquired)
+darwin_durable.update(workdir=str(snapshot_workdir),
+    launch_command_digest=hashlib.sha256(start_command.encode()).hexdigest())
+snapshot_values = ["Synthetic", "$7", "pre-identity", "@17", "%23", "4242",
+                   str(snapshot_workdir), "claude", start_command]
+class SnapshotControl:
+    def __init__(self): self.index = 0; self.kills = []
+    def command(self, arguments):
+        value = snapshot_values[self.index]; self.index += 1
+        token = arguments[-1].split(":", 1)[0]
+        return [token + ":" + module.encode_tmux_command_argument(value)]
+    def command_sequence(self, commands): self.kills.append(commands); return [[], []]
+real_system = module.platform.system; real_exact_process_identity = module.exact_process_identity
+module.platform.system = lambda: "Darwin"
+observations = [
+    ("claude", "1750000000.000017", ["claude", "--session-id", darwin_durable["claude_session_id"]],
+     darwin_durable["process_command_digest"]),
+    ("claude", "1750000000.000017", ["substituted", "--session-id", darwin_durable["claude_session_id"]],
+     "b" * 64),
+]
+module.exact_process_identity = lambda pid: observations.pop(0)
+control = SnapshotControl()
+try: real_inspect_exact_pre_identity_target(control, darwin_durable)
+except module.HelperError: pass
+else: raise AssertionError("Darwin hybrid process observation was accepted")
+assert not control.kills
+
+darwin_authority = {key:value for key,value in darwin_durable.items() if key != "process_identity"}
+darwin_authority.update(session_id="$7", process_start_identity="process-start:1750000000.000017")
+observations = [
+    ("claude", "1750000000.000017", ["claude"], darwin_durable["process_command_digest"]),
+    ("claude", "1750000000.000017", ["substituted"], "b" * 64),
+]
+module.exact_process_identity = lambda pid: observations.pop(0)
+control = SnapshotControl()
+try: real_stop_exact_pre_identity_target(control, darwin_authority)
+except module.HelperError: pass
+else: raise AssertionError("Darwin hybrid final snapshot reached exact stop")
+assert not control.kills
+module.platform.system = real_system; module.exact_process_identity = real_exact_process_identity
+print("ok")
+`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil || string(output) != "ok\n" {
+		t.Fatalf("exact-pane disposal fixture: %v: %s", err, output)
+	}
 }
 
 func TestRetirementControlConnectionNeverReconnectsToReplacementTmuxServer(t *testing.T) {
@@ -2712,8 +3359,16 @@ while True:
     time.sleep(0.01)
 replacement_before = subprocess.check_output(prefix + ["list-panes", "-a", "-F", "#{pane_id}"], text=True).strip()
 assert replacement_before == "%0", replacement_before
+exact_identity = {"session":"Synthetic", "session_id":"$0", "window":"synthetic",
+    "window_id":"@0", "pane_id":"%0", "pane_pid":4242,
+    "claude_session_id":"550e8400-e29b-41d4-a716-446655440000", "workdir":"/synthetic",
+    "current_command":"claude", "process_name":"claude", "process_identity":"synthetic-start",
+    "process_start_identity":"process-start:synthetic-start", "process_command_digest":"9" * 64,
+    "launch_command_digest":"5" * 64}
+assert module.confirm_exact_pre_identity_target_absent(connection, exact_identity) == \
+    "tmux_control_connection_unavailable"
 try:
-    connection.command(["kill-pane", "-t", "%0"])
+    module.stop_exact_pre_identity_target(connection, exact_identity)
 except module.HelperError:
     pass
 else:
@@ -2864,6 +3519,22 @@ for terminal_state in ("launch_completed", "verified_parked"):
     except module.HelperError as error: assert "not authorized" in str(error), error
     else: raise AssertionError("retained transport executed after " + terminal_state)
     assert not executed and retained.path.read_bytes() == retained_before
+
+for name, model in (("fable", "claude-fable-5"), ("omitted", None)):
+    drifted, _, _ = fixture("model-drift-" + name)
+    data = drifted.load_store(); receipt = data["receipts"][0]
+    receipt["binding"]["model"] = "claude-opus-4-8"
+    if model is not None: receipt["events"][1]["model"] = model
+    drifted.commit(data); drifted_before = drifted.path.read_bytes(); executed = []
+    module.os.execve = lambda *arguments: executed.append(arguments)
+    try:
+        module.execute_authorized_launch_transport(
+            drifted, "model-drift-" + name, "/synthetic", ["synthetic"], {})
+    except module.HelperError as error:
+        assert "model differs" in str(error), error
+    else:
+        raise AssertionError("model-drifted receipt reached transport execve: " + name)
+    assert not executed and drifted.path.read_bytes() == drifted_before, name
 
 fenced, _, _ = fixture("pre-fenced")
 with fenced.lifecycle.mutation_lock():
@@ -3661,6 +4332,7 @@ func TestLinuxLaunchDoesNotClaimMutatingDelegation(t *testing.T) {
 	fixture := newLaunchFixture(t)
 	request := cloneJSONMap(t, fixture.request)
 	request["workflow"] = "mutating"
+	request["model"] = "claude-opus-4-8"
 	delete(request, "expected_launch_policy_digest")
 	request["baseline_branch"] = "delegate"
 	request["writer_owner"] = "claude"
@@ -3668,7 +4340,9 @@ func TestLinuxLaunchDoesNotClaimMutatingDelegation(t *testing.T) {
 	request["coordinator_write_frozen"] = true
 	request["shared_writable"] = false
 	request["handoff"] = "one_clean_local_commit"
-	request["capacity_request"] = map[string]any{}
+	request["capacity_request"] = stageACapacityRequest(
+		map[string]any{}, request["delegation_id"].(string), "task-linux-boundary",
+	)
 	_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, request, "launch", "plan")
 	if err == nil || !strings.Contains(stderr, "mutating Claude launch remains available only on Darwin") {
 		t.Fatalf("Linux mutating launch error = %v, stderr %q", err, stderr)
@@ -4669,17 +5343,28 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 	}
 	defaultPolicy := decodeJSONMap(t, defaultStdout)
 	explicitStdout, explicitStderr, err := runHelper(t, fixture.stateDir, map[string]any{
-		"workflow": "read_only", "model": "claude-fable-5",
+		"workflow": "read_only", "model": "claude-opus-4-8",
 	}, "launch", "policy-digest")
 	if err != nil {
 		t.Fatalf("explicit policy digest: %v: %s", err, explicitStderr)
 	}
 	explicitPolicy := decodeJSONMap(t, explicitStdout)
-	if explicitPolicy["model"] != "claude-fable-5" {
+	if explicitPolicy["model"] != "claude-opus-4-8" {
 		t.Fatalf("explicit policy model = %#v", explicitPolicy["model"])
 	}
 	if explicitPolicy["launch_policy_digest"] == defaultPolicy["launch_policy_digest"] {
 		t.Fatal("explicit model did not change launch policy digest")
+	}
+	fableStdout, fableStderr, err := runHelper(t, fixture.stateDir, map[string]any{
+		"workflow": "read_only", "model": "claude-fable-5",
+	}, "launch", "policy-digest")
+	if err != nil {
+		t.Fatalf("fable policy digest: %v: %s", err, fableStderr)
+	}
+	fablePolicy := decodeJSONMap(t, fableStdout)
+	if fablePolicy["model"] != "claude-fable-5" ||
+		fablePolicy["launch_policy_digest"] == explicitPolicy["launch_policy_digest"] {
+		t.Fatalf("fable policy = %#v", fablePolicy)
 	}
 
 	for _, test := range []struct {
@@ -4725,21 +5410,28 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 	}
 	mutatingRequest := cloneJSONMap(t, fixture.request)
 	mutatingRequest["workflow"] = "mutating"
+	delete(mutatingRequest, "expected_launch_policy_digest")
 	mutatingRequest["model"] = "claude-fable-5"
-	if _, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, mutatingRequest, "launch", "plan"); err == nil || !strings.Contains(stderr, "unknown fields") || !strings.Contains(stderr, "model") {
+	if _, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, mutatingRequest, "launch", "plan"); err == nil || !strings.Contains(stderr, "claude-opus-4-8") {
 		t.Fatalf("mutating launch model error = %v, stderr %q", err, stderr)
 	}
 	mutatingBinding := testBinding("mutating-model-rejected")
 	mutatingBinding["producer_role"] = "mutating_delegate"
+	mutatingBinding["authority"] = "exclusive_writer"
+	mutatingBinding["baseline_branch"] = "delegate"
+	mutatingBinding["writer_owner"] = "claude_mutating_delegate"
+	mutatingBinding["integration_owner"] = "amp_coordinator"
+	mutatingBinding["handoff"] = "one_clean_local_commit"
+	mutatingBinding["capacity_decision_digest"] = strings.Repeat("e", 64)
 	mutatingBinding["model"] = "claude-fable-5"
 	if _, stderr, err := runHelper(t, t.TempDir(), map[string]any{
 		"binding": mutatingBinding, "routing": map[string]any{"target": "machine_local_inbox"},
-	}, "receipt", "create"); err == nil || !strings.Contains(stderr, "unknown fields: model") {
+	}, "receipt", "create"); err == nil || !strings.Contains(stderr, "claude-opus-4-8") {
 		t.Fatalf("mutating binding model error = %v, stderr %q", err, stderr)
 	}
 
 	request := cloneJSONMap(t, fixture.request)
-	request["model"] = "claude-fable-5"
+	request["model"] = "claude-opus-4-8"
 	request["expected_launch_policy_digest"] = explicitPolicy["launch_policy_digest"]
 	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -4749,7 +5441,7 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 		t.Fatalf("explicit model launch plan: %v: %s", err, stderr)
 	}
 	plan := decodeJSONMap(t, stdout)
-	if plan["model"] != "claude-fable-5" || plan["launch_policy_digest"] != explicitPolicy["launch_policy_digest"] {
+	if plan["model"] != "claude-opus-4-8" || plan["launch_policy_digest"] != explicitPolicy["launch_policy_digest"] {
 		t.Fatalf("explicit model plan = %#v", plan)
 	}
 	binding := testBinding(request["delegation_id"].(string))
@@ -4758,7 +5450,7 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 	binding["packet_digest"] = plan["packet_digest"]
 	binding["launch_policy_digest"] = plan["launch_policy_digest"]
 	binding["launch_command_digest"] = plan["launch_command_digest"]
-	binding["model"] = "claude-fable-5"
+	binding["model"] = "claude-opus-4-8"
 	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "recorded", map[string]any{
 		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
 	}, "receipt", "create")
@@ -4795,8 +5487,9 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 		t.Fatal(readErr)
 	}
 	changed := cloneJSONMap(t, request)
-	changed["model"] = "claude-unknown-5"
-	if _, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, changed, "launch", "execute"); err == nil || !strings.Contains(stderr, "exact approved read-only model") {
+	changed["model"] = "claude-fable-5"
+	changed["expected_launch_policy_digest"] = fablePolicy["launch_policy_digest"]
+	if _, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, changed, "launch", "execute"); err == nil || !strings.Contains(stderr, "model selection does not match immutable receipt binding") {
 		t.Fatalf("changed-after-plan error = %v, stderr %q", err, stderr)
 	}
 	afterChanged, err := os.ReadFile(receiptPath)
@@ -4835,13 +5528,166 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 	for index, argument := range transport.Argv {
 		arguments[index] = []byte(argument)
 	}
-	assertExactArgValue(t, arguments, "--model", "claude-fable-5")
+	assertExactArgValue(t, arguments, "--model", "claude-opus-4-8")
 	finalReceipt, err := os.ReadFile(receiptPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(finalReceipt, []byte(`"model":"claude-fable-5"`)) || !bytes.Contains(finalReceipt, []byte(plan["expected_argv_digest"].(string))) {
+	if !bytes.Contains(finalReceipt, []byte(`"model":"claude-opus-4-8"`)) || !bytes.Contains(finalReceipt, []byte(plan["expected_argv_digest"].(string))) {
 		t.Fatalf("receipt does not bind model command identity: %s", finalReceipt)
+	}
+	launchLog, err := os.ReadFile(fixture.tmuxLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name  string
+		model any
+	}{
+		{name: "fable", model: "claude-fable-5"},
+		{name: "omitted", model: nil},
+	} {
+		var stored map[string]any
+		if err := json.Unmarshal(finalReceipt, &stored); err != nil {
+			t.Fatal(err)
+		}
+		receipt := stored["receipts"].([]any)[0].(map[string]any)
+		for _, candidate := range receipt["events"].([]any) {
+			event := candidate.(map[string]any)
+			if event["kind"] != "launch_intent" {
+				continue
+			}
+			if test.model == nil {
+				delete(event, "model")
+			} else {
+				event["model"] = test.model
+			}
+		}
+		drifted, err := json.Marshal(stored)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(receiptPath, drifted, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, request, "launch", "execute")
+		if err == nil || !strings.Contains(stderr, "launch intent model differs from immutable binding") {
+			t.Fatalf("%s model-drifted replay error = %v, stderr %q", test.name, err, stderr)
+		}
+		preserved, readErr := os.ReadFile(receiptPath)
+		if readErr != nil || !bytes.Equal(preserved, drifted) {
+			t.Fatalf("%s model-drifted replay changed receipt bytes: %v", test.name, readErr)
+		}
+		currentLog, readErr := os.ReadFile(fixture.tmuxLog)
+		if readErr != nil || !bytes.Equal(currentLog, launchLog) {
+			t.Fatalf("%s model-drifted replay mutated tmux: %v\n%s", test.name, readErr, currentLog)
+		}
+	}
+}
+
+func TestReadOnlyExplicitModelSemanticEnvelopesRemainCompatible(t *testing.T) {
+	for _, kind := range []string{"report", "input"} {
+		t.Run(kind, func(t *testing.T) {
+			stateDir := t.TempDir()
+			binding := testBinding("explicit-model-" + kind)
+			binding["model"] = "claude-opus-4-8"
+			assertHelperOutcome(t, stateDir, "recorded", map[string]any{
+				"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+			}, "receipt", "create")
+			if kind == "report" {
+				message := testMessage(binding, "explicit-model-report", "thinker_report", map[string]any{
+					"accepted_role": true, "accepted_exclusions": true, "status": "complete",
+					"verdict": "Compatible.", "rationale": "Model provenance remains in the immutable binding.",
+					"evidence": []any{}, "assumptions": []any{}, "unsupported_claims": []any{},
+					"blockers": []any{}, "verification": []any{}, "changed_artifacts": []any{}, "references": []any{},
+				})
+				assertHelperOutcome(t, stateDir, "recorded", message, "report", "submit")
+				return
+			}
+			message := testMessage(binding, "explicit-model-input", "input_request", map[string]any{
+				"request_type": "missing_evidence", "question": "What evidence is available?",
+				"blocking_reason": "Synthetic compatibility check.",
+			})
+			assertHelperOutcome(t, stateDir, "recorded", message, "input", "submit")
+		})
+	}
+}
+
+func TestLaunchCompletionRejectsDurableModelDrift(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("experimental Claude launch requires an exact supported process identity")
+	}
+	for _, test := range []struct {
+		name       string
+		driftModel string
+	}{
+		{name: "fable", driftModel: "claude-fable-5"},
+		{name: "omitted", driftModel: "__omit__"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newLaunchFixture(t)
+			enableAsyncClaudeLaunch(t, fixture.binDir, &fixture.environment)
+			receiptPath := filepath.Join(fixture.stateDir, "receipts.json")
+			snapshotPath := filepath.Join(t.TempDir(), "drifted-receipt")
+			fixture.environment = append(fixture.environment,
+				"DRIFT_RECEIPT_PATH="+receiptPath,
+				"DRIFT_RECEIPT_MODEL="+test.driftModel,
+				"DRIFT_RECEIPT_SNAPSHOT="+snapshotPath,
+			)
+			if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			policyStdout, policyStderr, err := runHelper(t, fixture.stateDir, map[string]any{
+				"workflow": "read_only", "model": "claude-opus-4-8",
+			}, "launch", "policy-digest")
+			if err != nil {
+				t.Fatalf("Opus policy digest: %v: %s", err, policyStderr)
+			}
+			policy := decodeJSONMap(t, policyStdout)
+			fixture.request["model"] = "claude-opus-4-8"
+			fixture.request["expected_launch_policy_digest"] = policy["launch_policy_digest"]
+			planStdout, planStderr, err := runHelperEnv(
+				t, fixture.stateDir, fixture.environment, fixture.request, "launch", "plan",
+			)
+			if err != nil {
+				t.Fatalf("Opus launch plan: %v: %s", err, planStderr)
+			}
+			plan := decodeJSONMap(t, planStdout)
+			binding := testBinding(fixture.request["delegation_id"].(string))
+			binding["workdir"] = fixture.request["workdir"]
+			binding["base"] = fixture.request["base"]
+			binding["packet_digest"] = plan["packet_digest"]
+			binding["launch_policy_digest"] = plan["launch_policy_digest"]
+			binding["launch_command_digest"] = plan["launch_command_digest"]
+			binding["model"] = "claude-opus-4-8"
+			assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "recorded", map[string]any{
+				"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
+			}, "receipt", "create")
+			_, stderr, err := runHelperEnv(
+				t, fixture.stateDir, fixture.environment, fixture.request, "launch", "execute",
+			)
+			if err == nil || !strings.Contains(stderr, "launch intent model differs from immutable binding") {
+				t.Fatalf("%s completion drift error = %v, stderr %q", test.name, err, stderr)
+			}
+			drifted, err := os.ReadFile(snapshotPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			preserved, err := os.ReadFile(receiptPath)
+			if err != nil || !bytes.Equal(preserved, drifted) {
+				t.Fatalf("%s completion drift changed receipt after rejection: %v", test.name, err)
+			}
+			if bytes.Contains(preserved, []byte(`"kind":"launch_completed"`)) {
+				t.Fatalf("%s completion drift appended launch_completed: %s", test.name, preserved)
+			}
+			log, err := os.ReadFile(fixture.tmuxLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Count(string(log), "new-window") != 1 || strings.Contains(string(log), "kill-pane") {
+				t.Fatalf("%s completion drift performed unexpected tmux mutation: %s", test.name, log)
+			}
+		})
 	}
 }
 
@@ -4963,7 +5809,7 @@ exit 2
 case "$1" in
   --version) printf '%s\n' '2.1.212 (Claude Code)' ;;
   --help)
-    printf '%s\n' '--allowed-tools --disable-slash-commands --disallowed-tools --mcp-config --no-chrome --permission-mode --prompt-suggestions --session-id --setting-sources --settings --strict-mcp-config --tools'
+    printf '%s\n' '--allowed-tools --disable-slash-commands --disallowed-tools --mcp-config --model --no-chrome --permission-mode --prompt-suggestions --session-id --setting-sources --settings --strict-mcp-config --tools'
     if [ -e "$DISAPPEAR_AFTER_CHECK" ]; then
       rm "$DISAPPEAR_AFTER_CHECK" "$TMUX_SESSION"
     fi
@@ -5404,25 +6250,77 @@ printf '%s\n' '[{"provider":"claude","source":"web","usage":{"primary":{"usedPer
 			t.Errorf("diagnostics leaked forbidden field %q", forbidden)
 		}
 	}
-	malformed := []string{
-		`[{"provider":"claude","source":"private-sentinel","source":"web","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
-		`[{"provider":"claude","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
-		`[{"provider":"claude","source":"claude","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
-		`[{"provider":"claude","source":"web","extra":"unsupported","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
-		`[{"provider":"claude","source":"web","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z","extra":"unsupported"}}]`,
-		`[{"provider":"claude","source":"web","usage":{"primary":{"usedPercent":12,"windowMinutes":300,"resetsAt":"2026-07-20T15:00:00Z","extra":"unsupported"},"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
-		`[{"provider":"claude","source":"web","sourceVersion":1,"schemaVersion":1,"usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z"}}]`,
+	initialDiagnostic := decodeJSONMap(t, stdout)
+	initialCapacity := initialDiagnostic["capacity"].(map[string]any)
+	if initialCapacity["reason"] != "capacity source payload has no supported versioned contract" || len(initialCapacity["windows"].([]any)) != 0 {
+		t.Fatalf("unversioned capacity diagnostic = %#v", initialCapacity)
 	}
-	for index, payload := range malformed {
-		writeExecutable(t, filepath.Join(binDir, "codexbar"), "#!/bin/sh\nprintf '%s\\n' '"+payload+"'\n")
+	hugePercentage := strings.Repeat("9", 400)
+	capacityCases := []struct {
+		name    string
+		script  string
+		reason  string
+		private string
+	}{
+		{
+			name:   "command failure",
+			script: "#!/bin/sh\nexit 2\n",
+			reason: "capacity source command or execution failed",
+		},
+		{
+			name:    "malformed JSON",
+			script:  "#!/bin/sh\nprintf '%s\\n' '[{private-sentinel}]'\n",
+			reason:  "capacity source returned malformed JSON",
+			private: "private-sentinel",
+		},
+		{
+			name:   "nonstandard numeric constants",
+			script: "#!/bin/sh\nprintf '%s\\n' '[{\"provider\":\"claude\",\"source\":\"web\",\"usage\":{\"primary\":{\"usedPercent\":NaN},\"secondary\":{\"usedPercent\":Infinity},\"tertiary\":{\"usedPercent\":-Infinity},\"extraRateWindows\":[],\"updatedAt\":\"2026-07-20T12:00:00Z\"}}]'\n",
+			reason: "capacity source returned malformed JSON",
+		},
+		{
+			name:   "valid unrecognized payload",
+			script: "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+			reason: "capacity source payload is unrecognized",
+		},
+		{
+			name: "recognized current CodexBar shape",
+			script: `#!/bin/sh
+printf '%s\n' '[{"provider":"claude","version":"synthetic-version","source":"web","status":{"indicator":"synthetic"},"usage":{"primary":{"usedPercent":12,"windowMinutes":300},"secondary":{"usedPercent":34,"windowMinutes":10080,"resetsAt":"2026-07-24T00:00:00Z"},"tertiary":null,"extraRateWindows":[],"updatedAt":"2026-07-20T12:00:00Z","dataConfidence":"estimated"}}]'
+`,
+			reason: "recognized CodexBar capacity payload has unsupported schema or version",
+		},
+		{
+			name:    "duplicate key",
+			script:  "#!/bin/sh\nprintf '%s\\n' '[{\"provider\":\"claude\",\"source\":\"private-sentinel\",\"source\":\"web\",\"usage\":{\"primary\":null,\"secondary\":null,\"tertiary\":null,\"extraRateWindows\":[],\"updatedAt\":\"2026-07-20T12:00:00Z\"}}]'\n",
+			reason:  "capacity source returned malformed JSON",
+			private: "private-sentinel",
+		},
+		{
+			name:   "unsupported surrogate timestamp",
+			script: "#!/bin/sh\nprintf '%s\\n' '[{\"provider\":\"claude\",\"source\":\"web\",\"usage\":{\"primary\":null,\"secondary\":null,\"tertiary\":null,\"extraRateWindows\":[],\"updatedAt\":\"\\ud800\"}}]'\n",
+			reason: "recognized CodexBar capacity payload has unsupported schema or version",
+		},
+		{
+			name:   "unsupported oversized number",
+			script: "#!/bin/sh\nprintf '%s\\n' '[{\"provider\":\"claude\",\"source\":\"web\",\"usage\":{\"primary\":{\"usedPercent\":" + hugePercentage + ",\"windowMinutes\":300,\"resetsAt\":\"2026-07-20T15:00:00Z\"},\"secondary\":null,\"tertiary\":null,\"extraRateWindows\":[],\"updatedAt\":\"2026-07-20T12:00:00Z\"}}]'\n",
+			reason: "recognized CodexBar capacity payload has unsupported schema or version",
+		},
+	}
+	for _, test := range capacityCases {
+		writeExecutable(t, filepath.Join(binDir, "codexbar"), test.script)
 		stdout, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{}, "diagnose")
 		if err != nil {
-			t.Fatalf("diagnose malformed capacity shape %d: %v: %s", index, err, stderr)
+			t.Fatalf("diagnose %s: %v: %s", test.name, err, stderr)
 		}
 		diagnostic := decodeJSONMap(t, stdout)
 		capacity, ok := diagnostic["capacity"].(map[string]any)
-		if !ok || capacity["status"] != "unavailable" || strings.Contains(stdout, "private-sentinel") {
-			t.Fatalf("malformed diagnostic capacity %d was accepted or leaked: %s", index, stdout)
+		windows, windowsOK := capacity["windows"].([]any)
+		if !ok || capacity["status"] != "unavailable" || capacity["reason"] != test.reason || !windowsOK || len(windows) != 0 {
+			t.Fatalf("%s diagnostic = %s", test.name, stdout)
+		}
+		if test.private != "" && strings.Contains(stdout, test.private) {
+			t.Fatalf("%s diagnostic leaked private input: %s", test.name, stdout)
 		}
 	}
 	writeExecutable(t, filepath.Join(binDir, "claude"), `#!/bin/sh
@@ -5451,16 +6349,20 @@ esac
 
 	tooManyExtraWindows := strings.Repeat(`{"id":"id","title":"title","window":{"usedPercent":1,"windowMinutes":1,"resetsAt":"2026-07-20T12:01:00Z"}},`, 33)
 	tooManyExtraWindows = strings.TrimSuffix(tooManyExtraWindows, ",")
-	boundedMalformed := []string{
-		"printf '\\377'",
-		"python3 -c 'print(\"x\" * 262145)'",
-		"python3 -c 'print(\"[\" * 1100 + \"0\" + \"]\" * 1100)'",
-		"printf '%s\\n' '" + `[{"provider":"claude","source":"web","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[` + tooManyExtraWindows + `],"updatedAt":"2026-07-20T12:00:00Z"}}]` + "'",
+	boundedMalformed := []struct {
+		command string
+		reason  string
+	}{
+		{"printf '\\377'", "capacity source returned malformed JSON"},
+		{"python3 -c 'print(\"x\" * 262145)'", "capacity source command or execution failed"},
+		{"printf '%s\\n' '" + `[{"provider":"claude","source":"web","usage":{"primary":null,"secondary":null,"tertiary":null,"extraRateWindows":[` + tooManyExtraWindows + `],"updatedAt":"2026-07-20T12:00:00Z"}}]` + "'", "recognized CodexBar capacity payload has unsupported schema or version"},
 	}
-	for index, command := range boundedMalformed {
-		writeExecutable(t, filepath.Join(binDir, "codexbar"), "#!/bin/sh\n"+command+"\n")
+	for index, test := range boundedMalformed {
+		writeExecutable(t, filepath.Join(binDir, "codexbar"), "#!/bin/sh\n"+test.command+"\n")
 		stdout, stderr, err = runHelperEnv(t, stateDir, environment, map[string]any{}, "diagnose")
-		if err != nil || len(stdout) > 4096 || !strings.Contains(stdout, `"status":"unavailable"`) {
+		diagnostic := decodeJSONMap(t, stdout)
+		capacity := diagnostic["capacity"].(map[string]any)
+		if err != nil || len(stdout) > 4096 || capacity["status"] != "unavailable" || capacity["reason"] != test.reason || len(capacity["windows"].([]any)) != 0 {
 			t.Fatalf("unbounded malformed diagnostic %d: %v: %s%s", index, err, stdout, stderr)
 		}
 	}
@@ -5858,6 +6760,7 @@ func main() {
     for _, argument := range os.Args[1:] { _, _ = output.Write(append([]byte(argument), 0)) }
     _ = output.Close()
   }
+  if path := os.Getenv("CLAUDE_STARTED_MARKER"); path != "" { _ = os.WriteFile(path, nil, 0600) }
   for { time.Sleep(time.Second) }
 }
 `
@@ -5899,6 +6802,9 @@ case "$1" in
     test -s "$PANE_PID_FILE"
     pane_pid=$(cat "$PANE_PID_FILE")
     kill -0 "$pane_pid"
+    if [ -n "${DRIFT_RECEIPT_MODEL:-}" ] && [ ! -e "$DRIFT_RECEIPT_SNAPSHOT" ] && [ -e "${CLAUDE_STARTED_MARKER:-/nonexistent}" ]; then
+      python3 -c 'import json,os,pathlib; p=pathlib.Path(os.environ["DRIFT_RECEIPT_PATH"]); d=json.loads(p.read_text()); e=next(x for x in d["receipts"][0]["events"] if x.get("kind")=="launch_intent"); m=os.environ["DRIFT_RECEIPT_MODEL"]; e.pop("model",None) if m=="__omit__" else e.__setitem__("model",m); b=json.dumps(d,separators=(",",":")).encode(); p.write_bytes(b); pathlib.Path(os.environ["DRIFT_RECEIPT_SNAPSHOT"]).write_bytes(b)'
+    fi
     start_command=$(tail -n 1 "$TMUX_LOG" | sed -n 's/^.* -c [^ ]* //p')
     if [ -n "${REPORTED_START_COMMAND:-}" ]; then start_command=$REPORTED_START_COMMAND; fi
     printf 'Claude\tthinker\t@20\t%%20\t%s\t%s\tclaude\t%s\n' "$pane_pid" "${REPORTED_WORKDIR:-$WORKDIR}" "$start_command"
@@ -5908,7 +6814,16 @@ case "$1" in
   *) exit 2 ;;
 esac
 `)
-	*environment = append(*environment, "PANE_PID_FILE="+panePID, "PANE_OUTPUT="+paneOutput)
+	// The launch transport revalidates the receipt immediately before exec, so a
+	// receipt-drifting fixture must wait for the exec to happen. This marker is the
+	// causal signal: Claude writes it only after the transport handed control over.
+	startedMarker := filepath.Join(t.TempDir(), "claude.started")
+	*environment = append(
+		*environment,
+		"PANE_PID_FILE="+panePID,
+		"PANE_OUTPUT="+paneOutput,
+		"CLAUDE_STARTED_MARKER="+startedMarker,
+	)
 	t.Cleanup(func() {
 		data, err := os.ReadFile(panePID)
 		if err != nil {
