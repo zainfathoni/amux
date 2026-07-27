@@ -51,7 +51,7 @@ type ProcessMetadata struct {
 	Identity  string
 }
 
-const restartPaneFormat = "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}\t#{pane_dead}\t#{pane_pid}\t#{pane_created}"
+const restartPaneFormat = "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}\t#{pane_dead}\t#{pane_pid}"
 
 var inspectProcessIdentity = ProcessIdentity
 var inspectProcessName = ProcessName
@@ -68,15 +68,13 @@ func parseRestartPanes(out []byte) ([]WindowPane, error) {
 			return nil, fmt.Errorf("unexpected tmux restart pane row %q", line)
 		}
 		pane := WindowPane{Session: fields[0], Window: fields[1], WindowID: fields[2], PaneID: fields[3], Path: fields[4], Command: fields[5], StartCommand: fields[6], Dead: fields[7] == "1"}
-		if len(fields) == 9 { // Compatibility with older focused parser tests.
-			pane.StartTime, _ = strconv.ParseInt(fields[8], 10, 64)
-		} else if len(fields) == 10 {
+		if len(fields) == 9 || len(fields) == 10 {
 			var err error
 			pane.PID, err = strconv.Atoi(fields[8])
 			if err != nil || pane.PID <= 0 {
 				return nil, fmt.Errorf("unexpected tmux pane PID in row %q", line)
 			}
-			if fields[9] != "" {
+			if len(fields) == 10 && fields[9] != "" {
 				pane.StartTime, err = strconv.ParseInt(fields[9], 10, 64)
 				if err != nil || pane.StartTime < 0 {
 					return nil, fmt.Errorf("unexpected tmux pane creation time in row %q", line)

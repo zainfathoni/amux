@@ -204,6 +204,14 @@ func TestParseRestartPanesRejectsMalformedRequiredNumericMetadata(t *testing.T) 
 	}
 }
 
+func TestParseRestartPanesAcceptsTmux34EmptyPaneCreated(t *testing.T) {
+	row := "amux\tworker\t@1\t%1\t/tmp\tamp\tstart\t0\t42\t\n"
+	panes, err := parseRestartPanes([]byte(row))
+	if err != nil || len(panes) != 1 || panes[0].PID != 42 || panes[0].StartTime != 0 {
+		t.Fatalf("tmux 3.4 empty pane_created row = %+v, %v", panes, err)
+	}
+}
+
 func TestDryRunWritesPlannedCommandToConfiguredOutput(t *testing.T) {
 	var output strings.Builder
 	runner := Runner{DryRun: true, Output: &output}

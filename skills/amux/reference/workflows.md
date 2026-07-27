@@ -94,7 +94,7 @@ amux report submit --report-id <stable-report-id> --group <durable-issue-group> 
 
 `merged` is terminal. The callback remains a wake-up; the coordinator inspects and acknowledges the merged event. Then the coordinator explicitly directs `/amux finish`. Finish verifies GitHub/Git/worktree/runner ownership, cleans the worktree and safe branch state, and invokes `amux teardown --thread <member-thread>` last. Group membership and report history survive teardown unless a separate explicit group removal is requested. Never force-delete a branch, infer finish from a callback, or release automatically.
 
-Run the final park/remove/teardown from a verified independent executor, never from the worker or runner transport being stopped. amux checks exact process incarnation and ancestry before mutation and fails closed when that relationship is ambiguous; pane names, cwd, and other presentation are not independence evidence.
+Run the final park/remove/teardown from a verified independent executor, never from the worker or runner transport being stopped. amux checks exact process incarnation and ancestry before mutation and fails closed for the whole invocation when any target relationship is ambiguous; pane names, cwd, and other presentation are not independence evidence. A rejected maintenance safety preflight reports the error without rewriting its prior checkpoint.
 
 ### 7. Coordinator-owned deadline queue
 

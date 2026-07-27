@@ -793,8 +793,19 @@ func (a app) runMaintenance(in invocation, dir config.Directory, env *result.Env
 		}
 		inspection, ie := inspectRunner(row)
 		before, preflighted := maintenancePreflight.inspections[row.Workdir]
-		if ie == nil && (!preflighted || !sameMaintenanceRunnerInspection(before, inspection)) {
+		disappearedAfterPreflight := preflighted && before.state == runnerPaneExact && inspection.state == runnerPaneAbsent
+		if ie == nil && (!preflighted || !allowedMaintenanceRunnerTransition(before, inspection)) {
 			ie = errors.New("runner identity changed after maintenance preflight")
+		}
+		if ie == nil && before.state == runnerPaneExact && inspection.state == runnerPaneExact {
+			expected, ok := maintenancePreflight.processMetadata[lifecyclePaneProcessKey(before.pane)]
+			actual, processErr := lifecycleProcessLink(inspection.pane.PID)
+			if !ok || processErr != nil || !sameLifecycleProcess(expected, actual) {
+				ie = errors.New("runner process incarnation changed after maintenance preflight")
+				if processErr != nil {
+					ie = fmt.Errorf("reinspect runner process after maintenance preflight: %w", processErr)
+				}
+			}
 		}
 		if ie != nil || inspection.state == runnerPaneConflict || inspection.state == runnerPaneAmbiguous {
 			if ie == nil {
@@ -811,7 +822,7 @@ func (a app) runMaintenance(in invocation, dir config.Directory, env *result.Env
 			ro.Status = "skipped"
 			out.Message = "pending runner launch already recovered"
 			env.Skipped = append(env.Skipped, out)
-		} else if inspection.state == runnerPaneAbsent && pendingPhase[row.Workdir] == "" {
+		} else if inspection.state == runnerPaneAbsent && pendingPhase[row.Workdir] == "" && !disappearedAfterPreflight {
 			ro.Status = "skipped"
 			out.Message = "stopped runner preserved"
 			env.Skipped = append(env.Skipped, out)
@@ -880,8 +891,9 @@ func (a app) runMaintenance(in invocation, dir config.Directory, env *result.Env
 }
 
 type maintenanceExecutorPreflight struct {
-	rows        []config.RunnerRow
-	inspections map[string]runnerInspection
+	rows            []config.RunnerRow
+	inspections     map[string]runnerInspection
+	processMetadata map[string]tmux.ProcessMetadata
 }
 
 func preflightMaintenanceExecutor(dir config.Directory) (maintenanceExecutorPreflight, error) {
@@ -905,13 +917,17 @@ func preflightMaintenanceExecutor(dir config.Directory) (maintenanceExecutorPref
 			panes = append(panes, inspection.pane)
 		}
 	}
-	if err := preflightLifecycleExecutor("runner maintenance run", panes); err != nil {
+	processMetadata, err := preflightLifecycleExecutorEvidence("runner maintenance run", panes)
+	if err != nil {
 		return maintenanceExecutorPreflight{}, err
 	}
-	return maintenanceExecutorPreflight{rows: rows, inspections: inspections}, nil
+	return maintenanceExecutorPreflight{rows: rows, inspections: inspections, processMetadata: processMetadata}, nil
 }
 
-func sameMaintenanceRunnerInspection(before, after runnerInspection) bool {
+func allowedMaintenanceRunnerTransition(before, after runnerInspection) bool {
+	if before.state == runnerPaneExact && after.state == runnerPaneAbsent {
+		return true
+	}
 	if before.state != after.state {
 		return false
 	}

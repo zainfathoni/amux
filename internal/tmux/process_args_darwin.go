@@ -80,6 +80,9 @@ func ProcessIdentity(pid int) (string, error) {
 // InspectProcessLink returns parent and per-incarnation identity from one
 // native proc_bsdinfo snapshot.
 func InspectProcessLink(pid int) (ProcessMetadata, error) {
+	if pid <= 0 {
+		return ProcessMetadata{}, fmt.Errorf("process PID is unavailable")
+	}
 	info, err := readProcBSDInfo(pid)
 	if err != nil {
 		return ProcessMetadata{}, err

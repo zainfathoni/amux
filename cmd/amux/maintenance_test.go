@@ -18,6 +18,7 @@ import (
 	"github.com/zainfathoni/amux/internal/config"
 	"github.com/zainfathoni/amux/internal/lock"
 	"github.com/zainfathoni/amux/internal/result"
+	"github.com/zainfathoni/amux/internal/tmux"
 )
 
 // TestMaintenanceFailurePreservesAppliedFingerprint covers failures which occur
@@ -1129,7 +1130,7 @@ def row(ws, pane=None):
   if mode=='absent': return
   cmd='amp' if mode=='exact' else 'bash'
   start=v['start'] if mode=='exact' else 'foreign command'
-  print('%s\t%s\t@%s\t%s\t%s\t%s\t%s\t0\t1' % (ws,v['window'],v['id'],pane,v['workdir'],cmd,start))
+  print('%s\t%s\t@%s\t%s\t%s\t%s\t%s\t0\t%s' % (ws,v['window'],v['id'],pane,v['workdir'],cmd,start,7000+v['id']))
 if a[0]=='has-session':
   ws=a[a.index('-t')+1].lstrip('='); sys.exit(0 if ws in s else 1)
 if a[0]=='list-panes':
@@ -1841,6 +1842,81 @@ func TestMaintenanceUsesPreflightRunnerSnapshotWhenRegistryAddsRow(t *testing.T)
 	rows, err := config.LoadRunnersReadOnly(f.dir.RunnersPath())
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("late registry row was not preserved: rows=%+v err=%v", rows, err)
+	}
+}
+
+func TestMaintenanceTreatsExactToAbsentPreflightDriftAsPendingLaunch(t *testing.T) {
+	f := newMaintenanceLifecycleFixture(t, "external", 1)
+	old := lifecycleFingerprint(t, f.amp)
+	seedLifecyclePrior(t, f, old)
+	writeLifecycleState(t, f, map[string]string{"ws0": "exact"})
+	if err := os.WriteFile(f.amp, []byte("changed\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	baseExec := maintenanceExec
+	drifted := false
+	maintenanceExec = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if !drifted && len(args) == 1 && args[0] == "version" {
+			drifted = true
+			writeLifecycleState(t, f, map[string]string{"ws0": "absent"})
+		}
+		return baseExec(ctx, name, args...)
+	}
+
+	before := lifecycleLog(t, f)
+	if _, err := runLifecycle(t, f); err != nil {
+		t.Fatal(err)
+	}
+	delta := strings.TrimPrefix(lifecycleLog(t, f), before)
+	if !drifted {
+		t.Fatal("test did not remove exact runner after preflight")
+	}
+	if strings.Contains(delta, "kill-window") {
+		t.Fatalf("exact-to-absent runner was stopped again:\n%s", delta)
+	}
+	if !strings.Contains(delta, "new-window") && !strings.Contains(delta, "new-session") {
+		t.Fatalf("exact-to-absent runner was not relaunched:\n%s", delta)
+	}
+	got, err := loadMaintenanceOutcome(f.dir.MaintenanceResultPath())
+	if err != nil || got.Status != "successful" || lifecycleRunner(t, got, f.workdirs["ws0"]).Phase != "pending_launch" {
+		t.Fatalf("exact-to-absent outcome = %+v, error = %v", got, err)
+	}
+}
+
+func TestMaintenanceRejectsLiveProcessIncarnationDriftAfterPreflight(t *testing.T) {
+	f := newMaintenanceLifecycleFixture(t, "external", 1)
+	old := lifecycleFingerprint(t, f.amp)
+	seedLifecyclePrior(t, f, old)
+	writeLifecycleState(t, f, map[string]string{"ws0": "exact"})
+	if err := os.WriteFile(f.amp, []byte("changed\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	baseExec := maintenanceExec
+	drifted := false
+	maintenanceExec = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if len(args) == 1 && args[0] == "version" {
+			drifted = true
+		}
+		return baseExec(ctx, name, args...)
+	}
+	baseInspect := lifecycleProcessLink
+	t.Cleanup(func() { lifecycleProcessLink = baseInspect })
+	lifecycleProcessLink = func(pid int) (tmux.ProcessMetadata, error) {
+		process, err := baseInspect(pid)
+		if drifted && pid != 9000 && pid != 8000 && pid != 1 {
+			process.Identity = "reused-after-preflight"
+		}
+		return process, err
+	}
+
+	before := lifecycleLog(t, f)
+	env, err := runLifecycle(t, f)
+	if err == nil || len(env.Failed) == 0 || env.Failed[0].Error == nil || !strings.Contains(env.Failed[0].Error.Message, "process incarnation changed after maintenance preflight") {
+		t.Fatalf("live process incarnation drift: env=%+v error=%v", env, err)
+	}
+	delta := strings.TrimPrefix(lifecycleLog(t, f), before)
+	if strings.Contains(delta, "kill-window") || strings.Contains(delta, "new-window") || strings.Contains(delta, "new-session") {
+		t.Fatalf("live process incarnation drift mutated runner:\n%s", delta)
 	}
 }
 

@@ -25,10 +25,16 @@ func TestLifecycleExecutorPreflightUsesExactAncestry(t *testing.T) {
 		{name: "direct self target", currentPID: 90, targetPID: 90, parents: map[int]int{90: 80, 80: 1}, wantError: "would stop or replace"},
 		{name: "target transport is ancestor", currentPID: 90, targetPID: 80, parents: map[int]int{90: 80, 80: 1}, wantError: "would stop or replace"},
 		{name: "target transport is descendant", currentPID: 90, targetPID: 100, parents: map[int]int{100: 90, 90: 80, 80: 1}, wantError: "would stop or replace"},
+		{name: "direct PID 1 target", currentPID: 1, targetPID: 1, parents: map[int]int{1: 0}, wantError: "would stop or replace"},
+		{name: "PID 1 target ancestor", currentPID: 2, targetPID: 1, parents: map[int]int{2: 1, 1: 0}, wantError: "would stop or replace"},
+		{name: "PID 1 current ancestor", currentPID: 1, targetPID: 2, parents: map[int]int{2: 1, 1: 0}, wantError: "would stop or replace"},
 		{name: "independent executor", currentPID: 90, targetPID: 70, parents: map[int]int{90: 80, 80: 1, 70: 60, 60: 1}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			installLifecycleSafetyFixture(t, test.currentPID, test.targetPID, func(pid int) (tmux.ProcessMetadata, error) {
+				if pid == 1 {
+					return tmux.ProcessMetadata{PID: 1, ParentPID: 0, Identity: "start-1"}, nil
+				}
 				parent, ok := test.parents[pid]
 				if !ok {
 					return tmux.ProcessMetadata{}, fmt.Errorf("unexpected pid %d", pid)
@@ -44,6 +50,43 @@ func TestLifecycleExecutorPreflightUsesExactAncestry(t *testing.T) {
 				t.Fatalf("preflight error = %v, want %q and guidance", err, test.wantError)
 			}
 		})
+	}
+}
+
+func TestLifecycleProcessAncestryRecordsPID1AndUsesExactLimit(t *testing.T) {
+	oldInspect := lifecycleProcessLink
+	t.Cleanup(func() { lifecycleProcessLink = oldInspect })
+	lifecycleProcessLink = func(pid int) (tmux.ProcessMetadata, error) {
+		parent := pid - 1
+		if pid == 1 {
+			parent = 0
+		}
+		return tmux.ProcessMetadata{PID: pid, ParentPID: parent, Identity: fmt.Sprintf("start-%d", pid)}, nil
+	}
+	ancestry, err := lifecycleProcessAncestry(lifecycleAncestryLimit)
+	if err != nil || len(ancestry) != lifecycleAncestryLimit || ancestry[1].Identity == "" {
+		t.Fatalf("exact-limit ancestry = %d records, PID 1 = %+v, error = %v", len(ancestry), ancestry[1], err)
+	}
+	if _, err := lifecycleProcessAncestry(lifecycleAncestryLimit + 1); err == nil || !strings.Contains(err.Error(), "exceeded safety limit") {
+		t.Fatalf("over-limit ancestry error = %v", err)
+	}
+	lifecycleProcessLink = func(pid int) (tmux.ProcessMetadata, error) {
+		if pid == 1 {
+			return tmux.ProcessMetadata{}, errors.New("PID 1 unavailable")
+		}
+		return tmux.ProcessMetadata{PID: pid, ParentPID: 1, Identity: fmt.Sprintf("start-%d", pid)}, nil
+	}
+	if _, err := lifecycleProcessAncestry(2); err == nil || !strings.Contains(err.Error(), "PID 1 unavailable") {
+		t.Fatalf("unavailable PID 1 error = %v", err)
+	}
+	lifecycleProcessLink = func(pid int) (tmux.ProcessMetadata, error) {
+		if pid == 1 {
+			return tmux.ProcessMetadata{PID: 1, ParentPID: 1, Identity: "start-1"}, nil
+		}
+		return tmux.ProcessMetadata{PID: pid, ParentPID: 1, Identity: fmt.Sprintf("start-%d", pid)}, nil
+	}
+	if _, err := lifecycleProcessAncestry(2); err == nil || !strings.Contains(err.Error(), "PID 1 returned a nonzero parent") {
+		t.Fatalf("malformed PID 1 parent error = %v", err)
 	}
 }
 
@@ -98,14 +141,47 @@ func TestLifecycleExecutorConflictRequiresStableIntersectingIdentity(t *testing.
 	}
 }
 
+func TestLifecycleExecutorConfirmRejectsPaneProcessIncarnationDrift(t *testing.T) {
+	calls := map[int]int{}
+	installLifecycleSafetyFixture(t, 90, 70, func(pid int) (tmux.ProcessMetadata, error) {
+		calls[pid]++
+		process := lifecycleFixtureProcess(pid)
+		if pid == 70 && calls[pid] == 3 {
+			process.Identity = "reused-at-confirm"
+		}
+		return process, nil
+	})
+
+	err := preflightLifecycleExecutor("runner restart", []tmux.WindowPane{{Session: "alpha", Window: "runner", WindowID: "@1"}})
+	if err == nil || !strings.Contains(err.Error(), "target pane process incarnation changed") {
+		t.Fatalf("confirm-step incarnation drift error = %v", err)
+	}
+}
+
+func TestLifecycleExecutorRevalidatesCurrentAncestryAfterPaneConfirmation(t *testing.T) {
+	calls := map[int]int{}
+	installLifecycleSafetyFixture(t, 90, 70, func(pid int) (tmux.ProcessMetadata, error) {
+		calls[pid]++
+		process := lifecycleFixtureProcess(pid)
+		if pid == 90 && calls[pid] > 1 {
+			process.Identity = "reused-current"
+		}
+		return process, nil
+	})
+
+	err := preflightLifecycleExecutor("runner restart", []tmux.WindowPane{{Session: "alpha", Window: "runner", WindowID: "@1"}})
+	if err == nil || !strings.Contains(err.Error(), "process 90 ancestry identity changed") {
+		t.Fatalf("late current ancestry drift error = %v", err)
+	}
+}
+
 func TestResolveLifecyclePaneProcessRequiresExactLiveIncarnation(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		row       string
 		wantError bool
 	}{
-		{name: "exact", row: "alpha\tworker\t@1\t%1\t/tmp\tamp\tstart\t0\t42\t123\n"},
-		{name: "missing process identity", row: "alpha\tworker\t@1\t%1\t/tmp\tamp\tstart\t0\t42\t0\n", wantError: true},
+		{name: "tmux 3.4 empty pane created", row: "alpha\tworker\t@1\t%1\t/tmp\tamp\tstart\t0\t42\t\n"},
 		{name: "reused pane", row: "alpha\tworker\t@1\t%2\t/tmp\tamp\tstart\t0\t42\t123\n", wantError: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -116,10 +192,64 @@ func TestResolveLifecyclePaneProcessRequiresExactLiveIncarnation(t *testing.T) {
 			if test.wantError && err == nil {
 				t.Fatalf("resolve accepted stale pane: %+v", pane)
 			}
-			if !test.wantError && (err != nil || pane.PID != 42 || pane.StartTime != 123) {
+			if !test.wantError && (err != nil || pane.PID != 42) {
 				t.Fatalf("resolve exact pane = %+v, %v", pane, err)
 			}
 		})
+	}
+}
+
+func TestLifecycleExecutorAllowsIndependentTmux34PaneWithoutCreatedField(t *testing.T) {
+	bin := t.TempDir()
+	row := "alpha\tworker\t@1\t%1\t/tmp\tamp\tstart\t0\t70\t\n"
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nprintf %s "+shellSingleQuote(row)+"\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	oldCurrent, oldInspect, oldPane := lifecycleCurrentPID, lifecycleProcessLink, lifecyclePaneProcess
+	lifecycleCurrentPID = func() int { return 90 }
+	lifecycleProcessLink = func(pid int) (tmux.ProcessMetadata, error) { return lifecycleFixtureProcess(pid), nil }
+	lifecyclePaneProcess = resolveLifecyclePaneProcess
+	t.Cleanup(func() {
+		lifecycleCurrentPID, lifecycleProcessLink, lifecyclePaneProcess = oldCurrent, oldInspect, oldPane
+	})
+
+	if err := preflightLifecycleExecutor("worker park", []tmux.WindowPane{{Session: "alpha", Window: "worker", WindowID: "@1"}}); err != nil {
+		t.Fatalf("independent tmux 3.4 target rejected: %v", err)
+	}
+}
+
+func TestStopCapableCommandRoutesRequireTmuxAndLifecycleGuard(t *testing.T) {
+	workerStops := map[string]bool{"shelve": true, "park": true, "restart": true, "remove": true, "teardown": true}
+	runnerStops := map[string]bool{"park": true, "restart": true, "remove": true}
+	workerFound, runnerFound := map[string]bool{}, map[string]bool{}
+	for _, command := range workerCommand().Children {
+		if lifecycleCommandStopsWorker(command.Name) {
+			workerFound[command.Name] = true
+			if !workerStops[command.Name] || !workerCommandNeedsTmux(command.Name) {
+				t.Errorf("worker route %q can stop tmux without matching the guarded route list", command.Name)
+			}
+		}
+	}
+	for _, command := range runnerCommand().Children {
+		if lifecycleCommandStopsRunner(command.Name) {
+			runnerFound[command.Name] = true
+			if !runnerStops[command.Name] || !runnerCommandNeedsTmux(command.Name) {
+				t.Errorf("runner route %q can stop tmux without matching the guarded route list", command.Name)
+			}
+		}
+	}
+	if fmt.Sprint(workerFound) != fmt.Sprint(workerStops) || fmt.Sprint(runnerFound) != fmt.Sprint(runnerStops) {
+		t.Fatalf("stop-capable command table drift: worker=%v want=%v runner=%v want=%v", workerFound, workerStops, runnerFound, runnerStops)
+	}
+	for _, command := range rootCommand.Children {
+		if workerStops[command.Name] && !lifecycleCommandStopsWorker(command.Name) {
+			t.Errorf("aggregate worker route %q does not require the lifecycle guard", command.Name)
+		}
+		if runnerStops[command.Name] && !lifecycleCommandStopsRunner(command.Name) {
+			t.Errorf("aggregate runner route %q does not require the lifecycle guard", command.Name)
+		}
+	}
+	if !maintenanceCommand().Children[2].Mutating || maintenanceCommand().Children[2].Name != "run" {
+		t.Fatal("runner maintenance run route no longer identifies the guarded mutating command")
 	}
 }
 
