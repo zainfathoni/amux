@@ -26,9 +26,12 @@ const (
 	model          = "openai-codex/gpt-5.3-codex-spark"
 	maxInputBytes  = 64 << 10
 	maxTaskBytes   = 16 << 10
-	maxPromptBytes = 256 << 10
+	maxPromptBytes = 512 << 10
+	maxGitBytes    = 1 << 20
 	gitPath        = "/usr/bin/git"
 )
+
+var errAppliedStateIndeterminate = errors.New("applied state indeterminate")
 
 var fixedArgs = []string{
 	"--model", model,
@@ -93,9 +96,20 @@ type result struct {
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {
+		if errors.Is(err, errAppliedStateIndeterminate) {
+			fmt.Fprintln(os.Stderr, "indeterminate_applied_state:", err)
+			os.Exit(failureExitCode(err))
+		}
 		fmt.Fprintln(os.Stderr, "blocked:", err)
-		os.Exit(2)
+		os.Exit(failureExitCode(err))
 	}
+}
+
+func failureExitCode(err error) int {
+	if errors.Is(err, errAppliedStateIndeterminate) {
+		return 3
+	}
+	return 2
 }
 
 func run(args []string, output io.Writer) error {
@@ -111,8 +125,8 @@ func run(args []string, output io.Writer) error {
 	flags.StringVar(&o.task, "task", "", "self-contained microtask")
 	flags.StringVar(&o.expectedReplacementSHA256, "expected-replacement-sha256", "", "optional exact SHA-256 required before replacement")
 	flags.DurationVar(&o.timeout, "timeout", 2*time.Minute, "wall-clock limit")
-	flags.IntVar(&o.stdoutLimit, "stdout-limit", 128<<10, "final response byte limit")
-	flags.IntVar(&o.stderrLimit, "stderr-limit", 16<<10, "diagnostic byte limit")
+	flags.IntVar(&o.stdoutLimit, "stdout-limit", 512<<10, "final response byte limit")
+	flags.IntVar(&o.stderrLimit, "stderr-limit", 16<<10, "diagnostic byte limit; 0 rejects any stderr byte")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return errors.New("usage: pi-spark-local --pi ABS --pi-sha256 HEX --node ABS --node-sha256 HEX --workdir ABS --file REL --task TEXT [--timeout 2m]")
 	}
@@ -219,7 +233,7 @@ func run(args []string, output io.Writer) error {
 	receipt := result{
 		Status: status, Package: packageName, Version: packageVersion,
 		RequestedModel: model, Executable: pi, ExecutableSHA256: piDigest, Node: node, NodeSHA256: nodeDigest,
-		Argv:        append([]string{node, pi}, fixedArgs...),
+		Argv:        argv,
 		ChangedPath: relative, StdoutBytes: len(stdout), StderrBytes: len(stderr), Stderr: stderrSummary,
 		ExpectedReplacementSHA256: o.expectedReplacementSHA256,
 	}
@@ -241,8 +255,12 @@ func admitPi(argument, expectedDigest string) (string, string, error) {
 	}
 	root := filepath.Dir(filepath.Dir(pi))
 	metadataPath := filepath.Join(root, "package.json")
+	metadataInfo, err := os.Lstat(metadataPath)
+	if err != nil || !metadataInfo.Mode().IsRegular() || metadataInfo.Size() > 1<<20 {
+		return "", "", errors.New("Pi package metadata is unavailable, linked, or oversized")
+	}
 	metadata, err := os.ReadFile(metadataPath)
-	if err != nil || len(metadata) > 1<<20 {
+	if err != nil {
 		return "", "", errors.New("Pi package metadata is unavailable or oversized")
 	}
 	var pkg packageJSON
@@ -261,7 +279,8 @@ func admitPi(argument, expectedDigest string) (string, string, error) {
 }
 
 func admitExecutable(argument, expectedDigest, label string) (string, string, error) {
-	if !filepath.IsAbs(argument) || len(expectedDigest) != 64 {
+	decodedDigest, digestErr := hex.DecodeString(expectedDigest)
+	if !filepath.IsAbs(argument) || digestErr != nil || len(decodedDigest) != sha256.Size {
 		return "", "", fmt.Errorf("%s path or expected SHA-256 is malformed", label)
 	}
 	path, err := filepath.EvalSymlinks(argument)
@@ -272,11 +291,17 @@ func admitExecutable(argument, expectedDigest, label string) (string, string, er
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
 		return "", "", fmt.Errorf("resolved %s object is not an executable regular file", label)
 	}
-	contents, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return "", "", fmt.Errorf("%s executable cannot be hashed", label)
 	}
-	observed := digest(contents)
+	hasher := sha256.New()
+	_, copyErr := io.Copy(hasher, file)
+	closeErr := file.Close()
+	if copyErr != nil || closeErr != nil {
+		return "", "", fmt.Errorf("%s executable cannot be hashed", label)
+	}
+	observed := hex.EncodeToString(hasher.Sum(nil))
 	if observed != strings.ToLower(expectedDigest) {
 		return "", "", fmt.Errorf("%s executable does not match its admitted SHA-256", label)
 	}
@@ -336,8 +361,11 @@ func admitWorktree(argument, relative string) (string, string, string, []byte, e
 	if err != nil {
 		return "", "", "", nil, errors.New("worktree is unavailable")
 	}
-	if filepath.IsAbs(relative) || relative == "." || relative != filepath.Clean(relative) || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+	if filepath.IsAbs(relative) || relative == "." || relative == ".." || relative != filepath.Clean(relative) || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
 		return "", "", "", nil, errors.New("--file must be one canonical relative path")
+	}
+	if err := requireSafeGitConfiguration(workdir); err != nil {
+		return "", "", "", nil, err
 	}
 	root, err := git(workdir, "rev-parse", "--show-toplevel")
 	if err != nil || strings.TrimSpace(string(root)) != workdir {
@@ -427,7 +455,7 @@ func execute(o options, argv []string, prompt []byte, agentDir string) ([]byte, 
 		return nil, nil, errors.New("private Pi working directory cannot be created")
 	}
 	defer os.RemoveAll(privateDir)
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = privateDir
 	cmd.Stdin = bytes.NewReader(prompt)
 	home, err := os.UserHomeDir()
@@ -449,29 +477,71 @@ func execute(o options, argv []string, prompt []byte, agentDir string) ([]byte, 
 	if extraProcessEnvironment != nil {
 		cmd.Env = append(cmd.Env, extraProcessEnvironment()...)
 	}
-	cmd.Stdout, cmd.Stderr = stdout, stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.WaitDelay = 5 * time.Second
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return os.ErrProcessDone
-		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return err
-		}
-		return nil
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, nil, errors.New("Pi stdout cannot be captured")
 	}
-	err = cmd.Run()
-	pid := 0
-	if cmd.Process != nil {
-		pid = cmd.Process.Pid
-		_ = cmd.Cancel()
-		if err := verifyProcessGroupGone(pid); err != nil {
-			return nil, nil, err
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, nil, errors.New("Pi stderr cannot be captured")
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		return nil, nil, errors.New("Pi failed to start")
+	}
+
+	streamDone := make(chan error, 2)
+	go func() {
+		_, err := io.Copy(stdout, stdoutPipe)
+		streamDone <- err
+	}()
+	go func() {
+		_, err := io.Copy(stderr, stderrPipe)
+		streamDone <- err
+	}()
+	streamsComplete := false
+	streamErrors := make([]error, 0, 2)
+	for len(streamErrors) < 2 {
+		select {
+		case streamErr := <-streamDone:
+			streamErrors = append(streamErrors, streamErr)
+			if len(streamErrors) == 2 {
+				streamsComplete = true
+			}
+		case <-ctx.Done():
+			goto cleanup
 		}
+	}
+
+cleanup:
+	// The leader has not been reaped, so its PID still reserves this process
+	// group identity. Never signal or probe the bare PGID after Wait releases it.
+	killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	var cleanupStreamErr error
+	if !streamsComplete {
+		cleanupTimer := time.NewTimer(2 * time.Second)
+		cleanupTimerC := cleanupTimer.C
+		for len(streamErrors) < 2 {
+			select {
+			case streamErr := <-streamDone:
+				streamErrors = append(streamErrors, streamErr)
+			case <-cleanupTimerC:
+				_ = stdoutPipe.Close()
+				_ = stderrPipe.Close()
+				cleanupStreamErr = errors.New("Pi process streams did not close after group termination")
+				cleanupTimerC = nil
+			}
+		}
+		if !cleanupTimer.Stop() {
+			select {
+			case <-cleanupTimer.C:
+			default:
+			}
+		}
+	}
+	waitErr := cmd.Wait()
+	if killErr != nil {
+		return nil, nil, errors.New("Pi process-group termination could not be verified")
 	}
 	if stdout.overflow || stderr.overflow {
 		return nil, nil, errors.New("Pi output exceeded its configured bound")
@@ -479,37 +549,30 @@ func execute(o options, argv []string, prompt []byte, agentDir string) ([]byte, 
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return nil, nil, fmt.Errorf("Pi timed out after %s", o.timeout)
 	}
-	if errors.Is(err, exec.ErrWaitDelay) {
-		return nil, nil, errors.New("Pi process streams did not close after termination")
+	if cleanupStreamErr != nil {
+		return nil, nil, cleanupStreamErr
 	}
-	if err != nil {
+	for _, streamErr := range streamErrors {
+		if streamErr != nil {
+			return nil, nil, errors.New("Pi process streams did not close after group termination")
+		}
+	}
+	if waitErr != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if !errors.As(waitErr, &exitErr) {
+			return nil, nil, errors.New("Pi terminated unexpectedly")
+		}
+		if exitErr.ProcessState.ExitCode() >= 0 {
 			return nil, nil, fmt.Errorf("Pi exited with code %d", exitErr.ExitCode())
 		}
-		return nil, nil, errors.New("Pi failed to start")
+		// Closed stdout and stderr are Pi print mode's final-response boundary.
+		// SIGKILL after that boundary is our pre-Wait process-group cleanup.
+		status, signaled := exitErr.Sys().(syscall.WaitStatus)
+		if !signaled || !status.Signaled() || status.Signal() != syscall.SIGKILL || !streamsComplete {
+			return nil, nil, errors.New("Pi terminated unexpectedly")
+		}
 	}
 	return stdout.b.Bytes(), stderr.b.Bytes(), nil
-}
-
-func verifyProcessGroupGone(pid int) error {
-	if pid <= 0 {
-		return errors.New("Pi process identity was not recorded")
-	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		err := syscall.Kill(-pid, 0)
-		if errors.Is(err, syscall.ESRCH) {
-			return nil
-		}
-		if err != nil && !errors.Is(err, syscall.EPERM) {
-			return errors.New("Pi process-group termination could not be verified")
-		}
-		if time.Now().After(deadline) {
-			return errors.New("Pi process group remained live after termination")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 }
 
 func parseReplacement(data []byte) (replacement, error) {
@@ -554,10 +617,16 @@ func parseReplacement(data []byte) (replacement, error) {
 	if len(seen) != 3 || !seen["path"] || !seen["original_sha256"] || !seen["replacement"] || value.Path == "" || digestErr != nil || len(decodedDigest) != sha256.Size {
 		return value, errors.New("final response has empty or malformed replacement fields")
 	}
+	if value.OriginalSHA256 != strings.ToLower(value.OriginalSHA256) {
+		return value, errors.New("final response original_sha256 must use canonical lowercase hexadecimal")
+	}
 	return value, nil
 }
 
 func requireUnchanged(workdir, target string, before []byte) error {
+	if err := requireSafeGitConfiguration(workdir); err != nil {
+		return err
+	}
 	if err := requireVisibleIndex(workdir); err != nil {
 		return err
 	}
@@ -597,6 +666,9 @@ func replaceFile(target string, contents []byte) error {
 }
 
 func requireExactDiff(workdir, relative string) error {
+	if err := requireSafeGitConfiguration(workdir); err != nil {
+		return err
+	}
 	if err := requireVisibleIndex(workdir); err != nil {
 		return err
 	}
@@ -636,25 +708,98 @@ func requireVisibleIndex(workdir string) error {
 	return nil
 }
 
+type rollbackDependencies struct {
+	replace func(string, []byte) error
+	read    func(string) ([]byte, error)
+	gitSafe func(string) error
+	visible func(string) error
+	git     func(string, ...string) ([]byte, error)
+}
+
 func rollbackAfterApply(workdir, target string, before []byte, cause error) error {
-	if err := replaceFile(target, before); err != nil {
-		return fmt.Errorf("indeterminate: replacement may remain applied; rollback failed after %v: %w", cause, err)
+	return rollbackAfterApplyWith(workdir, target, before, cause, rollbackDependencies{
+		replace: replaceFile, read: os.ReadFile, gitSafe: requireSafeGitConfiguration,
+		visible: requireVisibleIndex, git: git,
+	})
+}
+
+func rollbackAfterApplyWith(workdir, target string, before []byte, cause error, deps rollbackDependencies) error {
+	if err := deps.replace(target, before); err != nil {
+		return fmt.Errorf("%w: replacement may remain applied; rollback failed after %v: %v", errAppliedStateIndeterminate, cause, err)
 	}
-	current, readErr := os.ReadFile(target)
+	current, readErr := deps.read(target)
 	if readErr != nil || !bytes.Equal(current, before) {
-		return fmt.Errorf("indeterminate: replacement may remain applied; rollback read-back failed after %v", cause)
+		return fmt.Errorf("%w: replacement may remain applied; rollback read-back failed after %v", errAppliedStateIndeterminate, cause)
 	}
-	if err := requireVisibleIndex(workdir); err != nil {
-		return fmt.Errorf("indeterminate: original bytes restored but clean state is unverified after %v: %w", cause, err)
+	if err := deps.gitSafe(workdir); err != nil {
+		return fmt.Errorf("%w: original bytes restored but Git safety is unverified after %v: %v", errAppliedStateIndeterminate, cause, err)
 	}
-	status, err := git(workdir, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	if err := deps.visible(workdir); err != nil {
+		return fmt.Errorf("%w: original bytes restored but clean state is unverified after %v: %v", errAppliedStateIndeterminate, cause, err)
+	}
+	status, err := deps.git(workdir, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 	if err != nil || len(status) != 0 {
-		return fmt.Errorf("indeterminate: original bytes restored but worktree is not clean after %v", cause)
+		return fmt.Errorf("%w: original bytes restored but worktree is not clean after %v", errAppliedStateIndeterminate, cause)
 	}
 	return fmt.Errorf("%w; replacement rolled back", cause)
 }
 
+func requireSafeGitConfiguration(workdir string) error {
+	configNames, err := git(workdir, "config", "--local", "--includes", "--name-only", "--null", "--list")
+	if err != nil {
+		return errors.New("repository-local Git configuration could not be inspected safely")
+	}
+	for _, name := range bytes.Split(configNames, []byte{0}) {
+		lower := strings.ToLower(string(name))
+		if strings.HasPrefix(lower, "filter.") && (strings.HasSuffix(lower, ".clean") || strings.HasSuffix(lower, ".process")) {
+			return errors.New("repository-local external Git filter configuration is not admitted")
+		}
+	}
+	paths, err := git(workdir, "ls-files", "-z")
+	if err != nil {
+		return errors.New("tracked paths could not be inspected for Git filter attributes")
+	}
+	attributes, err := gitInput(workdir, paths, "check-attr", "-z", "--all", "--stdin")
+	if err != nil {
+		return errors.New("Git attributes could not be inspected safely")
+	}
+	fields := bytes.Split(attributes, []byte{0})
+	for i := 0; i+2 < len(fields); i += 3 {
+		if string(fields[i+1]) == "filter" {
+			return errors.New("repository-local Git filter attribute binding is not admitted")
+		}
+	}
+	if len(fields) > 1 && (len(fields)-1)%3 != 0 {
+		return errors.New("Git attribute inspection output is malformed")
+	}
+	return nil
+}
+
+var errGitOutputBound = errors.New("Git command output exceeded its bound")
+
+type boundedBuffer struct {
+	b     bytes.Buffer
+	limit int
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	remaining := b.limit - b.b.Len()
+	if remaining >= len(p) {
+		return b.b.Write(p)
+	}
+	if remaining > 0 {
+		_, _ = b.b.Write(p[:remaining])
+	}
+	return max(remaining, 0), errGitOutputBound
+}
+
+func (b *boundedBuffer) Bytes() []byte { return b.b.Bytes() }
+
 func git(workdir string, args ...string) ([]byte, error) {
+	return gitInput(workdir, nil, args...)
+}
+
+func gitInput(workdir string, input []byte, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	gitArgs := []string{"--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", workdir}
@@ -664,7 +809,15 @@ func git(workdir string, args ...string) ([]byte, error) {
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_LITERAL_PATHSPECS=1",
 		"GIT_PAGER=cat", "GIT_OPTIONAL_LOCKS=0",
 	}
-	return cmd.Output()
+	cmd.Stdin = bytes.NewReader(input)
+	stdout := &boundedBuffer{limit: maxGitBytes}
+	stderr := &boundedBuffer{limit: 64 << 10}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		return nil, err
+	}
+	return stdout.Bytes(), nil
 }
 
 func digest(contents []byte) string {

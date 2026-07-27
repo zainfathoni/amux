@@ -81,13 +81,14 @@ func TestPromptBounds(t *testing.T) {
 		}
 	})
 	t.Run("generated packet", func(t *testing.T) {
-		f := newFixture(t)
-		mustWrite(t, f.target, bytes.Repeat([]byte{0}, maxInputBytes), 0o644)
-		gitRun(t, f.workdir, "add", "target.txt")
-		gitRun(t, f.workdir, "commit", "-qm", "large fixture")
-		err := run(f.args("--task", "edit"), &bytes.Buffer{})
-		if err == nil || !strings.Contains(err.Error(), "generated prompt exceeds") {
-			t.Fatalf("err=%v", err)
+		contents := bytes.Repeat([]byte{0}, maxInputBytes)
+		prompt, err := buildPrompt(strings.Repeat("\x00", maxTaskBytes), "target.txt", strings.Repeat("a", 64), contents)
+		if err != nil || len(prompt) > maxPromptBytes {
+			t.Fatalf("worst-case admitted packet: bytes=%d err=%v", len(prompt), err)
+		}
+		encodedReply := marshal(t, replacement{Path: "target.txt", OriginalSHA256: strings.Repeat("a", 64), Replacement: string(contents)})
+		if len(encodedReply) > 512<<10 {
+			t.Fatalf("worst-case admitted response exceeds default stdout bound: %d", len(encodedReply))
 		}
 	})
 }
@@ -131,6 +132,37 @@ func TestExpectedReplacementSHA256Gate(t *testing.T) {
 			t.Fatalf("mismatched replacement left worktree changes: %q, %v", status, statusErr)
 		}
 	})
+
+	for _, malformed := range []string{strings.Repeat("a", 63), strings.Repeat("g", 64)} {
+		t.Run("malformed expected hash", func(t *testing.T) {
+			f := newFixture(t)
+			err := run(f.args("--task", "edit", "--expected-replacement-sha256", malformed), &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), "exactly 64 hexadecimal") {
+				t.Fatalf("hash=%q err=%v", malformed, err)
+			}
+		})
+	}
+}
+
+func TestRejectsAPIKeyRoutesBeforeLaunch(t *testing.T) {
+	for _, name := range []string{"OPENAI_API_KEY", "CODEX_API_KEY"} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			t.Setenv(name, "fixture-not-a-secret")
+			err := run(f.args("--task", "edit"), &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), name+" is present") {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestRejectsExactParentPath(t *testing.T) {
+	f := newFixture(t)
+	err := run(f.args("--file", "..", "--task", "edit"), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "canonical relative path") {
+		t.Fatalf("err=%v", err)
+	}
 }
 
 func TestRejectsWrongPackageIdentityBeforeLaunch(t *testing.T) {
@@ -150,6 +182,16 @@ func TestRejectsWrongPackageIdentityBeforeLaunch(t *testing.T) {
 		if err := run(f.args("--task", "edit"), &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "package") {
 			t.Fatalf("err=%v", err)
 		}
+	}
+}
+
+func TestRejectsOversizedPackageMetadataBeforeRead(t *testing.T) {
+	f := newFixture(t)
+	metadata := filepath.Join(filepath.Dir(filepath.Dir(f.pi)), "package.json")
+	mustWrite(t, metadata, bytes.Repeat([]byte(" "), (1<<20)+1), 0o600)
+	err := run(f.args("--task", "edit"), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "oversized") {
+		t.Fatalf("err=%v", err)
 	}
 }
 
@@ -228,6 +270,7 @@ func TestRejectsMalformedOrUnboundFinalOutput(t *testing.T) {
 		{"invalid-utf8", "{\xff}", "UTF-8"},
 		{"wrong-path", `{"path":"other.txt","original_sha256":"` + strings.Repeat("a", 64) + `","replacement":"x"}`, "bind"},
 		{"wrong-digest", `{"path":"target.txt","original_sha256":"` + strings.Repeat("a", 64) + `","replacement":"x"}`, "bind"},
+		{"uppercase-digest", `{"path":"target.txt","original_sha256":"` + strings.Repeat("A", 64) + `","replacement":"x"}`, "canonical lowercase"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
@@ -273,6 +316,39 @@ func TestBoundsOutputAndTimeoutAndTerminatesProcessGroup(t *testing.T) {
 			t.Fatalf("descendant %d survived verified group termination", pid)
 		}
 	})
+	t.Run("normal completion", func(t *testing.T) {
+		f := newFixture(t)
+		pidFile := filepath.Join(f.root, "child.pid")
+		t.Setenv("FAKE_PI_MODE", "normal-descendant")
+		t.Setenv("FAKE_PI_PID_FILE", pidFile)
+		before := mustRead(t, f.target)
+		reply := replacement{Path: "target.txt", OriginalSHA256: digest(before), Replacement: "after\n"}
+		t.Setenv("FAKE_PI_OUTPUT", marshal(t, reply))
+		if err := run(f.args("--task", "edit"), &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		pid, parseErr := strconv.Atoi(strings.TrimSpace(string(mustRead(t, pidFile))))
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		if err := syscall.Kill(pid, 0); err == nil {
+			t.Fatalf("normal-completion descendant %d survived group cleanup", pid)
+		}
+	})
+	t.Run("unexpected signal", func(t *testing.T) {
+		f := newFixture(t)
+		before := mustRead(t, f.target)
+		reply := replacement{Path: "target.txt", OriginalSHA256: digest(before), Replacement: "after\n"}
+		t.Setenv("FAKE_PI_MODE", "signal")
+		t.Setenv("FAKE_PI_OUTPUT", marshal(t, reply))
+		err := run(f.args("--task", "edit"), &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "terminated unexpectedly") {
+			t.Fatalf("err=%v", err)
+		}
+		if !bytes.Equal(mustRead(t, f.target), before) {
+			t.Fatal("unexpectedly signaled Pi changed target")
+		}
+	})
 }
 
 func TestRejectsPiWorktreeMutationAndOutOfScopeDiff(t *testing.T) {
@@ -304,6 +380,51 @@ func TestGitHardeningDisablesRepositoryFSMonitor(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("repository fsmonitor executed: %v", err)
+	}
+}
+
+func TestGitHardeningRejectsExternalCleanFiltersBeforeExecution(t *testing.T) {
+	f := newFixture(t)
+	mustWrite(t, filepath.Join(f.workdir, ".gitattributes"), []byte("target.txt filter=evil\n"), 0o644)
+	gitRun(t, f.workdir, "add", ".gitattributes")
+	gitRun(t, f.workdir, "commit", "-qm", "filter attributes fixture")
+	marker := filepath.Join(f.root, "clean-filter-invoked")
+	gitRun(t, f.workdir, "config", "filter.evil.clean", fmt.Sprintf("sh -c 'printf invoked >%q; cat'", marker))
+	if err := os.Chtimes(f.target, time.Now().Add(time.Second), time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	err := run(f.args("--task", "edit"), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "external Git filter configuration") {
+		t.Fatalf("err=%v", err)
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("repository clean filter executed: %v", statErr)
+	}
+}
+
+func TestGitHardeningRejectsFilterAttributeWithoutDriver(t *testing.T) {
+	for _, value := range []string{"unconfigured", "unspecified"} {
+		t.Run(value, func(t *testing.T) {
+			f := newFixture(t)
+			mustWrite(t, filepath.Join(f.workdir, ".gitattributes"), []byte("target.txt filter="+value+"\n"), 0o644)
+			gitRun(t, f.workdir, "add", ".gitattributes")
+			gitRun(t, f.workdir, "commit", "-qm", "filter attributes fixture")
+			err := run(f.args("--task", "edit"), &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), "filter attribute binding") {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestGitCommandOutputIsBounded(t *testing.T) {
+	f := newFixture(t)
+	large := filepath.Join(f.workdir, "large.txt")
+	mustWrite(t, large, bytes.Repeat([]byte("x"), maxGitBytes+1), 0o644)
+	gitRun(t, f.workdir, "add", "large.txt")
+	gitRun(t, f.workdir, "commit", "-qm", "large output fixture")
+	if _, err := git(f.workdir, "show", "HEAD:large.txt"); !errors.Is(err, errGitOutputBound) {
+		t.Fatalf("err=%v", err)
 	}
 }
 
@@ -365,6 +486,66 @@ func TestTransactionalApplyRollsBackFailures(t *testing.T) {
 				t.Fatalf("failed transaction did not restore clean state: %q, %v", status, statusErr)
 			}
 		})
+	}
+}
+
+func TestEveryIndeterminateRollbackBranchHasMachineReadableStatus(t *testing.T) {
+	before := []byte("before\n")
+	cause := errors.New("forced post-apply failure")
+	okReplace := func(string, []byte) error { return nil }
+	okRead := func(string) ([]byte, error) { return before, nil }
+	okCheck := func(string) error { return nil }
+	okGit := func(string, ...string) ([]byte, error) { return nil, nil }
+	tests := []struct {
+		name string
+		deps rollbackDependencies
+	}{
+		{
+			name: "restore failure",
+			deps: rollbackDependencies{
+				replace: func(string, []byte) error { return errors.New("restore failed") },
+				read:    okRead, gitSafe: okCheck, visible: okCheck, git: okGit,
+			},
+		},
+		{
+			name: "read-back failure",
+			deps: rollbackDependencies{
+				replace: okReplace, read: func(string) ([]byte, error) { return nil, errors.New("read failed") },
+				gitSafe: okCheck, visible: okCheck, git: okGit,
+			},
+		},
+		{
+			name: "Git safety failure",
+			deps: rollbackDependencies{
+				replace: okReplace, read: okRead,
+				gitSafe: func(string) error { return errors.New("unsafe Git") }, visible: okCheck, git: okGit,
+			},
+		},
+		{
+			name: "index visibility failure",
+			deps: rollbackDependencies{
+				replace: okReplace, read: okRead, gitSafe: okCheck,
+				visible: func(string) error { return errors.New("hidden index") }, git: okGit,
+			},
+		},
+		{
+			name: "dirty status",
+			deps: rollbackDependencies{
+				replace: okReplace, read: okRead, gitSafe: okCheck, visible: okCheck,
+				git: func(string, ...string) ([]byte, error) { return []byte("dirty"), nil },
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := rollbackAfterApplyWith("worktree", "target", before, cause, tc.deps)
+			if !errors.Is(err, errAppliedStateIndeterminate) || failureExitCode(err) != 3 {
+				t.Fatalf("err=%v exit=%d", err, failureExitCode(err))
+			}
+		})
+	}
+	if failureExitCode(errors.New("blocked")) != 2 {
+		t.Fatal("ordinary refusal must retain exit status 2")
 	}
 }
 
@@ -452,6 +633,8 @@ fi
 case "${FAKE_PI_MODE:-success}" in
   overflow) while :; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; done ;;
   sleep) sleep 60 & child=$!; printf '%s\n' "$child" >"$FAKE_PI_PID_FILE"; wait "$child" ;;
+  normal-descendant) sleep 60 >/dev/null 2>&1 & child=$!; printf '%s\n' "$child" >"$FAKE_PI_PID_FILE"; printf '%s' "$FAKE_PI_OUTPUT" ;;
+  signal) printf '%s' "$FAKE_PI_OUTPUT"; kill -TERM $$ ;;
   mutate) printf 'bad\n' >"$FAKE_PI_MUTATE"; printf '%s' "$FAKE_PI_OUTPUT" ;;
   mutate-pi) printf '# changed\n' >>"$FAKE_PI_SELF"; printf '%s' "$FAKE_PI_OUTPUT" ;;
   agent-overlay) printf fixture >"$FAKE_PI_AGENT/SYSTEM.md"; printf '%s' "$FAKE_PI_OUTPUT" ;;
