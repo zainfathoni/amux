@@ -322,8 +322,8 @@ func newFixture(t *testing.T, operation string) fixture {
 int has(int argc, char **argv, const char *value) { for (int i=1;i<argc;i++) if (!strcmp(argv[i], value)) return 1; return 0; }
 int main(int argc, char **argv) {
   const char *mode = getenv("FAKE_PI_MODE"); if (!mode) mode = "";
-  if (argc == 3 && !strcmp(argv[2], "--version")) { puts(!strcmp(mode,"wrong-version") ? "0.81.0" : "0.80.10"); return 0; }
-  if (argc >= 3 && !strcmp(argv[2], "--list-models")) { puts(!strcmp(mode,"wrong-model") ? "openai gpt-5.3-codex-spark" : "openai-codex gpt-5.3-codex-spark text 1 1"); return 0; }
+  if (argc == 3 && !strcmp(argv[2], "--version")) { usleep(150000); puts(!strcmp(mode,"wrong-version") ? "0.81.0" : "0.80.10"); return 0; }
+  if (argc >= 3 && !strcmp(argv[2], "--list-models")) { usleep(150000); puts(!strcmp(mode,"wrong-model") ? "openai gpt-5.3-codex-spark" : "openai-codex gpt-5.3-codex-spark text 1 1"); return 0; }
   const char *expected[] = {"--mode","json","--model","openai-codex/gpt-5.3-codex-spark","--thinking","high","--no-session","--no-tools","--no-extensions","--no-skills","--no-prompt-templates","--no-themes","--no-context-files","--no-approve","--system-prompt","Return only the requested JSON replacement envelope. Do not use tools, files, external context, network publishing, or delegation."};
   if (argc != 18) return 42; for (int i=2;i<18;i++) if (strcmp(argv[i],expected[i-2])) return 42;
   if (!strcmp(mode,"sleep")) { sleep(10); return 0; }
