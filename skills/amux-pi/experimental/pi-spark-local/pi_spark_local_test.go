@@ -163,7 +163,7 @@ func TestExecutionFailsClosedOnBusyConcurrency(t *testing.T) {
 }
 
 func TestExecutionBoundsTimeoutAndOutputOverflow(t *testing.T) {
-	for _, test := range []struct{ name, mode, want string }{{"timeout", "sleep", "timed out"}, {"overflow", "overflow", "exceeded its bound"}} {
+	for _, test := range []struct{ name, mode, want string }{{"timeout", "sleep", "timed out"}, {"overflow", "overflow", "per-event byte bound"}} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, test.name)
 			authBefore := mustRead(t, f.auth)
@@ -184,6 +184,27 @@ func TestExecutionBoundsTimeoutAndOutputOverflow(t *testing.T) {
 				t.Fatal("failed run changed shared OAuth credential bytes")
 			}
 		})
+	}
+}
+
+func TestExecutionStreamsBoundedUpdatesWithoutAggregateOverflow(t *testing.T) {
+	f := newFixture(t, "streaming-updates")
+	packet := readObject(t, f.packet)
+	packet["stdout_limit"] = float64(1024)
+	packet["event_limit"] = float64(200)
+	writeObject(t, f.packet, packet, 0o600)
+	runOK(t, f, "plan", "--packet", f.packet)
+	t.Setenv("FAKE_PI_MODE", "streaming-updates")
+	runOK(t, f, "execute", "--operation-id", "streaming-updates")
+	if got := mustRead(t, f.target); got != "after\n" {
+		t.Fatalf("target=%q, want streamed replacement", got)
+	}
+	receipt := readObject(t, filepath.Join(f.state, "operations", "streaming-updates.json"))
+	if receipt["stdout_bytes"].(float64) <= packet["stdout_limit"].(float64) {
+		t.Fatalf("stdout_bytes=%v did not reproduce aggregate overflow shape", receipt["stdout_bytes"])
+	}
+	if receipt["event_count"].(float64) <= 100 {
+		t.Fatalf("event_count=%v did not include discarded incremental updates", receipt["event_count"])
 	}
 }
 
@@ -229,9 +250,14 @@ func TestExecutionBindsSettingsWorktreeAndConsumesRejectedAttempt(t *testing.T) 
 }
 
 func TestExecutionRejectsRetryEventAndWillRetryCompletion(t *testing.T) {
-	for _, mode := range []string{"retry-event", "will-retry"} {
+	for _, mode := range []string{"retry-event", "retry-event-sleep", "will-retry"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newFixture(t, mode)
+			if mode == "retry-event-sleep" {
+				packet := readObject(t, f.packet)
+				packet["timeout_seconds"] = float64(1)
+				writeObject(t, f.packet, packet, 0o600)
+			}
 			runOK(t, f, "plan", "--packet", f.packet)
 			t.Setenv("FAKE_PI_MODE", mode)
 			runBlockedArgs(t, f, "retry", "execute", "--operation-id", mode)
@@ -244,12 +270,18 @@ func TestExecutionRejectsRetryEventAndWillRetryCompletion(t *testing.T) {
 }
 
 func TestExecutionRejectsToolContentAndOutOfOrderLifecycle(t *testing.T) {
-	for _, mode := range []string{"tool-content", "out-of-order"} {
-		t.Run(mode, func(t *testing.T) {
-			f := newFixture(t, mode)
+	for _, test := range []struct{ mode, want string }{
+		{"tool-content", "Pi"},
+		{"toolcall-update", "unsupported nested assistant event"},
+		{"update-before-session", "did not start with a session"},
+		{"update-after-settled", "after agent_settled"},
+		{"out-of-order", "Pi"},
+	} {
+		t.Run(test.mode, func(t *testing.T) {
+			f := newFixture(t, test.mode)
 			runOK(t, f, "plan", "--packet", f.packet)
-			t.Setenv("FAKE_PI_MODE", mode)
-			runBlockedArgs(t, f, "Pi", "execute", "--operation-id", mode)
+			t.Setenv("FAKE_PI_MODE", test.mode)
+			runBlockedArgs(t, f, test.want, "execute", "--operation-id", test.mode)
 			if got := mustRead(t, f.target); got != "before\n" {
 				t.Fatalf("rejected provenance edited target: %q", got)
 			}
@@ -329,15 +361,19 @@ int main(int argc, char **argv) {
   if (!strcmp(mode,"sleep")) { sleep(10); return 0; }
   char input[4096]; while (fread(input,1,sizeof(input),stdin) > 0) {}
   if (!strcmp(mode,"overflow")) { while (1) { for (int i=0;i<1024;i++) putchar('x'); fflush(stdout); } }
+  if (!strcmp(mode,"update-before-session")) puts("{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"before session\"}}");
   char cwd[4096]; if (!getcwd(cwd,sizeof(cwd))) return 43;
   printf("{\"type\":\"session\",\"version\":3,\"cwd\":\"%s\",\"id\":\"fixture\",\"timestamp\":\"fixture\"}\n", cwd);
   puts("{\"type\":\"agent_start\"}");
-  if (!strcmp(mode,"retry-event")) puts("{\"type\":\"auto_retry_start\"}");
+  if (!strcmp(mode,"streaming-updates")) { puts("{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"thinking_start\"}}"); for (int i=0;i<120;i++) puts("{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"thinking_delta\",\"delta\":\"bounded incremental update\"}}"); puts("{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"thinking_end\"}}"); puts("{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_start\"}}"); puts("{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"bounded incremental update\"}}"); puts("{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_end\"}}"); }
+  if (!strcmp(mode,"retry-event") || !strcmp(mode,"retry-event-sleep")) puts("{\"type\":\"auto_retry_start\"}");
+  if (!strcmp(mode,"retry-event-sleep")) { fflush(stdout); sleep(10); return 0; }
+  if (!strcmp(mode,"toolcall-update")) puts("{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"toolcall_start\"}}");
   if (!strcmp(mode,"out-of-order")) puts("{\"type\":\"agent_end\",\"willRetry\":false}");
   if (!strcmp(mode,"scope")) puts("{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"provider\":\"openai-codex\",\"model\":\"gpt-5.3-codex-spark\",\"stopReason\":\"stop\",\"content\":[{\"type\":\"text\",\"text\":\"{\\\"summary\\\":\\\"bad\\\",\\\"files\\\":[{\\\"path\\\":\\\"outside.txt\\\",\\\"content\\\":\\\"bad\\\"}]}\"}]}}");
   else if (!strcmp(mode,"tool-content")) puts("{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"provider\":\"openai-codex\",\"model\":\"gpt-5.3-codex-spark\",\"stopReason\":\"stop\",\"content\":[{\"type\":\"text\",\"text\":\"{}\"},{\"type\":\"toolCall\",\"name\":\"forbidden\"}]}}");
   else puts("{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"provider\":\"openai-codex\",\"model\":\"gpt-5.3-codex-spark\",\"stopReason\":\"stop\",\"content\":[{\"type\":\"text\",\"text\":\"{\\\"summary\\\":\\\"tiny useful edit\\\",\\\"files\\\":[{\\\"path\\\":\\\"target.txt\\\",\\\"content\\\":\\\"after\\\\n\\\"}]}\"}]}}");
-  if (strcmp(mode,"out-of-order")) puts(!strcmp(mode,"will-retry") ? "{\"type\":\"agent_end\",\"willRetry\":true}" : "{\"type\":\"agent_end\",\"willRetry\":false}"); puts("{\"type\":\"agent_settled\"}"); return 0;
+  if (strcmp(mode,"out-of-order")) puts(!strcmp(mode,"will-retry") ? "{\"type\":\"agent_end\",\"willRetry\":true}" : "{\"type\":\"agent_end\",\"willRetry\":false}"); puts("{\"type\":\"agent_settled\"}"); if (!strcmp(mode,"update-after-settled")) puts("{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"after settled\"}}"); return 0;
 }`
 	if err := os.WriteFile(source, []byte(program), 0o600); err != nil {
 		t.Fatal(err)

@@ -135,6 +135,8 @@ Preflight and execution reject API-key environment presence without printing val
 
 The helper invokes the absolute resolved Node interpreter and exact Pi CLI in JSON mode with `--no-session`, `--no-tools`, `--no-extensions`, `--no-skills`, `--no-prompt-templates`, `--no-themes`, `--no-context-files`, and `--no-approve`. It removes `NODE_OPTIONS` and `NODE_PATH`, uses a reviewed PATH rooted at the planned Node directory, and sets `PI_OFFLINE=1` plus `PI_SKIP_VERSION_CHECK=1`; offline mode suppresses unrelated startup traffic, not the selected inference request.
 
+Stdout is parsed incrementally as bounded JSONL events: `stdout_limit` bounds each event and the retained lifecycle/result set, while `event_limit` bounds the complete stream count. Valid `message_update` deltas count toward that limit but are discarded after validation, so normal streaming cannot exhaust memory reserved for the terminal result.
+
 On timeout it signals only the `Popen` handle after byte-equal process-incarnation revalidation. It never uses process-name matching, guessed PIDs, broad stops, fallback, alias substitution, or automatic retry. Changed identity produces an indeterminate terminal record instead of a guessed stop.
 
 Successful inference and replacement application initially returns `awaiting_quota_confirmation`, not success. Immediately obtain a trusted after observation in the same reset window:

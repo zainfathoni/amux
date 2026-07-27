@@ -54,6 +54,14 @@ PI_ARGS = (
     "--system-prompt",
     "Return only the requested JSON replacement envelope. Do not use tools, files, external context, network publishing, or delegation.",
 )
+ALLOWED_EVENT_TYPES = {
+    "session", "agent_start", "turn_start", "message_start", "message_update",
+    "message_end", "turn_end", "agent_end", "agent_settled",
+}
+ALLOWED_ASSISTANT_MESSAGE_EVENT_TYPES = {
+    "text_start", "text_delta", "text_end",
+    "thinking_start", "thinking_delta", "thinking_end",
+}
 
 
 class Blocked(Exception):
@@ -330,7 +338,7 @@ def run_probe(argv: list[str], timeout: int, limit: int) -> subprocess.Completed
         else:
             contain_owned_child(process)
         raise
-    stdout, stderr, timed_out, overflowed = finish_bounded_process(
+    stdout, stderr, timed_out, overflowed, _, _, _ = finish_bounded_process(
         process, b"", identity, time.monotonic() + timeout, limit, limit,
     )
     if timed_out or overflowed or len(stdout) > limit or len(stderr) > limit:
@@ -615,21 +623,17 @@ def stable_process_identity(pid: int, deadline: float) -> dict[str, Any] | None:
     raise Blocked("Pi process identity did not stabilize before the operation deadline")
 
 
-def extract_result(events: bytes, event_limit: int, workdir: pathlib.Path) -> tuple[dict[str, Any], int]:
+def extract_result(events: bytes, event_count: int, workdir: pathlib.Path) -> tuple[dict[str, Any], int]:
     lines = events.splitlines()
-    if not lines or len(lines) > event_limit:
-        raise Blocked("Pi event count is empty or overflowed")
+    if not lines or event_count < len(lines):
+        raise Blocked("Pi event stream is empty or inconsistent")
     parsed: list[dict[str, Any]] = []
     for line in lines:
         event = strict_json(line, "Pi event")
         if not isinstance(event, dict):
             raise Blocked("Pi emitted a non-object event")
         parsed.append(event)
-    allowed_types = {
-        "session", "agent_start", "turn_start", "message_start", "message_update",
-        "message_end", "turn_end", "agent_end", "agent_settled",
-    }
-    if any(event.get("type") not in allowed_types for event in parsed):
+    if any(event.get("type") not in ALLOWED_EVENT_TYPES for event in parsed):
         raise Blocked("Pi emitted an unexpected, retry, tool, or compaction event")
     for event in parsed:
         if event.get("type") == "message_update":
@@ -668,7 +672,7 @@ def extract_result(events: bytes, event_limit: int, workdir: pathlib.Path) -> tu
     replacement = strict_json(text.encode(), "Pi result replacement envelope")
     if not isinstance(replacement, dict) or set(replacement) != {"summary", "files"} or not isinstance(replacement["summary"], str) or not isinstance(replacement["files"], list):
         raise Blocked("Pi result replacement envelope has an invalid shape")
-    return replacement, len(lines)
+    return replacement, event_count
 
 
 def task_prompt(packet: dict[str, Any], workdir: pathlib.Path, allowed: list[pathlib.Path], intent: dict[str, Any]) -> bytes:
@@ -715,6 +719,79 @@ def bounded_read(stream: Any, limit: int, destination: bytearray, overflow: thre
             overflow.set()
 
 
+def bounded_event_read(
+    stream: Any, line_limit: int, event_limit: int, destination: bytearray,
+    byte_count: list[int], event_count: list[int], failure: list[str], overflow: threading.Event,
+) -> None:
+    pending = bytearray()
+    settled = False
+
+    def accept(line: bytes) -> bool:
+        nonlocal settled
+        if len(line) > line_limit:
+            failure.append("Pi event exceeded its per-event byte bound")
+            overflow.set()
+            return False
+        event_count[0] += 1
+        if event_count[0] > event_limit:
+            failure.append("Pi event count overflowed")
+            overflow.set()
+            return False
+        try:
+            event = strict_json(line, "Pi event")
+            if not isinstance(event, dict):
+                raise Blocked("Pi emitted a non-object event")
+            event_type = event.get("type")
+            if event_type not in ALLOWED_EVENT_TYPES:
+                raise Blocked("Pi emitted an unexpected, retry, tool, or compaction event")
+            if event_count[0] == 1 and event_type != "session":
+                raise Blocked("Pi event stream did not start with a session")
+            if settled:
+                raise Blocked("Pi emitted an event after agent_settled")
+            if event_type == "agent_settled":
+                settled = True
+            if event_type == "message_update":
+                nested = event.get("assistantMessageEvent")
+                if not isinstance(nested, dict) or nested.get("type") not in ALLOWED_ASSISTANT_MESSAGE_EVENT_TYPES:
+                    raise Blocked("Pi emitted an unsupported nested assistant event")
+                return True
+        except Blocked as error:
+            failure.append(str(error))
+            overflow.set()
+            return False
+        if len(destination) + len(line) + 1 > line_limit:
+            failure.append("Pi retained events exceeded their byte bound")
+            overflow.set()
+            return False
+        destination.extend(line)
+        destination.append(0x0A)
+        return True
+
+    while True:
+        chunk = stream.read1(65536)
+        if not chunk:
+            if pending:
+                accept(bytes(pending))
+            return
+        byte_count[0] += len(chunk)
+        pending.extend(chunk)
+        while True:
+            newline = pending.find(b"\n")
+            if newline < 0:
+                if len(pending) > line_limit:
+                    failure.append("Pi event exceeded its per-event byte bound")
+                    overflow.set()
+                    return
+                break
+            line = bytes(pending[:newline])
+            del pending[:newline + 1]
+            if not line or not accept(line):
+                if not line:
+                    failure.append("Pi emitted an empty event")
+                    overflow.set()
+                return
+
+
 def bounded_write(stream: Any, prompt: bytes) -> None:
     try:
         stream.write(prompt)
@@ -754,13 +831,25 @@ def contain_owned_child(process: subprocess.Popen[bytes]) -> None:
 
 def finish_bounded_process(
     process: subprocess.Popen[bytes], prompt: bytes, identity: dict[str, Any] | None, deadline: float,
-    stdout_limit: int, stderr_limit: int,
-) -> tuple[bytes, bytes, bool, bool]:
+    stdout_limit: int, stderr_limit: int, event_limit: int | None = None,
+) -> tuple[bytes, bytes, bool, bool, int, int, str | None]:
     stdout_buffer = bytearray()
     stderr_buffer = bytearray()
+    stdout_bytes = [0]
+    event_count = [0]
+    failure: list[str] = []
     overflow = threading.Event()
+    stdout_reader = (
+        threading.Thread(
+            target=bounded_event_read,
+            args=(process.stdout, stdout_limit, event_limit, stdout_buffer, stdout_bytes, event_count, failure, overflow),
+            daemon=True,
+        )
+        if event_limit is not None else
+        threading.Thread(target=bounded_read, args=(process.stdout, stdout_limit, stdout_buffer, overflow), daemon=True)
+    )
     readers = [
-        threading.Thread(target=bounded_read, args=(process.stdout, stdout_limit, stdout_buffer, overflow), daemon=True),
+        stdout_reader,
         threading.Thread(target=bounded_read, args=(process.stderr, stderr_limit, stderr_buffer, overflow), daemon=True),
     ]
     for reader in readers:
@@ -782,7 +871,11 @@ def finish_bounded_process(
         reader.join(timeout=5)
         if reader.is_alive():
             raise Blocked("Pi output stream did not close after exact process exit")
-    return bytes(stdout_buffer), bytes(stderr_buffer), timed_out, overflow.is_set()
+    observed_stdout_bytes = stdout_bytes[0] if event_limit is not None else len(stdout_buffer)
+    return (
+        bytes(stdout_buffer), bytes(stderr_buffer), timed_out, overflow.is_set(),
+        observed_stdout_bytes, event_count[0], failure[0] if failure else None,
+    )
 
 
 def replace_allowed_file(
@@ -913,8 +1006,8 @@ def execute(state_dir: pathlib.Path, operation_id: str) -> dict[str, Any]:
         receipt.update({"status": "running", "started_at": started.isoformat(), "process": identity})
         atomic_json(receipt_path, receipt)
         try:
-            stdout, stderr, timed_out, overflowed = finish_bounded_process(
-                process, prompt, identity, deadline, intent["stdout_limit"], intent["stderr_limit"]
+            stdout, stderr, timed_out, overflowed, stdout_bytes, event_count, stream_failure = finish_bounded_process(
+                process, prompt, identity, deadline, intent["stdout_limit"], intent["stderr_limit"], intent["event_limit"]
             )
         except Blocked as error:
             receipt.update({"status": "indeterminate", "reason": str(error)})
@@ -923,23 +1016,24 @@ def execute(state_dir: pathlib.Path, operation_id: str) -> dict[str, Any]:
         ended = utcnow()
         receipt.update({
             "ended_at": ended.isoformat(), "exit_status": process.returncode,
-            "stdout_bytes": len(stdout), "stderr_bytes": len(stderr),
+            "stdout_bytes": stdout_bytes, "stderr_bytes": len(stderr),
             "stderr_summary": "empty" if not stderr else "present_redacted",
         })
         if timed_out:
             receipt.update({"status": "timeout", "reason": "wall-clock timeout"})
             atomic_json(receipt_path, receipt)
             raise Blocked("Pi operation timed out")
-        if overflowed or len(stdout) > intent["stdout_limit"] or len(stderr) > intent["stderr_limit"]:
-            receipt.update({"status": "blocked", "reason": "output overflow"})
+        if overflowed or len(stderr) > intent["stderr_limit"]:
+            reason = stream_failure or "output overflow"
+            receipt.update({"status": "blocked", "reason": reason})
             atomic_json(receipt_path, receipt)
-            raise Blocked("Pi output exceeded its bound")
+            raise Blocked(reason)
         if process.returncode != 0:
             receipt.update({"status": "blocked", "reason": "nonzero exit"})
             atomic_json(receipt_path, receipt)
             raise Blocked("Pi exited nonzero")
         try:
-            replacement, count = extract_result(stdout, intent["event_limit"], workdir)
+            replacement, count = extract_result(stdout, event_count, workdir)
         except Blocked as error:
             receipt.update({"status": "blocked", "reason": str(error)})
             atomic_json(receipt_path, receipt)
