@@ -120,6 +120,7 @@ func TestWorkerAdoptPersistsIntentBeforeTmuxAndIsIdempotentWithoutDelivery(t *te
 	running := filepath.Join(bin, "running")
 	failOnce := filepath.Join(bin, "fail-once")
 	row := config.Row{Workspace: "alpha", Window: "native", Workdir: workdir, Thread: "T-native"}
+	admissionWorkdir := workdir + string(os.PathSeparator) + "unused" + string(os.PathSeparator) + ".."
 	start := teardownExpectedStartCommand(teardownIdentity{Workspace: row.Workspace, Session: row.Workspace, Window: row.Window, Thread: row.Thread}, row)
 	writeExecutable(t, filepath.Join(bin, "amp"), `#!/bin/sh
 echo "amp $*" >> `+shellSingleQuote(logPath)+`
@@ -152,7 +153,7 @@ exit 98
 `)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-	args := []string{"--json", "--config-dir", dir, "worker", "adopt", "--thread", row.Thread, "--workspace", row.Workspace, "--window", row.Window, "--workdir", row.Workdir, "--group", "native-group"}
+	args := []string{"--json", "--config-dir", dir, "worker", "adopt", "--thread", row.Thread, "--workspace", row.Workspace, "--window", row.Window, "--workdir", admissionWorkdir, "--group", "native-group"}
 
 	dry := executeWorkerJSON(t, append([]string{"--dry-run"}, args...)...)
 	if len(dry.Planned) != 5 || dry.Planned[0].Worker == nil || dry.Planned[0].Worker.ReceiptSource != nativeAdoptionReceiptSource || dry.Planned[0].Worker.Workdir != workdir || dry.Planned[0].Worker.NativeExecutor != unknownNativePlacement || dry.Planned[0].Worker.NativeRunnerID != unknownNativePlacement || dry.Planned[0].Worker.ExecutionAffinity != unknownNativePlacement || dry.Planned[3].Action != "ensure-label" || dry.Planned[4].Action != "create-client" {
@@ -167,7 +168,7 @@ exit 98
 		t.Fatalf("injected tmux interruption = %v, exit=%d, envelope=%+v", interruptionErr, result.ExitCode(interruptionErr), interrupted)
 	}
 	rows, err := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
-	if err != nil || len(rows) != 1 || !workerRowsEquivalent(rows[0], row) {
+	if err != nil || len(rows) != 1 || rows[0] != row {
 		t.Fatalf("persisted worker intent = %+v, err=%v", rows, err)
 	}
 	memberships, err := config.LoadGroupsReadOnly(filepath.Join(dir, config.GroupsFile))
@@ -185,7 +186,7 @@ exit 98
 	}
 
 	completed := executeWorkerJSON(t, args...)
-	if len(completed.Successful) != 3 || completed.Successful[2].Worker == nil || completed.Successful[2].Worker.LocalState != "adopted" {
+	if len(completed.Successful) != 3 || completed.Successful[2].Worker == nil || completed.Successful[2].Worker.LocalState != "adopted" || completed.Successful[2].Worker.Workdir != workdir {
 		t.Fatalf("completed adoption = %+v", completed)
 	}
 	beforeReplay, err := os.ReadFile(logPath)
@@ -1043,9 +1044,9 @@ func TestThreadArchiveStatusesBoundsAmpThreadsListFailures(t *testing.T) {
 
 func TestScopedWorkerDoctorReusesOneThreadInventory(t *testing.T) {
 	dir := t.TempDir()
-	nonCanonical := filepath.Join("relative", "..", "b")
+	legacyWorkdir := "legacy/../worker"
 	rows := []config.Row{
-		{Workspace: "alpha", Window: "b", Workdir: nonCanonical, Thread: "T-b"},
+		{Workspace: "alpha", Window: "b", Workdir: legacyWorkdir, Thread: "T-b"},
 		{Workspace: "alpha", Window: "a", Workdir: "/tmp/a", Thread: "T-a"},
 		{Workspace: "beta", Window: "c", Workdir: "/tmp/c", Thread: "T-c"},
 	}
@@ -1067,12 +1068,8 @@ func TestScopedWorkerDoctorReusesOneThreadInventory(t *testing.T) {
 			t.Fatalf("worker doctor placement diagnostic = %+v", out)
 		}
 	}
-	wantWorkdir, err := config.CanonicalWorkdir(nonCanonical)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Successful[1].Worker.LocalState != "exact" || got.Successful[1].Worker.Workdir != wantWorkdir || !strings.Contains(got.Successful[1].Message, "local=exact") {
-		t.Fatalf("worker doctor preserved-spelling inspection = %+v, want canonical workdir %q", got.Successful[1], wantWorkdir)
+	if got.Successful[1].Worker.LocalState != "exact" || got.Successful[1].Worker.Workdir != "legacy/../worker" || !strings.Contains(got.Successful[1].Message, "local=exact") {
+		t.Fatalf("worker doctor legacy catalog spelling = %+v", got.Successful[1])
 	}
 }
 

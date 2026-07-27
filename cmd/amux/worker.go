@@ -208,16 +208,6 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			}
 		}
 	}
-	doctorWorkdirs := make(map[string]string, len(rows))
-	if in.Command.Name == "doctor" {
-		for _, row := range rows {
-			workdir, canonicalErr := config.CanonicalWorkdir(row.Workdir)
-			if canonicalErr != nil {
-				return &env, result.Preflight(canonicalErr)
-			}
-			doctorWorkdirs[row.Thread] = workdir
-		}
-	}
 	if workerCommandNeedsTmux(in.Command.Name) {
 		for _, row := range rows {
 			if (in.Command.Name == "launch" || in.Command.Name == "restart") && shelved[row.Thread] {
@@ -381,10 +371,8 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			if doctorStatusErr == nil {
 				remote = string(doctorStatuses[canonicalThreadID(row.Thread)])
 			}
-			reportedRow := row
-			reportedRow.Workdir = doctorWorkdirs[row.Thread]
-			out.Worker = workerPlacementDetails(reportedRow, string(inspections[row.Thread].state))
-			out.Message = fmt.Sprintf("local=%s remote=%s intent=%t native_executor=unknown native_runner_id=unknown execution_affinity=unknown", inspections[row.Thread].state, remote, shelved[row.Thread])
+			out.Worker = workerPlacementDetails(row, string(inspections[row.Thread].state))
+			out.Message = fmt.Sprintf("local=%s remote=%s intent=%t native_executor=%s native_runner_id=%s execution_affinity=%s", inspections[row.Thread].state, remote, shelved[row.Thread], unknownNativePlacement, unknownNativePlacement, unknownNativePlacement)
 			env.Successful = append(env.Successful, out)
 			continue
 		case "reconcile":
@@ -435,7 +423,11 @@ func (a app) workerAdopt(in invocation, dir config.Directory, env *result.Envelo
 	if s.Thread == "" || s.Workspace == "" || s.Window == "" || s.Workdir == "" {
 		return env, result.Request(errors.New("worker adopt requires --thread, --workspace, --window, and --workdir"))
 	}
-	row := config.Row{Workspace: s.Workspace, Window: s.Window, Workdir: s.Workdir, Thread: s.Thread}
+	workdir, err := config.CanonicalWorkdir(s.Workdir)
+	if err != nil {
+		return env, result.Preflight(err)
+	}
+	row := config.Row{Workspace: s.Workspace, Window: s.Window, Workdir: workdir, Thread: s.Thread}
 	stat, err := os.Stat(row.Workdir)
 	if err != nil || !stat.IsDir() {
 		return env, result.Preflight(fmt.Errorf("missing workdir: %s", row.Workdir))

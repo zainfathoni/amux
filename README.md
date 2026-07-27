@@ -166,7 +166,7 @@ Create the thread and deliver its initial assignment with Amp's native thread cr
 amux worker adopt --thread <thread> --workspace <workspace> --window <window> --workdir <workdir>
 ```
 
-Native creation owns execution placement; adoption owns only local catalog, group, workdir, and tmux state. Adoption never re-homes the thread or proves where future turns run. Its JSON and `worker doctor` diagnostics therefore report native executor, runner ID, and execution affinity as `unknown` rather than inferring them from the local pane. Create directly on the exact executor/workdir required for future work, and name an exact physical runner ID and canonical workdir whenever physical state matters. Orb-create → physical-adopt is not migration.
+Native creation owns execution placement; adoption owns only local catalog, group, workdir, and tmux state. Adoption never re-homes the thread or proves where future turns run. New adoption canonicalizes its owner-supplied workdir before storing or launching it. `worker doctor` reports preserved catalog spelling unchanged, so a legacy relative value is not a canonical or physical-location claim. Adoption and doctor report native executor, runner ID, and execution affinity as `unknown` rather than inferring them from the local pane. Create directly on the exact executor/workdir required for future work, and name an exact physical runner ID and owner-supplied canonical workdir whenever physical state matters. Orb-create → physical-adopt is not migration.
 
 The tombstones do not read message files or stdin, resolve or migrate configuration, acquire the mutation lock, invoke Amp/tmux, or write operations. Preserved legacy spawn operation records remain immutable diagnostic evidence and are never retried or reconciled.
 

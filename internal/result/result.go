@@ -144,9 +144,9 @@ type WorkerDetails struct {
 	Workdir           string `json:"workdir"`
 	LocalState        string `json:"local_state"`
 	ReceiptSource     string `json:"receipt_source,omitempty"`
-	NativeExecutor    string `json:"native_executor,omitempty"`
-	NativeRunnerID    string `json:"native_runner_id,omitempty"`
-	ExecutionAffinity string `json:"execution_affinity,omitempty"`
+	NativeExecutor    string `json:"native_executor"`
+	NativeRunnerID    string `json:"native_runner_id"`
+	ExecutionAffinity string `json:"execution_affinity"`
 }
 
 type GroupDetails struct {

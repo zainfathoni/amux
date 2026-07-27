@@ -310,9 +310,9 @@ func TestNativeAdoptionDoesNotClaimExecutorMigration(t *testing.T) {
 		contents string
 		required []string
 	}{
-		"workflow": {workflow, []string{"Orb creation followed by physical adoption as migration", "Adoption neither changes nor verifies continued affinity", "exact physical runner ID", "execution affinity as `unknown`"}},
-		"ADR 0003": {adr, []string{"Adoption does not re-home, migrate, or retarget", "does not verify continued affinity", "Orb creation followed by physical adoption is never an execution-migration mechanism", "execution affinity as `unknown`"}},
-		"README":   {readme, []string{"Adoption never re-homes the thread or proves where future turns run", "Orb-create → physical-adopt is not migration", "execution affinity as `unknown`"}},
+		"workflow": {workflow, []string{"Orb creation followed by physical adoption as migration", "Adoption neither changes nor verifies continued affinity", "owner-supplied workdir", "preserves legacy catalog spelling", "execution affinity as `unknown`"}},
+		"ADR 0003": {adr, []string{"Adoption does not re-home, migrate, or retarget", "does not verify continued affinity", "admission-canonicalized workdir", "authoritative catalog spelling unchanged", "execution affinity as `unknown`"}},
+		"README":   {readme, []string{"Adoption never re-homes the thread or proves where future turns run", "legacy relative value is not a canonical or physical-location claim", "owner-supplied canonical workdir", "execution affinity as `unknown`"}},
 	} {
 		for _, required := range check.required {
 			if !strings.Contains(check.contents, required) {
