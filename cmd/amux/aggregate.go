@@ -44,6 +44,19 @@ func (a app) executeAggregate(in invocation, dir config.Directory) (*result.Enve
 			runnerIn.Selectors.All = true
 		}
 	}
+	if in.Command.Name == "doctor" && in.Selectors.All && !useWorker {
+		operations, operationsErr := config.LoadOperationsReadOnly(dir.OperationsPath())
+		if operationsErr != nil {
+			return &env, result.Preflight(operationsErr)
+		}
+		for _, operation := range operations {
+			if operation.Kind == "worker-spawn" {
+				useWorker = true
+				workerIn.Selectors.All = true
+				break
+			}
+		}
+	}
 	if !useWorker && !useRunner {
 		switch {
 		case in.Command.Name == "list":

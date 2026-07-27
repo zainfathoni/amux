@@ -24,7 +24,7 @@ amux runner unpin --workdir <path>
 amux runner unpin --current
 
 # Worker-only concise routes
-amux spawn --workspace <name> --window <slug> --workdir <path> --mode medium [--group <id>|--work-item-id <id> --worker-ordinal <number>] --message <text> --idempotency-key <key> [--reconcile]
+amux worker adopt --thread <thread> --workspace <name> --window <slug> --workdir <path> [--group <id>]
 amux shelve|unshelve|teardown [--workspace <name>|--thread <id>|--current|--all]
 
 # Durable group intent, reports, and ephemeral callbacks
@@ -57,7 +57,7 @@ Removed commands and positional forms fail with remediation. Do not use `store`,
 
 ## Selection and scope
 
-- Worker selectors: canonical `--thread`; or `--workspace`, `--current`, and explicit `--all` where help permits. `--window` and `--workdir` are creation metadata for worker pin/spawn, not canonical worker identity.
+- Worker selectors: canonical `--thread`; or `--workspace`, `--current`, and explicit `--all` where help permits. `--window` and `--workdir` are placement metadata for worker pin/adopt, not canonical worker identity.
 - Runner selectors: canonical `--workdir`; or `--workspace`, `--current`, and explicit `--all` where help permits. Runner windows are generated implementation details.
 - Aggregate routes accept both `--thread` and `--workdir`. A workspace selection jointly preflights both modes.
 - Read-only discovery may naturally cover all configured resources. No-selector `launch` is the bulk-mutation exception; other machine-wide mutations require `--all`.
@@ -77,7 +77,7 @@ Removed commands and positional forms fail with remediation. Do not use `store`,
 | `remove` | remove selected config; remove worker shelf intent | remove selected config | stop verified selected clients | none |
 | `shelve` | record intent first; preserve worker | none | park verified workers | archive selected threads |
 | `unshelve` | remove intent only after unarchive | none | none | unarchive selected threads |
-| `spawn` | add worker after verified delivery | none | create interactive worker | create/rename one thread |
+| `spawn` | removed tombstone; none | none | none | none |
 | `teardown` | remove worker and shelf intent | none | stop verified worker; absence is benign | archive verified thread |
 | `reconcile` | synchronize shelf/remote drift | repair stale runner ownership | only verified repairs | worker archive synchronization only |
 
@@ -88,7 +88,7 @@ Runner pin requires a canonical existing directory. Git repository, worktree, an
 ## Work-group, report, and callback contract
 
 - Group IDs are at most 32 characters and match `^[a-z0-9]+(?:-[a-z0-9]+)*$` byte-for-byte. Local `groups.tsv` intent is authoritative and survives worker teardown and finish. External labels project member roles only; coordinator identity remains local so long-lived coordinators do not accumulate supervised-group labels. Member labels are add-only: reconcile skips coordinators, removal is local-only and reports `external_sync: unsupported` plus `drift: may_remain_indefinitely`, and promoting an already-labelled member cannot remove its prior label. Coordinator reassignment demotes the prior coordinator to member and reports it separately as `external_sync: additive_ensure_required` plus `drift: label_may_be_missing`; run `group reconcile` to add-only ensure that member's label. Repeated `group declare`/`coordinator` and `group add` targeting an existing coordinator are skipped no-ops that never probe Amp.
-- Spawn validates/sorts explicit groups before creation, then attaches only the final authoritative receiving thread. Explicit `--group` is authoritative. Without it, `--work-item-id` plus `--worker-ordinal` resolves `<configured-prefix>-<work-item-id>-<semantic-window>` from `group-naming.json`, but only after the workdir's `origin` verifies an exact configured `host/owner/repository`. The same exact final group derives `<group-id>-worker-<ordinal>`. Missing, ambiguous, invalid, mismatched, or over-limit policy/input rejects without normalization or truncation before Amp, tmux, or registry mutation. JSON returns bounded `group_naming` details; human output is `GROUP_NAMING<TAB><prefix><TAB><work-item><TAB><slug><TAB><group><TAB><report><TAB><config-source>`. Retry the same key after partial grouping; never attach the abandoned provisioned thread.
+- Create and assign the thread natively in Amp, then adopt the exact returned thread. `amux spawn` and `amux worker spawn` always reject with migration guidance and never read message input or mutate state. Legacy spawn operation records are read-only evidence and must not be retried or reconciled.
 - Report identity is the stable `--report-id` plus immutable group/thread/issue/reference binding. Exact duplicate submission is a skipped replay and retries callback notification. Conflicting reuse and illegal transitions are exit `2`. `ready` requires a PR and means implementation, tests, one review, PR, and normal CI are complete. `blocked` may use `--pr none`; `merged` requires prior durable finish authorization.
 - Submission persists or confirms the report before callback verification. Human fields are tab-separated: recorded submission is `<report><TAB><status><TAB>recorded<TAB><thread>`, exact replay substitutes `duplicate`, and dry-run substitutes `planned`. Its next line is `CALLBACK<TAB><group><TAB><report><TAB>notified`; callback failure substitutes `failed`. Callback failure is exit `1`, with a successful/skipped report outcome and separate failed callback outcome; the report remains pending.
 - `acknowledge` prints `<report><TAB>acknowledged` (or `<report><TAB>duplicate`), but does not authorize finish. `authorize-finish` prints `<report><TAB>authorized` (or `<report><TAB>duplicate`) and is accepted only from the current durable group coordinator for a `ready` report.
@@ -103,8 +103,8 @@ Runner pin requires a canonical existing directory. Git repository, worktree, an
 - Exit `0`: no failures. Exit `1`: at least one runtime failure after mutation may have begun. Exit `2`: request/preflight rejection before mutation.
 - Bulk operations preflight the whole plan, then continue independent actions after runtime failures.
 - Mutations share one bounded machine-level lock. A busy result includes structured lock ownership and performs no mutation.
-- Lock contention is exit `2`, authorizes no side effect, and must be retried as the identical desired-state operation after the current lock owner finishes. Preserve the same report ID or spawn key.
-- Desired-state operations are idempotent. Spawn additionally requires a stable `--idempotency-key`; an unrecoverable interrupted external creation becomes indeterminate and must not be blindly retried.
+- Lock contention is exit `2`, authorizes no side effect, and must be retried as the identical desired-state operation after the current lock owner finishes. Preserve the same report ID or adoption request identity.
+- Desired-state operations are idempotent. An indeterminate native creation must not be blindly retried or inferred from other threads.
 
 ## Installation and maintenance
 

@@ -278,63 +278,25 @@ func TestInvocationPolicyIsProgressivelyDisclosedWithoutChangingClaudeRoutes(t *
 	root := repoRoot(t)
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
 	policy := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "amp-invocation-policy.md"))
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
 	claude := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-read-only-delegation.md"))
-
-	for _, required := range []string{
-		"load [`reference/amp-invocation-policy.md`]",
-		"Never bypass a binding `ask` or `reject`",
-	} {
+	for _, required := range []string{"amp-invocation-policy.md", "Never bypass a binding `ask` or `reject`"} {
 		if !strings.Contains(skill, required) {
 			t.Errorf("SKILL.md is missing invocation-policy routing %q", required)
 		}
 	}
-	for _, required := range []string{
-		"observed",
-		"instruction-only",
-		"one narrow query",
-		"Raw delegated arguments are never logged",
-		"Amp-native `runner(id)`",
-		"unknown charge route",
-		"public-safe",
-		"#147",
-		"#176",
-	} {
+	for _, required := range []string{"observed", "instruction-only", "Raw delegated arguments are never logged", "Amp-native `runner(id)`", "unknown charge route", "public-safe", "#147", "#176"} {
 		if !strings.Contains(policy, required) {
 			t.Errorf("invocation policy is missing %q", required)
 		}
 	}
+	for _, required := range []string{"explicit executor", "Select `medium`", "Amp-native `runner(id)`", "does not return a prompt digest", "do not claim exactly-once delivery"} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("native creation workflow is missing %q", required)
+		}
+	}
 	if strings.Contains(claude, "amp-invocation-policy") {
 		t.Error("independent Claude route unexpectedly loads invocation policy")
-	}
-	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
-	for _, required := range []string{
-		"resolve-amp-invocation-policy",
-		"MODE=medium",
-		`"mode":"%s"`,
-		"exact deterministic `allow` document",
-		"Every automatic `amux spawn` command in this reference",
-		"Exit nonzero stops before `amux spawn`",
-	} {
-		if !strings.Contains(workflow, required) {
-			t.Errorf("automatic spawn workflow is missing resolver preflight %q", required)
-		}
-	}
-	if count := strings.Count(workflow, "Run the shared automatic-spawn preflight above before this block."); count != 2 {
-		t.Errorf("automatic spawn route markers=%d, want 2 for sprawl and durable coordination", count)
-	}
-	spawnCommands := 0
-	scanLines(t, filepath.Join(root, "skills", "amux", "reference", "workflows.md"), func(lineNumber int, line string) {
-		command := commandText(line)
-		if !strings.HasPrefix(command, "amux ") || !strings.Contains(command, " spawn ") {
-			return
-		}
-		spawnCommands++
-		if !strings.Contains(command, `--mode "$MODE"`) {
-			t.Errorf("workflows.md:%d automatic spawn does not bind shared MODE: %s", lineNumber, strings.TrimSpace(line))
-		}
-	})
-	if spawnCommands != 8 {
-		t.Errorf("automatic spawn command coverage=%d, want 8", spawnCommands)
 	}
 }
 
@@ -347,16 +309,94 @@ func TestReadThreadDiscrepancyRecoveryContractStaysAligned(t *testing.T) {
 		filepath.Join("skills", "amux", "reference", "troubleshooting.md"),
 	} {
 		contents := readSkillFile(t, root, relativePath)
-		for _, required := range []string{
-			"authorized `/amux` lifecycle or coordination operation",
-			"concrete local/GitHub discrepancy",
-			"deterministic evidence",
-			"durable/local/GitHub evidence",
-			"one narrow query",
-			"block rather than widening or chaining",
-		} {
+		for _, required := range []string{"authorized `/amux` lifecycle or coordination operation", "concrete local/GitHub discrepancy", "deterministic evidence", "durable/local/GitHub evidence", "one narrow query", "block rather than widening or chaining"} {
 			if !strings.Contains(contents, required) {
 				t.Errorf("%s is missing discrepancy-recovery contract %q", relativePath, required)
+			}
+		}
+	}
+}
+
+func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	stages := []string{"### 1. Preflight authoritative state and bootstrap the CLI", "### 2. Declare the group and register the verified coordinator lease", "### 3. Native-create and adopt the authoritative thread", "### 4. Persist ready, wake, acknowledge, and independently verify", "### 5. Merge, verify post-merge CI, then authorize finish", "### 6. Submit merged and run `/amux finish`", "### 7. Coordinator-owned deadline queue"}
+	last := -1
+	for _, stage := range stages {
+		at := strings.Index(workflow, stage)
+		if at <= last {
+			t.Errorf("coordinator stage missing or out of order: %q", stage)
+		}
+		last = at
+	}
+	for _, required := range []string{
+		"native parent/sub-issue/blocked-by/blocking relationships", "fresh `origin/main`", "issue-unprefixed semantic window", "worker adopt", "--group <durable-issue-group>",
+		"amux --json callback register", "amux report submit --report-id <stable-report-id>", "amux report pending --group <durable-issue-group>", "amux report acknowledge --report-id <stable-report-id>",
+		"PR URL, head branch/SHA", "amux report authorize-finish --report-id <stable-report-id>", "post-merge CI", "--status merged", "amux teardown --thread <member-thread>", "Group membership and report history survive teardown",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("coordinator workflow is missing %q", required)
+		}
+	}
+}
+
+func TestIssueCoordinationPreservesAndConfiguresDurableIdentity(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	readme := readSkillFile(t, root, "README.md")
+	for _, required := range []string{"issue-bearing branch/worktree", "issue-unprefixed semantic window", "exact durable group", "stable report ID", "immutable coordination input"} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("workflow is missing durable identity rule %q", required)
+		}
+	}
+	for _, required := range []string{"amux group declare --group amux-131", "--report-id amux-133-worker-1 --group amux-133", "explicit local adoption"} {
+		if !strings.Contains(readme, required) {
+			t.Errorf("README is missing durable identity example %q", required)
+		}
+	}
+}
+
+func TestConfigurableGroupNamingSourceReferencesStayConsistent(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	current := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "commands.md")) + readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	for _, removed := range []string{"--work-item-id", "--worker-ordinal", "GROUP_NAMING<TAB>"} {
+		if strings.Contains(current, removed) {
+			t.Errorf("current native workflow still advertises removed automatic spawn naming %q", removed)
+		}
+	}
+	for _, required := range []string{"worker adopt", "exact group", "stable report ID"} {
+		if !strings.Contains(current, required) {
+			t.Errorf("current native workflow is missing explicit identity %q", required)
+		}
+	}
+}
+
+func TestWorkGroupCompletionsExposeImplementedCommands(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	checks := map[string][]string{
+		"bash": {"declare add remove coordinator list show reconcile", "register clear", "submit pending history acknowledge authorize-finish", "worker", "adopt"},
+		"zsh":  {"group_commands=(", "callback_commands=(", "report_commands=(", "--report-id", "--pane", "adopt"},
+		"fish": {"__fish_amux_group_leaf", "__fish_amux_callback_leaf", "__fish_amux_report_leaf", "authorize-finish", "report-id", "pane", "adopt"},
+	}
+	for shell, wants := range checks {
+		command := exec.Command("go", "run", "./cmd/amux", "completion", shell)
+		command.Dir = root
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("completion %s failed: %v\n%s", shell, err, output)
+		}
+		for _, want := range wants {
+			if !strings.Contains(string(output), want) {
+				t.Errorf("completion %s is missing %q", shell, want)
+			}
+		}
+		for _, removed := range []string{"--message-file", "--idempotency-key", "--work-item-id", "--worker-ordinal"} {
+			if strings.Contains(string(output), removed) {
+				t.Errorf("completion %s retains removed spawn flag %q", shell, removed)
 			}
 		}
 	}
@@ -721,204 +761,6 @@ func TestDocumentedCommandTreeMatchesCLIHelp(t *testing.T) {
 	}
 }
 
-func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
-	t.Parallel()
-	root := repoRoot(t)
-	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
-	commands := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "commands.md"))
-	troubleshooting := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "troubleshooting.md"))
-
-	stages := []string{
-		"### 1. Preflight authoritative state and bootstrap the CLI",
-		"### 2. Declare the group and register the verified coordinator lease",
-		"### 3. Native-create and adopt the authoritative thread",
-		"### 4. Persist ready, wake, acknowledge, and independently verify",
-		"### 5. Merge, verify post-merge CI, then authorize finish",
-		"### 6. Submit merged and run `/amux finish`",
-		"### 7. Coordinator-owned deadline queue",
-	}
-	last := -1
-	for _, stage := range stages {
-		at := strings.Index(workflow, stage)
-		if at <= last {
-			t.Errorf("coordinator stage missing or out of order: %q", stage)
-		}
-		last = at
-	}
-
-	for _, required := range []string{
-		"native parent/sub-issue/blocked-by/blocking relationships",
-		"fresh `origin/main`",
-		"issue-unprefixed semantic window",
-		"--mode medium",
-		"--group <durable-issue-group>",
-		"native-create → `worker adopt`",
-		"amux --json callback register --group <durable-issue-group> --thread <coordinator-thread> --pane <coordinator-pane>",
-		"amux report submit --report-id <stable-report-id> --group <durable-issue-group>",
-		"amux report pending --group <durable-issue-group>",
-		"amux report acknowledge --report-id <stable-report-id>",
-		"PR URL, head branch/SHA, issue scope and diff, mergeability, closing-issue metadata",
-		"amux report authorize-finish --report-id <stable-report-id>",
-		"verify post-merge CI",
-		"--status merged",
-		"invokes `amux teardown --thread <member-thread>` last",
-		"Group membership and report history survive teardown",
-		"<stable-report-id><TAB>ready<TAB>recorded<TAB><member-thread>",
-		"CALLBACK<TAB><durable-issue-group><TAB><stable-report-id><TAB>notified",
-		"AMUX_REPORT group=<durable-issue-group> report=<stable-report-id>",
-		"Do not edit `reports.json` directly",
-		"current CLI exposes no command to create or update deadline records",
-	} {
-		if !strings.Contains(workflow, required) {
-			t.Errorf("coordinator workflow is missing %q", required)
-		}
-	}
-	for _, inconsistent := range []string{"--group amux-135", "--group <group>", "CALLBACK<TAB><group><TAB><stable-report-id>", "AMUX_REPORT group=<group> report=<stable-report-id>"} {
-		if strings.Contains(workflow, inconsistent) {
-			t.Errorf("coordinator workflow contains inconsistent durable issue placeholder %q", inconsistent)
-		}
-	}
-	durableStart := strings.Index(workflow, "## Coordinate a durable issue work group")
-	if durableStart < 0 {
-		t.Fatal("durable coordination workflow is missing")
-	}
-	durable := workflow[durableStart:]
-	namingPreflight := strings.Index(durable, "--workdir <verified-repository-checkout>")
-	groupDeclaration := strings.Index(durable, "amux --json group declare")
-	callbackRegistration := strings.Index(durable, "amux --json callback register")
-	worktreeCreation := strings.Index(durable, "git worktree add -b")
-	if namingPreflight < 0 || groupDeclaration < 0 || callbackRegistration < 0 || worktreeCreation < 0 || namingPreflight > groupDeclaration || namingPreflight > callbackRegistration || namingPreflight > worktreeCreation {
-		t.Errorf("durable naming preflight must precede group declaration, callback registration, and worktree creation: naming=%d group=%d callback=%d worktree=%d", namingPreflight, groupDeclaration, callbackRegistration, worktreeCreation)
-	}
-	for _, required := range []string{"Treat this result as immutable coordination input", "No thread, worktree, group, callback, label, or report mutation may precede this step", "final dry-run to reproduce byte-for-byte"} {
-		if !strings.Contains(durable, required) {
-			t.Errorf("durable naming ordering contract is missing %q", required)
-		}
-	}
-
-	for _, required := range []string{
-		"<report><TAB><status><TAB>recorded<TAB><thread>",
-		"CALLBACK<TAB><group><TAB><report><TAB>notified",
-		"AMUX_REPORT group=<group> report=<id>",
-		"external_sync: unsupported",
-		"drift: may_remain_indefinitely",
-		"Lock contention is exit `2`",
-	} {
-		if !strings.Contains(commands, required) {
-			t.Errorf("command contract is missing %q", required)
-		}
-	}
-
-	for _, required := range []string{
-		"Missing, stale, or recycled callback",
-		"Busy composer",
-		"Failed send with a verified safe pane",
-		"Duplicate or reordered wake-up",
-		"Coordinator restart",
-		"Add-only label drift",
-		"Bootstrap mismatch",
-		"retry the identical desired-state operation with the same report ID or spawn key",
-		"do not fall back to stale bare `amux`",
-	} {
-		if !strings.Contains(troubleshooting, required) {
-			t.Errorf("coordinator recovery is missing %q", required)
-		}
-	}
-}
-
-func TestIssueCoordinationPreservesAndConfiguresDurableIdentity(t *testing.T) {
-	t.Parallel()
-	root := repoRoot(t)
-	checks := map[string][]string{
-		filepath.Join("skills", "amux", "reference", "workflows.md"): {
-			"`amux-<issue-number>`",
-			"`amux-<issue-number>-worker-<ordinal>`",
-			"`<repository-slug>-<issue-number>`",
-			"`<repository-slug>-<issue-number>-worker-<ordinal>`",
-			"not a generic `amux group` validation rule",
-			"`amux-135-worker-1`",
-			"purpose-specific groups such as `pr-181-review`",
-			"`<project-prefix>-<work-item-id>-<short-slug>`",
-			"`<group-id>-worker-<ordinal>`",
-			"`host/owner/repository` identity verified from the selected workdir's `origin`",
-			"--work-item-id <work-item-id> --worker-ordinal <ordinal>",
-			"Explicit `--group` wins",
-		},
-		"README.md": {
-			"--group amux-110",
-			"--report-id amux-133-worker-1 --group amux-133",
-			"another unconfigured repository uses the equivalent `<repository-slug>-131` and `<repository-slug>-131-worker-1` explicitly",
-			"Existing `amux-*`, repository-slug, `issue-*`, purpose-specific groups such as `pr-181-review`, and explicit groups remain valid",
-			"`--work-item-id 975 --worker-ordinal 1 --window unlisted-addons`",
-			"Explicit `--group` remains authoritative",
-		},
-		filepath.Join("docs", "skill", "index.html"): {
-			"amux-&lt;issue-number&gt;",
-			"amux-&lt;issue-number&gt;-worker-&lt;ordinal&gt;",
-			"--group amux-135",
-			"--report-id amux-135-worker-1 --group amux-135",
-			"&lt;project-prefix&gt;-&lt;work-item-id&gt;-&lt;short-slug&gt;",
-			"Explicit <code>--group</code> remains authoritative",
-		},
-	}
-	for relativePath, required := range checks {
-		contents := readSkillFile(t, root, relativePath)
-		for _, want := range required {
-			if !strings.Contains(contents, want) {
-				t.Errorf("%s is missing issue identity convention %q", relativePath, want)
-			}
-		}
-		for _, obsolete := range []string{"--group issue-110", "--group issue-131", "--group issue-133", "`issue-135-worker-1`"} {
-			if strings.Contains(contents, obsolete) {
-				t.Errorf("%s still teaches obsolete issue identity %q", relativePath, obsolete)
-			}
-		}
-	}
-}
-
-func TestConfigurableGroupNamingSourceReferencesStayConsistent(t *testing.T) {
-	t.Parallel()
-	root := repoRoot(t)
-	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
-	commands := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "commands.md"))
-	readme := readSkillFile(t, root, "README.md")
-	for _, contents := range []string{workflow, commands, readme} {
-		for _, required := range []string{"group-naming.json", "--work-item-id", "--worker-ordinal", "origin", "Explicit `--group`"} {
-			if !strings.Contains(contents, required) {
-				t.Errorf("configurable naming reference is missing %q", required)
-			}
-		}
-	}
-	for _, required := range []string{"GROUP_NAMING<TAB><prefix><TAB><work-item><TAB><slug><TAB><group><TAB><report><TAB><config-source>", "before Amp, tmux, or registry mutation", "without normalization or truncation"} {
-		if !strings.Contains(commands, required) {
-			t.Errorf("command naming contract is missing %q", required)
-		}
-	}
-}
-
-func TestWorkGroupCompletionsExposeImplementedCommands(t *testing.T) {
-	t.Parallel()
-	root := repoRoot(t)
-	checks := map[string][]string{
-		"bash": {"declare add remove coordinator list show reconcile", "register clear", "submit pending history acknowledge authorize-finish", "--work-item-id --worker-ordinal"},
-		"zsh":  {"group_commands=(", "callback_commands=(", "report_commands=(", "--report-id", "--pane", "--work-item-id", "--worker-ordinal"},
-		"fish": {"__fish_amux_group_leaf", "__fish_amux_callback_leaf", "__fish_amux_report_leaf", "authorize-finish", "-l 'report-id'", "-l 'pane'", "-l 'work-item-id'", "-l 'worker-ordinal'"},
-	}
-	for shell, wants := range checks {
-		command := exec.Command("go", "run", "./cmd/amux", "completion", shell)
-		command.Dir = root
-		output, err := command.CombinedOutput()
-		if err != nil {
-			t.Fatalf("completion %s failed: %v\n%s", shell, err, output)
-		}
-		for _, want := range wants {
-			if !strings.Contains(string(output), want) {
-				t.Errorf("completion %s is missing %q", shell, want)
-			}
-		}
-	}
-}
-
 func TestCoordinatorDeadlinePolicyIsConsistent(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
@@ -1108,16 +950,12 @@ func TestSprawlContractUsesDedicatedSemanticWorkers(t *testing.T) {
 	t.Parallel()
 	workflow := readSkillFile(t, repoRoot(t), filepath.Join("skills", "amux", "reference", "workflows.md"))
 	for _, required := range []string{
-		"worker-only orchestration",
-		"native `blockedBy`, `blocking`, parent, and sub-issue relationships",
-		"`amux-agent-first` label",
-		"one narrow issue, one dedicated worktree, and one branch",
-		"--window <semantic-window>",
-		"--mode medium",
-		"--title-prefix '#<issue>'",
-		"--group <durable-issue-group>",
-		"focused Oracle review",
-		"callback destination metadata",
+		"native dependency",
+		"one dedicated branch/worktree",
+		"issue-unprefixed semantic window",
+		"task-only assignment",
+		"native-created thread",
+		"worker adopt",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("sprawl workflow is missing %q", required)
@@ -1324,14 +1162,7 @@ func TestContractV1IsProgressivelyDisclosedForWorkers(t *testing.T) {
 	if !strings.Contains(workflow, "contract-v1.md") || !strings.Contains(workflow, "task-only") {
 		t.Error("workflows must require task-only prompts and contract-v1 read-once")
 	}
-	for _, required := range []string{
-		"path the coordinator resolved",
-		"never** send an unresolved relative path",
-		"~/.agents/skills/amux",
-		"~/.config/agents/skills/amux",
-		"~/.config/amp/skills/amux",
-		"reference/contract-v1.md` alone",
-	} {
+	for _, required := range []string{"absolute path", "one-time read"} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("spawn message template must resolve the contract path for the worker: missing %q", required)
 		}
@@ -1355,7 +1186,7 @@ func TestContractV1IsProgressivelyDisclosedForWorkers(t *testing.T) {
 	if healthAt := strings.Index(coordinate, "## Health workers and runners"); healthAt > 0 {
 		coordinate = coordinate[:healthAt]
 	}
-	for _, required := range []string{"contract-v1.md", "only protocol source"} {
+	for _, required := range []string{"contract-v1.md", "task-only assignment"} {
 		if !strings.Contains(coordinate, required) {
 			t.Errorf("coordinator work-group spawn must carry the contract read requirement: missing %q", required)
 		}
@@ -1427,4 +1258,26 @@ func readSkillFile(t *testing.T, root, relativePath string) string {
 		t.Fatal(err)
 	}
 	return string(contents)
+}
+
+func TestPublicDocsContainNoExecutableSpawnExamples(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	paths := []string{"README.md", filepath.Join("docs", "index.html"), filepath.Join("docs", "skill", "index.html"), filepath.Join("skills", "amux", "SKILL.md")}
+	paths = append(paths,
+		filepath.Join("skills", "amux", "reference", "commands.md"),
+		filepath.Join("skills", "amux", "reference", "workflows.md"),
+		filepath.Join("skills", "amux", "reference", "troubleshooting.md"),
+		filepath.Join("skills", "amux", "reference", "trigger-phrases.md"),
+		filepath.Join("skills", "amux", "reference", "amp-invocation-policy.md"),
+	)
+	for _, path := range paths {
+		contents := readSkillFile(t, root, path)
+		for lineNumber, line := range strings.Split(contents, "\n") {
+			trimmed := strings.TrimSpace(strings.TrimPrefix(line, ">"))
+			if strings.HasPrefix(trimmed, "$ amux spawn ") || strings.HasPrefix(trimmed, "amux spawn ") || strings.HasPrefix(trimmed, "$ amux worker spawn ") || strings.HasPrefix(trimmed, "amux worker spawn ") {
+				t.Errorf("%s:%d contains executable removed spawn example: %s", path, lineNumber+1, trimmed)
+			}
+		}
+	}
 }

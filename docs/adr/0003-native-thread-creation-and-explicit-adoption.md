@@ -11,7 +11,7 @@ Worker assignment becomes a two-owner protocol:
 1. Amp's authenticated native thread-creation tool, invoked by the `/amux` skill, owns the single creation invocation and submission of its initial prompt. The skill must choose an explicit executor (`orb`, local execution where supported, or one exact Amp runner ID) and an explicit mode (`medium` unless the owner names another mode). It never silently falls back to another executor or mode.
 2. `amux worker adopt` accepts the exact already-created thread and owns only deterministic local adoption: canonical workspace/session, semantic window, canonical workdir, tmux client, worker catalog, and optional exact durable group-member intent.
 
-The amux CLI does not invoke, wrap, or pretend to invoke an Amp server tool. Adoption sends no message, presses no Enter, parses no composer or box-drawing frame, and reads no transcript. Legacy `amux spawn` remains available as a deprecated compatibility path until the removal gate below is satisfied.
+The amux CLI does not invoke, wrap, or pretend to invoke an Amp server tool. Adoption sends no message, presses no Enter, parses no composer or box-drawing frame, and reads no transcript. Legacy `amux spawn` and `amux worker spawn` are deterministic, non-mutating exit-2 migration tombstones.
 
 The prototype command is:
 
@@ -86,7 +86,7 @@ A creation receipt never authorizes merge, finish, archive, teardown, cleanup, r
 
 ## Migration and removal gate
 
-The `/amux` skill should prefer native create → adopt for new workers and mark TUI delivery deprecated. Existing workers, operation records, groups, reports, callbacks, shelves, restart, and finish remain compatible. `amux spawn` is not removed or broadly refactored in this prototype, and closed parser work is not revived.
+The `/amux` skill uses native create → adopt for new workers. Existing workers, groups, reports, callbacks, shelves, restart, and finish remain compatible. Legacy operation records remain readable, immutable diagnostic evidence through v0.3.x: they are never reinterpreted, retried, deleted, converted, or marked successful.
 
 Compatibility spawn may be removed only in a later explicit change after all of the following are recorded:
 
