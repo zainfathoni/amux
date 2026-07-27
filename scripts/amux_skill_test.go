@@ -1263,7 +1263,7 @@ func readSkillFile(t *testing.T, root, relativePath string) string {
 func TestPublicDocsContainNoExecutableSpawnExamples(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	paths := []string{"README.md", filepath.Join("docs", "index.html"), filepath.Join("docs", "skill", "index.html"), filepath.Join("skills", "amux", "SKILL.md")}
+	paths := []string{"README.md", "CONTRIBUTING.md", filepath.Join("docs", "index.html"), filepath.Join("docs", "skill", "index.html"), filepath.Join("skills", "amux", "SKILL.md")}
 	paths = append(paths,
 		filepath.Join("skills", "amux", "reference", "commands.md"),
 		filepath.Join("skills", "amux", "reference", "workflows.md"),
