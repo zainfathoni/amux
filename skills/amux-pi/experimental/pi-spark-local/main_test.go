@@ -506,6 +506,63 @@ func TestGitHardeningRejectsCoreAttributesFileIncludingFromInclude(t *testing.T)
 	}
 }
 
+func TestGitHardeningRejectsWorktreeScopedConfigurationAndIncludes(t *testing.T) {
+	for _, tc := range []struct {
+		key      string
+		included bool
+	}{
+		{"core.attributesFile", false},
+		{"core.attributesFile", true},
+		{"filter.evil.clean", false},
+		{"filter.evil.clean", true},
+		{"filter.evil.process", false},
+		{"filter.evil.process", true},
+	} {
+		t.Run(fmt.Sprintf("%s/included=%t", tc.key, tc.included), func(t *testing.T) {
+			f := newFixture(t)
+			gitRun(t, f.workdir, "config", "extensions.worktreeConfig", "true")
+			value := filepath.Join(f.root, "external-attributes")
+			want := "core.attributesFile"
+			if strings.HasPrefix(tc.key, "filter.") {
+				mustWrite(t, filepath.Join(f.workdir, ".gitattributes"), []byte("target.txt filter=evil\n"), 0o644)
+				gitRun(t, f.workdir, "add", ".gitattributes")
+				gitRun(t, f.workdir, "commit", "-qm", "worktree filter fixture")
+				marker := filepath.Join(f.root, "worktree-filter-invoked")
+				value = fmt.Sprintf("sh -c 'printf invoked >%s; cat'", marker)
+				want = "external Git filter configuration"
+				if err := os.Chtimes(f.target, time.Now().Add(time.Second), time.Now().Add(time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+						t.Errorf("worktree-scoped filter executed: %v", statErr)
+					}
+				})
+			} else {
+				mustWrite(t, value, []byte("* text\n"), 0o600)
+			}
+			if tc.included {
+				included := filepath.Join(f.root, "worktree-included.gitconfig")
+				var contents string
+				if strings.HasPrefix(tc.key, "filter.") {
+					driver := strings.TrimPrefix(tc.key, "filter.evil.")
+					contents = fmt.Sprintf("[filter \"evil\"]\n\t%s = %s\n", driver, value)
+				} else {
+					contents = fmt.Sprintf("[core]\n\tattributesFile = %s\n", value)
+				}
+				mustWrite(t, included, []byte(contents), 0o600)
+				gitRun(t, f.workdir, "config", "--worktree", "include.path", included)
+			} else {
+				gitRun(t, f.workdir, "config", "--worktree", tc.key, value)
+			}
+			err := run(f.args("--task", "edit"), &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
 func TestGitCommandOutputIsBounded(t *testing.T) {
 	f := newFixture(t)
 	large := filepath.Join(f.workdir, "large.txt")

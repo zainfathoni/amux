@@ -808,9 +808,9 @@ func rollbackAfterApplyWith(workdir, target string, before []byte, cause error, 
 }
 
 func requireSafeGitConfiguration(workdir string) error {
-	configNames, err := git(workdir, "config", "--local", "--includes", "--name-only", "--null", "--list")
+	configNames, err := git(workdir, "config", "--includes", "--name-only", "--null", "--list")
 	if err != nil {
-		return errors.New("repository-local Git configuration could not be inspected safely")
+		return errors.New("effective repository Git configuration could not be inspected safely")
 	}
 	for _, name := range bytes.Split(configNames, []byte{0}) {
 		lower := strings.ToLower(string(name))
