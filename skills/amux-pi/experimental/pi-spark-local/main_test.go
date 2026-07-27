@@ -39,7 +39,7 @@ func TestAppliesOneExactReplacementInPrintMode(t *testing.T) {
 	if got.Status != "replacement_applied_untrusted" || got.RequestedModel != model || got.Version != packageVersion || got.Stderr != "empty" {
 		t.Fatalf("result=%+v", got)
 	}
-	wantArgs := append([]string{f.node, f.pi}, fixedArgs...)
+	wantArgs := append([]string{mustCanonical(t, f.node), mustCanonical(t, f.pi)}, fixedArgs...)
 	if strings.Join(got.Argv, "\x00") != strings.Join(wantArgs, "\x00") {
 		t.Fatalf("argv=%q, want %q", got.Argv, wantArgs)
 	}
@@ -494,6 +494,15 @@ func mustReadFile(path string) []byte {
 		panic(err)
 	}
 	return data
+}
+
+func mustCanonical(t *testing.T, path string) string {
+	t.Helper()
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
 }
 
 func marshal(t *testing.T, value any) string {
