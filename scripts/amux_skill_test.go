@@ -14,6 +14,7 @@ var publicSkillFiles = []string{
 	"README.md",
 	filepath.Join("skills", "amux", "SKILL.md"),
 	filepath.Join("skills", "amux", "reference", "pi-spark-orb-executor.md"),
+	filepath.Join("skills", "amux", "reference", "pi-spark-local-executor.md"),
 	filepath.Join("skills", "amux", "reference", "commands.md"),
 	filepath.Join("skills", "amux", "reference", "trigger-phrases.md"),
 	filepath.Join("skills", "amux", "reference", "workflows.md"),
@@ -33,8 +34,8 @@ func TestTriggerChecklistMatchesSkillActivationAndRouting(t *testing.T) {
 
 	triggerPattern := regexp.MustCompile(`(?m)^\| \x60([^\x60]+)\x60 \|`)
 	matches := triggerPattern.FindAllStringSubmatch(checklist, -1)
-	if len(matches) != 23 {
-		t.Fatalf("trigger checklist has %d routes, want 23", len(matches))
+	if len(matches) != 24 {
+		t.Fatalf("trigger checklist has %d routes, want 24", len(matches))
 	}
 	for _, match := range matches {
 		trigger := match[1]
@@ -55,6 +56,7 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 		"trigger-phrases.md",
 		"claude-opus-orb-executor.md",
 		"pi-spark-orb-executor.md",
+		"pi-spark-local-executor.md",
 		"claude-read-only-delegation.md",
 		"claude-mutating-delegation.md",
 		"claude-delegation-contract.md",
@@ -203,6 +205,50 @@ func TestExperimentalPiSparkOrbRecipeStaysProviderSpecificAndFailClosed(t *testi
 			t.Errorf("Pi/Spark capture invariant missing or out of order: %q", marker)
 		}
 		last = at
+	}
+}
+
+func TestLocalPiSparkExecutorStaysProviderSpecificAndPersistentHostSafe(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
+	triggers := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md"))
+	reference := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "pi-spark-local-executor.md"))
+	helper := readSkillFile(t, root, filepath.Join("skills", "amux", "experimental", "pi-spark-local", "pi_spark_local.py"))
+
+	for _, required := range []string{
+		"Run a bounded local Pi Spark microtask",
+		"pi-spark-local-executor.md",
+	} {
+		if !strings.Contains(skill, required) || !strings.Contains(triggers, required) {
+			t.Errorf("local Pi route is missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		"openai-codex/gpt-5.3-codex-spark", "persistent-host", "Darwin-only",
+		"never reads `auth.json`", "--no-tools", "awaiting_quota_confirmation",
+		"chatgpt-codex-oauth-spark", "preflight", "plan", "execute", "finalize",
+		"inspect", "recover", "Pi cannot commit, push, open a PR, merge, release, install, clean, or tear down",
+	} {
+		if !strings.Contains(reference, required) {
+			t.Errorf("local Pi reference is missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		`MODEL = "openai-codex/gpt-5.3-codex-spark"`, `"--no-tools"`,
+		`PROHIBITED_ENV = ("OPENAI_API_KEY", "CODEX_API_KEY")`,
+		`fcntl.LOCK_EX | fcntl.LOCK_NB`, `process_identity(process.pid)`,
+		`process.terminate()`, `process.kill()`, `status": "awaiting_quota_confirmation"`,
+		`result_trust": "untrusted_pending_coordinator_review_and_validation"`,
+	} {
+		if !strings.Contains(helper, required) {
+			t.Errorf("local Pi helper is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"logout", "pkill", "killall", "git push", "gh pr", "read_text())\n    auth"} {
+		if strings.Contains(helper, forbidden) {
+			t.Errorf("local Pi helper contains forbidden lifecycle/credential marker %q", forbidden)
+		}
 	}
 }
 
