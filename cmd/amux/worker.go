@@ -382,7 +382,8 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			if doctorStatusErr == nil {
 				remote = string(doctorStatuses[canonicalThreadID(row.Thread)])
 			}
-			out.Message = fmt.Sprintf("local=%s remote=%s intent=%t", inspections[row.Thread].state, remote, shelved[row.Thread])
+			out.Worker = workerPlacementDetails(row, string(inspections[row.Thread].state))
+			out.Message = fmt.Sprintf("local=%s remote=%s intent=%t native_executor=%s native_runner_id=%s execution_affinity=%s", inspections[row.Thread].state, remote, shelved[row.Thread], unknownNativePlacement, unknownNativePlacement, unknownNativePlacement)
 			env.Successful = append(env.Successful, out)
 			continue
 		case "reconcile":
@@ -423,14 +424,21 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 	return &env, nil
 }
 
-const nativeAdoptionReceiptSource = "amp_native_create_thread"
+const (
+	nativeAdoptionReceiptSource = "amp_native_create_thread"
+	unknownNativePlacement      = "unknown"
+)
 
 func (a app) workerAdopt(in invocation, dir config.Directory, env *result.Envelope) (*result.Envelope, error) {
 	s := in.Selectors
 	if s.Thread == "" || s.Workspace == "" || s.Window == "" || s.Workdir == "" {
 		return env, result.Request(errors.New("worker adopt requires --thread, --workspace, --window, and --workdir"))
 	}
-	row := config.Row{Workspace: s.Workspace, Window: s.Window, Workdir: s.Workdir, Thread: s.Thread}
+	workdir, err := config.CanonicalWorkdir(s.Workdir)
+	if err != nil {
+		return env, result.Preflight(err)
+	}
+	row := config.Row{Workspace: s.Workspace, Window: s.Window, Workdir: workdir, Thread: s.Thread}
 	stat, err := os.Stat(row.Workdir)
 	if err != nil || !stat.IsDir() {
 		return env, result.Preflight(fmt.Errorf("missing workdir: %s", row.Workdir))
@@ -652,8 +660,21 @@ func (a app) workerAdopt(in invocation, dir config.Directory, env *result.Envelo
 
 func adoptionOutcome(row config.Row, action, localState string) result.Outcome {
 	out := workerOutcome(row, action, "")
-	out.Worker = &result.WorkerDetails{Workspace: row.Workspace, Window: row.Window, Workdir: row.Workdir, LocalState: localState, ReceiptSource: nativeAdoptionReceiptSource}
+	out.Worker = workerPlacementDetails(row, localState)
+	out.Worker.ReceiptSource = nativeAdoptionReceiptSource
 	return out
+}
+
+func workerPlacementDetails(row config.Row, localState string) *result.WorkerDetails {
+	return &result.WorkerDetails{
+		Workspace:         row.Workspace,
+		Window:            row.Window,
+		Workdir:           row.Workdir,
+		LocalState:        localState,
+		NativeExecutor:    unknownNativePlacement,
+		NativeRunnerID:    unknownNativePlacement,
+		ExecutionAffinity: unknownNativePlacement,
+	}
 }
 
 func verifyAdoptionThreadAndTmux(row config.Row) (workerInspection, error) {

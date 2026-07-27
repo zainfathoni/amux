@@ -53,6 +53,48 @@ func TestEnvelopeWritesOneVersionedDocumentWithDiscriminatedResources(t *testing
 	}
 }
 
+func TestWorkerPlacementFieldsRemainExplicitInSchemaV1(t *testing.T) {
+	envelope := NewEnvelope("worker doctor", false)
+	worker, err := WorkerResource("T-worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.Successful = append(envelope.Successful, Outcome{
+		Resource: worker,
+		Action:   "doctor",
+		Worker:   &WorkerDetails{},
+	})
+
+	var stdout bytes.Buffer
+	if err := envelope.Write(&stdout); err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	if got := int(document["schema_version"].(float64)); got != SchemaVersion {
+		t.Fatalf("schema_version = %d, want additive schema v1", got)
+	}
+	details := document["successful"].([]any)[0].(map[string]any)["worker"].(map[string]any)
+	for _, field := range []string{"native_executor", "native_runner_id", "execution_affinity"} {
+		if value, found := details[field]; !found || value != "" {
+			t.Fatalf("worker placement field %q = %#v, found=%t; field must remain explicit", field, value, found)
+		}
+	}
+	var legacy struct {
+		SchemaVersion int `json:"schema_version"`
+		Successful    []struct {
+			Worker struct {
+				Workdir string `json:"workdir"`
+			} `json:"worker"`
+		} `json:"successful"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &legacy); err != nil || legacy.SchemaVersion != SchemaVersion || len(legacy.Successful) != 1 {
+		t.Fatalf("schema-v1 consumer rejected additive worker placement fields: legacy=%+v err=%v", legacy, err)
+	}
+}
+
 func TestExitCodeDistinguishesRejectedAndRuntimeFailures(t *testing.T) {
 	if got := ExitCode(nil); got != ExitSuccess {
 		t.Fatalf("ExitCode(nil) = %d, want %d", got, ExitSuccess)

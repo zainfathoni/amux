@@ -9,7 +9,9 @@ status: accepted
 Worker assignment becomes a two-owner protocol:
 
 1. Amp's authenticated native thread-creation tool, invoked by the `/amux` skill, owns the single creation invocation and submission of its initial prompt. The skill must choose an explicit executor (`orb`, local execution where supported, or one exact Amp runner ID) and an explicit mode (`medium` unless the owner names another mode). It never silently falls back to another executor or mode.
-2. `amux worker adopt` accepts the exact already-created thread and owns only deterministic local adoption: canonical workspace/session, semantic window, canonical workdir, tmux client, worker catalog, and optional exact durable group-member intent.
+2. `amux worker adopt` accepts the exact already-created thread and owns only deterministic local adoption: workspace/session, semantic window, an admission-canonicalized workdir for the new row, tmux client, worker catalog, and optional exact durable group-member intent.
+
+Native creation owns intended execution placement. Adoption does not re-home, migrate, or retarget the thread's native executor, does not verify continued affinity, and a local continued-thread pane is not evidence that later turns run in that pane's workdir. Create the thread directly on the executor and physical workdir intended for its work. In particular, Orb creation followed by physical adoption is never an execution-migration mechanism.
 
 The amux CLI does not invoke, wrap, or pretend to invoke an Amp server tool. Adoption sends no message, presses no Enter, parses no composer or box-drawing frame, and reads no transcript. Legacy `amux spawn` and `amux worker spawn` are deterministic, non-mutating exit-2 migration tombstones.
 
@@ -21,7 +23,7 @@ amux worker adopt --thread <exact-id-or-url> --workspace <workspace> \
   [--group <one-exact-group>] [--dry-run] [--json]
 ```
 
-JSON identifies the exact thread as the worker resource and reports workspace, window, canonical workdir, local state, and receipt source `amp_native_create_thread`. This source names the caller-side provenance; it is not proof of fields absent from the native receipt contract.
+JSON identifies the exact thread as the worker resource and reports workspace, window, workdir, local state, and receipt source `amp_native_create_thread`. New adoption canonicalizes its owner-supplied workdir before persistence, pane identity, and output. Doctor reports the authoritative catalog spelling unchanged; a preserved legacy relative value is not canonicalized against the invoking directory and is not a physical-location claim. Adoption and doctor report native executor, native runner ID, and execution affinity as `unknown`, because amux has no authoritative source for them. The local workspace, window, workdir, and local-state fields describe only local ownership. The receipt source names caller-side provenance; it is not proof of fields absent from the native receipt contract.
 
 ## Trust boundary
 
@@ -29,9 +31,11 @@ The native creation receipt is deliberately two-part: the authenticated request 
 
 The [Amp manual](https://ampcode.com/manual) independently documents the four built-in modes, `createThread({ executor: "orb" })`, exact runner selection through `executor: { type: "runner", id }`, and that a runner accepts remotely created threads in the directory where it was started. It also documents the narrower message boundary: appending a user message returns when Amp accepts it, not when inference completes. The creation result does **not** contain a prompt digest, transcript proof, inference completion, separate delivery acknowledgement, canonical workdir, or Amp installation identity. Native creation therefore must not claim those absent fields.
 
-For a physical runner, the coordinator selects one exact live runner immediately before creation and records its authoritative runner ID and reported working directory. The manual's current-directory contract plus the exact Linux/Darwin physical proofs establish physical runner create/adopt dispatch evidence for the migration; they do not establish finish or full removal parity. The returned thread ID still remains the only remote identity passed to adoption. amux locally verifies only its own canonical workdir and tmux/catalog ownership. A worker report may corroborate the remote checkout, but it is operational evidence rather than an amux receipt field.
+For a physical runner, the coordinator selects one exact live runner immediately before creation and records its authoritative runner ID and reported working directory. The manual's current-directory contract plus the exact Linux/Darwin physical proofs establish physical runner create/adopt dispatch evidence for the migration; they do not establish finish or full removal parity. The returned thread ID still remains the only remote identity passed to adoption. On a new adoption path, amux locally verifies its admission-canonicalized workdir and tmux/catalog ownership. A worker report may corroborate the remote checkout, but it is operational evidence rather than an amux receipt field.
 
-amux locally revalidates all facts it owns:
+If physical state matters—including a dirty worktree that exists only on one machine—the native creation request, retained caller-side receipt, and assignment name the exact physical runner ID and canonical workdir. amux adoption and doctor still report native runner identity and affinity as `unknown`. Recovery creates the worker on that exact runner, or uses a separate explicit handoff that leaves immutable worktree ownership with the physical worker. It never creates in an Orb and adopts physically to imply migration. If the native API cannot authoritatively report current affinity, the value remains `unknown`; thread environment, local panes, and adoption state must not be used to infer it.
+
+For a new adoption path, amux locally revalidates all facts it owns:
 
 - thread ID/URL canonicalization and current active status through bounded `amp threads list --json` inventories;
 - existing canonical workdir directory;
