@@ -72,7 +72,7 @@ Prefer `--dry-run` before mutating tmux or workspace config:
 
 ```sh
 amux --dry-run launch --workspace demo
-amux --dry-run spawn --workspace demo --window worker --workdir ~/Code/demo --mode medium --message "Start here" --idempotency-key contributor-demo
+amux --dry-run worker adopt --thread T-example --workspace demo --window worker --workdir ~/Code/demo
 ```
 
 Do not use real private thread IDs in tests or examples. Use placeholders such as `T-example` or `https://ampcode.com/threads/T-example`.
