@@ -33,7 +33,7 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 - **Unshelve this**: `amux unshelve --current` or `--thread`. Launch separately.
 - **Restore my workspace**: `amux launch --workspace <name>` (or bare `amux` for all workers).
 - **Doctor amux**: `amux doctor --all` or scoped doctor.
-- **Spawn a worker for ...**: load [`reference/workflows.md`](reference/workflows.md); use one native Amp thread creation with explicit executor and `medium`, then `amux worker adopt` using the returned exact thread. The task-only initial native message includes one line naming the **absolute** path to the loaded skill's `reference/contract-v1.md` (read once; never a bare relative path). `amux spawn` and `amux worker spawn` are removed migration tombstones.
+- **Spawn a worker for ...**: load [`reference/workflows.md`](reference/workflows.md); create directly on the executor/workdir where future turns must run, then adopt locally—adoption never migrates execution. Use explicit executor and `medium`. The task-only initial message includes the **absolute path to the loaded skill's** `reference/contract-v1.md` (never a bare relative path). `amux spawn` and `amux worker spawn` are removed tombstones.
 - **Coordinate issue workers**: load [`reference/workflows.md`](reference/workflows.md#coordinate-a-durable-issue-work-group).
 - **Teardown this worker**: load [`reference/workflows.md`](reference/workflows.md#teardown-a-worker). If `/amux-claude` pairs may exist, run that skill's paired lifecycle preflight first; then `amux teardown` last.
 - **/amux health**: [`workflows.md`](reference/workflows.md#health-workers-and-runners).

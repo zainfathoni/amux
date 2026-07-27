@@ -155,7 +155,7 @@ exit 98
 	args := []string{"--json", "--config-dir", dir, "worker", "adopt", "--thread", row.Thread, "--workspace", row.Workspace, "--window", row.Window, "--workdir", row.Workdir, "--group", "native-group"}
 
 	dry := executeWorkerJSON(t, append([]string{"--dry-run"}, args...)...)
-	if len(dry.Planned) != 5 || dry.Planned[0].Worker == nil || dry.Planned[0].Worker.ReceiptSource != nativeAdoptionReceiptSource || dry.Planned[0].Worker.Workdir != workdir || dry.Planned[3].Action != "ensure-label" || dry.Planned[4].Action != "create-client" {
+	if len(dry.Planned) != 5 || dry.Planned[0].Worker == nil || dry.Planned[0].Worker.ReceiptSource != nativeAdoptionReceiptSource || dry.Planned[0].Worker.Workdir != workdir || dry.Planned[0].Worker.NativeExecutor != unknownNativePlacement || dry.Planned[0].Worker.NativeRunnerID != unknownNativePlacement || dry.Planned[0].Worker.ExecutionAffinity != unknownNativePlacement || dry.Planned[3].Action != "ensure-label" || dry.Planned[4].Action != "create-client" {
 		t.Fatalf("adoption dry run = %+v", dry)
 	}
 	if _, err := os.Stat(filepath.Join(dir, config.WorkersFile)); !os.IsNotExist(err) {
@@ -1043,8 +1043,10 @@ func TestThreadArchiveStatusesBoundsAmpThreadsListFailures(t *testing.T) {
 
 func TestScopedWorkerDoctorReusesOneThreadInventory(t *testing.T) {
 	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	rows := []config.Row{
-		{Workspace: "alpha", Window: "b", Workdir: "/tmp/b", Thread: "T-b"},
+		{Workspace: "alpha", Window: "b", Workdir: "~/b", Thread: "T-b"},
 		{Workspace: "alpha", Window: "a", Workdir: "/tmp/a", Thread: "T-a"},
 		{Workspace: "beta", Window: "c", Workdir: "/tmp/c", Thread: "T-c"},
 	}
@@ -1060,6 +1062,14 @@ func TestScopedWorkerDoctorReusesOneThreadInventory(t *testing.T) {
 	}
 	if len(got.Successful) != 2 || got.Successful[0].Resource.Thread != "T-a" || got.Successful[1].Resource.Thread != "T-b" || len(got.Failed) != 0 {
 		t.Fatalf("scoped worker doctor = %+v", got)
+	}
+	for _, out := range got.Successful {
+		if out.Worker == nil || out.Worker.Workdir == "" || out.Worker.NativeExecutor != unknownNativePlacement || out.Worker.NativeRunnerID != unknownNativePlacement || out.Worker.ExecutionAffinity != unknownNativePlacement || !strings.Contains(out.Message, "execution_affinity=unknown") {
+			t.Fatalf("worker doctor placement diagnostic = %+v", out)
+		}
+	}
+	if got.Successful[1].Worker.Workdir != filepath.Join(home, "b") {
+		t.Fatalf("worker doctor workdir = %q, want canonical path", got.Successful[1].Worker.Workdir)
 	}
 }
 

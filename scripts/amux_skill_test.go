@@ -300,6 +300,35 @@ func TestInvocationPolicyIsProgressivelyDisclosedWithoutChangingClaudeRoutes(t *
 	}
 }
 
+func TestNativeAdoptionDoesNotClaimExecutorMigration(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	adr := readSkillFile(t, root, filepath.Join("docs", "adr", "0003-native-thread-creation-and-explicit-adoption.md"))
+	readme := readSkillFile(t, root, "README.md")
+	for path, contents := range map[string]string{
+		"workflow": workflow,
+		"ADR 0003": adr,
+		"README":   readme,
+	} {
+		for _, required := range []string{"adoption", "unknown", "physical", "workdir"} {
+			if !strings.Contains(contents, required) {
+				t.Errorf("%s is missing native-affinity boundary %q", path, required)
+			}
+		}
+	}
+	for _, required := range []string{"Orb-create → physical-adopt", "exact physical runner", "does not re-home", "execution affinity"} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("native workflow is missing migration guard %q", required)
+		}
+	}
+	for _, required := range []string{"Every task Lead title starts with `🎖️ `", "member worker titles do not", "presentation only", "neither executor placement nor authoritative group role", "amp threads rename"} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("native workflow is missing Lead presentation rule %q", required)
+		}
+	}
+}
+
 func TestReadThreadDiscrepancyRecoveryContractStaysAligned(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
