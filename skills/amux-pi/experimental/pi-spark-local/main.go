@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -96,13 +97,17 @@ type result struct {
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {
-		if errors.Is(err, errAppliedStateIndeterminate) {
-			fmt.Fprintln(os.Stderr, "indeterminate_applied_state:", err)
-			os.Exit(failureExitCode(err))
-		}
-		fmt.Fprintln(os.Stderr, "blocked:", err)
-		os.Exit(failureExitCode(err))
+		os.Exit(reportFailure(err, os.Stderr))
 	}
+}
+
+func reportFailure(err error, output io.Writer) int {
+	if errors.Is(err, errAppliedStateIndeterminate) {
+		fmt.Fprintln(output, "indeterminate_applied_state:", err)
+	} else {
+		fmt.Fprintln(output, "blocked:", err)
+	}
+	return failureExitCode(err)
 }
 
 func failureExitCode(err error) int {
@@ -416,11 +421,12 @@ func buildPrompt(task, path, originalDigest string, contents []byte) ([]byte, er
 }
 
 type cappedWriter struct {
-	mu       sync.Mutex
-	b        bytes.Buffer
-	limit    int
-	overflow bool
-	cancel   context.CancelFunc
+	mu             sync.Mutex
+	b              bytes.Buffer
+	limit          int
+	overflow       bool
+	overflowSignal chan struct{}
+	overflowOnce   *sync.Once
 }
 
 func (w *cappedWriter) Write(p []byte) (int, error) {
@@ -438,7 +444,7 @@ func (w *cappedWriter) Write(p []byte) (int, error) {
 	}
 	w.mu.Unlock()
 	if first {
-		w.cancel()
+		w.overflowOnce.Do(func() { close(w.overflowSignal) })
 	}
 	return len(p), nil
 }
@@ -446,22 +452,39 @@ func (w *cappedWriter) Write(p []byte) (int, error) {
 func execute(o options, argv []string, prompt []byte, agentDir string) ([]byte, []byte, error) {
 	ctx, timeoutCancel := context.WithTimeout(context.Background(), o.timeout)
 	defer timeoutCancel()
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	stdout := &cappedWriter{limit: o.stdoutLimit, cancel: cancel}
-	stderr := &cappedWriter{limit: o.stderrLimit, cancel: cancel}
+	overflowSignal := make(chan struct{})
+	overflowOnce := &sync.Once{}
+	stdout := &cappedWriter{limit: o.stdoutLimit, overflowSignal: overflowSignal, overflowOnce: overflowOnce}
+	stderr := &cappedWriter{limit: o.stderrLimit, overflowSignal: overflowSignal, overflowOnce: overflowOnce}
 	privateDir, err := os.MkdirTemp("", "amux-pi-spark-")
 	if err != nil {
 		return nil, nil, errors.New("private Pi working directory cannot be created")
 	}
 	defer os.RemoveAll(privateDir)
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Dir = privateDir
-	cmd.Stdin = bytes.NewReader(prompt)
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, nil, errors.New("owner home is unavailable")
 	}
+
+	guardianInput, guardianHold, err := os.Pipe()
+	if err != nil {
+		return nil, nil, errors.New("process-group guardian pipe cannot be created")
+	}
+	guardian := exec.Command("/bin/cat")
+	guardian.Dir = privateDir
+	guardian.Stdin = guardianInput
+	guardian.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := guardian.Start(); err != nil {
+		guardianInput.Close()
+		guardianHold.Close()
+		return nil, nil, errors.New("process-group guardian cannot be started")
+	}
+	guardianInput.Close()
+	guardianPID := guardian.Process.Pid
+
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = privateDir
+	cmd.Stdin = bytes.NewReader(prompt)
 	cmd.Env = []string{
 		"HOME=" + home,
 		"PATH=" + filepath.Dir(argv[0]) + ":/usr/bin:/bin",
@@ -477,50 +500,71 @@ func execute(o options, argv []string, prompt []byte, agentDir string) ([]byte, 
 	if extraProcessEnvironment != nil {
 		cmd.Env = append(cmd.Env, extraProcessEnvironment()...)
 	}
-	stdoutPipe, err := cmd.StdoutPipe()
+	stdoutPipe, stdoutChild, err := os.Pipe()
 	if err != nil {
+		terminateGuardian(guardian, guardianHold)
 		return nil, nil, errors.New("Pi stdout cannot be captured")
 	}
-	stderrPipe, err := cmd.StderrPipe()
+	stderrPipe, stderrChild, err := os.Pipe()
 	if err != nil {
+		stdoutPipe.Close()
+		stdoutChild.Close()
+		terminateGuardian(guardian, guardianHold)
 		return nil, nil, errors.New("Pi stderr cannot be captured")
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdout = stdoutChild
+	cmd.Stderr = stderrChild
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: guardianPID}
 	if err := cmd.Start(); err != nil {
+		stdoutPipe.Close()
+		stdoutChild.Close()
+		stderrPipe.Close()
+		stderrChild.Close()
+		terminateGuardian(guardian, guardianHold)
 		return nil, nil, errors.New("Pi failed to start")
 	}
+	stdoutChild.Close()
+	stderrChild.Close()
 
 	streamDone := make(chan error, 2)
 	go func() {
+		defer stdoutPipe.Close()
 		_, err := io.Copy(stdout, stdoutPipe)
 		streamDone <- err
 	}()
 	go func() {
+		defer stderrPipe.Close()
 		_, err := io.Copy(stderr, stderrPipe)
 		streamDone <- err
 	}()
-	streamsComplete := false
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+
+	var waitErr error
+	waitCollected := false
+	timedOut := false
 	streamErrors := make([]error, 0, 2)
-	for len(streamErrors) < 2 {
+	for !waitCollected {
 		select {
 		case streamErr := <-streamDone:
 			streamErrors = append(streamErrors, streamErr)
-			if len(streamErrors) == 2 {
-				streamsComplete = true
-			}
+		case waitErr = <-waitDone:
+			waitCollected = true
+		case <-overflowSignal:
+			goto cleanup
 		case <-ctx.Done():
+			timedOut = true
 			goto cleanup
 		}
 	}
 
 cleanup:
-	cleanupRequired := !streamsComplete
-	var killErr error
+	// The guardian remains live and unreaped, so it owns and reserves the PGID
+	// while every terminal path removes Pi and any descendants from that group.
+	killErr := syscall.Kill(-guardianPID, syscall.SIGKILL)
+	guardianHold.Close()
 	var cleanupStreamErr error
-	if cleanupRequired {
-		// The leader has not been reaped, so its PID still reserves this process
-		// group identity. Never signal or probe the bare PGID after Wait releases it.
-		killErr = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	if len(streamErrors) < 2 {
 		cleanupTimer := time.NewTimer(2 * time.Second)
 		cleanupTimerC := cleanupTimer.C
 		for len(streamErrors) < 2 {
@@ -541,14 +585,21 @@ cleanup:
 			}
 		}
 	}
-	waitErr := cmd.Wait()
-	if cleanupRequired && !groupTerminationVerified(killErr) {
+	if !waitCollected {
+		waitErr = <-waitDone
+		waitCollected = true
+	}
+	guardianErr := guardian.Wait()
+	if killErr != nil {
 		return nil, nil, errors.New("Pi process-group termination could not be verified")
+	}
+	if !killedBySignal(guardianErr, syscall.SIGKILL) {
+		return nil, nil, errors.New("process-group guardian termination could not be verified")
 	}
 	if stdout.overflow || stderr.overflow {
 		return nil, nil, errors.New("Pi output exceeded its configured bound")
 	}
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if timedOut {
 		return nil, nil, fmt.Errorf("Pi timed out after %s", o.timeout)
 	}
 	if cleanupStreamErr != nil {
@@ -567,21 +618,24 @@ cleanup:
 		if exitErr.ProcessState.ExitCode() >= 0 {
 			return nil, nil, fmt.Errorf("Pi exited with code %d", exitErr.ExitCode())
 		}
-		// SIGKILL is admitted only when this function requested pre-Wait group
-		// cleanup after timeout or overflow. Ordinary completion must exit zero.
-		status, signaled := exitErr.Sys().(syscall.WaitStatus)
-		if !signaled || !status.Signaled() || status.Signal() != syscall.SIGKILL || !cleanupRequired {
-			return nil, nil, errors.New("Pi terminated unexpectedly")
-		}
+		return nil, nil, errors.New("Pi terminated unexpectedly")
 	}
 	return stdout.b.Bytes(), stderr.b.Bytes(), nil
 }
 
-func groupTerminationVerified(killErr error) bool {
-	// Darwin reports ESRCH when the unreaped leader's group already has no
-	// signalable members. Both outcomes are established before Wait releases
-	// the leader PID; all other errors leave termination unverified.
-	return killErr == nil || errors.Is(killErr, syscall.ESRCH)
+func terminateGuardian(guardian *exec.Cmd, hold *os.File) {
+	_ = syscall.Kill(-guardian.Process.Pid, syscall.SIGKILL)
+	_ = hold.Close()
+	_ = guardian.Wait()
+}
+
+func killedBySignal(err error, signal syscall.Signal) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	return ok && status.Signaled() && status.Signal() == signal
 }
 
 func parseReplacement(data []byte) (replacement, error) {
@@ -760,6 +814,9 @@ func requireSafeGitConfiguration(workdir string) error {
 	}
 	for _, name := range bytes.Split(configNames, []byte{0}) {
 		lower := strings.ToLower(string(name))
+		if lower == "core.attributesfile" {
+			return errors.New("repository-local core.attributesFile is not admitted")
+		}
 		if strings.HasPrefix(lower, "filter.") && (strings.HasSuffix(lower, ".clean") || strings.HasSuffix(lower, ".process")) {
 			return errors.New("repository-local external Git filter configuration is not admitted")
 		}
@@ -768,20 +825,49 @@ func requireSafeGitConfiguration(workdir string) error {
 	if err != nil {
 		return errors.New("tracked paths could not be inspected for Git filter attributes")
 	}
-	attributes, err := gitInput(workdir, paths, "check-attr", "-z", "--all", "--stdin")
+	fallback, sentinel, cleanup, err := createAttributeFallback()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	attributes, err := gitInputWithConfig(workdir, paths, "core.attributesFile="+fallback, "check-attr", "-z", "--stdin", "filter")
 	if err != nil {
 		return errors.New("Git attributes could not be inspected safely")
 	}
+	tracked := bytes.Split(paths, []byte{0})
 	fields := bytes.Split(attributes, []byte{0})
-	for i := 0; i+2 < len(fields); i += 3 {
-		if string(fields[i+1]) == "filter" {
+	if len(tracked) == 0 || len(fields) != 3*(len(tracked)-1)+1 {
+		return errors.New("Git attribute inspection output is malformed")
+	}
+	for i, path := range tracked[:len(tracked)-1] {
+		field := fields[3*i : 3*i+3]
+		if !bytes.Equal(field[0], path) || string(field[1]) != "filter" {
+			return errors.New("Git attribute inspection output is malformed")
+		}
+		if string(field[2]) != sentinel {
 			return errors.New("repository-local Git filter attribute binding is not admitted")
 		}
 	}
-	if len(fields) > 1 && (len(fields)-1)%3 != 0 {
-		return errors.New("Git attribute inspection output is malformed")
-	}
 	return nil
+}
+
+func createAttributeFallback() (string, string, func(), error) {
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return "", "", nil, errors.New("private Git attribute sentinel cannot be generated")
+	}
+	sentinel := "amux_safe_" + hex.EncodeToString(random)
+	directory, err := os.MkdirTemp("", "amux-git-attributes-")
+	if err != nil {
+		return "", "", nil, errors.New("private Git attribute directory cannot be created")
+	}
+	cleanup := func() { _ = os.RemoveAll(directory) }
+	path := filepath.Join(directory, "attributes")
+	if err := os.WriteFile(path, []byte("* filter="+sentinel+"\n"), 0o600); err != nil {
+		cleanup()
+		return "", "", nil, errors.New("private Git attribute fallback cannot be written")
+	}
+	return path, sentinel, cleanup, nil
 }
 
 var errGitOutputBound = errors.New("Git command output exceeded its bound")
@@ -809,9 +895,17 @@ func git(workdir string, args ...string) ([]byte, error) {
 }
 
 func gitInput(workdir string, input []byte, args ...string) ([]byte, error) {
+	return gitInputWithConfig(workdir, input, "", args...)
+}
+
+func gitInputWithConfig(workdir string, input []byte, config string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	gitArgs := []string{"--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", workdir}
+	gitArgs := []string{"--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"}
+	if config != "" {
+		gitArgs = append(gitArgs, "-c", config)
+	}
+	gitArgs = append(gitArgs, "-C", workdir)
 	cmd := exec.CommandContext(ctx, gitPath, append(gitArgs, args...)...)
 	cmd.Env = []string{
 		"HOME=/nonexistent", "PATH=/usr/bin:/bin", "LANG=C.UTF-8", "LC_ALL=C.UTF-8",

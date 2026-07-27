@@ -296,7 +296,7 @@ func TestRejectsMalformedOrUnboundFinalOutput(t *testing.T) {
 }
 
 func TestBoundsOutputAndTimeoutAndTerminatesProcessGroup(t *testing.T) {
-	t.Run("overflow", func(t *testing.T) {
+	t.Run("overflow with active pipes", func(t *testing.T) {
 		f := newFixture(t)
 		t.Setenv("FAKE_PI_MODE", "overflow")
 		err := run(f.args("--task", "edit", "--stdout-limit", "128"), &bytes.Buffer{})
@@ -304,7 +304,7 @@ func TestBoundsOutputAndTimeoutAndTerminatesProcessGroup(t *testing.T) {
 			t.Fatalf("err=%v", err)
 		}
 	})
-	t.Run("timeout", func(t *testing.T) {
+	t.Run("timeout with active pipes", func(t *testing.T) {
 		f := newFixture(t)
 		pidFile := filepath.Join(f.root, "child.pid")
 		t.Setenv("FAKE_PI_MODE", "sleep")
@@ -317,13 +317,44 @@ func TestBoundsOutputAndTimeoutAndTerminatesProcessGroup(t *testing.T) {
 		if parseErr != nil {
 			t.Fatal(parseErr)
 		}
-		deadline := time.Now().Add(time.Second)
-		for syscall.Kill(pid, 0) == nil && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
+		requirePIDGone(t, pid)
+	})
+	t.Run("closed pipes then hang", func(t *testing.T) {
+		f := newFixture(t)
+		started := time.Now()
+		t.Setenv("FAKE_PI_MODE", "close-hang")
+		err := run(f.args("--task", "edit", "--timeout", "100ms"), &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("err=%v", err)
 		}
-		if err := syscall.Kill(pid, 0); err == nil {
-			t.Fatalf("descendant %d survived verified group termination", pid)
+		if elapsed := time.Since(started); elapsed > 3*time.Second {
+			t.Fatalf("closed-pipe hang exceeded bounded cleanup: %s", elapsed)
 		}
+	})
+	t.Run("overflow then close and hang", func(t *testing.T) {
+		f := newFixture(t)
+		t.Setenv("FAKE_PI_MODE", "overflow-close-hang")
+		err := run(f.args("--task", "edit", "--stdout-limit", "128"), &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "exceeded") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+	t.Run("zero exit removes redirected descendant", func(t *testing.T) {
+		f := newFixture(t)
+		pidFile := filepath.Join(f.root, "child.pid")
+		t.Setenv("FAKE_PI_MODE", "normal-descendant")
+		t.Setenv("FAKE_PI_PID_FILE", pidFile)
+		before := mustRead(t, f.target)
+		reply := replacement{Path: "target.txt", OriginalSHA256: digest(before), Replacement: "after\n"}
+		t.Setenv("FAKE_PI_OUTPUT", marshal(t, reply))
+		if err := run(f.args("--task", "edit"), &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		pid, parseErr := strconv.Atoi(strings.TrimSpace(string(mustRead(t, pidFile))))
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		requirePIDGone(t, pid)
 	})
 	t.Run("unexpected signal", func(t *testing.T) {
 		f := newFixture(t)
@@ -339,14 +370,30 @@ func TestBoundsOutputAndTimeoutAndTerminatesProcessGroup(t *testing.T) {
 			t.Fatal("unexpectedly signaled Pi changed target")
 		}
 	})
+	t.Run("independent SIGKILL", func(t *testing.T) {
+		f := newFixture(t)
+		before := mustRead(t, f.target)
+		reply := replacement{Path: "target.txt", OriginalSHA256: digest(before), Replacement: "after\n"}
+		t.Setenv("FAKE_PI_MODE", "sigkill")
+		t.Setenv("FAKE_PI_OUTPUT", marshal(t, reply))
+		err := run(f.args("--task", "edit"), &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "terminated unexpectedly") {
+			t.Fatalf("err=%v", err)
+		}
+		if !bytes.Equal(mustRead(t, f.target), before) {
+			t.Fatal("independently SIGKILLed Pi changed target")
+		}
+	})
 }
 
-func TestProcessGroupTerminationVerificationIsCrossPlatformAndFailClosed(t *testing.T) {
-	if !groupTerminationVerified(nil) || !groupTerminationVerified(syscall.ESRCH) {
-		t.Fatal("successful kill and already-absent pre-Wait group must be verified")
+func requirePIDGone(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for syscall.Kill(pid, 0) == nil && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
 	}
-	if groupTerminationVerified(syscall.EPERM) {
-		t.Fatal("permission failure must leave group termination unverified")
+	if err := syscall.Kill(pid, 0); err == nil {
+		t.Fatalf("descendant %d survived anchored process-group termination", pid)
 	}
 }
 
@@ -401,15 +448,58 @@ func TestGitHardeningRejectsExternalCleanFiltersBeforeExecution(t *testing.T) {
 	}
 }
 
-func TestGitHardeningRejectsFilterAttributeWithoutDriver(t *testing.T) {
-	for _, value := range []string{"unconfigured", "unspecified"} {
-		t.Run(value, func(t *testing.T) {
+func TestGitHardeningRejectsIncludedExternalFiltersBeforeExecution(t *testing.T) {
+	for _, key := range []string{"clean", "process"} {
+		t.Run(key, func(t *testing.T) {
 			f := newFixture(t)
-			mustWrite(t, filepath.Join(f.workdir, ".gitattributes"), []byte("target.txt filter="+value+"\n"), 0o644)
+			mustWrite(t, filepath.Join(f.workdir, ".gitattributes"), []byte("target.txt filter=evil\n"), 0o644)
+			gitRun(t, f.workdir, "add", ".gitattributes")
+			gitRun(t, f.workdir, "commit", "-qm", "filter attributes fixture")
+			marker := filepath.Join(f.root, "included-filter-invoked")
+			included := filepath.Join(f.root, "included.gitconfig")
+			mustWrite(t, included, []byte(fmt.Sprintf("[filter \"evil\"]\n\t%s = sh -c 'printf invoked >%s; cat'\n", key, marker)), 0o600)
+			gitRun(t, f.workdir, "config", "include.path", included)
+			err := run(f.args("--task", "edit"), &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), "external Git filter configuration") {
+				t.Fatalf("err=%v", err)
+			}
+			if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("included repository filter executed: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestGitHardeningRejectsEveryFilterAttributeState(t *testing.T) {
+	for _, attribute := range []string{"filter=unconfigured", "filter=unspecified", "-filter", "!filter"} {
+		t.Run(attribute, func(t *testing.T) {
+			f := newFixture(t)
+			mustWrite(t, filepath.Join(f.workdir, ".gitattributes"), []byte("target.txt "+attribute+"\n"), 0o644)
 			gitRun(t, f.workdir, "add", ".gitattributes")
 			gitRun(t, f.workdir, "commit", "-qm", "filter attributes fixture")
 			err := run(f.args("--task", "edit"), &bytes.Buffer{})
 			if err == nil || !strings.Contains(err.Error(), "filter attribute binding") {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestGitHardeningRejectsCoreAttributesFileIncludingFromInclude(t *testing.T) {
+	for _, included := range []bool{false, true} {
+		t.Run(fmt.Sprintf("included=%t", included), func(t *testing.T) {
+			f := newFixture(t)
+			attributes := filepath.Join(f.root, "external-attributes")
+			mustWrite(t, attributes, []byte("* text\n"), 0o600)
+			if included {
+				config := filepath.Join(f.root, "included.gitconfig")
+				mustWrite(t, config, []byte("[core]\n\tattributesFile = "+attributes+"\n"), 0o600)
+				gitRun(t, f.workdir, "config", "include.path", config)
+			} else {
+				gitRun(t, f.workdir, "config", "core.attributesFile", attributes)
+			}
+			err := run(f.args("--task", "edit"), &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), "core.attributesFile") {
 				t.Fatalf("err=%v", err)
 			}
 		})
@@ -488,7 +578,7 @@ func TestTransactionalApplyRollsBackFailures(t *testing.T) {
 	}
 }
 
-func TestEveryIndeterminateRollbackBranchHasMachineReadableStatus(t *testing.T) {
+func TestEveryIndeterminateRollbackBranchUsesSentinel(t *testing.T) {
 	before := []byte("before\n")
 	cause := errors.New("forced post-apply failure")
 	okReplace := func(string, []byte) error { return nil }
@@ -546,6 +636,28 @@ func TestEveryIndeterminateRollbackBranchHasMachineReadableStatus(t *testing.T) 
 	if failureExitCode(errors.New("blocked")) != 2 {
 		t.Fatal("ordinary refusal must retain exit status 2")
 	}
+}
+
+func TestIndeterminateFailureEmitsSentinelAndExitsThree(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=TestIndeterminateExitHelper")
+	cmd.Env = append(os.Environ(), "AMUX_TEST_INDETERMINATE_EXIT=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 3 {
+		t.Fatalf("err=%v", err)
+	}
+	if got := stderr.String(); !strings.Contains(got, "indeterminate_applied_state: applied state indeterminate") {
+		t.Fatalf("stderr=%q", got)
+	}
+}
+
+func TestIndeterminateExitHelper(t *testing.T) {
+	if os.Getenv("AMUX_TEST_INDETERMINATE_EXIT") != "1" {
+		return
+	}
+	os.Exit(reportFailure(fmt.Errorf("%w: forced fixture", errAppliedStateIndeterminate), os.Stderr))
 }
 
 func TestRejectsUnchangedReplacement(t *testing.T) {
@@ -633,7 +745,11 @@ fi
 case "${FAKE_PI_MODE:-success}" in
   overflow) while :; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; done ;;
   sleep) sleep 60 & child=$!; printf '%s\n' "$child" >"$FAKE_PI_PID_FILE"; wait "$child" ;;
+  close-hang) exec 1>&- 2>&-; sleep 60 ;;
+  overflow-close-hang) printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; exec 1>&- 2>&-; sleep 60 ;;
+  normal-descendant) sleep 60 >/dev/null 2>&1 & child=$!; printf '%s\n' "$child" >"$FAKE_PI_PID_FILE"; printf '%s' "$FAKE_PI_OUTPUT" ;;
   signal) printf '%s' "$FAKE_PI_OUTPUT"; kill -TERM $$ ;;
+  sigkill) printf '%s' "$FAKE_PI_OUTPUT"; kill -KILL $$ ;;
   mutate) printf 'bad\n' >"$FAKE_PI_MUTATE"; printf '%s' "$FAKE_PI_OUTPUT" ;;
   mutate-pi) printf '# changed\n' >>"$FAKE_PI_SELF"; printf '%s' "$FAKE_PI_OUTPUT" ;;
   agent-overlay) printf fixture >"$FAKE_PI_AGENT/SYSTEM.md"; printf '%s' "$FAKE_PI_OUTPUT" ;;
