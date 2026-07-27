@@ -3213,9 +3213,18 @@ func threadArchiveStatuses(rows []config.Row) (map[string]threadStatus, error) {
 	if err != nil {
 		return nil, fmt.Errorf("active thread inventory: %w", err)
 	}
-	includingArchived, err := ampThreadIDSet(ctx, true, targets)
-	if err != nil {
-		return nil, fmt.Errorf("archived thread inventory: %w", err)
+	unresolved := make(map[string]bool, len(targets))
+	for id := range targets {
+		if !active[id] {
+			unresolved[id] = true
+		}
+	}
+	includingArchived := make(map[string]bool)
+	if len(unresolved) > 0 {
+		includingArchived, err = ampThreadIDSet(ctx, true, unresolved)
+		if err != nil {
+			return nil, fmt.Errorf("archived thread inventory: %w", err)
+		}
 	}
 	statuses := make(map[string]threadStatus, len(rows))
 	for _, row := range rows {

@@ -4069,7 +4069,7 @@ func TestThreadArchiveStatusesBoundsAmpThreadsListFailures(t *testing.T) {
 				if slicesContain(args, "--include-archived") {
 					return "timeout", ""
 				}
-				return "output", `[{"id":"T-worker"}]`
+				return "output", `[]`
 			},
 			want:      "archived thread inventory: amp threads list timed out after 50ms",
 			wantCalls: 2,
@@ -4104,7 +4104,7 @@ func TestThreadArchiveStatusesBoundsAmpThreadsListFailures(t *testing.T) {
 				if slicesContain(args, "--include-archived") {
 					return "nonzero", ""
 				}
-				return "output", `[{"id":"T-worker"}]`
+				return "output", `[]`
 			},
 			want:      "archived thread inventory: amp threads list failed with exit code 7",
 			wantCalls: 2,
@@ -4115,7 +4115,7 @@ func TestThreadArchiveStatusesBoundsAmpThreadsListFailures(t *testing.T) {
 				if slicesContain(args, "--include-archived") {
 					return "malformed", ""
 				}
-				return "output", `[{"id":"T-worker"}]`
+				return "output", `[]`
 			},
 			want:      "archived thread inventory: amp threads list returned malformed JSON",
 			wantCalls: 2,
@@ -4126,7 +4126,7 @@ func TestThreadArchiveStatusesBoundsAmpThreadsListFailures(t *testing.T) {
 				if slicesContain(args, "--include-archived") {
 					return "overflow", ""
 				}
-				return "output", `[{"id":"T-worker"}]`
+				return "output", `[]`
 			},
 			want:      "archived thread inventory: amp threads list output exceeded 64-byte limit",
 			wantCalls: 2,
@@ -4193,8 +4193,8 @@ func TestScopedWorkerDoctorReusesOneThreadInventory(t *testing.T) {
 	})
 
 	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "doctor", "--workspace", "alpha")
-	if *calls != 2 {
-		t.Fatalf("amp threads list calls = %d, want one active and one archive inventory", *calls)
+	if *calls != 1 {
+		t.Fatalf("amp threads list calls = %d, want one active inventory", *calls)
 	}
 	if len(got.Successful) != 2 || got.Successful[0].Resource.Thread != "T-a" || got.Successful[1].Resource.Thread != "T-b" || len(got.Failed) != 0 {
 		t.Fatalf("scoped worker doctor = %+v", got)

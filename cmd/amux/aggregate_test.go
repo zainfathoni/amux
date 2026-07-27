@@ -454,8 +454,8 @@ esac
 	})
 
 	got := executeAggregateJSON(t, "--json", "--config-dir", dir, "doctor", "--workspace", "alpha")
-	if *calls != 2 {
-		t.Fatalf("aggregate doctor amp threads list calls = %d, want one active and one archive inventory", *calls)
+	if *calls != 1 {
+		t.Fatalf("aggregate doctor amp threads list calls = %d, want one active inventory", *calls)
 	}
 	if keys := aggregateResourceKeys(got.Successful); strings.Join(keys, ",") != "runner:"+runnerDir+",worker:T-a,worker:T-b" {
 		t.Fatalf("aggregate doctor = %+v", got)

@@ -256,11 +256,16 @@ func (r Runner) SessionExists(session string) (bool, error) {
 		return false, fmt.Errorf("tmux has-session: %w", err)
 	}
 	message := strings.TrimSpace(stderr.String())
-	if message == "" || strings.Contains(message, "can't find session") || strings.Contains(message, "no server running") ||
-		(strings.Contains(message, "error connecting to ") && strings.Contains(message, "No such file or directory")) {
+	if message == "" || strings.Contains(message, "can't find session") || missingServerMessage(message) {
 		return false, nil
 	}
 	return false, fmt.Errorf("tmux has-session: %s", message)
+}
+
+func missingServerMessage(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "no server running") ||
+		strings.Contains(message, "error connecting to ") && strings.Contains(message, "no such file or directory")
 }
 
 func (r Runner) WindowNames(session string) ([]string, error) {
@@ -362,6 +367,9 @@ func (r Runner) AllWindowPanes() ([]WindowPane, error) {
 	}
 	out, err := tmuxOutput("list-panes", "-a", "-F", "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_start_command}")
 	if err != nil {
+		if missingServerMessage(err.Error()) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	text := strings.TrimSuffix(string(out), "\n")
