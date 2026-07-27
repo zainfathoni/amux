@@ -21,6 +21,10 @@ type fixture struct {
 func TestBoundedSparkExecutionAppliesOnlyExactAllowedReplacement(t *testing.T) {
 	f := newFixture(t, "success")
 	authBefore := mustRead(t, f.auth)
+	foreignMarker := filepath.Join(f.worktree, ".target.txt.amux-pi-success")
+	if err := os.WriteFile(foreignMarker, []byte("foreign\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	runOK(t, f, "plan", "--packet", f.packet)
 	intent := readObject(t, filepath.Join(f.state, "intents", "success.json"))
 	argv := intent["argv"].([]any)
@@ -29,6 +33,10 @@ func TestBoundedSparkExecutionAppliesOnlyExactAllowedReplacement(t *testing.T) {
 		"--model", "openai-codex/gpt-5.3-codex-spark", "--thinking", "high",
 		"--no-session", "--no-tools", "--no-extensions", "--no-skills",
 		"--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve",
+		"--system-prompt", "Return only the requested JSON replacement envelope. Do not use tools, files, external context, network publishing, or delegation.",
+	}
+	if len(argv) != len(wantArgv) {
+		t.Fatalf("argv has %d entries, want exact %d", len(argv), len(wantArgv))
 	}
 	for index, want := range wantArgv {
 		got := argv[index].(string)
@@ -51,6 +59,9 @@ func TestBoundedSparkExecutionAppliesOnlyExactAllowedReplacement(t *testing.T) {
 	if got := mustRead(t, f.auth); got != authBefore {
 		t.Fatal("shared OAuth credential bytes changed")
 	}
+	if got := mustRead(t, foreignMarker); got != "foreign\n" {
+		t.Fatalf("foreign temporary-name collision marker changed: %q", got)
+	}
 	receipt := readObject(t, filepath.Join(f.state, "operations", "success.json"))
 	process := receipt["process"].(map[string]any)
 	for _, field := range []string{"pid", "start_seconds", "start_microseconds", "executable", "executable_identity"} {
@@ -65,6 +76,29 @@ func TestBoundedSparkExecutionAppliesOnlyExactAllowedReplacement(t *testing.T) {
 	output = runOK(t, f, "finalize", "--operation-id", "success", "--quota-after", quotaAfter)
 	if !strings.Contains(output, `"status":"success"`) || !strings.Contains(output, `"billing_route":"chatgpt-codex-oauth-spark"`) {
 		t.Fatalf("final result lacks billing proof: %s", output)
+	}
+}
+
+func TestPreflightRejectsFilesAliasingSharedAuthentication(t *testing.T) {
+	for _, target := range []string{"packet", "settings", "allowed"} {
+		t.Run(target, func(t *testing.T) {
+			f := newFixture(t, "alias-"+target)
+			if target == "packet" {
+				runBlockedArgs(t, f, "aliases shared authentication", "preflight", "--packet", f.auth)
+				return
+			}
+			path := f.target
+			if target == "settings" {
+				path = filepath.Join(filepath.Dir(f.auth), "settings.json")
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(f.auth, path); err != nil {
+				t.Fatal(err)
+			}
+			runBlocked(t, f, "preflight", "aliases shared authentication")
+		})
 	}
 }
 
@@ -209,6 +243,20 @@ func TestExecutionRejectsRetryEventAndWillRetryCompletion(t *testing.T) {
 	}
 }
 
+func TestExecutionRejectsToolContentAndOutOfOrderLifecycle(t *testing.T) {
+	for _, mode := range []string{"tool-content", "out-of-order"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newFixture(t, mode)
+			runOK(t, f, "plan", "--packet", f.packet)
+			t.Setenv("FAKE_PI_MODE", mode)
+			runBlockedArgs(t, f, "Pi", "execute", "--operation-id", mode)
+			if got := mustRead(t, f.target); got != "before\n" {
+				t.Fatalf("rejected provenance edited target: %q", got)
+			}
+		})
+	}
+}
+
 func TestRecoveryRefusesChangedLiveIdentityAndRecordsExactAbsence(t *testing.T) {
 	f := newFixture(t, "recover")
 	authBefore := mustRead(t, f.auth)
@@ -276,7 +324,8 @@ int main(int argc, char **argv) {
   const char *mode = getenv("FAKE_PI_MODE"); if (!mode) mode = "";
   if (argc == 3 && !strcmp(argv[2], "--version")) { puts(!strcmp(mode,"wrong-version") ? "0.81.0" : "0.80.10"); return 0; }
   if (argc >= 3 && !strcmp(argv[2], "--list-models")) { puts(!strcmp(mode,"wrong-model") ? "openai gpt-5.3-codex-spark" : "openai-codex gpt-5.3-codex-spark text 1 1"); return 0; }
-  if (!has(argc,argv,"--mode") || !has(argc,argv,"json") || !has(argc,argv,"--model") || !has(argc,argv,"openai-codex/gpt-5.3-codex-spark") || !has(argc,argv,"--no-session") || !has(argc,argv,"--no-tools")) return 42;
+  const char *expected[] = {"--mode","json","--model","openai-codex/gpt-5.3-codex-spark","--thinking","high","--no-session","--no-tools","--no-extensions","--no-skills","--no-prompt-templates","--no-themes","--no-context-files","--no-approve","--system-prompt","Return only the requested JSON replacement envelope. Do not use tools, files, external context, network publishing, or delegation."};
+  if (argc != 18) return 42; for (int i=2;i<18;i++) if (strcmp(argv[i],expected[i-2])) return 42;
   if (!strcmp(mode,"sleep")) { sleep(10); return 0; }
   char input[4096]; while (fread(input,1,sizeof(input),stdin) > 0) {}
   if (!strcmp(mode,"overflow")) { while (1) { for (int i=0;i<1024;i++) putchar('x'); fflush(stdout); } }
@@ -284,9 +333,11 @@ int main(int argc, char **argv) {
   printf("{\"type\":\"session\",\"version\":3,\"cwd\":\"%s\",\"id\":\"fixture\",\"timestamp\":\"fixture\"}\n", cwd);
   puts("{\"type\":\"agent_start\"}");
   if (!strcmp(mode,"retry-event")) puts("{\"type\":\"auto_retry_start\"}");
+  if (!strcmp(mode,"out-of-order")) puts("{\"type\":\"agent_end\",\"willRetry\":false}");
   if (!strcmp(mode,"scope")) puts("{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"provider\":\"openai-codex\",\"model\":\"gpt-5.3-codex-spark\",\"stopReason\":\"stop\",\"content\":[{\"type\":\"text\",\"text\":\"{\\\"summary\\\":\\\"bad\\\",\\\"files\\\":[{\\\"path\\\":\\\"outside.txt\\\",\\\"content\\\":\\\"bad\\\"}]}\"}]}}");
+  else if (!strcmp(mode,"tool-content")) puts("{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"provider\":\"openai-codex\",\"model\":\"gpt-5.3-codex-spark\",\"stopReason\":\"stop\",\"content\":[{\"type\":\"text\",\"text\":\"{}\"},{\"type\":\"toolCall\",\"name\":\"forbidden\"}]}}");
   else puts("{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"provider\":\"openai-codex\",\"model\":\"gpt-5.3-codex-spark\",\"stopReason\":\"stop\",\"content\":[{\"type\":\"text\",\"text\":\"{\\\"summary\\\":\\\"tiny useful edit\\\",\\\"files\\\":[{\\\"path\\\":\\\"target.txt\\\",\\\"content\\\":\\\"after\\\\n\\\"}]}\"}]}}");
-  puts(!strcmp(mode,"will-retry") ? "{\"type\":\"agent_end\",\"willRetry\":true}" : "{\"type\":\"agent_end\",\"willRetry\":false}"); puts("{\"type\":\"agent_settled\"}"); return 0;
+  if (strcmp(mode,"out-of-order")) puts(!strcmp(mode,"will-retry") ? "{\"type\":\"agent_end\",\"willRetry\":true}" : "{\"type\":\"agent_end\",\"willRetry\":false}"); puts("{\"type\":\"agent_settled\"}"); return 0;
 }`
 	if err := os.WriteFile(source, []byte(program), 0o600); err != nil {
 		t.Fatal(err)

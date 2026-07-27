@@ -109,7 +109,7 @@ Do not include commands that grant Pi validation or repository authority. `valid
 ## 3. Preflight, plan, and execute exactly once
 
 ```bash
-HELPER=skills/amux/experimental/pi-spark-local/pi_spark_local.py
+HELPER=skills/amux-pi/experimental/pi-spark-local/pi_spark_local.py
 STATE=<owner-private-state-directory>
 PACKET=<owner-private-task-packet>
 
@@ -128,7 +128,7 @@ Preflight and execution reject API-key environment presence without printing val
 - exact Pi 0.80.10 CLI object/content, resolved Node interpreter object/content, model catalog entry, normalized argv, and microsecond Darwin kernel process incarnation;
 - immutable mode-0400 execution intent separate from mutable operation state, with exact schemas and digest binding;
 - one global local-Pi execution lock;
-- one irreversibly recorded process attempt, whole-operation monotonic deadline, asynchronous bounded stdin, immediate output-overflow stop, and event count;
+- one irreversibly recorded process attempt, inference-phase monotonic deadline, asynchronous bounded stdin, immediate output-overflow stop, and event count;
 - one source-faithful session/agent lifecycle with `agent_end.willRetry=false`, no unknown/retry/tool/compaction events, and one terminal `agent_settled`;
 - one completed assistant message from exactly `openai-codex` / `gpt-5.3-codex-spark` in the admitted canonical worktree;
 - a strict replacement envelope containing only allowed files unchanged since plan time.
@@ -173,5 +173,7 @@ python3 "$HELPER" --state-dir "$STATE" recover --operation-id <exact-operation-i
 ```
 
 The coordinator must inspect `git status` and the exact diff, reject unrelated or low-quality changes, run every packet validation command, and decide whether to retain the worktree edits. Pi cannot commit, push, open a PR, merge, release, install, clean, or tear down anything.
+
+Synthetic tests establish only the helper's deterministic boundaries. Owner-authorized OAuth/Spark runtime acceptance and a useful real microtask remain pending until a separately authorized smoke supplies reviewed before/after quota and provenance evidence.
 
 Completed operation state is durable provenance, not disposable runtime residue. The helper's atomic replacement temporaries are removed on every handled path. Never delete shared authentication/configuration or unrelated host sessions. Remove owner-private smoke packet/quota artifacts only after independently listing and proving their exact operation ownership; preserve requested worktree edits for review.

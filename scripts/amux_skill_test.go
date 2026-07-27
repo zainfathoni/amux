@@ -249,7 +249,8 @@ func TestLocalPiSparkExecutorStaysProviderSpecificAndPersistentHostSafe(t *testi
 	reference := readSkillFile(t, root, filepath.Join("skills", "amux-pi", "reference", "pi-spark-local-executor.md"))
 	helper := readSkillFile(t, root, filepath.Join("skills", "amux-pi", "experimental", "pi-spark-local", "pi_spark_local.py"))
 	core := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
-	if strings.Contains(core, "Run a bounded local Pi Spark microtask") {
+	coreTriggers := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md"))
+	if strings.Contains(core, "Run a bounded local Pi Spark microtask") || strings.Contains(coreTriggers, "Run a bounded local Pi Spark microtask") {
 		t.Error("core /amux skill must not route local Pi/Spark triggers")
 	}
 
@@ -274,7 +275,7 @@ func TestLocalPiSparkExecutorStaysProviderSpecificAndPersistentHostSafe(t *testi
 	for _, required := range []string{
 		`MODEL = "openai-codex/gpt-5.3-codex-spark"`, `"--no-tools"`,
 		`PROHIBITED_ENV = ("OPENAI_API_KEY", "CODEX_API_KEY")`,
-		`fcntl.LOCK_EX | fcntl.LOCK_NB`, `process_identity(process.pid)`,
+		`fcntl.LOCK_EX | fcntl.LOCK_NB`, `stable_process_identity(process.pid`, `process_incarnation(process.pid)`,
 		`process.terminate()`, `process.kill()`, `status": "awaiting_quota_confirmation"`,
 		`result_trust": "untrusted_pending_coordinator_review_and_validation"`,
 	} {
@@ -1284,6 +1285,7 @@ func TestExperimentalSkillsAreSeparatedFromCoreAmux(t *testing.T) {
 		"Delegate isolated mutating work to Claude",
 		"Delegate bounded work to Claude Opus in a fresh Amp Orb",
 		"Run Pi on Spark in an Amp Orb",
+		"Run a bounded local Pi Spark microtask",
 		"Recover indeterminate Claude worker evidence",
 	} {
 		if strings.Contains(coreTriggers, forbidden) {

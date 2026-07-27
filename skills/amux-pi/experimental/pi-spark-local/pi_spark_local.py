@@ -88,13 +88,73 @@ def parse_time(value: Any, name: str) -> dt.datetime:
     return parsed.astimezone(dt.timezone.utc)
 
 
-def load_json(path: pathlib.Path, label: str) -> dict[str, Any]:
+def strict_json(data: bytes, label: str) -> Any:
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise Blocked(f"{label} contains a duplicate JSON key")
+            value[key] = item
+        return value
+
     try:
-        value = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as error:
-        raise Blocked(f"{label} is unreadable") from error
+        return json.loads(data, object_pairs_hook=unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise Blocked(f"{label} is not valid UTF-8 JSON") from error
+
+
+def identity_from_stat(path: pathlib.Path, info: os.stat_result) -> dict[str, Any]:
+    return {
+        "path": str(path), "device": str(info.st_dev), "inode": str(info.st_ino),
+        "mode": stat.S_IMODE(info.st_mode), "size": info.st_size, "mtime_ns": str(info.st_mtime_ns),
+    }
+
+
+def read_bound_file(
+    path: pathlib.Path, label: str, maximum: int = 1_048_576,
+    expected: dict[str, Any] | None = None, forbidden_inode: tuple[str, str] | None = None,
+) -> tuple[bytes, dict[str, Any], str]:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as error:
+        raise Blocked(f"{label} could not be opened without following links") from error
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise Blocked(f"{label} is not a regular file")
+        identity = identity_from_stat(path, info)
+        if expected is not None and identity != expected:
+            raise Blocked(f"{label} identity changed")
+        if forbidden_inode == (identity["device"], identity["inode"]):
+            raise Blocked(f"{label} aliases shared authentication")
+        data = bytearray()
+        digest = hashlib.sha256()
+        while len(data) <= maximum:
+            chunk = os.read(descriptor, min(65536, maximum + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+            digest.update(chunk)
+        if len(data) > maximum:
+            raise Blocked(f"{label} exceeds its byte bound")
+        return bytes(data), identity, digest.hexdigest()
+    finally:
+        os.close(descriptor)
+
+
+def load_bound_json(
+    path: pathlib.Path, label: str, maximum: int = 1_048_576,
+    expected: dict[str, Any] | None = None, forbidden_inode: tuple[str, str] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    data, identity, digest = read_bound_file(path, label, maximum, expected, forbidden_inode)
+    value = strict_json(data, label)
     if not isinstance(value, dict):
         raise Blocked(f"{label} must be a JSON object")
+    return value, identity, digest
+
+
+def load_json(path: pathlib.Path, label: str) -> dict[str, Any]:
+    value, _, _ = load_bound_json(path, label)
     return value
 
 
@@ -106,15 +166,7 @@ def canonical_existing_file(path: str, label: str) -> pathlib.Path:
 
 
 def file_identity(path: pathlib.Path) -> dict[str, Any]:
-    info = path.stat()
-    return {
-        "path": str(path),
-        "device": str(info.st_dev),
-        "inode": str(info.st_ino),
-        "mode": stat.S_IMODE(info.st_mode),
-        "size": info.st_size,
-        "mtime_ns": str(info.st_mtime_ns),
-    }
+    return identity_from_stat(path, path.stat())
 
 
 def digest_file(path: pathlib.Path) -> str:
@@ -130,8 +182,19 @@ def require_exact_identity(path: pathlib.Path, expected: dict[str, Any], label: 
         raise Blocked(f"{label} identity changed")
 
 
-def validate_packet(path: pathlib.Path) -> tuple[dict[str, Any], pathlib.Path, list[pathlib.Path]]:
-    packet = load_json(path, "task packet")
+def validate_packet(path: pathlib.Path) -> tuple[dict[str, Any], pathlib.Path, list[pathlib.Path], dict[str, Any], str]:
+    path = canonical_existing_file(str(path.absolute()), "task packet")
+    packet_forbidden_inode = None
+    selected_auth = pathlib.Path(os.environ.get("PI_CODING_AGENT_DIR", pathlib.Path.home() / ".pi" / "agent")).expanduser() / "auth.json"
+    try:
+        selected_auth = selected_auth.resolve(strict=True)
+        auth_info = selected_auth.stat()
+        packet_forbidden_inode = (str(auth_info.st_dev), str(auth_info.st_ino))
+    except OSError:
+        pass
+    packet, packet_identity, packet_digest = load_bound_json(
+        path, "task packet", forbidden_inode=packet_forbidden_inode,
+    )
     required = {
         "schema", "operation_id", "owner_authorized", "goal", "workdir",
         "allowed_paths", "expected_output", "validation_commands", "exclusions",
@@ -190,10 +253,10 @@ def validate_packet(path: pathlib.Path) -> tuple[dict[str, Any], pathlib.Path, l
         if workdir not in resolved.parents:
             raise Blocked("allowed path escapes the worktree")
         allowed.append(resolved)
-    return packet, workdir, allowed
+    return packet, workdir, allowed, packet_identity, packet_digest
 
 
-def validate_admission(packet: dict[str, Any], now: dt.datetime) -> pathlib.Path:
+def validate_admission(packet: dict[str, Any], now: dt.datetime) -> tuple[pathlib.Path, dict[str, Any], str]:
     present = [name for name in PROHIBITED_ENV if name in os.environ]
     if present:
         raise Blocked("prohibited API-key environment is present")
@@ -230,11 +293,13 @@ def validate_admission(packet: dict[str, Any], now: dt.datetime) -> pathlib.Path
         raise Blocked("quota evidence does not prove available OAuth Spark capacity")
     quota_time = parse_time(quota["observed_at"], "quota observed_at")
     reset = parse_time(quota["reset_at"], "quota reset_at")
-    if (now - quota_time).total_seconds() < -30 or (now - quota_time).total_seconds() > 300 or reset <= now:
+    if (now - quota_time).total_seconds() < -30 or (now - quota_time).total_seconds() > 300 or reset <= now or quota_time >= reset:
         raise Blocked("quota evidence is stale or has an invalid reset window")
 
     settings_path = auth_path.parent / "settings.json"
-    settings = load_json(settings_path, "shared Pi settings")
+    settings, settings_identity, settings_digest = load_bound_json(
+        settings_path, "shared Pi settings", forbidden_inode=(observed_identity["device"], observed_identity["inode"]),
+    )
     retry = settings.get("retry")
     if not isinstance(retry, dict) or retry.get("enabled") is not False or retry.get("maxRetries", 0) != 0:
         raise Blocked("shared Pi settings do not disable agent retries")
@@ -244,7 +309,7 @@ def validate_admission(packet: dict[str, Any], now: dt.datetime) -> pathlib.Path
     compaction = settings.get("compaction")
     if not isinstance(compaction, dict) or compaction.get("enabled") is not False:
         raise Blocked("shared Pi settings do not disable compaction")
-    return auth_path
+    return auth_path, settings_identity, settings_digest
 
 
 def run_probe(argv: list[str], timeout: int, limit: int) -> subprocess.CompletedProcess[bytes]:
@@ -253,7 +318,18 @@ def run_probe(argv: list[str], timeout: int, limit: int) -> subprocess.Completed
     environment.pop("NODE_PATH", None)
     environment.update({"PI_SKIP_VERSION_CHECK": "1", "PI_OFFLINE": "1"})
     process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
-    identity = process_identity(process.pid)
+    try:
+        identity = stable_process_identity(process.pid, time.monotonic() + timeout)
+    except Exception:
+        try:
+            incarnation = process_incarnation(process.pid)
+        except Blocked:
+            incarnation = None
+        if incarnation is not None:
+            stop_exact_process(process, incarnation)
+        else:
+            contain_owned_child(process)
+        raise
     stdout, stderr, timed_out, overflowed = finish_bounded_process(
         process, b"", identity, time.monotonic() + timeout, limit, limit,
     )
@@ -338,24 +414,32 @@ def worktree_identity(workdir: pathlib.Path) -> dict[str, Any]:
 
 
 def build_intent(packet_path: pathlib.Path, pi_argument: str) -> tuple[dict[str, Any], list[pathlib.Path]]:
-    packet, workdir, allowed = validate_packet(packet_path)
-    auth_path = validate_admission(packet, utcnow())
+    packet, workdir, allowed, packet_identity, packet_digest = validate_packet(packet_path)
+    auth_path, settings_identity, settings_digest = validate_admission(packet, utcnow())
     pi, node, version = resolve_pi(pi_argument)
     parent_identities = {}
+    allowed_identities = {}
+    allowed_digests = {}
+    auth_identity = file_identity(auth_path)
     for path in allowed:
         info = path.parent.stat()
-        parent_identities[str(path.relative_to(workdir))] = {"path": str(path.parent), "device": str(info.st_dev), "inode": str(info.st_ino)}
+        relative = str(path.relative_to(workdir))
+        parent_identities[relative] = {"path": str(path.parent), "device": str(info.st_dev), "inode": str(info.st_ino)}
+        _, allowed_identities[relative], allowed_digests[relative] = read_bound_file(
+            path, "allowed path", 131072, forbidden_inode=(auth_identity["device"], auth_identity["inode"]),
+        )
     intent = {
         "schema": 1,
         "provider": PROVIDER,
         "model": MODEL_ID,
         "operation_id": packet["operation_id"],
         "packet_path": str(packet_path.resolve(strict=True)),
-        "packet_sha256": digest_file(packet_path),
+        "packet_identity": packet_identity,
+        "packet_sha256": packet_digest,
         "workdir": str(workdir),
         "allowed_paths": [str(path.relative_to(workdir)) for path in allowed],
-        "allowed_before": {str(path.relative_to(workdir)): digest_file(path) for path in allowed},
-        "allowed_identity": {str(path.relative_to(workdir)): file_identity(path) for path in allowed},
+        "allowed_before": allowed_digests,
+        "allowed_identity": allowed_identities,
         "parent_identity": parent_identities,
         "worktree_identity": worktree_identity(workdir),
         "pi": file_identity(pi),
@@ -364,8 +448,9 @@ def build_intent(packet_path: pathlib.Path, pi_argument: str) -> tuple[dict[str,
         "node_sha256": digest_file(node),
         "pi_version": version,
         "argv": [str(node), str(pi), *PI_ARGS],
-        "auth": file_identity(auth_path),
-        "settings_sha256": digest_file(auth_path.parent / "settings.json"),
+        "auth": auth_identity,
+        "settings": settings_identity,
+        "settings_sha256": settings_digest,
         "quota_before": packet["quota_evidence"],
         "timeout_seconds": packet["timeout_seconds"],
         "stdout_limit": packet["stdout_limit"],
@@ -380,13 +465,18 @@ def atomic_json(path: pathlib.Path, value: dict[str, Any], mode: int = 0o600) ->
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
+        os.fchmod(descriptor, mode)
         with os.fdopen(descriptor, "w") as output:
             json.dump(value, output, sort_keys=True, separators=(",", ":"))
             output.write("\n")
             output.flush()
             os.fsync(output.fileno())
-        os.chmod(temporary, mode)
         os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         try:
             os.unlink(temporary)
@@ -394,26 +484,42 @@ def atomic_json(path: pathlib.Path, value: dict[str, Any], mode: int = 0o600) ->
             pass
 
 
-def create_plan(state_dir: pathlib.Path, packet_path: pathlib.Path, pi_argument: str) -> dict[str, Any]:
-    intent, _ = build_intent(packet_path, pi_argument)
-    receipt, _ = state_paths(state_dir, intent["operation_id"])
-    immutable = intent_path(state_dir, intent["operation_id"])
-    receipt.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    immutable.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if receipt.exists() or immutable.exists():
-        raise Blocked("operation identity already exists")
-    atomic_json(immutable, intent, 0o400)
-    operation = {
-        "schema": 1, "operation_id": intent["operation_id"],
-        "intent_sha256": digest_file(immutable), "status": "planned",
-    }
+def exclusive_json(path: pathlib.Path, value: dict[str, Any], mode: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
-        descriptor = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
     except FileExistsError as error:
         raise Blocked("operation identity already exists") from error
-    os.close(descriptor)
-    atomic_json(receipt, operation)
-    return {**intent, **operation}
+    try:
+        with os.fdopen(descriptor, "w") as output:
+            json.dump(value, output, sort_keys=True, separators=(",", ":"))
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except Exception:
+        raise
+
+
+def create_plan(state_dir: pathlib.Path, packet_path: pathlib.Path, pi_argument: str) -> dict[str, Any]:
+    with (state_dir / "plan.lock").open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        intent, _ = build_intent(packet_path, pi_argument)
+        receipt, _ = state_paths(state_dir, intent["operation_id"])
+        immutable = intent_path(state_dir, intent["operation_id"])
+        if receipt.exists() or immutable.exists():
+            raise Blocked("operation identity already exists")
+        exclusive_json(immutable, intent, 0o400)
+        operation = {
+            "schema": 1, "operation_id": intent["operation_id"],
+            "intent_sha256": digest_file(immutable), "status": "planned",
+        }
+        exclusive_json(receipt, operation, 0o600)
+        return {**intent, **operation}
 
 
 def load_operation(state_dir: pathlib.Path, requested_id: str) -> tuple[pathlib.Path, dict[str, Any], dict[str, Any]]:
@@ -432,9 +538,9 @@ def load_operation(state_dir: pathlib.Path, requested_id: str) -> tuple[pathlib.
     if digest_file(immutable) != operation.get("intent_sha256") or intent.get("operation_id") != requested_id:
         raise Blocked("immutable execution intent digest or identity changed")
     intent_fields = {
-        "schema", "provider", "model", "operation_id", "packet_path", "packet_sha256", "workdir",
+        "schema", "provider", "model", "operation_id", "packet_path", "packet_identity", "packet_sha256", "workdir",
         "allowed_paths", "allowed_before", "allowed_identity", "parent_identity", "worktree_identity",
-        "pi", "pi_sha256", "node", "node_sha256", "pi_version", "argv", "auth", "settings_sha256",
+        "pi", "pi_sha256", "node", "node_sha256", "pi_version", "argv", "auth", "settings", "settings_sha256",
         "quota_before", "timeout_seconds", "stdout_limit", "stderr_limit", "event_limit", "status",
     }
     operation_fields = {
@@ -466,7 +572,7 @@ class ProcBSDInfo(ctypes.Structure):
     ]
 
 
-def process_identity(pid: int) -> dict[str, Any] | None:
+def process_incarnation(pid: int) -> dict[str, Any] | None:
     if sys.platform != "darwin":
         raise Blocked("local Pi process incarnation verification is currently supported only on Darwin")
     library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
@@ -476,15 +582,21 @@ def process_identity(pid: int) -> dict[str, Any] | None:
         return None
     if size != ctypes.sizeof(info) or info.pid != pid:
         raise Blocked("Darwin returned an incomplete process identity")
+    return {"pid": pid, "start_seconds": str(info.start_tvsec), "start_microseconds": str(info.start_tvusec)}
+
+
+def process_identity(pid: int) -> dict[str, Any] | None:
+    incarnation = process_incarnation(pid)
+    if incarnation is None:
+        return None
+    library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
     path_buffer = ctypes.create_string_buffer(4096)
     path_size = library.proc_pidpath(pid, path_buffer, len(path_buffer))
     if path_size <= 0:
         raise Blocked("Darwin process executable path is unavailable")
     executable = pathlib.Path(os.fsdecode(path_buffer.value)).resolve(strict=True)
     return {
-        "pid": pid,
-        "start_seconds": str(info.start_tvsec),
-        "start_microseconds": str(info.start_tvusec),
+        **incarnation,
         "executable": str(executable),
         "executable_identity": file_identity(executable),
     }
@@ -509,10 +621,7 @@ def extract_result(events: bytes, event_limit: int, workdir: pathlib.Path) -> tu
         raise Blocked("Pi event count is empty or overflowed")
     parsed: list[dict[str, Any]] = []
     for line in lines:
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError as error:
-            raise Blocked("Pi emitted an invalid JSON event") from error
+        event = strict_json(line, "Pi event")
         if not isinstance(event, dict):
             raise Blocked("Pi emitted a non-object event")
         parsed.append(event)
@@ -522,6 +631,11 @@ def extract_result(events: bytes, event_limit: int, workdir: pathlib.Path) -> tu
     }
     if any(event.get("type") not in allowed_types for event in parsed):
         raise Blocked("Pi emitted an unexpected, retry, tool, or compaction event")
+    for event in parsed:
+        if event.get("type") == "message_update":
+            nested = event.get("assistantMessageEvent")
+            if not isinstance(nested, dict) or nested.get("type") not in {"text_delta", "thinking_delta"}:
+                raise Blocked("Pi emitted an unsupported nested assistant event")
     sessions = [event for event in parsed if event.get("type") == "session"]
     starts = [event for event in parsed if event.get("type") == "agent_start"]
     ends = [event for event in parsed if event.get("type") == "agent_end"]
@@ -536,28 +650,46 @@ def extract_result(events: bytes, event_limit: int, workdir: pathlib.Path) -> tu
     settled = [event for event in parsed if event.get("type") == "agent_settled"]
     if len(assistant) != 1 or len(valid) != 1 or len(settled) != 1 or parsed[-1].get("type") != "agent_settled":
         raise Blocked("Pi completion or exact inference provenance is unavailable")
+    indexes = (
+        parsed.index(sessions[0]), parsed.index(starts[0]),
+        next(index for index, event in enumerate(parsed) if event.get("type") == "message_end" and event.get("message") is valid[0]),
+        parsed.index(ends[0]), parsed.index(settled[0]),
+    )
+    if indexes != tuple(sorted(indexes)) or len(set(indexes)) != len(indexes):
+        raise Blocked("Pi lifecycle events are out of order")
     content = valid[0].get("content")
-    if not isinstance(content, list):
+    if not isinstance(content, list) or not content or any(
+        not isinstance(block, dict) or set(block) != {"type", "text"}
+        or block.get("type") != "text" or not isinstance(block.get("text"), str)
+        for block in content
+    ):
         raise Blocked("Pi assistant content is unavailable")
-    text = "".join(block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text")
-    try:
-        replacement = json.loads(text)
-    except json.JSONDecodeError as error:
-        raise Blocked("Pi result is not the strict JSON replacement envelope") from error
+    text = "".join(block["text"] for block in content)
+    replacement = strict_json(text.encode(), "Pi result replacement envelope")
     if not isinstance(replacement, dict) or set(replacement) != {"summary", "files"} or not isinstance(replacement["summary"], str) or not isinstance(replacement["files"], list):
         raise Blocked("Pi result replacement envelope has an invalid shape")
     return replacement, len(lines)
 
 
-def task_prompt(packet: dict[str, Any], workdir: pathlib.Path, allowed: list[pathlib.Path]) -> bytes:
+def task_prompt(packet: dict[str, Any], workdir: pathlib.Path, allowed: list[pathlib.Path], intent: dict[str, Any]) -> bytes:
     files = []
     total = 0
     for path in allowed:
-        content = path.read_text()
-        total += len(content.encode())
+        relative = str(path.relative_to(workdir))
+        data, _, digest = read_bound_file(
+            path, "allowed path", 131072, intent["allowed_identity"][relative],
+            (intent["auth"]["device"], intent["auth"]["inode"]),
+        )
+        if digest != intent["allowed_before"][relative]:
+            raise Blocked("allowed file content changed before prompt construction")
+        try:
+            content = data.decode()
+        except UnicodeDecodeError as error:
+            raise Blocked("allowed file is not UTF-8 text") from error
+        total += len(data)
         if total > 131072:
             raise Blocked("allowed file context exceeds 128 KiB")
-        files.append({"path": str(path.relative_to(workdir)), "content": content})
+        files.append({"path": relative, "content": content})
     request = {
         "goal": packet["goal"],
         "expected_output": packet["expected_output"],
@@ -591,19 +723,33 @@ def bounded_write(stream: Any, prompt: bytes) -> None:
         pass
 
 
-def stop_exact_process(process: subprocess.Popen[bytes], identity: dict[str, Any]) -> None:
+def stop_exact_process(process: subprocess.Popen[bytes], identity: dict[str, Any] | None) -> None:
     if identity is None:
         raise Blocked("Pi process identity is unavailable; exact stop refused")
-    if process_identity(process.pid) != identity:
+    incarnation = {key: identity[key] for key in ("pid", "start_seconds", "start_microseconds")}
+    if process_incarnation(process.pid) != incarnation:
         raise Blocked("Pi process identity changed; exact stop refused")
     process.terminate()
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        if process_identity(process.pid) != identity:
+        if process_incarnation(process.pid) != incarnation:
             raise Blocked("Pi process identity changed; forced stop refused")
         process.kill()
         process.wait(timeout=5)
+
+
+def contain_owned_child(process: subprocess.Popen[bytes]) -> None:
+    """Stop only the still-running direct child represented by this Popen handle."""
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
 
 
 def finish_bounded_process(
@@ -647,7 +793,8 @@ def replace_allowed_file(
         directory_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError as error:
         raise Blocked("allowed parent directory could not be opened without following links") from error
-    temporary_name = f".{target.name}.amux-pi-{operation}"
+    temporary_name = f".{target.name}.amux-pi-{operation}-{os.urandom(8).hex()}"
+    temporary_created = False
     applied = False
     try:
         parent_info = os.fstat(directory_fd)
@@ -675,6 +822,7 @@ def replace_allowed_file(
             temporary_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
             file_expected["mode"], dir_fd=directory_fd,
         )
+        temporary_created = True
         try:
             encoded = content.encode()
             offset = 0
@@ -691,18 +839,16 @@ def replace_allowed_file(
             raise Indeterminate("replacement was applied but durable completion is uncertain") from error
         raise Blocked("race-safe allowed-file replacement failed") from error
     finally:
-        try:
-            os.unlink(temporary_name, dir_fd=directory_fd)
-        except FileNotFoundError:
-            pass
+        if temporary_created:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
         os.close(directory_fd)
 
 
 def execute(state_dir: pathlib.Path, operation_id: str) -> dict[str, Any]:
-    receipt_path, receipt, intent = load_operation(state_dir, operation_id)
     _, lock_path = state_paths(state_dir, operation_id)
-    if set(receipt) != {"schema", "operation_id", "intent_sha256", "status"} or receipt.get("status") != "planned":
-        raise Blocked("operation is not in exact planned state")
     lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock = lock_path.open("a+")
     try:
@@ -710,11 +856,13 @@ def execute(state_dir: pathlib.Path, operation_id: str) -> dict[str, Any]:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise Blocked("another local Pi operation is active") from error
+        receipt_path, receipt, intent = load_operation(state_dir, operation_id)
+        if set(receipt) != {"schema", "operation_id", "intent_sha256", "status"} or receipt.get("status") != "planned":
+            raise Blocked("operation is not in exact planned state")
         packet_path = pathlib.Path(intent["packet_path"])
-        if digest_file(packet_path) != intent["packet_sha256"]:
+        packet, workdir, allowed, packet_identity, packet_digest = validate_packet(packet_path)
+        if packet_identity != intent["packet_identity"] or packet_digest != intent["packet_sha256"]:
             raise Blocked("task packet changed after immutable intent")
-        packet, workdir, allowed = validate_packet(packet_path)
-        validate_admission(packet, utcnow())
         fresh_intent, _ = build_intent(packet_path, intent["pi"]["path"])
         if fresh_intent != intent:
             raise Blocked("immutable execution intent no longer matches current admission identity")
@@ -723,7 +871,7 @@ def execute(state_dir: pathlib.Path, operation_id: str) -> dict[str, Any]:
         argv = [str(node_path), str(pi_path), *PI_ARGS]
         if intent["argv"] != argv:
             raise Blocked("immutable normalized Pi argv changed")
-        prompt = task_prompt(packet, workdir, allowed)
+        prompt = task_prompt(packet, workdir, allowed, intent)
         environment = os.environ.copy()
         environment.pop("NODE_OPTIONS", None)
         environment.pop("NODE_PATH", None)
@@ -739,7 +887,20 @@ def execute(state_dir: pathlib.Path, operation_id: str) -> dict[str, Any]:
             receipt.update({"status": "blocked", "reason": "Pi launch failed before process identity"})
             atomic_json(receipt_path, receipt)
             raise Blocked("Pi launch failed") from error
-        identity = stable_process_identity(process.pid, deadline)
+        try:
+            identity = stable_process_identity(process.pid, deadline)
+        except Exception as error:
+            try:
+                incarnation = process_incarnation(process.pid)
+            except Blocked:
+                incarnation = None
+            receipt.update({"status": "indeterminate", "reason": "Pi identity acquisition failed"})
+            atomic_json(receipt_path, receipt)
+            if incarnation is not None:
+                stop_exact_process(process, incarnation)
+            else:
+                contain_owned_child(process)
+            raise Blocked("Pi process identity could not be verified") from error
         if identity is None:
             receipt.update({"status": "indeterminate", "reason": "Pi exited before process identity was recorded"})
             atomic_json(receipt_path, receipt)
@@ -783,6 +944,19 @@ def execute(state_dir: pathlib.Path, operation_id: str) -> dict[str, Any]:
             receipt.update({"status": "blocked", "reason": str(error)})
             atomic_json(receipt_path, receipt)
             raise
+        auth_path = pathlib.Path(intent["auth"]["path"])
+        if auth_path.is_symlink() or file_identity(auth_path) != intent["auth"]:
+            receipt.update({"status": "blocked", "reason": "shared authentication identity changed during execution"})
+            atomic_json(receipt_path, receipt)
+            raise Blocked("shared authentication identity changed during execution")
+        _, settings_identity, settings_digest = load_bound_json(
+            pathlib.Path(intent["settings"]["path"]), "shared Pi settings", expected=intent["settings"],
+            forbidden_inode=(intent["auth"]["device"], intent["auth"]["inode"]),
+        )
+        if settings_identity != intent["settings"] or settings_digest != intent["settings_sha256"]:
+            receipt.update({"status": "blocked", "reason": "shared settings changed during execution"})
+            atomic_json(receipt_path, receipt)
+            raise Blocked("shared Pi settings changed during execution")
         requested = {str(path.relative_to(workdir)): path for path in allowed}
         returned = replacement["files"]
         if len(returned) != 1:
@@ -868,7 +1042,10 @@ def finalize(state_dir: pathlib.Path, operation_id: str, quota_after_path: pathl
         if receipt.get("status") != "awaiting_quota_confirmation":
             raise Blocked("operation is not awaiting quota confirmation")
         evidence_path = canonical_existing_file(str(quota_after_path.absolute()), "post-run quota evidence")
-        evidence = load_json(evidence_path, "post-run quota evidence")
+        evidence, evidence_identity, evidence_digest = load_bound_json(
+            evidence_path, "post-run quota evidence",
+            forbidden_inode=(intent["auth"]["device"], intent["auth"]["inode"]),
+        )
         required = {"route", "source_confidence", "observed_at", "reset_at", "usage_increased"}
         if set(evidence) != required or evidence.get("route") != "chatgpt-codex-oauth-spark" or evidence.get("source_confidence") != "trusted" or evidence.get("usage_increased") is not True:
             raise Blocked("post-run quota evidence does not prove the OAuth Spark billing route")
@@ -885,7 +1062,7 @@ def finalize(state_dir: pathlib.Path, operation_id: str, quota_after_path: pathl
         receipt.update({
             "status": "success", "billing_route": "chatgpt-codex-oauth-spark",
             "quota_confirmed_at": evidence["observed_at"], "quota_after": evidence,
-            "quota_after_sha256": digest_file(evidence_path), "quota_after_identity": file_identity(evidence_path),
+            "quota_after_sha256": evidence_digest, "quota_after_identity": evidence_identity,
         })
         atomic_json(receipt_path, receipt)
         return {**intent, **receipt}
