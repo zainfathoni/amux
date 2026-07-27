@@ -8,7 +8,7 @@ status: accepted
 
 Worker assignment becomes a two-owner protocol:
 
-1. Amp's authenticated native thread-creation tool, invoked by the `/amux` skill, owns exactly one thread creation and its initial-message delivery. The skill must choose an explicit executor (`orb`, local execution where supported, or one exact Amp runner ID) and an explicit mode (`medium` unless the owner names another mode). It never silently falls back to another executor or mode.
+1. Amp's authenticated native thread-creation tool, invoked by the `/amux` skill, owns the single creation invocation and submission of its initial prompt. The skill must choose an explicit executor (`orb`, local execution where supported, or one exact Amp runner ID) and an explicit mode (`medium` unless the owner names another mode). It never silently falls back to another executor or mode.
 2. `amux worker adopt` accepts the exact already-created thread and owns only deterministic local adoption: canonical workspace/session, semantic window, canonical workdir, tmux client, worker catalog, and optional exact durable group-member intent.
 
 The amux CLI does not invoke, wrap, or pretend to invoke an Amp server tool. Adoption sends no message, presses no Enter, parses no composer or box-drawing frame, and reads no transcript. Legacy `amux spawn` remains available as a deprecated compatibility path until the removal gate below is satisfied.
@@ -25,9 +25,11 @@ JSON identifies the exact thread as the worker resource and reports workspace, w
 
 ## Trust boundary
 
-The locally available native `create_thread` tool contract proves these properties: the caller supplies the initial prompt, project, explicit executor and (when `runner`) exact Amp runner ID, and explicit agent mode; a successful tool result returns the created thread ID and URL. Those request fields plus the returned exact ID/URL are trusted native receipt data. Exactly-once creation and initial delivery are owned by that one native invocation, not re-proven by amux.
+The native creation receipt is deliberately two-part: the authenticated request supplied by the coordinator and the successful tool result returned for that one invocation. The current `create_thread` contract binds the complete initial prompt, project, explicit executor, exact Amp runner ID when `runner`, and explicit agent mode; success returns the created thread ID and URL and echoes the selected project, executor, mode, and runner ID where applicable. Those request fields plus the successful result are trusted caller-side receipt data. The coordinator issues one invocation and, if its result is indeterminate, preserves the invocation evidence rather than guessing or retrying. Amp owns handling of the initial prompt within that invocation; message delivery and inference completion are neither separate receipt fields nor facts re-proven by amux.
 
-No authoritative local/API documentation currently proves a stable richer receipt containing selected executor, selected mode, canonical workdir, initial-message digest, delivery acknowledgement, or Amp runner installation identity. Those fields are an explicit blocker for an amux-owned creation receipt. The prototype therefore implements only adoption and never invents, persists, or validates such fields.
+The [Amp manual](https://ampcode.com/manual) independently documents the four built-in modes, `createThread({ executor: "orb" })`, exact runner selection through `executor: { type: "runner", id }`, and that a runner accepts remotely created threads in the directory where it was started. It also documents the narrower message boundary: appending a user message returns when Amp accepts it, not when inference completes. The creation result does **not** contain a prompt digest, transcript proof, inference completion, separate delivery acknowledgement, canonical workdir, or Amp installation identity. Native creation therefore must not claim those absent fields.
+
+For a physical runner, the coordinator selects one exact live runner immediately before creation and records its authoritative runner ID and reported working directory. The manual's current-directory contract plus the exact Linux/Darwin physical proofs establish physical runner create/adopt dispatch evidence for the migration; they do not establish finish or full removal parity. The returned thread ID still remains the only remote identity passed to adoption. amux locally verifies only its own canonical workdir and tmux/catalog ownership. A worker report may corroborate the remote checkout, but it is operational evidence rather than an amux receipt field.
 
 amux locally revalidates all facts it owns:
 
@@ -88,12 +90,15 @@ The `/amux` skill should prefer native create → adopt for new workers and mark
 
 Compatibility spawn may be removed only in a later explicit change after all of the following are recorded:
 
-- one successful Orb native-create/adopt proof with no TUI delivery;
-- one exact physical Amp runner proof on Linux and one on Darwin;
-- documented stable native receipt semantics sufficient for physical native-create/adopt parity, including executor selection and workdir claims that the migration needs;
-- interruption, duplicate, inactive, conflict, group/report, restart, and finish parity;
-- an explicit migration window and rollback plan.
+- one successful Orb native-create/adopt proof with no TUI delivery — recorded on [#269](https://github.com/zainfathoni/amux/issues/269);
+- one exact physical Amp runner proof on Linux and one on Darwin — recorded on [#269](https://github.com/zainfathoni/amux/issues/269);
+- documented stable native request/result semantics sufficient for physical native-create/adopt parity, including explicit executor selection and the runner current-directory contract — documented above, without inventing a richer receipt;
+- interruption, duplicate, inactive, conflict, group/report, restart, and finish parity — unit coverage plus bounded physical evidence are recorded on [#269](https://github.com/zainfathoni/amux/issues/269);
+- an explicit migration window and rollback plan — tracked by [#272](https://github.com/zainfathoni/amux/issues/272);
+- fail-closed disposition for preserved legacy operations — remains owned by [#259](https://github.com/zainfathoni/amux/issues/259).
+
+The migration window keeps deprecated compatibility spawn in v0.2.x and targets v0.3.0 for a reject-only, non-mutating tombstone before later schema cleanup. During v0.3.x, legacy operation files remain readable and diagnosable but never auto-convert, retry, delete, or become successful. Before release, rollback may revert the v0.3 tombstone/removal only while retaining #259's fail-closed legacy-operation disposition. After release, downgrade is permitted only to a pinned v0.2.x build containing or backporting that disposition; if no such build exists, rollback is a forward fix rather than a binary downgrade. No rollback path may resubmit an indeterminate operation. The complete implementation boundary and acceptance criteria live in #272.
 
 ## Consequences
 
-Assignment delivery no longer depends on terminal size, composer geometry, pane text, or Enter safety in the preferred architecture. amux remains a deterministic local lifecycle manager rather than a remote model router. The separation intentionally leaves a receipt-proof blocker: local adoption can be shipped and tested now, while physical creation parity cannot be claimed until Amp documents the missing receipt fields and Linux/Darwin runner evidence exists.
+Assignment delivery no longer depends on terminal size, composer geometry, pane text, or Enter safety in the preferred architecture. amux remains a deterministic local lifecycle manager rather than a remote model router. Native request/result semantics and physical creation parity are now recorded without expanding amux's trust boundary: absent digest, acknowledgement, transcript, installation, and remote-workdir fields remain absent rather than fabricated. Legacy TUI removal is still blocked on #259 and proceeds only through the explicit migration in #272.
