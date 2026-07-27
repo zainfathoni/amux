@@ -934,7 +934,7 @@ func allowedMaintenanceRunnerTransition(before, after runnerInspection) bool {
 	if before.state != runnerPaneExact {
 		return true
 	}
-	return before.pane.Session == after.pane.Session && before.pane.Window == after.pane.Window && before.pane.WindowID == after.pane.WindowID && before.pane.PaneID == after.pane.PaneID && before.pane.PID == after.pane.PID && before.pane.StartTime == after.pane.StartTime
+	return before.pane.Session == after.pane.Session && before.pane.Window == after.pane.Window && before.pane.WindowID == after.pane.WindowID && before.pane.PaneID == after.pane.PaneID && before.pane.PID == after.pane.PID
 }
 func (a app) persistMaintenanceFailure(dir config.Directory, env *result.Envelope, o maintenanceOutcome, cause error) error {
 	o.Status = "failed"

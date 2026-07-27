@@ -1920,6 +1920,28 @@ func TestMaintenanceRejectsLiveProcessIncarnationDriftAfterPreflight(t *testing.
 	}
 }
 
+func TestAllowedMaintenanceRunnerTransitionIgnoresOnlyPresentationStartTime(t *testing.T) {
+	before := runnerInspection{state: runnerPaneExact, pane: tmux.WindowPane{Session: "alpha", Window: "runner", WindowID: "@1", PaneID: "%1", PID: 42, StartTime: 100}}
+	after := before
+	after.pane.StartTime = 200
+	if !allowedMaintenanceRunnerTransition(before, after) {
+		t.Fatal("StartTime-only change rejected despite native process-incarnation revalidation")
+	}
+	for _, mutate := range []func(*tmux.WindowPane){
+		func(p *tmux.WindowPane) { p.Session = "other" },
+		func(p *tmux.WindowPane) { p.Window = "other" },
+		func(p *tmux.WindowPane) { p.WindowID = "@2" },
+		func(p *tmux.WindowPane) { p.PaneID = "%2" },
+		func(p *tmux.WindowPane) { p.PID = 43 },
+	} {
+		changed := before
+		mutate(&changed.pane)
+		if allowedMaintenanceRunnerTransition(before, changed) {
+			t.Fatalf("exact tmux identity drift accepted: before=%+v after=%+v", before.pane, changed.pane)
+		}
+	}
+}
+
 func TestMaintenanceDoesNotTouchRunnerConfigOrAmpPIDFiles(t *testing.T) {
 	f := newMaintenanceLifecycleFixture(t, "external", 1)
 	old := lifecycleFingerprint(t, f.amp)
