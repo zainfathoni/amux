@@ -19,4 +19,5 @@ Trigger checklist: [`reference/trigger-phrases.md`](reference/trigger-phrases.md
 - Exact model `openai-codex/gpt-5.3-codex-spark` through owner-operated ChatGPT Codex OAuth.
 - API keys, ambiguous billing, automatic retry/fallback, repository authority, and credential transfer fail closed. The fresh-Orb recipe requires trusted quota evidence; the local spike treats quota observations only as optional smoke evidence, never runtime admission.
 - The local spike checks auth-file metadata without reading auth contents, requires retry/provider-retry/compaction disabled in owner-managed settings, disables Pi tools/session/context extras, bounds both output streams and time, verifies process-group termination, and rejects any Pi-created worktree diff.
+- Deterministic tasks may supply an exact expected replacement SHA-256, which must match before apply without newline normalization. Open-ended replacements remain explicitly untrusted and require coordinator diff review and tests.
 - Do not activate from incidental Pi/Spark mentions.

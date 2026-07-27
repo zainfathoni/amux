@@ -43,6 +43,47 @@ func TestAppliesOneExactReplacementInPrintMode(t *testing.T) {
 	}
 }
 
+func TestExpectedReplacementSHA256Gate(t *testing.T) {
+	t.Run("matching bytes apply as expected", func(t *testing.T) {
+		f := newFixture(t)
+		before := mustRead(t, f.target)
+		replacementBytes := []byte("after\n")
+		reply := replacement{Path: "target.txt", OriginalSHA256: digest(before), Replacement: string(replacementBytes)}
+		t.Setenv("FAKE_PI_OUTPUT", marshal(t, reply))
+		var output bytes.Buffer
+		if err := run(f.args("--task", "edit", "--expected-replacement-sha256", digest(replacementBytes)), &output); err != nil {
+			t.Fatal(err)
+		}
+		var got result
+		if err := json.Unmarshal(output.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "replacement_applied_expected" || got.ExpectedReplacementSHA256 != digest(replacementBytes) {
+			t.Fatalf("result=%+v", got)
+		}
+		if !bytes.Equal(mustRead(t, f.target), replacementBytes) {
+			t.Fatal("matching replacement was not applied byte-for-byte")
+		}
+	})
+
+	t.Run("trailing newline mismatch does not apply", func(t *testing.T) {
+		f := newFixture(t)
+		before := mustRead(t, f.target)
+		reply := replacement{Path: "target.txt", OriginalSHA256: digest(before), Replacement: "after"}
+		t.Setenv("FAKE_PI_OUTPUT", marshal(t, reply))
+		err := run(f.args("--task", "edit", "--expected-replacement-sha256", digest([]byte("after\n"))), &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "does not match expected SHA-256") {
+			t.Fatalf("err=%v", err)
+		}
+		if !bytes.Equal(mustRead(t, f.target), before) {
+			t.Fatal("mismatched replacement changed target")
+		}
+		if status, statusErr := git(f.workdir, "status", "--porcelain=v1", "-z", "--untracked-files=all"); statusErr != nil || len(status) != 0 {
+			t.Fatalf("mismatched replacement left worktree changes: %q, %v", status, statusErr)
+		}
+	})
+}
+
 func TestRejectsWrongPackageIdentityBeforeLaunch(t *testing.T) {
 	for _, mutate := range []func(map[string]any){
 		func(p map[string]any) { p["name"] = "other" },

@@ -40,6 +40,7 @@ var extraProcessEnvironment func() []string
 type options struct {
 	pi, piSHA256, node, nodeSHA256 string
 	workdir, file, task            string
+	expectedReplacementSHA256      string
 	timeout                        time.Duration
 	stdoutLimit, stderrLimit       int
 }
@@ -69,19 +70,20 @@ type replacement struct {
 }
 
 type result struct {
-	Status           string   `json:"status"`
-	Package          string   `json:"package"`
-	Version          string   `json:"version"`
-	Model            string   `json:"model"`
-	Executable       string   `json:"executable"`
-	ExecutableSHA256 string   `json:"executable_sha256"`
-	Node             string   `json:"node"`
-	NodeSHA256       string   `json:"node_sha256"`
-	Argv             []string `json:"argv"`
-	ChangedPath      string   `json:"changed_path"`
-	StdoutBytes      int      `json:"stdout_bytes"`
-	StderrBytes      int      `json:"stderr_bytes"`
-	Stderr           string   `json:"stderr"`
+	Status                    string   `json:"status"`
+	Package                   string   `json:"package"`
+	Version                   string   `json:"version"`
+	Model                     string   `json:"model"`
+	Executable                string   `json:"executable"`
+	ExecutableSHA256          string   `json:"executable_sha256"`
+	Node                      string   `json:"node"`
+	NodeSHA256                string   `json:"node_sha256"`
+	Argv                      []string `json:"argv"`
+	ChangedPath               string   `json:"changed_path"`
+	StdoutBytes               int      `json:"stdout_bytes"`
+	StderrBytes               int      `json:"stderr_bytes"`
+	Stderr                    string   `json:"stderr"`
+	ExpectedReplacementSHA256 string   `json:"expected_replacement_sha256,omitempty"`
 }
 
 func main() {
@@ -102,6 +104,7 @@ func run(args []string, output io.Writer) error {
 	flags.StringVar(&o.workdir, "workdir", "", "absolute clean Git worktree")
 	flags.StringVar(&o.file, "file", "", "one tracked file relative to worktree")
 	flags.StringVar(&o.task, "task", "", "self-contained microtask")
+	flags.StringVar(&o.expectedReplacementSHA256, "expected-replacement-sha256", "", "optional exact SHA-256 required before replacement")
 	flags.DurationVar(&o.timeout, "timeout", 2*time.Minute, "wall-clock limit")
 	flags.IntVar(&o.stdoutLimit, "stdout-limit", 128<<10, "final response byte limit")
 	flags.IntVar(&o.stderrLimit, "stderr-limit", 16<<10, "diagnostic byte limit")
@@ -116,6 +119,13 @@ func run(args []string, output io.Writer) error {
 	}
 	if !utf8.ValidString(o.task) {
 		return errors.New("task must be valid UTF-8")
+	}
+	if o.expectedReplacementSHA256 != "" {
+		decoded, err := hex.DecodeString(o.expectedReplacementSHA256)
+		if err != nil || len(decoded) != sha256.Size {
+			return errors.New("--expected-replacement-sha256 must be exactly 64 hexadecimal characters")
+		}
+		o.expectedReplacementSHA256 = strings.ToLower(o.expectedReplacementSHA256)
 	}
 	if _, present := os.LookupEnv("OPENAI_API_KEY"); present {
 		return errors.New("OPENAI_API_KEY is present; exact OAuth billing is not established")
@@ -167,6 +177,9 @@ func run(args []string, output io.Writer) error {
 	if len([]byte(parsed.Replacement)) > maxInputBytes {
 		return fmt.Errorf("replacement exceeds %d-byte limit", maxInputBytes)
 	}
+	if o.expectedReplacementSHA256 != "" && digest([]byte(parsed.Replacement)) != o.expectedReplacementSHA256 {
+		return errors.New("replacement does not match expected SHA-256")
+	}
 	if err := requireUnchanged(workdir, target, before); err != nil {
 		return err
 	}
@@ -181,11 +194,16 @@ func run(args []string, output io.Writer) error {
 	if len(stderr) > 0 {
 		stderrSummary = "present_redacted"
 	}
+	status := "replacement_applied_untrusted"
+	if o.expectedReplacementSHA256 != "" {
+		status = "replacement_applied_expected"
+	}
 	return json.NewEncoder(output).Encode(result{
-		Status: "replacement_applied_untrusted", Package: packageName, Version: packageVersion,
+		Status: status, Package: packageName, Version: packageVersion,
 		Model: model, Executable: pi, ExecutableSHA256: piDigest, Node: node, NodeSHA256: nodeDigest,
 		Argv:        append([]string{node, pi}, fixedArgs...),
 		ChangedPath: relative, StdoutBytes: len(stdout), StderrBytes: len(stderr), Stderr: stderrSummary,
+		ExpectedReplacementSHA256: o.expectedReplacementSHA256,
 	})
 }
 
