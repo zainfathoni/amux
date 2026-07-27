@@ -640,6 +640,10 @@ func (a app) runMaintenance(in invocation, dir config.Directory, env *result.Env
 			return env, result.Preflight(fmt.Errorf("load prior maintenance result: %w", priorErr))
 		}
 	}
+	maintenancePreflight, err := preflightMaintenanceExecutor(dir)
+	if err != nil {
+		return env, result.Preflight(err)
+	}
 	failureBase := maintenanceOutcome{
 		SchemaVersion:       1,
 		AmpPath:             m.AmpPath,
@@ -668,10 +672,6 @@ func (a app) runMaintenance(in invocation, dir config.Directory, env *result.Env
 			return env, result.Preflight(cause)
 		}
 		return env, a.persistMaintenanceFailure(dir, env, failureBase, cause)
-	}
-	maintenanceInspections, err := preflightMaintenanceExecutor(dir)
-	if err != nil {
-		return env, result.Preflight(err)
 	}
 	planDetails := maintenanceResultDetails(m)
 	if in.Options.DryRun {
@@ -751,11 +751,7 @@ func (a app) runMaintenance(in invocation, dir config.Directory, env *result.Env
 		env.Skipped = append(env.Skipped, executableResult(m.AmpPath, base.AmpVersion, false))
 		return env, nil
 	}
-	rows, e := config.LoadRunnersReadOnly(dir.RunnersPath())
-	if e != nil {
-		return env, a.persistMaintenanceFailure(dir, env, base, e)
-	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].Workdir < rows[j].Workdir })
+	rows := maintenancePreflight.rows
 	completed := map[string]bool{}
 	pendingPhase := map[string]string{}
 	sameObservedIdentity := prior.ObservedFingerprint == observed && prior.AmpVersion == base.AmpVersion
@@ -796,7 +792,7 @@ func (a app) runMaintenance(in invocation, dir config.Directory, env *result.Env
 			continue
 		}
 		inspection, ie := inspectRunner(row)
-		before, preflighted := maintenanceInspections[row.Workdir]
+		before, preflighted := maintenancePreflight.inspections[row.Workdir]
 		if ie == nil && (!preflighted || !sameMaintenanceRunnerInspection(before, inspection)) {
 			ie = errors.New("runner identity changed after maintenance preflight")
 		}
@@ -883,20 +879,26 @@ func (a app) runMaintenance(in invocation, dir config.Directory, env *result.Env
 	return env, nil
 }
 
-func preflightMaintenanceExecutor(dir config.Directory) (map[string]runnerInspection, error) {
+type maintenanceExecutorPreflight struct {
+	rows        []config.RunnerRow
+	inspections map[string]runnerInspection
+}
+
+func preflightMaintenanceExecutor(dir config.Directory) (maintenanceExecutorPreflight, error) {
 	rows, err := config.LoadRunnersReadOnly(dir.RunnersPath())
 	if err != nil {
-		return nil, err
+		return maintenanceExecutorPreflight{}, err
 	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Workdir < rows[j].Workdir })
 	panes := make([]tmux.WindowPane, 0, len(rows))
 	inspections := make(map[string]runnerInspection, len(rows))
 	for _, row := range rows {
 		inspection, inspectErr := inspectRunner(row)
 		if inspectErr != nil {
-			return nil, inspectErr
+			return maintenanceExecutorPreflight{}, inspectErr
 		}
 		if inspection.state == runnerPaneConflict || inspection.state == runnerPaneAmbiguous {
-			return nil, fmt.Errorf("runner %s has %s tmux identity before maintenance", row.Workdir, inspection.state)
+			return maintenanceExecutorPreflight{}, fmt.Errorf("runner %s has %s tmux identity before maintenance", row.Workdir, inspection.state)
 		}
 		inspections[row.Workdir] = inspection
 		if inspection.state == runnerPaneExact {
@@ -904,9 +906,9 @@ func preflightMaintenanceExecutor(dir config.Directory) (map[string]runnerInspec
 		}
 	}
 	if err := preflightLifecycleExecutor("runner maintenance run", panes); err != nil {
-		return nil, err
+		return maintenanceExecutorPreflight{}, err
 	}
-	return inspections, nil
+	return maintenanceExecutorPreflight{rows: rows, inspections: inspections}, nil
 }
 
 func sameMaintenanceRunnerInspection(before, after runnerInspection) bool {

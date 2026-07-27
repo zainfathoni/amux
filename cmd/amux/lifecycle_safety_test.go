@@ -80,6 +80,24 @@ func TestLifecycleExecutorPreflightFailsClosedOnUnavailableOrReusedIdentity(t *t
 	}
 }
 
+func TestLifecycleExecutorConflictRequiresStableIntersectingIdentity(t *testing.T) {
+	calls := map[int]int{}
+	installLifecycleSafetyFixture(t, 90, 80, func(pid int) (tmux.ProcessMetadata, error) {
+		calls[pid]++
+		parents := map[int]int{90: 80, 80: 1}
+		identity := fmt.Sprintf("start-%d", pid)
+		if pid == 80 && calls[pid] > 1 {
+			identity = "reused-80"
+		}
+		return tmux.ProcessMetadata{PID: pid, ParentPID: parents[pid], Identity: identity}, nil
+	})
+
+	err := preflightLifecycleExecutor("worker teardown", []tmux.WindowPane{{Session: "alpha", Window: "worker", WindowID: "@1"}})
+	if err == nil || !strings.Contains(err.Error(), "cannot prove worker teardown is independent") || strings.Contains(err.Error(), "would stop or replace") {
+		t.Fatalf("drifting conflict-path identity error = %v", err)
+	}
+}
+
 func TestResolveLifecyclePaneProcessRequiresExactLiveIncarnation(t *testing.T) {
 	for _, test := range []struct {
 		name      string
@@ -248,6 +266,38 @@ func TestRunnerMaintenanceRejectsSelfTargetBeforeUpdateOrCheckpoint(t *testing.T
 				t.Fatalf("maintenance self-target invoked mutation:\n%s", delta)
 			}
 		})
+	}
+}
+
+func TestRunnerMaintenanceSelfTargetPrecedesExecutableValidationFailure(t *testing.T) {
+	fixture := newMaintenanceLifecycleFixture(t, "self", 1)
+	fingerprint := lifecycleFingerprint(t, fixture.amp)
+	seedLifecyclePrior(t, fixture, fingerprint)
+	writeLifecycleState(t, fixture, map[string]string{"ws0": "exact"})
+	metadata, err := loadMaintenance(fixture.dir.MaintenancePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata.AmpTarget = filepath.Join(t.TempDir(), "stale-target")
+	if err := atomicJSON(fixture.dir.MaintenancePath(), metadata); err != nil {
+		t.Fatal(err)
+	}
+	beforeResult, err := os.ReadFile(fixture.dir.MaintenanceResultPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	installLifecycleSafetyFixture(t, 90, 80, func(pid int) (tmux.ProcessMetadata, error) {
+		parents := map[int]int{90: 80, 80: 1}
+		return tmux.ProcessMetadata{PID: pid, ParentPID: parents[pid], Identity: fmt.Sprintf("start-%d", pid)}, nil
+	})
+
+	_, err = runLifecycle(t, fixture)
+	if err == nil || !strings.Contains(err.Error(), "would stop or replace") || strings.Contains(err.Error(), "persisted Amp target changed") {
+		t.Fatalf("early self-target preflight error = %v", err)
+	}
+	afterResult, readErr := os.ReadFile(fixture.dir.MaintenanceResultPath())
+	if readErr != nil || !bytes.Equal(beforeResult, afterResult) {
+		t.Fatalf("early validation path changed result: err=%v before=%q after=%q", readErr, beforeResult, afterResult)
 	}
 }
 

@@ -1792,6 +1792,58 @@ func TestMaintenancePartialConflictPersistsAndRetries(t *testing.T) {
 	}
 }
 
+func TestMaintenanceUsesPreflightRunnerSnapshotWhenRegistryAddsRow(t *testing.T) {
+	f := newMaintenanceLifecycleFixture(t, "external", 1)
+	old := lifecycleFingerprint(t, f.amp)
+	seedLifecyclePrior(t, f, old)
+	writeLifecycleState(t, f, map[string]string{"ws0": "exact"})
+	if err := os.WriteFile(f.amp, []byte("changed\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lateWorkdir := t.TempDir()
+	lateRow := config.RunnerRow{Workspace: "late", Workdir: lateWorkdir, Window: config.RunnerWindow(lateWorkdir)}
+	baseExec := maintenanceExec
+	added := false
+	maintenanceExec = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if !added && len(args) == 1 && args[0] == "version" {
+			added = true
+			if _, err := config.StoreRunner(f.dir.RunnersPath(), lateRow); err != nil {
+				return nil, err
+			}
+			stateBytes, err := os.ReadFile(f.state)
+			if err != nil {
+				return nil, err
+			}
+			var state map[string]map[string]any
+			if err := json.Unmarshal(stateBytes, &state); err != nil {
+				return nil, err
+			}
+			state[lateRow.Workspace] = map[string]any{"mode": "exact", "workdir": lateWorkdir, "window": lateRow.Window, "start": runnerStartCommand(lateWorkdir), "id": 99}
+			updated, _ := json.Marshal(state)
+			if err := os.WriteFile(f.state, updated, 0o600); err != nil {
+				return nil, err
+			}
+		}
+		return baseExec(ctx, name, args...)
+	}
+
+	before := lifecycleLog(t, f)
+	if _, err := runLifecycle(t, f); err != nil {
+		t.Fatal(err)
+	}
+	delta := strings.TrimPrefix(lifecycleLog(t, f), before)
+	if !added {
+		t.Fatal("test did not add post-preflight runner")
+	}
+	if strings.Contains(delta, lateRow.Workspace) || strings.Contains(delta, lateRow.Window) || strings.Contains(delta, lateWorkdir) {
+		t.Fatalf("post-preflight runner became a lifecycle target:\n%s", delta)
+	}
+	rows, err := config.LoadRunnersReadOnly(f.dir.RunnersPath())
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("late registry row was not preserved: rows=%+v err=%v", rows, err)
+	}
+}
+
 func TestMaintenanceDoesNotTouchRunnerConfigOrAmpPIDFiles(t *testing.T) {
 	f := newMaintenanceLifecycleFixture(t, "external", 1)
 	old := lifecycleFingerprint(t, f.amp)

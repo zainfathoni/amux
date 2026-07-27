@@ -52,11 +52,13 @@ func preflightLifecycleExecutor(command string, panes []tmux.WindowPane) error {
 		if ancestryErr != nil {
 			return lifecycleExecutorEvidenceError(command, ancestryErr)
 		}
-		if _, targetIsAncestor := current[target.PID]; targetIsAncestor {
-			return lifecycleExecutorConflict(command)
+		targetProcess, targetIsAncestor := current[target.PID]
+		currentProcess, targetIsDescendant := targetAncestry[currentPID]
+		if targetIsAncestor && !sameLifecycleProcess(targetProcess, targetAncestry[target.PID]) {
+			return lifecycleExecutorEvidenceError(command, errors.New("intersecting target process identity differs between ancestry snapshots"))
 		}
-		if _, targetIsDescendant := targetAncestry[currentPID]; targetIsDescendant {
-			return lifecycleExecutorConflict(command)
+		if targetIsDescendant && !sameLifecycleProcess(currentProcess, current[currentPID]) {
+			return lifecycleExecutorEvidenceError(command, errors.New("intersecting current process identity differs between ancestry snapshots"))
 		}
 		if err := revalidateLifecycleAncestry(current); err != nil {
 			return lifecycleExecutorEvidenceError(command, err)
@@ -71,8 +73,15 @@ func preflightLifecycleExecutor(command string, panes []tmux.WindowPane) error {
 		if confirmed.PID != target.PID || confirmed.StartTime != target.StartTime || confirmed.PaneID != target.PaneID || confirmed.WindowID != target.WindowID {
 			return lifecycleExecutorEvidenceError(command, errors.New("target pane process identity changed during preflight"))
 		}
+		if targetIsAncestor || targetIsDescendant {
+			return lifecycleExecutorConflict(command)
+		}
 	}
 	return nil
+}
+
+func sameLifecycleProcess(left, right tmux.ProcessMetadata) bool {
+	return left.PID == right.PID && left.ParentPID == right.ParentPID && left.Identity != "" && left.Identity == right.Identity
 }
 
 func resolveLifecyclePaneProcess(before tmux.WindowPane) (tmux.WindowPane, error) {
