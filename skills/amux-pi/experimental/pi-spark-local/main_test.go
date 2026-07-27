@@ -22,6 +22,8 @@ type fixture struct {
 
 func TestAppliesOneExactReplacementInPrintMode(t *testing.T) {
 	f := newFixture(t)
+	leaderPIDFile := filepath.Join(f.root, "leader.pid")
+	t.Setenv("FAKE_PI_LEADER_PID_FILE", leaderPIDFile)
 	before := mustRead(t, f.target)
 	reply := replacement{Path: "target.txt", OriginalSHA256: digest(before), Replacement: "after\n"}
 	t.Setenv("FAKE_PI_OUTPUT", marshal(t, reply)+"\n")
@@ -42,6 +44,13 @@ func TestAppliesOneExactReplacementInPrintMode(t *testing.T) {
 	wantArgs := append([]string{mustCanonical(t, f.node), mustCanonical(t, f.pi)}, fixedArgs...)
 	if strings.Join(got.Argv, "\x00") != strings.Join(wantArgs, "\x00") {
 		t.Fatalf("argv=%q, want %q", got.Argv, wantArgs)
+	}
+	leaderPID, err := strconv.Atoi(strings.TrimSpace(string(mustRead(t, leaderPIDFile))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(leaderPID, 0); err == nil {
+		t.Fatalf("ordinary-completion leader %d remains live after Wait", leaderPID)
 	}
 }
 
@@ -316,25 +325,6 @@ func TestBoundsOutputAndTimeoutAndTerminatesProcessGroup(t *testing.T) {
 			t.Fatalf("descendant %d survived verified group termination", pid)
 		}
 	})
-	t.Run("normal completion", func(t *testing.T) {
-		f := newFixture(t)
-		pidFile := filepath.Join(f.root, "child.pid")
-		t.Setenv("FAKE_PI_MODE", "normal-descendant")
-		t.Setenv("FAKE_PI_PID_FILE", pidFile)
-		before := mustRead(t, f.target)
-		reply := replacement{Path: "target.txt", OriginalSHA256: digest(before), Replacement: "after\n"}
-		t.Setenv("FAKE_PI_OUTPUT", marshal(t, reply))
-		if err := run(f.args("--task", "edit"), &bytes.Buffer{}); err != nil {
-			t.Fatal(err)
-		}
-		pid, parseErr := strconv.Atoi(strings.TrimSpace(string(mustRead(t, pidFile))))
-		if parseErr != nil {
-			t.Fatal(parseErr)
-		}
-		if err := syscall.Kill(pid, 0); err == nil {
-			t.Fatalf("normal-completion descendant %d survived group cleanup", pid)
-		}
-	})
 	t.Run("unexpected signal", func(t *testing.T) {
 		f := newFixture(t)
 		before := mustRead(t, f.target)
@@ -603,7 +593,7 @@ func newFixture(t *testing.T) fixture {
 	t.Setenv("PI_CODING_AGENT_DIR", agent)
 	extraProcessEnvironment = func() []string {
 		var environment []string
-		for _, name := range []string{"FAKE_PI_MODE", "FAKE_PI_OUTPUT", "FAKE_PI_PID_FILE", "FAKE_PI_MUTATE", "FAKE_PI_SELF", "FAKE_PI_STDIN_FILE", "FAKE_PI_AGENT", "FAKE_PI_AUTH"} {
+		for _, name := range []string{"FAKE_PI_MODE", "FAKE_PI_OUTPUT", "FAKE_PI_PID_FILE", "FAKE_PI_LEADER_PID_FILE", "FAKE_PI_MUTATE", "FAKE_PI_SELF", "FAKE_PI_STDIN_FILE", "FAKE_PI_AGENT", "FAKE_PI_AUTH"} {
 			if value, present := os.LookupEnv(name); present {
 				environment = append(environment, name+"="+value)
 			}
@@ -632,6 +622,7 @@ test "$9" = "--no-context-files"
 test "${10}" = "--no-approve"
 test "${11}" = "-p"
 test "$#" = 11
+if [ -n "${FAKE_PI_LEADER_PID_FILE:-}" ]; then printf '%s\n' "$$" >"$FAKE_PI_LEADER_PID_FILE"; fi
 if [ -n "${FAKE_PI_STDIN_FILE:-}" ]; then
   cat >"$FAKE_PI_STDIN_FILE"
   test -s "$FAKE_PI_STDIN_FILE"
@@ -642,7 +633,6 @@ fi
 case "${FAKE_PI_MODE:-success}" in
   overflow) while :; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; done ;;
   sleep) sleep 60 & child=$!; printf '%s\n' "$child" >"$FAKE_PI_PID_FILE"; wait "$child" ;;
-  normal-descendant) sleep 60 >/dev/null 2>&1 & child=$!; printf '%s\n' "$child" >"$FAKE_PI_PID_FILE"; printf '%s' "$FAKE_PI_OUTPUT" ;;
   signal) printf '%s' "$FAKE_PI_OUTPUT"; kill -TERM $$ ;;
   mutate) printf 'bad\n' >"$FAKE_PI_MUTATE"; printf '%s' "$FAKE_PI_OUTPUT" ;;
   mutate-pi) printf '# changed\n' >>"$FAKE_PI_SELF"; printf '%s' "$FAKE_PI_OUTPUT" ;;

@@ -514,11 +514,13 @@ func execute(o options, argv []string, prompt []byte, agentDir string) ([]byte, 
 	}
 
 cleanup:
-	// The leader has not been reaped, so its PID still reserves this process
-	// group identity. Never signal or probe the bare PGID after Wait releases it.
-	killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	cleanupRequired := !streamsComplete
+	var killErr error
 	var cleanupStreamErr error
-	if !streamsComplete {
+	if cleanupRequired {
+		// The leader has not been reaped, so its PID still reserves this process
+		// group identity. Never signal or probe the bare PGID after Wait releases it.
+		killErr = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		cleanupTimer := time.NewTimer(2 * time.Second)
 		cleanupTimerC := cleanupTimer.C
 		for len(streamErrors) < 2 {
@@ -540,7 +542,7 @@ cleanup:
 		}
 	}
 	waitErr := cmd.Wait()
-	if !groupTerminationVerified(killErr) {
+	if cleanupRequired && !groupTerminationVerified(killErr) {
 		return nil, nil, errors.New("Pi process-group termination could not be verified")
 	}
 	if stdout.overflow || stderr.overflow {
@@ -565,10 +567,10 @@ cleanup:
 		if exitErr.ProcessState.ExitCode() >= 0 {
 			return nil, nil, fmt.Errorf("Pi exited with code %d", exitErr.ExitCode())
 		}
-		// Closed stdout and stderr are Pi print mode's final-response boundary.
-		// SIGKILL after that boundary is our pre-Wait process-group cleanup.
+		// SIGKILL is admitted only when this function requested pre-Wait group
+		// cleanup after timeout or overflow. Ordinary completion must exit zero.
 		status, signaled := exitErr.Sys().(syscall.WaitStatus)
-		if !signaled || !status.Signaled() || status.Signal() != syscall.SIGKILL || !streamsComplete {
+		if !signaled || !status.Signaled() || status.Signal() != syscall.SIGKILL || !cleanupRequired {
 			return nil, nil, errors.New("Pi terminated unexpectedly")
 		}
 	}
