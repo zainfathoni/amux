@@ -351,6 +351,15 @@ func TestBoundsOutputAndTimeoutAndTerminatesProcessGroup(t *testing.T) {
 	})
 }
 
+func TestProcessGroupTerminationVerificationIsCrossPlatformAndFailClosed(t *testing.T) {
+	if !groupTerminationVerified(nil) || !groupTerminationVerified(syscall.ESRCH) {
+		t.Fatal("successful kill and already-absent pre-Wait group must be verified")
+	}
+	if groupTerminationVerified(syscall.EPERM) {
+		t.Fatal("permission failure must leave group termination unverified")
+	}
+}
+
 func TestRejectsPiWorktreeMutationAndOutOfScopeDiff(t *testing.T) {
 	f := newFixture(t)
 	t.Setenv("FAKE_PI_MODE", "mutate")

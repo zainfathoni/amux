@@ -540,7 +540,7 @@ cleanup:
 		}
 	}
 	waitErr := cmd.Wait()
-	if killErr != nil {
+	if !groupTerminationVerified(killErr) {
 		return nil, nil, errors.New("Pi process-group termination could not be verified")
 	}
 	if stdout.overflow || stderr.overflow {
@@ -573,6 +573,13 @@ cleanup:
 		}
 	}
 	return stdout.b.Bytes(), stderr.b.Bytes(), nil
+}
+
+func groupTerminationVerified(killErr error) bool {
+	// Darwin reports ESRCH when the unreaped leader's group already has no
+	// signalable members. Both outcomes are established before Wait releases
+	// the leader PID; all other errors leave termination unverified.
+	return killErr == nil || errors.Is(killErr, syscall.ESRCH)
 }
 
 func parseReplacement(data []byte) (replacement, error) {
