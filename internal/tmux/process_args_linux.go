@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -34,23 +35,38 @@ func ProcessArgs(pid int) ([]string, error) {
 
 // ProcessIdentity returns Linux's per-incarnation process start ticks.
 func ProcessIdentity(pid int) (string, error) {
+	link, err := InspectProcessLink(pid)
+	if err != nil {
+		return "", err
+	}
+	return link.Identity, nil
+}
+
+// InspectProcessLink reads parent and per-incarnation identity from one native
+// procfs snapshot so presentation commands and PATH cannot influence ancestry.
+func InspectProcessLink(pid int) (ProcessMetadata, error) {
 	if pid <= 0 {
-		return "", fmt.Errorf("process PID is unavailable")
+		return ProcessMetadata{}, fmt.Errorf("process PID is unavailable")
 	}
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
-		return "", fmt.Errorf("inspect process %d identity: %w", pid, err)
+		return ProcessMetadata{}, fmt.Errorf("inspect process %d ancestry identity: %w", pid, err)
 	}
 	endName := strings.LastIndexByte(string(data), ')')
 	if endName < 0 {
-		return "", fmt.Errorf("process %d returned malformed stat identity", pid)
+		return ProcessMetadata{}, fmt.Errorf("process %d returned malformed stat ancestry identity", pid)
 	}
 	fields := strings.Fields(string(data[endName+1:]))
+	const parentPIDIndex = 1  // Field 4 after fields 1 (pid) and 2 (comm).
 	const startTimeIndex = 19 // Field 22 after fields 1 (pid) and 2 (comm).
 	if len(fields) <= startTimeIndex || fields[startTimeIndex] == "" {
-		return "", fmt.Errorf("process %d returned incomplete stat identity", pid)
+		return ProcessMetadata{}, fmt.Errorf("process %d returned incomplete stat ancestry identity", pid)
 	}
-	return fields[startTimeIndex], nil
+	parentPID, err := strconv.Atoi(fields[parentPIDIndex])
+	if err != nil || parentPID < 0 {
+		return ProcessMetadata{}, fmt.Errorf("process %d returned invalid parent PID", pid)
+	}
+	return ProcessMetadata{PID: pid, ParentPID: parentPID, Identity: fields[startTimeIndex]}, nil
 }
 
 // ProcessName returns Linux's native comm value without normalizing whitespace.

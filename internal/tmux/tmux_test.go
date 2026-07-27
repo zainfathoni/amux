@@ -122,6 +122,20 @@ func TestProcessIdentityReturnsStableNativeStartToken(t *testing.T) {
 	}
 }
 
+func TestInspectProcessLinkReturnsExactCurrentIncarnationAndParent(t *testing.T) {
+	link, err := InspectProcessLink(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := ProcessIdentity(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link.PID != os.Getpid() || link.ParentPID != os.Getppid() || link.Identity == "" || link.Identity != identity {
+		t.Fatalf("InspectProcessLink(%d) = %+v, identity = %q, parent = %d", os.Getpid(), link, identity, os.Getppid())
+	}
+}
+
 func TestProcessNameReturnsStableNativeName(t *testing.T) {
 	first, err := ProcessName(os.Getpid())
 	if err != nil {

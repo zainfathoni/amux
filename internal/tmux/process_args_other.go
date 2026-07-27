@@ -12,6 +12,10 @@ func ProcessIdentity(pid int) (string, error) {
 	return "", fmt.Errorf("exact process identity inspection is unsupported on this platform")
 }
 
+func InspectProcessLink(pid int) (ProcessMetadata, error) {
+	return ProcessMetadata{}, fmt.Errorf("exact process ancestry inspection is unsupported on this platform")
+}
+
 func ProcessName(pid int) (string, error) {
 	return "", fmt.Errorf("exact process name inspection is unsupported on this platform")
 }

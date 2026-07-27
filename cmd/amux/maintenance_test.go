@@ -1766,12 +1766,16 @@ func TestMaintenancePartialConflictPersistsAndRetries(t *testing.T) {
 	seedLifecyclePrior(t, f, old)
 	writeLifecycleState(t, f, map[string]string{"ws0": "exact", "ws1": "conflict"})
 	os.WriteFile(f.amp, []byte("changed\n"), 0o700)
+	beforeConflict := lifecycleLog(t, f)
 	if _, err := runLifecycle(t, f); err == nil {
 		t.Fatal("partial conflict succeeded")
 	}
 	got, _ := loadMaintenanceOutcome(f.dir.MaintenanceResultPath())
-	if got.AppliedFingerprint != old || got.Status != "failed" || lifecycleRunner(t, got, f.workdirs["ws0"]).Status != "successful" || lifecycleRunner(t, got, f.workdirs["ws1"]).Status != "failed" {
-		t.Fatalf("outcome=%+v", got)
+	if got.AppliedFingerprint != old || got.Status != "successful" || len(got.Runners) != 0 {
+		t.Fatalf("preflight conflict changed prior outcome=%+v", got)
+	}
+	if delta := strings.TrimPrefix(lifecycleLog(t, f), beforeConflict); strings.Contains(delta, "kill-window") || strings.Contains(delta, "new-window") || strings.Contains(delta, "new-session") || strings.Contains(delta, "amp update") {
+		t.Fatalf("preflight conflict mutated lifecycle:\n%s", delta)
 	}
 	writeLifecycleState(t, f, map[string]string{"ws0": "absent", "ws1": "exact"})
 	before := lifecycleLog(t, f)

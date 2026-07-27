@@ -20,6 +20,7 @@ import (
 
 	"github.com/zainfathoni/amux/internal/config"
 	"github.com/zainfathoni/amux/internal/result"
+	"github.com/zainfathoni/amux/internal/tmux"
 )
 
 const maintenanceJitter = 30 * time.Minute
@@ -668,6 +669,10 @@ func (a app) runMaintenance(in invocation, dir config.Directory, env *result.Env
 		}
 		return env, a.persistMaintenanceFailure(dir, env, failureBase, cause)
 	}
+	maintenanceInspections, err := preflightMaintenanceExecutor(dir)
+	if err != nil {
+		return env, result.Preflight(err)
+	}
 	planDetails := maintenanceResultDetails(m)
 	if in.Options.DryRun {
 		out := result.Outcome{Resource: result.ExecutableResource(m.AmpPath), Action: "run-maintenance", Maintenance: planDetails, Message: maintenancePlanMessage("run", planDetails)}
@@ -791,6 +796,10 @@ func (a app) runMaintenance(in invocation, dir config.Directory, env *result.Env
 			continue
 		}
 		inspection, ie := inspectRunner(row)
+		before, preflighted := maintenanceInspections[row.Workdir]
+		if ie == nil && (!preflighted || !sameMaintenanceRunnerInspection(before, inspection)) {
+			ie = errors.New("runner identity changed after maintenance preflight")
+		}
 		if ie != nil || inspection.state == runnerPaneConflict || inspection.state == runnerPaneAmbiguous {
 			if ie == nil {
 				ie = fmt.Errorf("runner identity is %s", inspection.state)
@@ -872,6 +881,42 @@ func (a app) runMaintenance(in invocation, dir config.Directory, env *result.Env
 	}
 	env.Successful = append(env.Successful, execOut)
 	return env, nil
+}
+
+func preflightMaintenanceExecutor(dir config.Directory) (map[string]runnerInspection, error) {
+	rows, err := config.LoadRunnersReadOnly(dir.RunnersPath())
+	if err != nil {
+		return nil, err
+	}
+	panes := make([]tmux.WindowPane, 0, len(rows))
+	inspections := make(map[string]runnerInspection, len(rows))
+	for _, row := range rows {
+		inspection, inspectErr := inspectRunner(row)
+		if inspectErr != nil {
+			return nil, inspectErr
+		}
+		if inspection.state == runnerPaneConflict || inspection.state == runnerPaneAmbiguous {
+			return nil, fmt.Errorf("runner %s has %s tmux identity before maintenance", row.Workdir, inspection.state)
+		}
+		inspections[row.Workdir] = inspection
+		if inspection.state == runnerPaneExact {
+			panes = append(panes, inspection.pane)
+		}
+	}
+	if err := preflightLifecycleExecutor("runner maintenance run", panes); err != nil {
+		return nil, err
+	}
+	return inspections, nil
+}
+
+func sameMaintenanceRunnerInspection(before, after runnerInspection) bool {
+	if before.state != after.state {
+		return false
+	}
+	if before.state != runnerPaneExact {
+		return true
+	}
+	return before.pane.Session == after.pane.Session && before.pane.Window == after.pane.Window && before.pane.WindowID == after.pane.WindowID && before.pane.PaneID == after.pane.PaneID && before.pane.PID == after.pane.PID && before.pane.StartTime == after.pane.StartTime
 }
 func (a app) persistMaintenanceFailure(dir config.Directory, env *result.Envelope, o maintenanceOutcome, cause error) error {
 	o.Status = "failed"
