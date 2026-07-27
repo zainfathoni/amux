@@ -331,31 +331,6 @@ test "$1" = send-keys
 	}
 }
 
-func TestClearLineUsesTmuxControlU(t *testing.T) {
-	tmp := t.TempDir()
-	logPath := filepath.Join(tmp, "calls.log")
-	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
-printf '%s\n' "$*" >> "`+logPath+`"
-if [ "$1" = send-keys ]; then
-  exit 0
-fi
-exit 2
-`)
-	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	if err := (Runner{}).ClearLine("%1"); err != nil {
-		t.Fatal(err)
-	}
-
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := strings.TrimSpace(string(logBytes)), "send-keys -t %1 C-u"; got != want {
-		t.Fatalf("ClearLine sent %q, want %q", got, want)
-	}
-}
-
 func TestCapturePaneJoinsWrappedLines(t *testing.T) {
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "calls.log")

@@ -4,7 +4,7 @@ This is the progressively disclosed policy for issue #175. It does not make amux
 
 ## Supported surface
 
-The only promoted tuple is the skill-owned automatic `/amux spawn` preflight. Pass schema version `1`, action `amux_spawn`, `automatic:true`, and the selected mode before any spawn command. `medium` is allowed; every other automatic mode is rejected without rewriting it. User-requested non-medium modes remain governed by the existing exact instruction rule rather than a model-asserted helper grant.
+The legacy automatic `/amux spawn` policy tuple is no longer an executable workflow because both CLI spawn aliases are tombstones. Native creation must preserve the owner's exact mode instruction; use `medium` when the owner did not name another mode. The resolver remains only for compatibility with installed historical skill material and does not authorize a spawn command.
 
 Current Amp-native child creation, Read Thread, specialist, generic Task, and native-message tuples are **observed** or **instruction-only**. Their exact tool schemas, effective defaults, trusted approval fields, one-call/replay behavior, or permission interception were not all proven for the probed client. Never treat their `would_allow`, `would_ask`, or `would_reject` advisory result as binding, and never claim that the observed permission adapter covers plugin-created threads or other bypasses. Amp-native `runner(id)` is an executor identity, not amux's canonical-workdir runner.
 

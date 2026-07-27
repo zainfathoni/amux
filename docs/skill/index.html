@@ -72,22 +72,17 @@ npx skills add zainfathoni/amux --skill amux-pi --global</code></pre>
 
           <h2 id="sprawl">Skill-only sprawl</h2>
           <p><code>/amux sprawl</code> remains worker-only. Before side effects, the agent reads every issue and native dependency relationship, checks likely file/API overlap, and sequences anything dependent or conflicting.</p>
-          <pre><code>amux spawn --workspace &lt;workspace&gt; \
-  --window install-diagnostics \
-  --workdir &lt;dedicated-worktree&gt; \
-  --mode medium \
-  --title-prefix '#110' \
-  --group amux-110 \
-  --message-file &lt;assignment&gt; \
-  --idempotency-key issue-110</code></pre>
-          <p>Every accepted issue gets the <code>amux-agent-first</code> label, one narrow assignment, dedicated branch/worktree, semantic issue-unprefixed window, focused Oracle diff review, and explicit callback/finish protocol. For Amux issue work, the durable group/Amp label is <code>amux-&lt;issue-number&gt;</code> and each report ID is <code>amux-&lt;issue-number&gt;-worker-&lt;ordinal&gt;</code>. Other unconfigured repositories use an explicit equivalent lowercase, group-safe repository slug. A repository may instead configure tracker-neutral <code>&lt;project-prefix&gt;-&lt;work-item-id&gt;-&lt;short-slug&gt;</code> naming in <code>group-naming.json</code>; <code>--work-item-id</code> and <code>--worker-ordinal</code> resolve the group and exact <code>&lt;group-id&gt;-worker-&lt;ordinal&gt;</code> report before mutation. Scope comes only from the workdir’s verified <code>origin</code>, never cwd/worktree/tmux naming or prior labels. Explicit <code>--group</code> remains authoritative. This workflow convention does not restrict generic group IDs or migrate existing <code>amux-*</code>, repository-slug, legacy <code>issue-*</code>, purpose-specific, or explicit groups. Medium is mandatory unless the user explicitly requests another mode; complexity never raises it automatically.</p>
+          <pre><code># Native-create a medium Amp thread and deliver &lt;assignment&gt;; capture &lt;thread&gt;.
+amux worker adopt --thread &lt;thread&gt; --workspace &lt;workspace&gt; \
+  --window install-diagnostics --workdir &lt;dedicated-worktree&gt; --group amux-110</code></pre>
+          <p>Every accepted issue gets the <code>amux-agent-first</code> label, one narrow assignment, dedicated branch/worktree, semantic issue-unprefixed window, focused Oracle diff review, and explicit callback/finish protocol. For Amux issue work, use the explicit durable group/Amp label <code>amux-&lt;issue-number&gt;</code> and report ID <code>amux-&lt;issue-number&gt;-worker-&lt;ordinal&gt;</code>. Medium is mandatory unless the user explicitly requests another mode; complexity never raises it automatically.</p>
 
           <h2 id="coordination">Durable issue-worker coordination</h2>
-          <p>The coordinator first inspects native issue dependencies and active overlap, preflights configured naming when requested, then creates worktrees from fresh <code>origin/main</code>. It declares a durable group without projecting the long-lived coordinator to an Amp label, registers the exact verified coordinator pane, and spawns with automatic naming or explicit <code>--group</code> so only the authoritative receiving thread is attached and labelled.</p>
+          <p>The coordinator first inspects native issue dependencies and active overlap, fixes explicit durable identity, then creates worktrees from fresh <code>origin/main</code>. It declares a durable group without projecting the long-lived coordinator to an Amp label, registers the exact verified coordinator pane, creates the thread natively, and adopts the exact returned identity with explicit <code>--group</code>.</p>
           <pre><code>amux callback register --group amux-135 --thread &lt;coordinator&gt; --pane &lt;pane&gt;
-amux spawn --mode medium --workspace &lt;workspace&gt; --window &lt;semantic-window&gt; \
-  --workdir &lt;fresh-worktree&gt; --title-prefix '#135' \
-  --group amux-135 --message-file &lt;assignment&gt; --idempotency-key issue-135
+# Native-create a medium thread with &lt;assignment&gt;, then capture &lt;worker&gt;.
+amux worker adopt --thread &lt;worker&gt; --workspace &lt;workspace&gt; \
+  --window &lt;semantic-window&gt; --workdir &lt;fresh-worktree&gt; --group amux-135
 amux report submit --report-id amux-135-worker-1 --group amux-135 \
   --thread &lt;worker&gt; --status ready --issue '#135' --pr &lt;url&gt; \
   --summary implementation-tests-review-pr-ci-complete</code></pre>
@@ -100,7 +95,7 @@ amux report submit --report-id amux-135-worker-1 --group amux-135 \
           <p>After updating main, finish removes the clean worktree without force and preserves squash-merge branch safety: <code>git branch -d</code> first; no automatic <code>-D</code>. Worker teardown runs last. A ready callback never authorizes cleanup; finish requires independently verified merge and explicit authorization.</p>
 
           <h2 id="contracts">Agent contracts</h2>
-          <ul><li>Use long canonical selectors and current contextual help.</li><li>Use <code>--dry-run</code> before mutation and <code>--json</code> for parsing.</li><li>JSON v1 separates <code>planned</code>, <code>successful</code>, <code>skipped</code>, and <code>failed</code>.</li><li>Exit 2 rejects before mutation; exit 1 may represent partial runtime success.</li><li>Mutations are idempotent desired state under one machine lock.</li><li>Spawn requires a stable idempotency key; reports require a stable report ID.</li><li>Group labels are add-only and member-only; coordinator roles stay local, while local removal or later promotion may leave permanent external drift.</li><li>Health, coordinator orchestration, sprawl, and finish are not <code>amux</code> subcommands.</li></ul>
+          <ul><li>Use long canonical selectors and current contextual help.</li><li>Use <code>--dry-run</code> before mutation and <code>--json</code> for parsing.</li><li>JSON v1 separates <code>planned</code>, <code>successful</code>, <code>skipped</code>, and <code>failed</code>.</li><li>Exit 2 rejects before mutation; exit 1 may represent partial runtime success.</li><li>Mutations are idempotent desired state under one machine lock.</li><li>Create threads natively, then adopt the exact returned identity; reports require a stable report ID.</li><li>Group labels are add-only and member-only; coordinator roles stay local, while local removal or later promotion may leave permanent external drift.</li><li>Health, coordinator orchestration, sprawl, and finish are not <code>amux</code> subcommands.</li></ul>
         </main>
       </div>
     </div>
