@@ -12,6 +12,8 @@ Require the exact `session:window` to resolve to one window and exactly one pane
 
 This route requires official current model selector `claude-opus-5`. The owner must explicitly select and confirm the exact literal `claude-opus-5` in every adopted Claude Code client before work begins. Omission, alias normalization, a default, fallback, substitution, or an offered alternative is rejection. Amp must not relaunch or reconfigure Claude to satisfy this preflight.
 
+The Claude Code UI may render a human-readable label such as `Opus 5` where the underlying selector is the literal `claude-opus-5`. That display form satisfies this preflight only when the owner explicitly confirms it denotes exactly `claude-opus-5` in that client. It never licenses inferring an alias table, mapping any other label to a literal, or accepting a displayed default; an unconfirmed label is an ambiguous state and fails closed.
+
 ## 2. Preflight before every prompt
 
 Build a task-local catalog for all adopted windows and show it to the owner:
@@ -41,9 +43,17 @@ Prepare one self-contained UTF-8 prompt of at most 16 KiB. Include the exact sel
 
 Before any paste, require the owner or bounded inspection of only the selected task pane to establish all of the following: Claude Code is active; the exact `claude-opus-5` selection is visible or freshly owner-confirmed; the composer is empty and focused; there is no autocomplete menu, pasted-text review, permission dialog, modal prompt, or Vim mode; and the pane has not been interrupted or resumed since preflight. Do not inspect unrelated scrollback.
 
+Distinguish ghost autocomplete from committed composer content. Rendered ghost text is an unaccepted suggestion, not bytes in the buffer; committed content is what the composer would actually submit. `Tab` accepts the ghost suggestion, so never send `Tab` unless accepting that exact suggestion is the intended action. When the owner confirms the visible text is only a ghost suggestion, that confirmation may establish an empty underlying buffer and satisfy the empty-composer condition. Without that confirmation, visible text is treated as committed content and the route fails closed.
+
 Paste the prompt literally into only the exact re-resolved `session:window`; do not type it key-by-key and do not append a submission key in the same operation. A paste is not submission. Inspect only enough current task-pane output to prove the complete prompt is present once and the composer state remains unambiguous, then submit exactly once.
 
+One exact controlled multiline paste may render collapsed as a single `[Pasted text #1]` placeholder instead of expanded text. Treat that placeholder as a legitimate operator-confirmation and submission boundary when the exact paste bytes, the single paste action, and the current pane tail are all bound to this task's retained prompt copy or digest. Do not require impossible full expansion of the collapsed placeholder, and never repaste to force visible text: a second paste duplicates the prompt. A placeholder that cannot be bound to the exact retained bytes, shows a count other than one paste, or accompanies unexplained additional content is ambiguous and stops the route before submission.
+
 Never send blind `Enter`, `Escape`, `Tab`, mode-switching keys, control keys, or a second paste. If autocomplete, pasted-text mode, a modal or permission dialog, Vim `-- INSERT --` or another Vim composer state, partial text, duplicate text, process interruption/resumption, or any uncertainty is visible, stop before input. State one bounded owner action, for example “in `claude:review-291`, choose the intended autocomplete item with Tab, then press Enter once” or “exit Vim insert mode and leave an empty normal composer, then confirm.” Re-preflight after the owner acts. Amp does not automate composer recovery.
+
+Vim mode remains an owner preference for their own client; this route does not globally require it disabled. When Vim mode makes the semantics of an automated key ambiguous, hand that one submission or recovery step to the owner instead of guessing a keystroke or asking them to change their editing preference.
+
+Every UI state this route has not explicitly classified is ambiguous by default. Unrecognized banners, labels, placeholders, overlays, or composer decorations are not implicitly benign: stop before input, report the last confirmed state, and request one bounded owner action.
 
 ## 4. Consume and verify the result
 
