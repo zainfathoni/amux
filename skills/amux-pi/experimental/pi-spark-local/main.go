@@ -356,12 +356,38 @@ func admitAgentMetadata() (string, error) {
 		settings.Compaction.Enabled == nil || *settings.Compaction.Enabled {
 		return "", errors.New("Pi settings do not disable agent retry, provider retry, and compaction")
 	}
-	for _, overlay := range []string{"models.json", "package.json", "models-store.json", "SYSTEM.md", "APPEND_SYSTEM.md"} {
+	for _, overlay := range []string{"models.json", "package.json", "SYSTEM.md", "APPEND_SYSTEM.md"} {
 		if _, err := os.Lstat(filepath.Join(agentDir, overlay)); err == nil || !errors.Is(err, os.ErrNotExist) {
 			return "", fmt.Errorf("Pi agent %s is present or ambiguous", overlay)
 		}
 	}
+	if err := admitModelsStore(agentDir); err != nil {
+		return "", err
+	}
 	return agentDir, nil
+}
+
+func admitModelsStore(agentDir string) error {
+	path := filepath.Join(agentDir, "models-store.json")
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 {
+		return errors.New("Pi model catalog cache is linked, oversized, or ambiguous")
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return errors.New("Pi model catalog cache is unreadable")
+	}
+	var providers map[string]json.RawMessage
+	if err := json.Unmarshal(contents, &providers); err != nil || providers == nil {
+		return errors.New("Pi model catalog cache is malformed")
+	}
+	if _, present := providers["openai-codex"]; present {
+		return errors.New("Pi model catalog cache can alter the admitted openai-codex model")
+	}
+	return nil
 }
 
 func admitWorktree(argument, relative string) (string, string, string, []byte, error) {

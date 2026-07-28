@@ -276,7 +276,7 @@ func TestRejectsRetryOrCompactionDefaults(t *testing.T) {
 }
 
 func TestRejectsAgentOverlaysBeforeLaunch(t *testing.T) {
-	for _, overlay := range []string{"models.json", "package.json", "models-store.json", "SYSTEM.md", "APPEND_SYSTEM.md"} {
+	for _, overlay := range []string{"models.json", "package.json", "SYSTEM.md", "APPEND_SYSTEM.md"} {
 		t.Run(overlay, func(t *testing.T) {
 			f := newFixture(t)
 			mustWrite(t, filepath.Join(f.root, "agent", overlay), []byte("fixture"), 0o600)
@@ -288,10 +288,40 @@ func TestRejectsAgentOverlaysBeforeLaunch(t *testing.T) {
 	}
 }
 
+func TestModelsStoreAllowsUnrelatedCacheAndRejectsTargetProvider(t *testing.T) {
+	t.Run("unrelated provider", func(t *testing.T) {
+		f := newFixture(t)
+		mustWrite(t, filepath.Join(f.root, "agent", "models-store.json"), []byte(`{"fixture-provider":{"models":[]}}`), 0o600)
+		before := mustRead(t, f.target)
+		t.Setenv("FAKE_PI_OUTPUT", marshal(t, replacement{Path: "target.txt", OriginalSHA256: digest(before), Replacement: "after\n"}))
+		if err := run(f.args("--task", "edit"), &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("openai-codex provider", func(t *testing.T) {
+		f := newFixture(t)
+		mustWrite(t, filepath.Join(f.root, "agent", "models-store.json"), []byte(`{"openai-codex":{"models":[]}}`), 0o600)
+		err := run(f.args("--task", "edit"), &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "can alter the admitted openai-codex model") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+	for _, contents := range [][]byte{[]byte(`[]`), []byte(`{`), bytes.Repeat([]byte(" "), (1<<20)+1)} {
+		t.Run("invalid cache", func(t *testing.T) {
+			f := newFixture(t)
+			mustWrite(t, filepath.Join(f.root, "agent", "models-store.json"), contents, 0o600)
+			if err := run(f.args("--task", "edit"), &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "model catalog cache") {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
 func TestRejectsAgentAdmissionDriftAfterAttempt(t *testing.T) {
 	for _, tc := range []struct{ name, mode string }{
 		{"overlay", "agent-overlay"},
 		{"settings", "agent-settings"},
+		{"model cache", "agent-model-cache"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
@@ -980,6 +1010,7 @@ case "${FAKE_PI_MODE:-success}" in
   mutate-pi) printf '# changed\n' >>"$FAKE_PI_SELF"; printf '%s' "$FAKE_PI_OUTPUT" ;;
   agent-overlay) printf fixture >"$FAKE_PI_AGENT/SYSTEM.md"; printf '%s' "$FAKE_PI_OUTPUT" ;;
   agent-settings) printf '{}' >"$FAKE_PI_AGENT/settings.json"; chmod 600 "$FAKE_PI_AGENT/settings.json"; printf '%s' "$FAKE_PI_OUTPUT" ;;
+  agent-model-cache) printf '{"openai-codex":{"models":[]}}' >"$FAKE_PI_AGENT/models-store.json"; printf '%s' "$FAKE_PI_OUTPUT" ;;
   auth-refresh) printf refreshed-fixture >"$FAKE_PI_AUTH"; chmod 600 "$FAKE_PI_AUTH"; printf '%s' "$FAKE_PI_OUTPUT" ;;
   *) printf '%s' "$FAKE_PI_OUTPUT" ;;
 esac
