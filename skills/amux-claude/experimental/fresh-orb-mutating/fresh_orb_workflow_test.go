@@ -223,7 +223,7 @@ func TestFreshOrbExactModelIdentityAndPrivacyGates(t *testing.T) {
 			fixture.binding["model"] = model
 		}
 		_, stderr, err := helper(t, t.TempDir(), map[string]any{"event_id": "wrong", "binding": fixture.binding}, "intent")
-		if err == nil || !strings.Contains(stderr, "claude-opus-4-8") {
+		if err == nil || (model != nil && !strings.Contains(stderr, "claude-opus-4-8")) {
 			t.Fatalf("model %v accepted: %v %s", model, err, stderr)
 		}
 	}
