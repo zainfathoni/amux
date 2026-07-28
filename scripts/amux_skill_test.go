@@ -122,6 +122,20 @@ func TestExperimentalPiRoutesStayProviderSpecificAndFailClosed(t *testing.T) {
 	if !strings.Contains(skill, "experimental/pi-spark-local") || !strings.Contains(triggers, "experimental/pi-spark-local") {
 		t.Error("local Pi replacement route is missing from skill routing or trigger checklist")
 	}
+	localPhysicalTrigger := "Run Pi on Spark on a physical runner in a dedicated local worktree/tmux with no Orb"
+	if !strings.Contains(skill, localPhysicalTrigger) || !strings.Contains(triggers, localPhysicalTrigger) {
+		t.Error("explicit physical-runner + dedicated worktree/tmux + no-Orb request is not recognized as the local route")
+	}
+	for _, required := range []string{"physical-host helper", "one tracked file", "not authority for arbitrary local work"} {
+		if !strings.Contains(skill, required) {
+			t.Errorf("local physical-host route is missing bound %q", required)
+		}
+	}
+	for _, required := range []string{"never the Orb recipe", "one attempt with no fallback", "no-recursive-delegation", "no-publication", "independent-review", "cleanup", "rollback"} {
+		if !strings.Contains(triggers, required) {
+			t.Errorf("local physical-host trigger contract is missing %q", required)
+		}
+	}
 	for _, required := range []string{
 		"openai-codex/gpt-5.3-codex-spark",
 		"OPENAI_API_KEY",

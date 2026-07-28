@@ -1,6 +1,6 @@
 ---
 name: amux-pi
-description: "Experimental Pi on Spark in an Amp Orb for amux. Use only after an explicit owner request to run Pi with openai-codex/gpt-5.3-codex-spark via owner-operated ChatGPT Codex OAuth. Not an amux lifecycle resource."
+description: "Experimental Pi on Spark for amux, either in a fresh Amp Orb or through the bounded physical-host helper in a dedicated local worktree/tmux with no Orb. Use only after an explicit owner request to run Pi with openai-codex/gpt-5.3-codex-spark via owner-operated ChatGPT Codex OAuth. Not an amux lifecycle resource."
 ---
 
 # amux-pi (experimental)
@@ -10,7 +10,8 @@ Disposable provider-specific experiment. **Not** an amux CLI resource, worker, r
 ## Route
 
 - **Run Pi on Spark in an Amp Orb**: only after an explicit owner request, load [`reference/pi-spark-orb-executor.md`](reference/pi-spark-orb-executor.md).
-- **Spike one bounded local file replacement**: use [`experimental/pi-spark-local`](experimental/pi-spark-local) only after explicit owner authorization. It admits the exact Pi 0.80.10 package/bin and Spark model, launches one ordinary text print-mode attempt, and applies one strictly bound replacement in an otherwise clean worktree. It does not parse Pi lifecycle events or use quota as a runtime gate.
+- **Run Pi on Spark on a physical runner in a dedicated local worktree/tmux with no Orb**: only after an explicit owner request naming that local execution intent, load [`experimental/pi-spark-local`](experimental/pi-spark-local). This is the existing bounded local helper/contract, not the fresh-Orb recipe and not authority for arbitrary local work: it admits the exact Pi 0.80.10 package/bin and Spark model, launches one ordinary text print-mode attempt, and applies one strictly bound replacement to one tracked file in an otherwise clean dedicated worktree. It does not parse Pi lifecycle events or use quota as a runtime gate.
+- **Spike one bounded local file replacement**: the same explicit-owner-only [`experimental/pi-spark-local`](experimental/pi-spark-local) route and one-tracked-file bound apply.
 
 Trigger checklist: [`reference/trigger-phrases.md`](reference/trigger-phrases.md).
 
