@@ -42,6 +42,8 @@ MAX_TMUX_COMMAND_BYTES = 8 * 1024
 MAX_ABSENCE_PANES = 256
 MAX_ABSENCE_PROCESSES = 2048
 MAX_ABSENCE_OUTPUT_BYTES = 64 * 1024
+MAX_QUARANTINE_ARTIFACTS = 32
+MAX_QUARANTINE_ARTIFACT_BYTES = 1024 * 1024
 PRE_IDENTITY_LAUNCH_INTENT_COMPATIBILITY = "pre_identity_launch_intent_v1"
 HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY = (
     "historical_modern_read_only_launch_intent_v1"
@@ -6548,6 +6550,337 @@ def worker_teardown_store_blocked(origin_thread: str, dry_run: bool) -> dict[str
     }
 
 
+def quarantine_artifact_manifest(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list) or len(value) > MAX_QUARANTINE_ARTIFACTS:
+        raise HelperError("quarantine artifact manifest is invalid")
+    result = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"kind", "path"}:
+            raise HelperError("quarantine artifact manifest is invalid")
+        kind = required_string(item, "kind", 64)
+        path = pathlib.Path(required_string(item, "path", 4096))
+        if not path.is_absolute():
+            raise HelperError("quarantine artifact manifest is invalid")
+        try:
+            raw, identity = read_owner_private_regular_file(
+                path, MAX_QUARANTINE_ARTIFACT_BYTES, "quarantine artifact"
+            )
+            info = os.stat(path, follow_symlinks=False)
+        except (HelperError, OSError) as error:
+            raise HelperError("quarantine artifact is unavailable") from error
+        result.append({
+            "kind": kind,
+            "path_sha256": hashlib.sha256(os.fsencode(path)).hexdigest(),
+            "object_sha256": canonical_sha256(
+                [identity, info.st_size, info.st_uid, stat.S_IMODE(info.st_mode)]
+            ),
+            "content_sha256": hashlib.sha256(raw).hexdigest(),
+        })
+    result = sorted(result, key=canonical_sha256)
+    if len({canonical_sha256(item) for item in result}) != len(result):
+        raise HelperError("quarantine artifact manifest is invalid")
+    return result
+
+
+def quarantine_registered_store_evidence(path: str) -> str:
+    evidence: dict[str, Any] = {"availability": "missing"}
+    try:
+        directory = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return canonical_sha256(evidence)
+    evidence = {
+        "availability": "observed",
+        "directory": [
+            directory.st_dev, directory.st_ino, stat.S_IFMT(directory.st_mode),
+            stat.S_IMODE(directory.st_mode), directory.st_uid,
+        ],
+    }
+    receipt_path = pathlib.Path(path) / "receipts.json"
+    try:
+        descriptor = os.open(
+            receipt_path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError:
+        try:
+            receipt = os.stat(receipt_path, follow_symlinks=False)
+        except OSError:
+            evidence["receipt"] = "unavailable"
+        else:
+            evidence["receipt"] = [
+                receipt.st_dev, receipt.st_ino, stat.S_IFMT(receipt.st_mode),
+                stat.S_IMODE(receipt.st_mode), receipt.st_uid, receipt.st_size,
+                receipt.st_mtime_ns, receipt.st_ctime_ns,
+            ]
+        return canonical_sha256(evidence)
+    try:
+        info = os.fstat(descriptor)
+        evidence["receipt"] = [
+            info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode), stat.S_IMODE(info.st_mode),
+            info.st_uid, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+        ]
+        if stat.S_ISREG(info.st_mode):
+            try:
+                raw = read_stable_descriptor(
+                    descriptor, MAX_STORE_BYTES, "quarantine registered receipt store"
+                )
+            except HelperError:
+                evidence["content"] = "unavailable"
+            else:
+                evidence["content_sha256"] = hashlib.sha256(raw).hexdigest()
+    finally:
+        os.close(descriptor)
+    return canonical_sha256(evidence)
+
+
+def quarantine_evidence(store: ReceiptStore, request: dict[str, Any]) -> dict[str, Any]:
+    origin = required_string(request, "origin_thread", 256)
+    if request.get("provider") != "claude" or request.get("action") != "park":
+        raise HelperError("quarantine authority is unsupported")
+    store_sha = required_string(request, "registered_store_sha256", 64)
+    if not re.fullmatch(r"[0-9a-f]{64}", store_sha):
+        raise HelperError("quarantine store selector is invalid")
+    manifest = quarantine_artifact_manifest(request.get("artifacts"))
+    try:
+        lifecycle_raw, _ = read_owner_private_regular_file(
+            store.lifecycle.path, MAX_STORE_BYTES, "quarantine lifecycle registry"
+        )
+    except HelperError as error:
+        raise HelperError("quarantine lifecycle evidence is unavailable") from error
+    lifecycle = store.lifecycle.load()
+    matches = [path for path in lifecycle["stores"] if hashlib.sha256(path.encode()).hexdigest() == store_sha]
+    if len(matches) != 1:
+        raise HelperError("quarantine registered store evidence is unavailable")
+    path = matches[0]
+    owner = ReceiptStore(pathlib.Path(path), store.lifecycle.state_dir)
+    expected = lifecycle["legacy_store_objects"].get(path)
+    store_evidence = quarantine_registered_store_evidence(path)
+    try:
+        load_registered_receipt_store(owner, path, expected, require_exists=True, acquire_lock=False)
+    except HelperError:
+        pass
+    else:
+        raise HelperError("quarantine requires invalid or unavailable registered store evidence")
+    return {
+        "schema_version": 1,
+        "reason": "receipt_store_invalid_or_unavailable",
+        "provider": "claude",
+        "action": "park",
+        "origin_thread_sha256": hashlib.sha256(origin.encode()).hexdigest(),
+        "registered_store_sha256": store_sha,
+        "registered_store_registration_sha256": canonical_sha256({
+            "kind": "registered_object" if expected is not None else "canonical_path_registration",
+            "identity": expected or store_sha,
+        }),
+        "registered_store_evidence_sha256": store_evidence,
+        "lifecycle_sha256": hashlib.sha256(lifecycle_raw).hexdigest(),
+        "artifact_manifest_sha256": canonical_sha256(manifest),
+    }
+
+
+def quarantine_plan(store: ReceiptStore, request: dict[str, Any]) -> dict[str, Any]:
+    reject_unknown(request, {"origin_thread", "provider", "action", "registered_store_sha256", "artifacts"}, "quarantine plan")
+    evidence = quarantine_evidence(store, request)
+    evidence["planned_at"] = utc_now()
+    evidence["plan_sha256"] = canonical_sha256(evidence)
+    return {"action": "quarantine_plan", "outcome": "ready", "plan": evidence}
+
+
+def execute_core_worker_park(origin_thread: str) -> None:
+    try:
+        completed = subprocess.run(
+            ["amux", "worker", "park", "--thread", origin_thread],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise HelperError("exact worker park outcome is indeterminate") from error
+    if completed.returncode != 0:
+        raise HelperError("exact worker park outcome is indeterminate")
+
+
+def validate_quarantine_plan(value: Any) -> dict[str, Any]:
+    fields = {
+        "schema_version", "reason", "provider", "action", "origin_thread_sha256",
+        "registered_store_sha256", "registered_store_registration_sha256",
+        "registered_store_evidence_sha256", "lifecycle_sha256",
+        "artifact_manifest_sha256", "planned_at", "plan_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise HelperError("quarantine plan is invalid")
+    if (
+        value.get("schema_version") != 1
+        or value.get("reason") != "receipt_store_invalid_or_unavailable"
+        or value.get("provider") != "claude"
+        or value.get("action") != "park"
+    ):
+        raise HelperError("quarantine plan is invalid")
+    for field in fields - {"schema_version", "reason", "provider", "action", "planned_at"}:
+        if not re.fullmatch(r"[0-9a-f]{64}", str(value.get(field, ""))):
+            raise HelperError("quarantine plan is invalid")
+    planned_at = required_string(value, "planned_at", 64)
+    try:
+        parsed_at = datetime.fromisoformat(planned_at.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise HelperError("quarantine plan is invalid") from error
+    if not planned_at.endswith("Z") or parsed_at.tzinfo is None:
+        raise HelperError("quarantine plan is invalid")
+    if canonical_sha256({key: nested for key, nested in value.items() if key != "plan_sha256"}) != value["plan_sha256"]:
+        raise HelperError("quarantine plan is invalid")
+    return copy.deepcopy(value)
+
+
+def validate_quarantine_authorization(value: Any, plan_sha256: str) -> dict[str, str]:
+    fields = {"decision", "plan_sha256", "authorization_sha256", "authorized_at"}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise HelperError("quarantine authorization is invalid")
+    if value.get("decision") != "park" or value.get("plan_sha256") != plan_sha256:
+        raise HelperError("quarantine authorization is invalid")
+    for field in {"plan_sha256", "authorization_sha256"}:
+        if not re.fullmatch(r"[0-9a-f]{64}", str(value.get(field, ""))):
+            raise HelperError("quarantine authorization is invalid")
+    authorized_at = required_string(value, "authorized_at", 64)
+    try:
+        parsed_at = datetime.fromisoformat(authorized_at.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise HelperError("quarantine authorization is invalid") from error
+    if not authorized_at.endswith("Z") or parsed_at.tzinfo is None:
+        raise HelperError("quarantine authorization is invalid")
+    return copy.deepcopy(value)
+
+
+def decode_quarantine_records(raw: bytes) -> dict[str, Any]:
+    try:
+        records = json.loads(raw, object_pairs_hook=reject_duplicate_json_pairs)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise HelperError("quarantine metadata is unavailable") from error
+    if not isinstance(records, dict) or set(records) != {"schema_version", "receipts"}:
+        raise HelperError("quarantine metadata is unavailable")
+    receipts = records.get("receipts")
+    if records.get("schema_version") != 1 or not isinstance(receipts, list):
+        raise HelperError("quarantine metadata is unavailable")
+    operation_ids: set[str] = set()
+    for receipt in receipts:
+        if not isinstance(receipt, dict):
+            raise HelperError("quarantine metadata is unavailable")
+        state = receipt.get("state")
+        fields = {"operation_id", "state", "plan", "owner_authorization", "created_at"}
+        if state == "completed":
+            fields.add("completed_at")
+        if set(receipt) != fields:
+            raise HelperError("quarantine metadata is unavailable")
+        operation_id = required_string(receipt, "operation_id", 64)
+        if not re.fullmatch(r"[0-9a-f]{64}", operation_id) or operation_id in operation_ids:
+            raise HelperError("quarantine metadata is unavailable")
+        if state not in {"intent", "completed"}:
+            raise HelperError("quarantine metadata is unavailable")
+        plan = validate_quarantine_plan(receipt.get("plan"))
+        validate_quarantine_authorization(receipt.get("owner_authorization"), plan["plan_sha256"])
+        for field in {"created_at", *(set(receipt) & {"completed_at"})}:
+            timestamp = required_string(receipt, field, 64)
+            try:
+                parsed_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError as error:
+                raise HelperError("quarantine metadata is unavailable") from error
+            if not timestamp.endswith("Z") or parsed_at.tzinfo is None:
+                raise HelperError("quarantine metadata is unavailable")
+        expected_operation = canonical_sha256({
+            "kind": "claude_quarantine_park_v1",
+            "evidence": {key: nested for key, nested in plan.items() if key not in {"planned_at", "plan_sha256"}},
+        })
+        if operation_id != expected_operation:
+            raise HelperError("quarantine metadata is unavailable")
+        operation_ids.add(operation_id)
+    return records
+
+
+def load_quarantine_records(path: pathlib.Path) -> dict[str, Any]:
+    try:
+        os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return {"schema_version": 1, "receipts": []}
+    except OSError as error:
+        raise HelperError("quarantine metadata is unavailable") from error
+    raw, _ = read_owner_private_regular_file(path, MAX_STORE_BYTES, "quarantine metadata")
+    return decode_quarantine_records(raw)
+
+
+def quarantine_apply(store: ReceiptStore, request: dict[str, Any], park_executor: Any = execute_core_worker_park) -> dict[str, Any]:
+    reject_unknown(request, {"origin_thread", "provider", "action", "registered_store_sha256", "artifacts", "plan", "owner_authorization", "recover"}, "quarantine apply")
+    if "recover" in request and not isinstance(request["recover"], bool):
+        raise HelperError("quarantine recovery selector is invalid")
+    plan = validate_quarantine_plan(request.get("plan"))
+    authorization = validate_quarantine_authorization(
+        request.get("owner_authorization"), plan["plan_sha256"]
+    )
+    comparable = {
+        key: value for key, value in plan.items() if key not in {"planned_at", "plan_sha256"}
+    }
+    operation_id = canonical_sha256({
+        "kind": "claude_quarantine_park_v1", "evidence": comparable,
+    })
+    quarantine_path = store.lifecycle.state_dir / "claude-quarantine.json"
+    with store.lifecycle.mutation_lock():
+        current = quarantine_evidence(store, request)
+        if current != comparable:
+            raise HelperError("quarantine bound evidence changed")
+        records = load_quarantine_records(quarantine_path)
+        prior = next((item for item in records.get("receipts", []) if item.get("operation_id") == operation_id), None)
+        if prior is not None:
+            if prior.get("plan") != plan or prior.get("owner_authorization") != authorization:
+                raise HelperError("quarantine operation conflicts with its original authority")
+            if prior.get("state") == "completed":
+                return {"action": "quarantine_apply", "outcome": "duplicate", "operation_sha256": operation_id}
+            if not request.get("recover"):
+                raise HelperError("quarantine park is indeterminate; explicit recovery is required")
+            # The external park may already have happened. Never authorize a second action.
+            return {"action": "quarantine_apply", "outcome": "blocked", "blocker": "park_outcome_indeterminate", "operation_sha256": operation_id}
+        receipt = {"operation_id": operation_id, "state": "intent", "plan": plan, "owner_authorization": authorization, "created_at": utc_now()}
+        records["receipts"].append(receipt)
+        write_private_json(quarantine_path, records)
+        # This adjacent second read is the final provider preflight. Arbitrary evidence and core
+        # Amp cannot share one transaction, so no unrelated work may occur between it and park.
+        if quarantine_evidence(store, request) != comparable:
+            return {
+                "action": "quarantine_apply", "outcome": "blocked",
+                "blocker": "quarantine_bound_evidence_changed",
+                "operation_sha256": operation_id,
+            }
+        try:
+            park_executor(required_string(request, "origin_thread", 256))
+        except Exception:
+            return {
+                "action": "quarantine_apply", "outcome": "blocked",
+                "blocker": "park_outcome_indeterminate", "operation_sha256": operation_id,
+            }
+        receipt["state"] = "completed"
+        receipt["completed_at"] = utc_now()
+        try:
+            write_private_json(quarantine_path, records)
+        except Exception:
+            return {
+                "action": "quarantine_apply", "outcome": "blocked",
+                "blocker": "park_outcome_indeterminate", "operation_sha256": operation_id,
+            }
+    return {"action": "quarantine_apply", "outcome": "parked", "operation_sha256": operation_id}
+
+
+def quarantine_inspect(store: ReceiptStore, request: dict[str, Any]) -> dict[str, Any]:
+    reject_unknown(request, {"operation_sha256"}, "quarantine inspect")
+    operation_id = required_string(request, "operation_sha256", 64)
+    if not re.fullmatch(r"[0-9a-f]{64}", operation_id):
+        raise HelperError("quarantine receipt is unavailable")
+    path = store.lifecycle.state_dir / "claude-quarantine.json"
+    with store.lifecycle.mutation_lock():
+        records = load_quarantine_records(path)
+        receipt = next(
+            (item for item in records["receipts"] if item["operation_id"] == operation_id), None
+        )
+    if receipt is None:
+        raise HelperError("quarantine receipt is unavailable")
+    return {"action": "quarantine_inspect", "outcome": "unresolved", "operation_sha256": operation_id, "state": receipt.get("state"), "reason": "receipt_store_invalid_or_unavailable"}
+
+
 def valid_worker_lifecycle_chain(receipt: dict[str, Any], parked: bool) -> bool:
     events = receipt.get("events")
     if not isinstance(events, list) or any(not isinstance(event, dict) for event in events):
@@ -6701,6 +7034,11 @@ def parser() -> argparse.ArgumentParser:
     lifecycle_commands.add_parser("retire-live-indeterminate-pair")
     lifecycle_commands.add_parser("retire-live-acquired-no-report-pair")
     lifecycle_commands.add_parser("dispose-exact-pre-identity-acquired-pair")
+    quarantine = commands.add_parser("quarantine")
+    quarantine_commands = quarantine.add_subparsers(dest="command", required=True)
+    quarantine_commands.add_parser("plan")
+    quarantine_commands.add_parser("apply")
+    quarantine_commands.add_parser("inspect")
     commands.add_parser("diagnose")
     return root
 
@@ -6715,6 +7053,19 @@ def main() -> int:
     else:
         lifecycle_state_dir = default_state_dir().expanduser().resolve()
     store = ReceiptStore(state_dir, lifecycle_state_dir)
+    if arguments.area == "quarantine":
+        request = read_input()
+        try:
+            if arguments.command == "plan":
+                result = quarantine_plan(store, request)
+            elif arguments.command == "apply":
+                result = quarantine_apply(store, request)
+            else:
+                result = quarantine_inspect(store, request)
+        except HelperError:
+            result = {"action": "quarantine_" + arguments.command, "outcome": "blocked", "blocker": "quarantine_evidence_invalid_or_unavailable"}
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 2 if result["outcome"] == "blocked" else 0
     if arguments.area == "mcp" and arguments.command == "serve":
         return serve_mcp(store, arguments.delegation_id)
     if arguments.area == "launch" and arguments.command == "transport":

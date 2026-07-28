@@ -18,6 +18,115 @@ import (
 	"time"
 )
 
+func TestProviderOwnedInvalidStoreQuarantine(t *testing.T) {
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import copy, hashlib, importlib.util, json, pathlib, sys, tempfile
+spec=importlib.util.spec_from_file_location("m", pathlib.Path(sys.argv[1])); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+root=pathlib.Path(tempfile.mkdtemp()); root.chmod(0o700); missing=root/"missing"
+artifacts={kind:root/kind for kind in ["report","worktree","artifact","operation"]}
+for kind,path in artifacts.items(): path.write_bytes(("preserved "+kind).encode()); path.chmod(0o600)
+artifact=artifacts["artifact"]
+lifecycle={"schema_version":1,"stores":[str(missing)],"legacy_store_objects":{},"teardown_fences":{}}
+(root/"lifecycle.json").write_text(json.dumps(lifecycle)); (root/"lifecycle.json").chmod(0o600)
+store=m.ReceiptStore(root,root); base={"origin_thread":"private-origin","provider":"claude","action":"park","registered_store_sha256":hashlib.sha256(str(missing).encode()).hexdigest(),"artifacts":[{"kind":kind,"path":str(path)} for kind,path in artifacts.items()]}
+before={p:p.read_bytes() for p in [root/"lifecycle.json",*artifacts.values()]}
+plan=m.quarantine_plan(store,base)["plan"]
+assert "private-origin" not in json.dumps(plan) and str(root) not in json.dumps(plan)
+assert {p:p.read_bytes() for p in before} == before
+auth={"decision":"park","plan_sha256":plan["plan_sha256"],"authorization_sha256":"a"*64,"authorized_at":"2026-07-28T00:00:00Z"}
+request={**base,"plan":plan,"owner_authorization":auth}
+calls=[]; result=m.quarantine_apply(store,request,lambda origin:calls.append(origin))
+assert result["outcome"]=="parked" and calls==["private-origin"]
+assert m.quarantine_apply(store,request,lambda origin:calls.append(origin))["outcome"]=="duplicate" and len(calls)==1
+inspection=m.quarantine_inspect(store,{"operation_sha256":result["operation_sha256"]}); assert inspection["outcome"]=="unresolved"
+assert "private-origin" not in json.dumps([result,inspection]) and str(root) not in json.dumps([result,inspection])
+assert {p:p.read_bytes() for p in before} == before
+# A second authorization or freshly timestamped plan for the same evidence cannot park again.
+changed_auth=copy.deepcopy(request); changed_auth["owner_authorization"]["authorization_sha256"]="f"*64
+fresh_plan=m.quarantine_plan(store,base)["plan"]
+fresh_request={**request,"plan":fresh_plan,"owner_authorization":{**auth,"plan_sha256":fresh_plan["plan_sha256"]}}
+for conflicting in [changed_auth,fresh_request]:
+    try: m.quarantine_apply(store,conflicting,lambda origin:calls.append(origin))
+    except m.HelperError: pass
+    else: raise AssertionError("conflicting authority replay accepted")
+assert len(calls)==1
+for action in ["remove","teardown","archive","cleanup","detach","catalog_detach","provider_cleanup"]:
+    bad={**base,"action":action}
+    try: m.quarantine_plan(store,bad)
+    except m.HelperError: pass
+    else: raise AssertionError("stronger action accepted")
+changed=copy.deepcopy(request); artifact.write_bytes(b"changed")
+try: m.quarantine_apply(store,changed,lambda origin:None)
+except m.HelperError: pass
+else: raise AssertionError("changed manifest accepted")
+artifact.write_bytes(before[artifact])
+# Missing-to-invalid store drift is distinct evidence and blocks an old plan.
+missing.mkdir(mode=0o700); (missing/"receipts.json").write_bytes(b"invalid"); (missing/"receipts.json").chmod(0o600)
+invalid_before=(missing/"receipts.json").read_bytes()
+try: m.quarantine_apply(store,request,lambda origin:None)
+except m.HelperError: pass
+else: raise AssertionError("changed store accepted")
+plan_invalid=m.quarantine_plan(store,base)["plan"]; assert plan_invalid["registered_store_evidence_sha256"] != plan["registered_store_evidence_sha256"]
+# An interrupted external action is durable and recovery never invokes it a second time.
+plan2=m.quarantine_plan(store,base)["plan"]; request2={**base,"plan":plan2,"owner_authorization":{"decision":"park","plan_sha256":plan2["plan_sha256"],"authorization_sha256":"b"*64,"authorized_at":"2026-07-28T00:01:00Z"}}
+def interrupted(origin): raise m.HelperError("synthetic interruption")
+interrupted_result=m.quarantine_apply(store,request2,interrupted)
+assert interrupted_result["blocker"]=="park_outcome_indeterminate" and interrupted_result["operation_sha256"]
+request2["recover"]=True; assert m.quarantine_apply(store,request2,lambda origin:(_ for _ in ()).throw(AssertionError("second park")))["blocker"]=="park_outcome_indeterminate"
+changed_interrupted_auth=copy.deepcopy(request2); changed_interrupted_auth["owner_authorization"]["authorization_sha256"]="c"*64
+try: m.quarantine_apply(store,changed_interrupted_auth,lambda origin:calls.append(origin))
+except m.HelperError: pass
+else: raise AssertionError("changed interrupted authorization accepted")
+assert (missing/"receipts.json").read_bytes()==invalid_before
+# Origin/provider/store/authorization changes all fail closed.
+for field,value in [("origin_thread","unrelated"),("provider","other"),("registered_store_sha256","0"*64)]:
+    bad=copy.deepcopy(request); bad[field]=value
+    try: m.quarantine_apply(store,bad,lambda origin:None)
+    except m.HelperError: pass
+    else: raise AssertionError(field+" change accepted")
+bad=copy.deepcopy(request); bad["owner_authorization"]["decision"]="remove"
+try: m.quarantine_apply(store,bad,lambda origin:None)
+except m.HelperError: pass
+else: raise AssertionError("authorization change accepted")
+# Mutating evidence immediately after durable intent blocks before the executor.
+(missing/"receipts.json").write_bytes(b"different-invalid"); plan3=m.quarantine_plan(store,base)["plan"]
+request3={**base,"plan":plan3,"owner_authorization":{"decision":"park","plan_sha256":plan3["plan_sha256"],"authorization_sha256":"d"*64,"authorized_at":"2026-07-28T00:02:00Z"}}
+original_write=m.write_private_json
+def mutate_after_intent(path,value):
+    original_write(path,value)
+    if path.name=="claude-quarantine.json" and value["receipts"][-1]["state"]=="intent": artifact.write_bytes(b"post-intent-change")
+m.write_private_json=mutate_after_intent
+preaction=m.quarantine_apply(store,request3,lambda origin:(_ for _ in ()).throw(AssertionError("park after drift")))
+assert preaction["blocker"]=="quarantine_bound_evidence_changed"
+m.write_private_json=original_write; artifact.write_bytes(before[artifact])
+# Malformed or unsafe provider metadata never erases replay evidence or permits an action.
+metadata=root/"claude-quarantine.json"; saved=metadata.read_bytes()
+for malformed in [b'{"schema_version":999,"receipts":[]}',b'{"schema_version":1,"receipts":{}}',b'{"schema_version":1,"receipts":[null]}']:
+    metadata.write_bytes(malformed); metadata.chmod(0o600)
+    try: m.quarantine_apply(store,request3,lambda origin:calls.append(origin))
+    except m.HelperError: pass
+    else: raise AssertionError("malformed metadata accepted")
+metadata.write_bytes(saved); metadata.chmod(0o600)
+target=root/"quarantine-target"; metadata.rename(target); metadata.symlink_to(target)
+try: m.quarantine_inspect(store,{"operation_sha256":result["operation_sha256"]})
+except m.HelperError: pass
+else: raise AssertionError("symlinked metadata accepted")
+metadata.unlink(); target.rename(metadata)
+assert (missing/"receipts.json").read_bytes()==b"different-invalid"
+assert invalid_before==b"invalid" and {p:p.read_bytes() for p in before} == before
+print("ok")`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil {
+		t.Fatalf("quarantine fixture: %v\n%s", err, output)
+	}
+	if string(output) != "ok\n" {
+		t.Fatalf("output = %q", output)
+	}
+}
+
 func TestLinuxProcessIdentityRejectsAmbiguousSnapshots(t *testing.T) {
 	t.Parallel()
 	helper, err := filepath.Abs("claude_delegation.py")
