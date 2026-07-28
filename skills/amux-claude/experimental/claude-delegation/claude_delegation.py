@@ -6673,7 +6673,7 @@ def worker_teardown_store_blocked(origin_thread: str, dry_run: bool) -> dict[str
         "dry_run": dry_run,
         "pairs": [],
         "blockers": [{"blocker": "receipt_store_invalid_or_unavailable"}],
-        "recovery": "preserve provider evidence; use explicit provider quarantine only for an owner-authorized exact park, or separately repair evidence before retrying teardown",
+        "recovery": "preserve provider evidence; use explicit provider quarantine only for an owner-authorized exact park",
     }
 
 
@@ -6820,12 +6820,13 @@ def write_private_bytes_at(directory_descriptor: int, name: str, payload: bytes)
 
 @contextlib.contextmanager
 def quarantine_lifecycle_lock(lifecycle: LifecycleRegistry) -> Iterator[tuple[int, os.stat_result]]:
-    lifecycle.prepare()
-    directory_descriptor, directory_info = open_quarantine_directory(
-        lifecycle.state_dir, "quarantine lifecycle state", private=True
-    )
+    directory_descriptor = -1
     lock_descriptor = -1
     try:
+        lifecycle.prepare()
+        directory_descriptor, directory_info = open_quarantine_directory(
+            lifecycle.state_dir, "quarantine lifecycle state", private=True
+        )
         lock_descriptor = os.open(
             "experimental.lock",
             os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
@@ -6841,12 +6842,16 @@ def quarantine_lifecycle_lock(lifecycle: LifecycleRegistry) -> Iterator[tuple[in
             raise HelperError("quarantine lifecycle lock is unavailable")
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
         yield directory_descriptor, directory_info
-    except OSError as error:
+    except (OSError, ValueError) as error:
         raise HelperError("quarantine lifecycle lock is unavailable") from error
     finally:
-        if lock_descriptor >= 0:
-            os.close(lock_descriptor)
-        os.close(directory_descriptor)
+        try:
+            if lock_descriptor >= 0:
+                os.close(lock_descriptor)
+            if directory_descriptor >= 0:
+                os.close(directory_descriptor)
+        except (OSError, ValueError) as error:
+            raise HelperError("quarantine lifecycle lock cleanup is unavailable") from error
 
 
 def exact_canonical_path(value: Any, label: str) -> str:

@@ -192,6 +192,29 @@ print("ok")`
 	}
 }
 
+func TestQuarantineLifecyclePrepareFailureReturnsPrivateJSONBlocker(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "private-lifecycle-path-sentinel")
+	if err := os.WriteFile(stateDir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := runHelper(t, stateDir, map[string]any{
+		"operation_sha256": strings.Repeat("a", 64),
+	}, "quarantine", "inspect")
+	if err == nil {
+		t.Fatal("quarantine inspect unexpectedly accepted a non-directory lifecycle state")
+	}
+	want := "{\"action\":\"quarantine_inspect\",\"blocker\":\"quarantine_evidence_invalid_or_unavailable\",\"outcome\":\"blocked\"}\n"
+	if stdout != want || stderr != "" {
+		t.Fatalf("prepare failure was not bounded private JSON: stdout %q stderr %q", stdout, stderr)
+	}
+	for _, forbidden := range []string{stateDir, "private-lifecycle-path-sentinel", "Traceback", "FileExistsError"} {
+		if strings.Contains(stdout+stderr, forbidden) {
+			t.Fatalf("prepare failure leaked %q: %s%s", forbidden, stdout, stderr)
+		}
+	}
+}
+
 func TestLinuxProcessIdentityRejectsAmbiguousSnapshots(t *testing.T) {
 	t.Parallel()
 	helper, err := filepath.Abs("claude_delegation.py")
