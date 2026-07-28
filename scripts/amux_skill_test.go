@@ -21,6 +21,7 @@ var publicSkillFiles = []string{
 	filepath.Join("skills", "amux", "reference", "contract-v1.md"),
 	filepath.Join("skills", "amux", "reference", "deadline-v1.md"),
 	filepath.Join("skills", "amux-claude", "SKILL.md"),
+	filepath.Join("skills", "amux-claude", "reference", "claude-local-tmux-adoption.md"),
 	filepath.Join("skills", "amux-pi", "SKILL.md"),
 	filepath.Join("skills", "amux-pi", "reference", "pi-spark-orb-executor.md"),
 	filepath.Join("skills", "amux-claude", "reference", "claude-opus-orb-executor.md"),
@@ -75,6 +76,7 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 				"claude-delegation-recovery.md",
 				"claude-read-only-delegation.md",
 				"claude-mutating-delegation.md",
+				"claude-local-tmux-adoption.md",
 				"claude-opus-orb-executor.md",
 				"trigger-phrases.md",
 			},
@@ -95,6 +97,55 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(root, pkg.skillDir, "reference", name)); err != nil {
 				t.Errorf("%s/reference/%s is missing: %v", pkg.skillDir, name, err)
 			}
+		}
+	}
+}
+
+func TestClaudeLocalTmuxAdoptionRouteStaysOperatorAssistedAndFailClosed(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "SKILL.md"))
+	triggers := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "trigger-phrases.md"))
+	reference := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-local-tmux-adoption.md"))
+
+	trigger := "Adopt owner-created Claude Code tmux windows on an explicitly selected physical host"
+	for name, contents := range map[string]string{"SKILL.md": skill, "trigger checklist": triggers} {
+		if !strings.Contains(contents, trigger) || !strings.Contains(contents, "claude-local-tmux-adoption.md") {
+			t.Errorf("%s does not route the explicit local tmux adoption trigger", name)
+		}
+	}
+	for _, required := range []string{
+		"not managed local delegation and not fresh-Orb execution",
+		"session:window",
+		"claude-opus-5",
+		"Omission, alias normalization, a default, fallback, substitution",
+		"Physical host",
+		"Worktree state",
+		"read-only",
+		"exclusive-writer",
+		"Reject a dirty worktree",
+		"16 KiB",
+		"autocomplete",
+		"pasted-text",
+		"Vim `-- INSERT --`",
+		"Never send blind `Enter`",
+		"result-consumed",
+		"window-decommissioned",
+		"decommission-indeterminate",
+		"final window",
+		"never implicitly destroys the final or whole session",
+		"owner authentication",
+		"Amp independently verifies",
+		"exact remote PR head",
+		"Do not start an automatic repair loop",
+	} {
+		if !strings.Contains(reference, required) {
+			t.Errorf("local tmux adoption reference is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"claude-opus-4-8", "tmux kill-session", "kill-server"} {
+		if strings.Contains(reference, forbidden) {
+			t.Errorf("local tmux adoption reference contains forbidden marker %q", forbidden)
 		}
 	}
 }
