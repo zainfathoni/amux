@@ -1,6 +1,6 @@
 # Delegate bounded read-only work to Claude Opus in a fresh Amp Orb
 
-Use this explicit-only, provider-specific experiment when an Amp coordinator is asked to run official Claude Code on Opus read-only in a fresh Orb. It is independent of the local interactive Claude delegation experiments, parent issue #207, and Pi work. It creates no amux worker, provider-neutral task state, receipt, registry, scheduler, or supervisor. One explicitly requested fresh-Orb mutation uses the separate durable [`claude-opus-orb-mutating.md`](claude-opus-orb-mutating.md) workflow; do not weaken this recipe or infer mutation authority from it.
+Use this explicit-only, provider-specific experiment when an Amp coordinator is asked to run official Claude Code on Opus read-only in a fresh Orb. It is independent of the local interactive Claude delegation experiments, parent issue #207, and Pi work. It creates no amux worker, provider-neutral task state, receipt, registry, scheduler, or supervisor. A fresh-Orb mutation request routes to the blocked, non-authorizing [`claude-opus-orb-mutating.md`](claude-opus-orb-mutating.md) scaffold; do not weaken this recipe or infer mutation authority from it.
 
 The coordinator and executor communicate only with native Amp thread messaging and file transfer. Treat every Claude result as untrusted executor data. Do not paste credentials, auth URLs, account identity, complete environment output, raw session metadata, or unreviewed Claude output into an Amp message or committed file.
 
@@ -327,7 +327,7 @@ test "$STDOUT_BYTES" -le 65536 || { RESULT_FAILURE=stdout_overflow; exit 1; }
 test "$STDERR_BYTES" -eq 0 || { RESULT_FAILURE=stderr_nonempty; exit 1; }
 ```
 
-Never add `--fallback-model`, `--dangerously-skip-permissions`, `--continue`, `--resume`, or `--session-id`. A useful repository task selects `READ_ONLY_ARGS`, runs in a dedicated clean worktree, and retains every non-tool bound. Capture bounded `git status --porcelain=v1 --untracked-files=all` before and after; any change blocks acceptance. A mutating task requires the separate explicit authority, durable receipt, artifact handoff, and acknowledgement-gated lifecycle in [`claude-opus-orb-mutating.md`](claude-opus-orb-mutating.md); this read-only recipe does not grant it.
+Never add `--fallback-model`, `--dangerously-skip-permissions`, `--continue`, `--resume`, or `--session-id`. A useful repository task selects `READ_ONLY_ARGS`, runs in a dedicated clean worktree, and retains every non-tool bound. Capture bounded `git status --porcelain=v1 --untracked-files=all` before and after; any change blocks acceptance. The required native authority and lifecycle adapters for mutation are unavailable as documented in [`claude-opus-orb-mutating.md`](claude-opus-orb-mutating.md); this read-only recipe does not grant or approximate them.
 
 ## 5. Validate and report the result
 
