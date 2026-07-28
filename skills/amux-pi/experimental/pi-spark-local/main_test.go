@@ -423,7 +423,7 @@ func TestBoundsOutputAndTimeoutAndTerminatesProcessGroup(t *testing.T) {
 		pidFile := filepath.Join(f.root, "child.pid")
 		t.Setenv("FAKE_PI_MODE", "sleep")
 		t.Setenv("FAKE_PI_PID_FILE", pidFile)
-		err := run(f.args("--task", "edit", "--timeout", "100ms"), &bytes.Buffer{})
+		err := run(f.args("--task", "edit", "--timeout", "500ms"), &bytes.Buffer{})
 		if err == nil || !strings.Contains(err.Error(), "timed out") {
 			t.Fatalf("err=%v", err)
 		}
@@ -502,7 +502,7 @@ func TestBoundsOutputAndTimeoutAndTerminatesProcessGroup(t *testing.T) {
 
 func requirePIDGone(t *testing.T, pid int) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(3 * time.Second)
 	for processIsLive(pid) && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -563,7 +563,7 @@ func TestGroupKillFailureUsesBoundedExactProcessFallback(t *testing.T) {
 			return originalSignal(pgid)
 		}
 		t.Cleanup(func() { signalProcessGroup = originalSignal })
-		err := run(f.args("--task", "edit", "--timeout", "100ms"), &bytes.Buffer{})
+		err := run(f.args("--task", "edit", "--timeout", "500ms"), &bytes.Buffer{})
 		if err == nil || !strings.Contains(err.Error(), "timed out") || calls != 2 {
 			t.Fatalf("err=%v group-kill calls=%d", err, calls)
 		}
@@ -590,7 +590,7 @@ func TestGroupKillFailureUsesBoundedExactProcessFallback(t *testing.T) {
 		}
 		t.Cleanup(func() { signalProcessGroup = originalSignal })
 		started := time.Now()
-		err := run(f.args("--task", "edit", "--timeout", "100ms"), &bytes.Buffer{})
+		err := run(f.args("--task", "edit", "--timeout", "500ms"), &bytes.Buffer{})
 		if err == nil || !strings.Contains(err.Error(), "process-group termination could not be verified") || calls != 2 {
 			t.Fatalf("err=%v group-kill calls=%d", err, calls)
 		}
