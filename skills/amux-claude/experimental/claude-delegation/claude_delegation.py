@@ -6882,18 +6882,29 @@ def quarantine_lifecycle_lock(lifecycle: LifecycleRegistry) -> Iterator[tuple[in
         ):
             raise HelperError("quarantine lifecycle lock is unavailable")
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
-    except (OSError, ValueError) as error:
-        raise HelperError("quarantine lifecycle lock is unavailable") from error
+    except (OSError, ValueError, HelperError) as error:
+        cleanup_error = None
+        for descriptor in (lock_descriptor, directory_descriptor):
+            if descriptor < 0:
+                continue
+            try:
+                os.close(descriptor)
+            except (OSError, ValueError) as close_error:
+                cleanup_error = cleanup_error or close_error
+        raise HelperError("quarantine lifecycle lock is unavailable") from (
+            cleanup_error or error
+        )
     try:
         yield directory_descriptor, directory_info
     finally:
-        try:
-            if lock_descriptor >= 0:
-                os.close(lock_descriptor)
-            if directory_descriptor >= 0:
-                os.close(directory_descriptor)
-        except (OSError, ValueError) as error:
-            raise HelperError("quarantine lifecycle lock cleanup is unavailable") from error
+        cleanup_error = None
+        for descriptor in (lock_descriptor, directory_descriptor):
+            try:
+                os.close(descriptor)
+            except (OSError, ValueError) as close_error:
+                cleanup_error = cleanup_error or close_error
+        if cleanup_error is not None:
+            raise HelperError("quarantine lifecycle lock cleanup is unavailable") from cleanup_error
 
 
 def exact_canonical_path(value: Any, label: str) -> str:
@@ -7555,8 +7566,6 @@ def quarantine_apply(store: ReceiptStore, request: dict[str, Any], park_executor
         _, existing_fence, _ = ensure_teardown_fence(
             lifecycle, origin, normalize_existing=True
         )
-        existing_entry = canonical_fence_entry(lifecycle, origin)
-        assert existing_entry is not None
         existing_fence = validate_quarantine_fence(
             existing_fence, fence_operation, operation_id
         )
@@ -7580,7 +7589,7 @@ def quarantine_apply(store: ReceiptStore, request: dict[str, Any], park_executor
         )
         if current != comparable:
             raise HelperError("quarantine bound evidence changed")
-        _, fence = existing_entry
+        fence = existing_fence
         fence.update({
             "quarantine_operation_id": operation_id,
             "quarantine_plan_sha256": plan["plan_sha256"],

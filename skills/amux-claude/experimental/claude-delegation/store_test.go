@@ -248,6 +248,44 @@ func TestQuarantineLifecyclePrepareFailureReturnsPrivateJSONBlocker(t *testing.T
 			t.Fatalf("prepare failure leaked %q: %s%s", forbidden, stdout, stderr)
 		}
 	}
+
+	hostileState := t.TempDir()
+	if err := os.Chmod(hostileState, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hostileState, "experimental.lock"), []byte("hostile"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fdScript := `import importlib.util, os, pathlib, sys
+spec=importlib.util.spec_from_file_location("m",pathlib.Path(sys.argv[1])); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+state=pathlib.Path(sys.argv[2]); before=len(os.listdir("/dev/fd"))
+for _ in range(128):
+    try:
+        with m.quarantine_lifecycle_lock(m.LifecycleRegistry(state)): pass
+    except m.HelperError as error:
+        assert str(error)=="quarantine lifecycle lock is unavailable"
+    else: raise AssertionError("hostile lock accepted")
+after=len(os.listdir("/dev/fd")); assert after==before,(before,after)
+print("ok")`
+	output, err := exec.Command("python3", "-c", fdScript, helper, hostileState).CombinedOutput()
+	if err != nil || string(output) != "ok\n" {
+		t.Fatalf("hostile lock leaked descriptors: %v: %s", err, output)
+	}
+	for range 3 {
+		stdout, stderr, err = runHelper(t, hostileState, map[string]any{
+			"operation_sha256": strings.Repeat("b", 64),
+		}, "quarantine", "inspect")
+		if err == nil || stdout != want || stderr != "" {
+			t.Fatalf("hostile lock failure was not bounded private JSON: %v stdout %q stderr %q", err, stdout, stderr)
+		}
+		if strings.Contains(stdout+stderr, hostileState) || strings.Contains(stdout+stderr, "Traceback") {
+			t.Fatalf("hostile lock failure leaked private state: %s%s", stdout, stderr)
+		}
+	}
 }
 
 func TestLinuxProcessIdentityRejectsAmbiguousSnapshots(t *testing.T) {
