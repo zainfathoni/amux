@@ -14,7 +14,7 @@ import (
 
 type orbFixture struct {
 	root, worktree, state, packet, artifact, base, bindingDigest string
-	binding                                                    map[string]any
+	binding                                                      map[string]any
 }
 
 func command(t *testing.T, dir string, name string, args ...string) string {
@@ -88,15 +88,15 @@ func newOrbFixture(t *testing.T) *orbFixture {
 	base := command(t, root, "git", "rev-parse", "HEAD")
 	command(t, root, "git", "worktree", "add", "-q", "-b", "delegate", worktree, base)
 	binding := map[string]any{
-		"operation_id":      "synthetic-op",
-		"origin_thread":     "T-origin-synthetic",
-		"orb_thread":        "T-orb-synthetic",
-		"repository":        "example.invalid/owner/repository",
-		"base_sha":          base,
-		"branch":            "delegate",
-		"worktree_id":       hash("dedicated-worktree"),
-		"task_sha256":       hash("bounded-task"),
-		"executable_path":   "/opt/provider/bin/claude",
+		"operation_id":       "synthetic-op",
+		"origin_thread":      "T-origin-synthetic",
+		"orb_thread":         "T-orb-synthetic",
+		"repository":         "example.invalid/owner/repository",
+		"base_sha":           base,
+		"branch":             "delegate",
+		"worktree_id":        hash("dedicated-worktree"),
+		"task_sha256":        hash("bounded-task"),
+		"executable_path":    "/opt/provider/bin/claude",
 		"executable_version": "1.2.3",
 		"argv": []any{
 			"claude", "--print", "--model", "claude-opus-4-8", "--output-format", "json",
@@ -150,9 +150,9 @@ func admitAndLaunch(t *testing.T, fixture *orbFixture) {
 	launch["attempt"], launch["launch_sha256"] = 1, hash("launch")
 	launch["launch_identity"] = map[string]any{
 		"orb_thread": fixture.binding["orb_thread"], "execution_id": fixture.binding["execution_id"],
-		"executable_path": fixture.binding["executable_path"],
+		"executable_path":    fixture.binding["executable_path"],
 		"executable_version": fixture.binding["executable_version"],
-		"argv_sha256": hashJSON(t, fixture.binding["argv"]), "model": "claude-opus-4-8",
+		"argv_sha256":        hashJSON(t, fixture.binding["argv"]), "model": "claude-opus-4-8",
 	}
 	mustHelper(t, fixture.state, launch, "launch")
 }
@@ -184,7 +184,7 @@ func exportResult(t *testing.T, fixture *orbFixture, outcome string) map[string]
 	exported := mustHelper(t, "", map[string]any{
 		"packet": fixture.packet, "binding_sha256": fixture.bindingDigest,
 		"model_usage": map[string]any{"claude-opus-4-8": map[string]any{}},
-		"worktree": fixture.worktree, "outcome": outcome, "output": fixture.artifact,
+		"worktree":    fixture.worktree, "outcome": outcome, "output": fixture.artifact,
 		"report_sha256": hash("bounded semantic report"),
 		"blocker_sha256": func() any {
 			if outcome == "blocked" {
@@ -380,7 +380,7 @@ func TestFreshOrbRejectsDirtyDivergentAndCorruptTransfer(t *testing.T) {
 		_, stderr, err := helper(t, "", map[string]any{
 			"packet": fixture.packet, "binding_sha256": fixture.bindingDigest,
 			"model_usage": map[string]any{"claude-opus-4-8": map[string]any{}},
-			"worktree": fixture.worktree, "outcome": "complete", "output": fixture.artifact,
+			"worktree":    fixture.worktree, "outcome": "complete", "output": fixture.artifact,
 		}, "export")
 		if err == nil || !strings.Contains(stderr, "dirty") {
 			t.Fatalf("dirty handoff accepted: %v %s", err, stderr)
@@ -396,7 +396,7 @@ func TestFreshOrbRejectsDirtyDivergentAndCorruptTransfer(t *testing.T) {
 		_, _, err := helper(t, "", map[string]any{
 			"packet": fixture.packet, "binding_sha256": fixture.bindingDigest,
 			"model_usage": map[string]any{"claude-opus-4-8": map[string]any{}},
-			"worktree": fixture.worktree, "outcome": "complete", "output": filepath.Join(t.TempDir(), "artifact"),
+			"worktree":    fixture.worktree, "outcome": "complete", "output": filepath.Join(t.TempDir(), "artifact"),
 		}, "export")
 		if err == nil {
 			t.Fatal("multi-commit handoff accepted")
