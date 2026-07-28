@@ -23,100 +23,165 @@ func TestProviderOwnedInvalidStoreQuarantine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := `import copy, hashlib, importlib.util, json, pathlib, sys, tempfile
+	script := `import copy, hashlib, importlib.util, json, pathlib, platform, sys, tempfile
 spec=importlib.util.spec_from_file_location("m", pathlib.Path(sys.argv[1])); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 root=pathlib.Path(tempfile.mkdtemp()); root.chmod(0o700); missing=root/"missing"
+amux=root/"amux"; amux.write_bytes(b"#!/bin/sh\nexit 0\n"); amux.chmod(0o700)
+shadow=root/"shadow"; shadow.mkdir(); (shadow/"amux").write_text("PATH shadow must not run")
+config=root/"config"; config.mkdir(mode=0o700); (config/"workers.tsv").write_text("ws\twin\t/tmp\thttps://ampcode.com/threads/T-private-origin\nws\tother\t/tmp\tT-unrelated\n")
 artifacts={kind:root/kind for kind in ["report","worktree","artifact","operation"]}
 for kind,path in artifacts.items(): path.write_bytes(("preserved "+kind).encode()); path.chmod(0o600)
 artifact=artifacts["artifact"]
 lifecycle={"schema_version":1,"stores":[str(missing)],"legacy_store_objects":{},"teardown_fences":{}}
 (root/"lifecycle.json").write_text(json.dumps(lifecycle)); (root/"lifecycle.json").chmod(0o600)
-store=m.ReceiptStore(root,root); base={"origin_thread":"private-origin","provider":"claude","action":"park","registered_store_sha256":hashlib.sha256(str(missing).encode()).hexdigest(),"artifacts":[{"kind":kind,"path":str(path)} for kind,path in artifacts.items()]}
-before={p:p.read_bytes() for p in [root/"lifecycle.json",*artifacts.values()]}
+store=m.ReceiptStore(root,root); base={"origin_thread":"T-private-origin","provider":"claude","action":"park","amux_executable":str(amux),"amux_config_dir":str(config),"registered_store_sha256":hashlib.sha256(str(missing).encode()).hexdigest(),"artifacts":[{"kind":kind,"path":str(path)} for kind,path in artifacts.items()]}
+binding={"protocol_version":1,"delegation_id":"fenced","nonce":"1"*64,"task_id":"task","question_message_id":"question","origin_thread":"https://ampcode.com/threads/T-private-origin","repository":"repo","base":"b"*40,"workdir":"/tmp/work","producer_role":"thinker","authority":"read_only","task_reference":"fixture","packet_digest":"2"*64,"launch_policy_digest":"3"*64,"launch_command_digest":"4"*64}
+assert store.create({"binding":binding,"routing":{"target":"machine_local_inbox"}})=="recorded"
+before={p:p.read_bytes() for p in [root/"lifecycle.json",root/"receipts.json",*artifacts.values()]}
 plan=m.quarantine_plan(store,base)["plan"]
-assert "private-origin" not in json.dumps(plan) and str(root) not in json.dumps(plan)
+assert "T-private-origin" not in json.dumps(plan) and str(root) not in json.dumps(plan)
 assert {p:p.read_bytes() for p in before} == before
+# The production executor consumes the retained executable and config bytes, not
+# replacements at either source path, and exposes only the exact park argv.
+production_marker=root/"production-marker"; wrong_marker=root/"wrong-marker"
+production_amux=root/"production-amux"
+production_amux.write_text("#!/bin/sh\nset -eu\n[ \"$1\" = --config-dir ]\n[ \"$3\" = worker ]\n[ \"$4\" = park ]\n[ \"$5\" = --thread ]\n[ \"$6\" = T-production ]\ngrep -q 'T-production' \"$2/workers.tsv\"\nprintf exact > \""+str(production_marker)+"\"\n")
+production_amux.chmod(0o700)
+production_config=root/"production-config"; production_config.mkdir(mode=0o700)
+(production_config/"workers.tsv").write_text("ws\twin\t/tmp\tT-production\n")
+(production_config/"shelves.tsv").write_text("T-other\n")
+production_request={"amux_executable":str(production_amux),"amux_config_dir":str(production_config)}
+with m.open_quarantine_execution_boundary(production_request,"T-production") as boundary:
+    production_amux.write_text("#!/bin/sh\nprintf wrong > \""+str(wrong_marker)+"\"\n"); production_amux.chmod(0o700)
+    (production_config/"workers.tsv").write_text("ws\twrong\t/tmp\tT-wrong\n")
+    (production_config/"shelves.tsv").write_text("T-production\n")
+    m.execute_core_worker_park(boundary[1],boundary[2],boundary[3])
+assert production_marker.read_bytes()==b"exact" and not wrong_marker.exists()
+(production_config/"workspaces.tsv").write_text("legacy")
+try:
+    with m.open_quarantine_execution_boundary(production_request,"T-wrong"): pass
+except m.HelperError: pass
+else: raise AssertionError("migration input accepted")
+for action in ["remove","teardown","archive","cleanup","detach","catalog_detach","provider_cleanup"]:
+    try: m.quarantine_plan(store,{**base,"action":action})
+    except m.HelperError: pass
+    else: raise AssertionError("stronger quarantine action accepted")
 auth={"decision":"park","plan_sha256":plan["plan_sha256"],"authorization_sha256":"a"*64,"authorized_at":"2026-07-28T00:00:00Z"}
 request={**base,"plan":plan,"owner_authorization":auth}
-calls=[]; result=m.quarantine_apply(store,request,lambda origin:calls.append(origin))
-assert result["outcome"]=="parked" and calls==["private-origin"]
-assert m.quarantine_apply(store,request,lambda origin:calls.append(origin))["outcome"]=="duplicate" and len(calls)==1
+calls=[]; result=m.quarantine_apply(store,request,lambda argv,env,fds:calls.append((argv,env,fds)))
+assert result["outcome"]=="parked" and len(calls)==1 and calls[0][0][1:]==["--config-dir",calls[0][0][2],"worker","park","--thread","T-private-origin"]
+if platform.system()=="Linux":
+    assert calls[0][0][0].startswith("/proc/self/fd/") and calls[0][0][2].startswith("/proc/self/fd/")
+else:
+    assert pathlib.Path(calls[0][0][0]).is_absolute() and pathlib.Path(calls[0][0][2]).is_absolute() and not calls[0][0][0].startswith("/dev/fd/") and not calls[0][0][2].startswith("/dev/fd/")
+assert str(shadow) not in calls[0][1]["PATH"] and set(calls[0][1])=={"HOME","PATH","TERM"}
+assert m.quarantine_apply(store,request,lambda *args:calls.append(args))["outcome"]=="duplicate" and len(calls)==1
 inspection=m.quarantine_inspect(store,{"operation_sha256":result["operation_sha256"]}); assert inspection["outcome"]=="unresolved"
-assert "private-origin" not in json.dumps([result,inspection]) and str(root) not in json.dumps([result,inspection])
-assert {p:p.read_bytes() for p in before} == before
-# A second authorization or freshly timestamped plan for the same evidence cannot park again.
-changed_auth=copy.deepcopy(request); changed_auth["owner_authorization"]["authorization_sha256"]="f"*64
-fresh_plan=m.quarantine_plan(store,base)["plan"]
-fresh_request={**request,"plan":fresh_plan,"owner_authorization":{**auth,"plan_sha256":fresh_plan["plan_sha256"]}}
-for conflicting in [changed_auth,fresh_request]:
-    try: m.quarantine_apply(store,conflicting,lambda origin:calls.append(origin))
-    except m.HelperError: pass
-    else: raise AssertionError("conflicting authority replay accepted")
-assert len(calls)==1
-for action in ["remove","teardown","archive","cleanup","detach","catalog_detach","provider_cleanup"]:
-    bad={**base,"action":action}
+assert "T-private-origin" not in json.dumps([result,inspection]) and str(root) not in json.dumps([result,inspection])
+assert {p:p.read_bytes() for p in artifacts.values()} == {p:before[p] for p in artifacts.values()}
+assert (root/"receipts.json").read_bytes()==before[root/"receipts.json"]
+# Fence is canonical, retained, and has worker-teardown identity.
+registry=json.loads((root/"lifecycle.json").read_text()); fence=registry["teardown_fences"]["T-private-origin"]
+assert fence["operation_id"]==hashlib.sha256(b"worker-teardown\0T-private-origin").hexdigest()
+release=store.release_worker_teardown("https://ampcode.com/threads/T-private-origin")
+assert release["outcome"]=="blocked" and json.loads((root/"lifecycle.json").read_text())["teardown_fences"]["T-private-origin"]==fence
+# The canonical fence blocks historical URL receipt and every launch-intent path.
+blocked_binding={**binding,"delegation_id":"fenced-new","nonce":"9"*64}
+try: store.create({"binding":blocked_binding,"routing":{"target":"machine_local_inbox"}})
+except m.HelperError as error: assert "fence" in str(error)
+else: raise AssertionError("canonical fence did not block historical origin")
+original_validate=m.validate_launch_request; original_policy=m.expected_launch_policy; original_components=m.launch_components
+m.expected_launch_policy=lambda request: None
+for workflow in ["read_only","mutating"]:
+    validated={"delegation_id":"fenced","event_id":"launch-"+workflow,"workdir":"/tmp/work","packet_file":"/tmp/packet","tmux_session":"Synthetic","tmux_window":"worker","claude_session_id":"550e8400-e29b-41d4-a716-446655440000","repository":"repo","base":"b"*40,"workflow":workflow}
+    m.validate_launch_request=lambda request,validated=validated: copy.deepcopy(validated)
+    components={"workflow":workflow,"packet_digest":"2"*64,"launch_policy_digest":"3"*64,"launch_command_digest":"4"*64,"expected_argv_digest":"5"*64,"expected_launcher_argv0_digest":"6"*64,"expected_launcher_identity":"file:1:2","expected_executable_object_identity":"object:1:2:3:"+"7"*64,"packet_identity":"object","workdir_identity":"directory"}
+    if workflow=="mutating": components["capacity_decision"]={"decision_digest":"8"*64,"acknowledgement_of":"ack","capacity_request_digest":"9"*64,"acknowledgement_expires_at":"2026-07-28T00:00:00Z"}
+    m.launch_components=lambda store,request,components=components: copy.deepcopy(components)
+    try: m.execute_launch(store,{})
+    except m.HelperError as error: assert "fence" in str(error)
+    else: raise AssertionError("fence did not block "+workflow+" launch intent")
+m.validate_launch_request=original_validate; m.expected_launch_policy=original_policy; m.launch_components=original_components
+# Quarantine admission rejects the historical URL even though config accepts it.
+bad={**base,"origin_thread":"https://ampcode.com/threads/T-private-origin"}
+try: m.quarantine_plan(store,bad)
+except m.HelperError: pass
+else: raise AssertionError("URL quarantine origin accepted")
+# Interrupted intent survives changed lifecycle/store/artifact/plan/authorization without re-execution.
+missing2=root/"missing2"; registry["stores"].append(str(missing2)); (root/"lifecycle.json").write_text(json.dumps(registry)); (root/"lifecycle.json").chmod(0o600)
+(config/"workers.tsv").write_text("ws\twin\t/tmp\tT-interrupted\n")
+base2={**base,"origin_thread":"T-interrupted","registered_store_sha256":hashlib.sha256(str(missing2).encode()).hexdigest()}
+plan2=m.quarantine_plan(store,base2)["plan"]; auth2={"decision":"park","plan_sha256":plan2["plan_sha256"],"authorization_sha256":"b"*64,"authorized_at":"2026-07-28T01:00:00Z"}
+request2={**base2,"plan":plan2,"owner_authorization":auth2}; attempted=[]
+blocked=m.quarantine_apply(store,request2,lambda *args:attempted.append(args) or (_ for _ in ()).throw(RuntimeError()))
+assert blocked["blocker"]=="park_outcome_indeterminate" and len(attempted)==1
+artifact.write_bytes(b"mutated supplemental evidence"); missing2.mkdir(mode=0o700); (missing2/"receipts.json").write_bytes(b"invalid"); (missing2/"receipts.json").chmod(0o600)
+alias=root/"artifact-alias"; alias.hardlink_to(artifact); alias.chmod(0o600)
+changed_base={**base2,"artifacts":[*base2["artifacts"],{"kind":"alias","path":str(alias)}]}
+fresh=m.quarantine_plan(store,changed_base)["plan"]; changed={**changed_base,"plan":fresh,"owner_authorization":{**auth2,"plan_sha256":fresh["plan_sha256"],"authorization_sha256":"c"*64}}
+try: m.quarantine_apply(store,changed,lambda *args:attempted.append(args))
+except m.HelperError: pass
+else: raise AssertionError("changed interrupted authority accepted")
+assert len(attempted)==1
+# The lifecycle fence, not the deletable ledger, is monotonic authority. Deletion,
+# valid replacement, and truncation cannot permit a second executor call.
+ledger=root/"claude-quarantine.json"; ledger.unlink()
+fenced=m.quarantine_apply(store,changed,lambda *args:attempted.append(args))
+assert fenced["blocker"]=="park_outcome_indeterminate" and len(attempted)==1
+ledger.write_text('{"schema_version":1,"receipts":[]}'); ledger.chmod(0o600)
+fenced=m.quarantine_apply(store,changed,lambda *args:attempted.append(args))
+assert fenced["blocker"]=="park_outcome_indeterminate" and len(attempted)==1
+ledger.write_bytes(b'{'); ledger.chmod(0o600)
+try: m.quarantine_apply(store,changed,lambda *args:attempted.append(args))
+except m.HelperError: pass
+else: raise AssertionError("truncated ledger accepted")
+assert len(attempted)==1
+ledger.write_text('{"schema_version":1,"receipts":[]}'); ledger.chmod(0o600)
+# Changed config and replacement config directory block before a first executor call.
+(config/"workers.tsv").write_text("ws\tdrift\t/tmp\tT-config-drift\n")
+missing3=root/"missing3"; registry=json.loads((root/"lifecycle.json").read_text()); registry["stores"].append(str(missing3)); (root/"lifecycle.json").write_text(json.dumps(registry)); (root/"lifecycle.json").chmod(0o600)
+base3={**base,"origin_thread":"T-config-drift","registered_store_sha256":hashlib.sha256(str(missing3).encode()).hexdigest(),"artifacts":[]}
+plan3=m.quarantine_plan(store,base3)["plan"]; request3={**base3,"plan":plan3,"owner_authorization":{"decision":"park","plan_sha256":plan3["plan_sha256"],"authorization_sha256":"d"*64,"authorized_at":"2026-07-28T02:00:00Z"}}
+(config/"workers.tsv").write_text("ws\tchanged\t/tmp\tT-different\n")
+try: m.quarantine_apply(store,request3,lambda *args:attempted.append(args))
+except m.HelperError: pass
+else: raise AssertionError("changed config accepted")
+assert len(attempted)==1
+# Replacing the exact config directory object also blocks before execution.
+(config/"workers.tsv").write_text("ws\treplace\t/tmp\tT-config-replace\n")
+missing4=root/"missing4"; registry=json.loads((root/"lifecycle.json").read_text()); registry["stores"].append(str(missing4)); (root/"lifecycle.json").write_text(json.dumps(registry)); (root/"lifecycle.json").chmod(0o600)
+base4={**base,"origin_thread":"T-config-replace","registered_store_sha256":hashlib.sha256(str(missing4).encode()).hexdigest(),"artifacts":[]}
+plan4=m.quarantine_plan(store,base4)["plan"]; request4={**base4,"plan":plan4,"owner_authorization":{"decision":"park","plan_sha256":plan4["plan_sha256"],"authorization_sha256":"e"*64,"authorized_at":"2026-07-28T03:00:00Z"}}
+old_config=root/"old-config"; config.rename(old_config); config.mkdir(mode=0o700); (config/"workers.tsv").write_text("ws\treplace\t/tmp\tT-config-replace\n")
+try: m.quarantine_apply(store,request4,lambda *args:attempted.append(args))
+except m.HelperError: pass
+else: raise AssertionError("replacement config accepted")
+assert len(attempted)==1
+# Tampering with the exact durable fence after intent blocks the action and retains intent.
+(config/"workers.tsv").write_text("ws\tfence\t/tmp\tT-fence-drift\n")
+missing5=root/"missing5"; registry=json.loads((root/"lifecycle.json").read_text()); registry["stores"].append(str(missing5)); (root/"lifecycle.json").write_text(json.dumps(registry)); (root/"lifecycle.json").chmod(0o600)
+base5={**base,"origin_thread":"T-fence-drift","registered_store_sha256":hashlib.sha256(str(missing5).encode()).hexdigest(),"artifacts":[]}
+plan5=m.quarantine_plan(store,base5)["plan"]; request5={**base5,"plan":plan5,"owner_authorization":{"decision":"park","plan_sha256":plan5["plan_sha256"],"authorization_sha256":"f"*64,"authorized_at":"2026-07-28T04:00:00Z"}}
+original_write=m.write_private_bytes_at
+def tamper_fence(directory,name,payload):
+    original_write(directory,name,payload)
+    if name=="claude-quarantine.json":
+        changed_registry=json.loads((root/"lifecycle.json").read_text()); changed_registry["teardown_fences"]["T-fence-drift"]["operation_id"]="0"*64; (root/"lifecycle.json").write_text(json.dumps(changed_registry)); (root/"lifecycle.json").chmod(0o600)
+m.write_private_bytes_at=tamper_fence
+fence_blocked=m.quarantine_apply(store,request5,lambda *args:attempted.append(args)); m.write_private_bytes_at=original_write
+assert fence_blocked["blocker"]=="quarantine_bound_evidence_changed" and len(attempted)==1
+# Supplemental manifest supports files only and refuses unknown shape, symlink, and directory.
+artifact.write_bytes(before[artifact]); symlink=root/"artifact-symlink"; symlink.symlink_to(artifact)
+for unsupported in [[{"kind":"x","path":str(artifact),"complete":True}],[{"kind":"x","path":str(symlink)}],[{"kind":"x","path":str(config)}]]:
+    bad={**base,"artifacts":unsupported}
     try: m.quarantine_plan(store,bad)
     except m.HelperError: pass
-    else: raise AssertionError("stronger action accepted")
-changed=copy.deepcopy(request); artifact.write_bytes(b"changed")
-try: m.quarantine_apply(store,changed,lambda origin:None)
-except m.HelperError: pass
-else: raise AssertionError("changed manifest accepted")
-artifact.write_bytes(before[artifact])
-# Missing-to-invalid store drift is distinct evidence and blocks an old plan.
-missing.mkdir(mode=0o700); (missing/"receipts.json").write_bytes(b"invalid"); (missing/"receipts.json").chmod(0o600)
-invalid_before=(missing/"receipts.json").read_bytes()
-try: m.quarantine_apply(store,request,lambda origin:None)
-except m.HelperError: pass
-else: raise AssertionError("changed store accepted")
-plan_invalid=m.quarantine_plan(store,base)["plan"]; assert plan_invalid["registered_store_evidence_sha256"] != plan["registered_store_evidence_sha256"]
-# An interrupted external action is durable and recovery never invokes it a second time.
-plan2=m.quarantine_plan(store,base)["plan"]; request2={**base,"plan":plan2,"owner_authorization":{"decision":"park","plan_sha256":plan2["plan_sha256"],"authorization_sha256":"b"*64,"authorized_at":"2026-07-28T00:01:00Z"}}
-def interrupted(origin): raise m.HelperError("synthetic interruption")
-interrupted_result=m.quarantine_apply(store,request2,interrupted)
-assert interrupted_result["blocker"]=="park_outcome_indeterminate" and interrupted_result["operation_sha256"]
-request2["recover"]=True; assert m.quarantine_apply(store,request2,lambda origin:(_ for _ in ()).throw(AssertionError("second park")))["blocker"]=="park_outcome_indeterminate"
-changed_interrupted_auth=copy.deepcopy(request2); changed_interrupted_auth["owner_authorization"]["authorization_sha256"]="c"*64
-try: m.quarantine_apply(store,changed_interrupted_auth,lambda origin:calls.append(origin))
-except m.HelperError: pass
-else: raise AssertionError("changed interrupted authorization accepted")
-assert (missing/"receipts.json").read_bytes()==invalid_before
-# Origin/provider/store/authorization changes all fail closed.
-for field,value in [("origin_thread","unrelated"),("provider","other"),("registered_store_sha256","0"*64)]:
-    bad=copy.deepcopy(request); bad[field]=value
-    try: m.quarantine_apply(store,bad,lambda origin:None)
-    except m.HelperError: pass
-    else: raise AssertionError(field+" change accepted")
-bad=copy.deepcopy(request); bad["owner_authorization"]["decision"]="remove"
-try: m.quarantine_apply(store,bad,lambda origin:None)
-except m.HelperError: pass
-else: raise AssertionError("authorization change accepted")
-# Mutating evidence immediately after durable intent blocks before the executor.
-(missing/"receipts.json").write_bytes(b"different-invalid"); plan3=m.quarantine_plan(store,base)["plan"]
-request3={**base,"plan":plan3,"owner_authorization":{"decision":"park","plan_sha256":plan3["plan_sha256"],"authorization_sha256":"d"*64,"authorized_at":"2026-07-28T00:02:00Z"}}
-original_write=m.write_private_json
-def mutate_after_intent(path,value):
-    original_write(path,value)
-    if path.name=="claude-quarantine.json" and value["receipts"][-1]["state"]=="intent": artifact.write_bytes(b"post-intent-change")
-m.write_private_json=mutate_after_intent
-preaction=m.quarantine_apply(store,request3,lambda origin:(_ for _ in ()).throw(AssertionError("park after drift")))
-assert preaction["blocker"]=="quarantine_bound_evidence_changed"
-m.write_private_json=original_write; artifact.write_bytes(before[artifact])
-# Malformed or unsafe provider metadata never erases replay evidence or permits an action.
-metadata=root/"claude-quarantine.json"; saved=metadata.read_bytes()
-for malformed in [b'{"schema_version":999,"receipts":[]}',b'{"schema_version":1,"receipts":{}}',b'{"schema_version":1,"receipts":[null]}']:
-    metadata.write_bytes(malformed); metadata.chmod(0o600)
-    try: m.quarantine_apply(store,request3,lambda origin:calls.append(origin))
-    except m.HelperError: pass
-    else: raise AssertionError("malformed metadata accepted")
-metadata.write_bytes(saved); metadata.chmod(0o600)
-target=root/"quarantine-target"; metadata.rename(target); metadata.symlink_to(target)
+    else: raise AssertionError("unsupported manifest form accepted")
+# A symlinked ledger is never followed or repaired.
+target=root/"ledger-target"; ledger.rename(target); ledger.symlink_to(target)
 try: m.quarantine_inspect(store,{"operation_sha256":result["operation_sha256"]})
 except m.HelperError: pass
-else: raise AssertionError("symlinked metadata accepted")
-metadata.unlink(); target.rename(metadata)
-assert (missing/"receipts.json").read_bytes()==b"different-invalid"
-assert invalid_before==b"invalid" and {p:p.read_bytes() for p in before} == before
+else: raise AssertionError("symlinked quarantine ledger accepted")
 print("ok")`
 	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
 	if err != nil {
