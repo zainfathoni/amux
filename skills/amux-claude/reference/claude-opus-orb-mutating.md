@@ -1,14 +1,6 @@
 # Fresh-Orb mutating Claude Opus route is blocked
 
-This provider-owned `/amux-claude` route is a **non-authorizing scaffold** for [issue #254](../../../docs/proposals/issue-254-fresh-orb-mutating-opus-workflow.md). It does not permit a repository mutation, create an Orb, invoke Claude, persist launch intent, import an artifact, verify a result, acknowledge capacity, archive a thread, or clean a workspace. Generic fresh-Orb mutation remains disabled and issue #254 remains open.
-
-Run the privacy-safe diagnostic only:
-
-```sh
-python3 experimental/fresh-orb-mutating/fresh_orb_workflow.py diagnose
-```
-
-It exits `2` with `native_fresh_orb_mutation_adapter_unavailable`. Every authorizing or lifecycle command is absent and fails before state or external mutation.
+This provider-owned `/amux-claude` route is blocked on `native_fresh_orb_mutation_adapter_unavailable`, as recorded by the [issue #254 design and primitive audit](../../../docs/proposals/issue-254-fresh-orb-mutating-opus-workflow.md). It does not permit a repository mutation, create an Orb, invoke Claude, persist launch intent, import an artifact, verify a result, acknowledge capacity, archive a thread, or clean a workspace. Stop at this documented blocker. Generic fresh-Orb mutation remains disabled and issue #254 remains open.
 
 ## Why current primitives cannot authorize this workflow
 
@@ -34,6 +26,6 @@ Implementation must remain blocked until an Amp-owned boundary provides all of t
 5. Native artifact/report import that binds exact bytes and source identity before Orb disposal.
 6. Authenticated headless-process absence plus replay-safe archive and workspace-cleanup intent/result transactions, with acknowledgement gates and durable failures.
 
-After those APIs exist, the provider workflow can add commit-bearing transfer and independent NUL-safe Git object/tree/mode verification. Until then, do not add an `intent`, `authorize`, `launch`, `transfer`, `verify`, `acknowledge`, `archive`, or `cleanup` command to this scaffold and do not run a real pilot.
+After those APIs exist, the provider workflow can add commit-bearing transfer and independent NUL-safe Git object/tree/mode verification. Until then, do not add an authorizing implementation or run a real pilot.
 
 The existing read-only fresh-Orb recipe and local tmux provider workflows remain unchanged.

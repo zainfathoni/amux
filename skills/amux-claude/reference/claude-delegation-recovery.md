@@ -112,4 +112,4 @@ Record the factual `unavailable` or `untested` capability and pause. Capacity di
 
 ## Fresh-Orb mutating recovery
 
-No fresh-Orb mutating launch or lifecycle is currently authorized, so there is no provider receipt to recover. Run only the `fresh_orb_workflow.py diagnose` blocker and preserve any separately encountered native Orb, workspace, report, or artifact evidence without adopting it. Do not create a caller-authored receipt, import local tmux semantics, retry a launch, infer process absence, archive, or clean up. Recovery requires the missing authenticated native adapters named in [`claude-opus-orb-mutating.md`](claude-opus-orb-mutating.md).
+No fresh-Orb mutating launch or lifecycle is currently authorized, so there is no provider receipt to recover. Stop at the documented blocker and preserve any separately encountered native Orb, workspace, report, or artifact evidence without adopting it. Do not create a caller-authored receipt, import local tmux semantics, retry a launch, infer process absence, archive, or clean up. Recovery requires the missing authenticated native adapters named in [`claude-opus-orb-mutating.md`](claude-opus-orb-mutating.md).
