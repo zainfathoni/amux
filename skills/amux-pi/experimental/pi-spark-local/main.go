@@ -22,14 +22,16 @@ import (
 )
 
 const (
-	packageName    = "@earendil-works/pi-coding-agent"
-	packageVersion = "0.80.10"
-	model          = "openai-codex/gpt-5.3-codex-spark"
-	maxInputBytes  = 64 << 10
-	maxTaskBytes   = 16 << 10
-	maxPromptBytes = 512 << 10
-	maxGitBytes    = 1 << 20
-	gitPath        = "/usr/bin/git"
+	packageName     = "@earendil-works/pi-coding-agent"
+	packageVersion  = "0.82.1"
+	packageEngine   = ">=22.19.0"
+	nodeEngineGuard = `data:text/javascript,const v=/^(\d+)\.(\d+)\.(\d+)$/.exec(process.versions.node);if(!v||+v[1]<22||(+v[1]===22&&+v[2]<19))throw new Error("Node >=22.19.0 required")`
+	model           = "openai-codex/gpt-5.3-codex-spark"
+	maxInputBytes   = 64 << 10
+	maxTaskBytes    = 16 << 10
+	maxPromptBytes  = 512 << 10
+	maxGitBytes     = 1 << 20
+	gitPath         = "/usr/bin/git"
 )
 
 var errAppliedStateIndeterminate = errors.New("applied state indeterminate")
@@ -59,6 +61,9 @@ type packageJSON struct {
 	Name    string          `json:"name"`
 	Version string          `json:"version"`
 	Bin     json.RawMessage `json:"bin"`
+	Engines struct {
+		Node string `json:"node"`
+	} `json:"engines"`
 }
 
 type settingsJSON struct {
@@ -122,7 +127,7 @@ func run(args []string, output io.Writer) error {
 	var o options
 	flags := flag.NewFlagSet("pi-spark-local", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	flags.StringVar(&o.pi, "pi", "", "absolute path to Pi 0.80.10")
+	flags.StringVar(&o.pi, "pi", "", "absolute path to Pi 0.82.1")
 	flags.StringVar(&o.piSHA256, "pi-sha256", "", "expected SHA-256 of Pi's dist/cli.js")
 	flags.StringVar(&o.node, "node", "", "absolute path to the selected Node executable")
 	flags.StringVar(&o.nodeSHA256, "node-sha256", "", "expected SHA-256 of the Node executable")
@@ -184,7 +189,7 @@ func run(args []string, output io.Writer) error {
 		return err
 	}
 
-	argv := append([]string{node, pi}, fixedArgs...)
+	argv := append([]string{node, "--import", nodeEngineGuard, pi}, fixedArgs...)
 	stdout, stderr, err := execute(o, argv, prompt, agentDir)
 	if err != nil {
 		return err
@@ -270,8 +275,8 @@ func admitPi(argument, expectedDigest string) (string, string, error) {
 		return "", "", errors.New("Pi package metadata is unavailable or oversized")
 	}
 	var pkg packageJSON
-	if err := json.Unmarshal(metadata, &pkg); err != nil || pkg.Name != packageName || pkg.Version != packageVersion {
-		return "", "", errors.New("Pi package name or version is not exactly admitted")
+	if err := json.Unmarshal(metadata, &pkg); err != nil || pkg.Name != packageName || pkg.Version != packageVersion || pkg.Engines.Node != packageEngine {
+		return "", "", errors.New("Pi package name, version, or Node engine is not exactly admitted")
 	}
 	var bins map[string]string
 	if err := json.Unmarshal(pkg.Bin, &bins); err != nil || len(bins) != 1 || filepath.Clean(bins["pi"]) != filepath.Join("dist", "cli.js") {
