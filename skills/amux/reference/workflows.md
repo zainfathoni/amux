@@ -98,6 +98,8 @@ amux report submit --report-id <stable-report-id> --group <durable-issue-group> 
 
 `merged` is terminal. The callback remains a wake-up; the coordinator inspects and acknowledges the merged event. Then the coordinator explicitly directs `/amux finish`. Finish verifies GitHub/Git/worktree/runner ownership, cleans the worktree and safe branch state, and invokes `amux teardown --thread <member-thread>` last. Group membership and report history survive teardown unless a separate explicit group removal is requested. Never force-delete a branch, infer finish from a callback, or release automatically.
 
+Run the final park/remove/teardown from a verified independent executor, never from the worker or runner transport being stopped. amux checks exact process incarnation and ancestry before mutation and fails closed for the whole invocation when any target relationship is ambiguous; pane names, cwd, and other presentation are not independence evidence. A rejected maintenance safety preflight reports the error without rewriting its prior checkpoint.
+
 ### 7. Coordinator-owned deadline queue
 
 Soft budgets to `ready` are Small 30m, Medium 1h (default), Large 2h; split XL before spawning. Stale is 15m; one review warns after 10m; demonstrated external CI waits alert after 20m; authorized finish alerts after 10m. Expiry is diagnostic and non-destructive. Use one nearest-deadline queue, not one timer process per child. Never force-delete a branch, auto-release, or erase group history.
@@ -151,6 +153,8 @@ amux teardown --current
 Use `--thread <id>` for `amux` when current identity is unavailable. When the helper runs, both dry-runs must succeed before mutation. Paired execution fences the origin, may park only terminal-safe verified pairs, and never removes artifacts, worktrees, receipts, reports, or group history. Any unsafe pair blocks; stop without Amp teardown. Indeterminate recovery is owner-authorized via `/amux-claude` only.
 
 After paired success (or when no pair preflight applies), invoke `amux teardown` immediately. Teardown is worker-only and fails closed on ambiguous Amp identity. It archives the verified remote thread, removes worker and shelf configuration, and stops the verified local client; an already absent verified local process is a benign skip. Worker teardown remains the final action.
+
+Invoke teardown from a verified independent executor. The target worker cannot safely teardown the Amp transport executing its own command, and unavailable or changed process-incarnation/ancestry evidence blocks before archive, catalog, shelf, or tmux mutation.
 
 ## Finish a merged worker
 

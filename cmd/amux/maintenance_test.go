@@ -18,6 +18,7 @@ import (
 	"github.com/zainfathoni/amux/internal/config"
 	"github.com/zainfathoni/amux/internal/lock"
 	"github.com/zainfathoni/amux/internal/result"
+	"github.com/zainfathoni/amux/internal/tmux"
 )
 
 // TestMaintenanceFailurePreservesAppliedFingerprint covers failures which occur
@@ -1129,7 +1130,7 @@ def row(ws, pane=None):
   if mode=='absent': return
   cmd='amp' if mode=='exact' else 'bash'
   start=v['start'] if mode=='exact' else 'foreign command'
-  print('%s\t%s\t@%s\t%s\t%s\t%s\t%s\t0\t1' % (ws,v['window'],v['id'],pane,v['workdir'],cmd,start))
+  print('%s\t%s\t@%s\t%s\t%s\t%s\t%s\t0\t%s' % (ws,v['window'],v['id'],pane,v['workdir'],cmd,start,7000+v['id']))
 if a[0]=='has-session':
   ws=a[a.index('-t')+1].lstrip('='); sys.exit(0 if ws in s else 1)
 if a[0]=='list-panes':
@@ -1766,12 +1767,16 @@ func TestMaintenancePartialConflictPersistsAndRetries(t *testing.T) {
 	seedLifecyclePrior(t, f, old)
 	writeLifecycleState(t, f, map[string]string{"ws0": "exact", "ws1": "conflict"})
 	os.WriteFile(f.amp, []byte("changed\n"), 0o700)
+	beforeConflict := lifecycleLog(t, f)
 	if _, err := runLifecycle(t, f); err == nil {
 		t.Fatal("partial conflict succeeded")
 	}
 	got, _ := loadMaintenanceOutcome(f.dir.MaintenanceResultPath())
-	if got.AppliedFingerprint != old || got.Status != "failed" || lifecycleRunner(t, got, f.workdirs["ws0"]).Status != "successful" || lifecycleRunner(t, got, f.workdirs["ws1"]).Status != "failed" {
-		t.Fatalf("outcome=%+v", got)
+	if got.AppliedFingerprint != old || got.Status != "successful" || len(got.Runners) != 0 {
+		t.Fatalf("preflight conflict changed prior outcome=%+v", got)
+	}
+	if delta := strings.TrimPrefix(lifecycleLog(t, f), beforeConflict); strings.Contains(delta, "kill-window") || strings.Contains(delta, "new-window") || strings.Contains(delta, "new-session") || strings.Contains(delta, "amp update") {
+		t.Fatalf("preflight conflict mutated lifecycle:\n%s", delta)
 	}
 	writeLifecycleState(t, f, map[string]string{"ws0": "absent", "ws1": "exact"})
 	before := lifecycleLog(t, f)
@@ -1785,6 +1790,155 @@ func TestMaintenancePartialConflictPersistsAndRetries(t *testing.T) {
 	got, _ = loadMaintenanceOutcome(f.dir.MaintenanceResultPath())
 	if got.AppliedFingerprint != got.ObservedFingerprint {
 		t.Fatalf("retry outcome=%+v", got)
+	}
+}
+
+func TestMaintenanceUsesPreflightRunnerSnapshotWhenRegistryAddsRow(t *testing.T) {
+	f := newMaintenanceLifecycleFixture(t, "external", 1)
+	old := lifecycleFingerprint(t, f.amp)
+	seedLifecyclePrior(t, f, old)
+	writeLifecycleState(t, f, map[string]string{"ws0": "exact"})
+	if err := os.WriteFile(f.amp, []byte("changed\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lateWorkdir := t.TempDir()
+	lateRow := config.RunnerRow{Workspace: "late", Workdir: lateWorkdir, Window: config.RunnerWindow(lateWorkdir)}
+	baseExec := maintenanceExec
+	added := false
+	maintenanceExec = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if !added && len(args) == 1 && args[0] == "version" {
+			added = true
+			if _, err := config.StoreRunner(f.dir.RunnersPath(), lateRow); err != nil {
+				return nil, err
+			}
+			stateBytes, err := os.ReadFile(f.state)
+			if err != nil {
+				return nil, err
+			}
+			var state map[string]map[string]any
+			if err := json.Unmarshal(stateBytes, &state); err != nil {
+				return nil, err
+			}
+			state[lateRow.Workspace] = map[string]any{"mode": "exact", "workdir": lateWorkdir, "window": lateRow.Window, "start": runnerStartCommand(lateWorkdir), "id": 99}
+			updated, _ := json.Marshal(state)
+			if err := os.WriteFile(f.state, updated, 0o600); err != nil {
+				return nil, err
+			}
+		}
+		return baseExec(ctx, name, args...)
+	}
+
+	before := lifecycleLog(t, f)
+	if _, err := runLifecycle(t, f); err != nil {
+		t.Fatal(err)
+	}
+	delta := strings.TrimPrefix(lifecycleLog(t, f), before)
+	if !added {
+		t.Fatal("test did not add post-preflight runner")
+	}
+	if strings.Contains(delta, lateRow.Workspace) || strings.Contains(delta, lateRow.Window) || strings.Contains(delta, lateWorkdir) {
+		t.Fatalf("post-preflight runner became a lifecycle target:\n%s", delta)
+	}
+	rows, err := config.LoadRunnersReadOnly(f.dir.RunnersPath())
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("late registry row was not preserved: rows=%+v err=%v", rows, err)
+	}
+}
+
+func TestMaintenanceTreatsExactToAbsentPreflightDriftAsPendingLaunch(t *testing.T) {
+	f := newMaintenanceLifecycleFixture(t, "external", 1)
+	old := lifecycleFingerprint(t, f.amp)
+	seedLifecyclePrior(t, f, old)
+	writeLifecycleState(t, f, map[string]string{"ws0": "exact"})
+	if err := os.WriteFile(f.amp, []byte("changed\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	baseExec := maintenanceExec
+	drifted := false
+	maintenanceExec = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if !drifted && len(args) == 1 && args[0] == "version" {
+			drifted = true
+			writeLifecycleState(t, f, map[string]string{"ws0": "absent"})
+		}
+		return baseExec(ctx, name, args...)
+	}
+
+	before := lifecycleLog(t, f)
+	if _, err := runLifecycle(t, f); err != nil {
+		t.Fatal(err)
+	}
+	delta := strings.TrimPrefix(lifecycleLog(t, f), before)
+	if !drifted {
+		t.Fatal("test did not remove exact runner after preflight")
+	}
+	if strings.Contains(delta, "kill-window") {
+		t.Fatalf("exact-to-absent runner was stopped again:\n%s", delta)
+	}
+	if !strings.Contains(delta, "new-window") && !strings.Contains(delta, "new-session") {
+		t.Fatalf("exact-to-absent runner was not relaunched:\n%s", delta)
+	}
+	got, err := loadMaintenanceOutcome(f.dir.MaintenanceResultPath())
+	if err != nil || got.Status != "successful" || lifecycleRunner(t, got, f.workdirs["ws0"]).Phase != "pending_launch" {
+		t.Fatalf("exact-to-absent outcome = %+v, error = %v", got, err)
+	}
+}
+
+func TestMaintenanceRejectsLiveProcessIncarnationDriftAfterPreflight(t *testing.T) {
+	f := newMaintenanceLifecycleFixture(t, "external", 1)
+	old := lifecycleFingerprint(t, f.amp)
+	seedLifecyclePrior(t, f, old)
+	writeLifecycleState(t, f, map[string]string{"ws0": "exact"})
+	if err := os.WriteFile(f.amp, []byte("changed\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	baseExec := maintenanceExec
+	drifted := false
+	maintenanceExec = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if len(args) == 1 && args[0] == "version" {
+			drifted = true
+		}
+		return baseExec(ctx, name, args...)
+	}
+	baseInspect := lifecycleProcessLink
+	t.Cleanup(func() { lifecycleProcessLink = baseInspect })
+	lifecycleProcessLink = func(pid int) (tmux.ProcessMetadata, error) {
+		process, err := baseInspect(pid)
+		if drifted && pid != 9000 && pid != 8000 && pid != 1 {
+			process.Identity = "reused-after-preflight"
+		}
+		return process, err
+	}
+
+	before := lifecycleLog(t, f)
+	env, err := runLifecycle(t, f)
+	if err == nil || len(env.Failed) == 0 || env.Failed[0].Error == nil || !strings.Contains(env.Failed[0].Error.Message, "process incarnation changed after maintenance preflight") {
+		t.Fatalf("live process incarnation drift: env=%+v error=%v", env, err)
+	}
+	delta := strings.TrimPrefix(lifecycleLog(t, f), before)
+	if strings.Contains(delta, "kill-window") || strings.Contains(delta, "new-window") || strings.Contains(delta, "new-session") {
+		t.Fatalf("live process incarnation drift mutated runner:\n%s", delta)
+	}
+}
+
+func TestAllowedMaintenanceRunnerTransitionIgnoresOnlyPresentationStartTime(t *testing.T) {
+	before := runnerInspection{state: runnerPaneExact, pane: tmux.WindowPane{Session: "alpha", Window: "runner", WindowID: "@1", PaneID: "%1", PID: 42, StartTime: 100}}
+	after := before
+	after.pane.StartTime = 200
+	if !allowedMaintenanceRunnerTransition(before, after) {
+		t.Fatal("StartTime-only change rejected despite native process-incarnation revalidation")
+	}
+	for _, mutate := range []func(*tmux.WindowPane){
+		func(p *tmux.WindowPane) { p.Session = "other" },
+		func(p *tmux.WindowPane) { p.Window = "other" },
+		func(p *tmux.WindowPane) { p.WindowID = "@2" },
+		func(p *tmux.WindowPane) { p.PaneID = "%2" },
+		func(p *tmux.WindowPane) { p.PID = 43 },
+	} {
+		changed := before
+		mutate(&changed.pane)
+		if allowedMaintenanceRunnerTransition(before, changed) {
+			t.Fatalf("exact tmux identity drift accepted: before=%+v after=%+v", before.pane, changed.pane)
+		}
 	}
 }
 

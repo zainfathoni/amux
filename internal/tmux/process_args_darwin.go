@@ -70,14 +70,27 @@ func ProcessArgs(pid int) ([]string, error) {
 
 // ProcessIdentity returns Darwin's native per-incarnation process start time.
 func ProcessIdentity(pid int) (string, error) {
-	info, err := readProcBSDInfo(pid)
+	link, err := InspectProcessLink(pid)
 	if err != nil {
 		return "", err
 	}
-	if info.StartSeconds == 0 {
-		return "", fmt.Errorf("process %d returned incomplete identity", pid)
+	return link.Identity, nil
+}
+
+// InspectProcessLink returns parent and per-incarnation identity from one
+// native proc_bsdinfo snapshot.
+func InspectProcessLink(pid int) (ProcessMetadata, error) {
+	if pid <= 0 {
+		return ProcessMetadata{}, fmt.Errorf("process PID is unavailable")
 	}
-	return fmt.Sprintf("%d.%06d", info.StartSeconds, info.StartMicroseconds), nil
+	info, err := readProcBSDInfo(pid)
+	if err != nil {
+		return ProcessMetadata{}, err
+	}
+	if info.StartSeconds == 0 {
+		return ProcessMetadata{}, fmt.Errorf("process %d returned incomplete ancestry identity", pid)
+	}
+	return ProcessMetadata{PID: pid, ParentPID: int(info.PPID), Identity: fmt.Sprintf("%d.%06d", info.StartSeconds, info.StartMicroseconds)}, nil
 }
 
 // ProcessName returns Darwin's native comm value without normalizing whitespace.

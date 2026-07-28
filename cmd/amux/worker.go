@@ -223,6 +223,17 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			inspections[row.Thread] = inspection
 		}
 	}
+	if lifecycleCommandStopsWorker(in.Command.Name) {
+		panes := make([]tmux.WindowPane, 0, len(rows))
+		for _, row := range rows {
+			if inspection := inspections[row.Thread]; inspection.state == workerPaneExact {
+				panes = append(panes, inspection.pane)
+			}
+		}
+		if err := preflightLifecycleExecutor("worker "+in.Command.Name, panes); err != nil {
+			return &env, result.Preflight(err)
+		}
+	}
 	var doctorStatuses map[string]threadStatus
 	var doctorStatusErr error
 	if in.Command.Name == "doctor" && !in.Options.DryRun {

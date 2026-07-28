@@ -122,6 +122,20 @@ func TestProcessIdentityReturnsStableNativeStartToken(t *testing.T) {
 	}
 }
 
+func TestInspectProcessLinkReturnsExactCurrentIncarnationAndParent(t *testing.T) {
+	link, err := InspectProcessLink(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := ProcessIdentity(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link.PID != os.Getpid() || link.ParentPID != os.Getppid() || link.Identity == "" || link.Identity != identity {
+		t.Fatalf("InspectProcessLink(%d) = %+v, identity = %q, parent = %d", os.Getpid(), link, identity, os.Getppid())
+	}
+}
+
 func TestProcessNameReturnsStableNativeName(t *testing.T) {
 	first, err := ProcessName(os.Getpid())
 	if err != nil {
@@ -187,6 +201,14 @@ func TestParseRestartPanesRejectsMalformedRequiredNumericMetadata(t *testing.T) 
 	panes, err := parseRestartPanes([]byte(fmt.Sprintf(base, "42", "")))
 	if err != nil || len(panes) != 1 || panes[0].PID != 42 || panes[0].StartTime != 0 {
 		t.Fatalf("optional unavailable pane creation time = %+v, %v", panes, err)
+	}
+}
+
+func TestParseRestartPanesAcceptsTmux34EmptyPaneCreated(t *testing.T) {
+	row := "amux\tworker\t@1\t%1\t/tmp\tamp\tstart\t0\t42\t\n"
+	panes, err := parseRestartPanes([]byte(row))
+	if err != nil || len(panes) != 1 || panes[0].PID != 42 || panes[0].StartTime != 0 {
+		t.Fatalf("tmux 3.4 empty pane_created row = %+v, %v", panes, err)
 	}
 }
 

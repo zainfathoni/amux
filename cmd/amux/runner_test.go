@@ -26,6 +26,25 @@ func TestMain(m *testing.M) {
 	runnerChildProcesses = func(parentPID int) ([]tmux.ProcessMetadata, error) {
 		return []tmux.ProcessMetadata{{PID: parentPID + 10000, ParentPID: parentPID, Name: "amp", Identity: fmt.Sprintf("start-%d", parentPID)}}, nil
 	}
+	lifecycleCurrentPID = func() int { return 9000 }
+	lifecycleProcessLink = func(pid int) (tmux.ProcessMetadata, error) {
+		if pid == 1 {
+			return tmux.ProcessMetadata{PID: 1, ParentPID: 0, Identity: "start-1"}, nil
+		}
+		parents := map[int]int{9000: 8000, 8000: 1}
+		parent, ok := parents[pid]
+		if !ok {
+			parent = 1
+		}
+		return tmux.ProcessMetadata{PID: pid, ParentPID: parent, Identity: fmt.Sprintf("start-%d", pid)}, nil
+	}
+	lifecyclePaneProcess = func(pane tmux.WindowPane) (tmux.WindowPane, error) {
+		if pane.PID <= 0 {
+			pane.PID = 7000
+		}
+		pane.StartTime = 123
+		return pane, nil
+	}
 	os.Exit(m.Run())
 }
 
