@@ -316,6 +316,7 @@ func TestSettingsPermissionsAcceptOwnerManagedDefaults(t *testing.T) {
 		if err := os.Chmod(filepath.Join(f.root, "agent", "settings.json"), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		mustWrite(t, filepath.Join(f.root, "agent", "models-store.json"), []byte(`{}`), 0o644)
 		before := mustRead(t, f.target)
 		t.Setenv("FAKE_PI_OUTPUT", marshal(t, replacement{Path: "target.txt", OriginalSHA256: digest(before), Replacement: "after\n"}))
 		if err := run(f.args("--task", "edit"), &bytes.Buffer{}); err != nil {
