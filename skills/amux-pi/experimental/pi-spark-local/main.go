@@ -361,6 +361,14 @@ func admitAgentMetadata() (string, error) {
 			return "", fmt.Errorf("Pi agent %s is present or ambiguous", overlay)
 		}
 	}
+	modelsStore := filepath.Join(agentDir, "models-store.json")
+	if info, err := os.Lstat(modelsStore); err == nil {
+		if !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Size() > 1<<20 {
+			return "", errors.New("Pi model catalog cache is linked, oversized, group/world-writable, or not regular")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", errors.New("Pi model catalog cache metadata is ambiguous")
+	}
 	return agentDir, nil
 }
 

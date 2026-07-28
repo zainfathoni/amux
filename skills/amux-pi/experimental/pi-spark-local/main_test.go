@@ -334,6 +334,56 @@ func TestSettingsPermissionsAcceptOwnerManagedDefaults(t *testing.T) {
 	})
 }
 
+func TestRejectsUnsafeManagedModelCacheObjects(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(*testing.T, string)
+	}{
+		{
+			name: "symlink",
+			prepare: func(t *testing.T, path string) {
+				t.Helper()
+				target := filepath.Join(filepath.Dir(path), "cache-target")
+				mustWrite(t, target, []byte(`{}`), 0o600)
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "directory",
+			prepare: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "oversized",
+			prepare: func(t *testing.T, path string) {
+				t.Helper()
+				mustWrite(t, path, bytes.Repeat([]byte(" "), (1<<20)+1), 0o600)
+			},
+		},
+		{
+			name: "group writable",
+			prepare: func(t *testing.T, path string) {
+				t.Helper()
+				mustWrite(t, path, []byte(`{}`), 0o660)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			tc.prepare(t, filepath.Join(f.root, "agent", "models-store.json"))
+			if err := run(f.args("--task", "edit"), &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "model catalog cache") {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
 func TestRejectsMalformedOrUnboundFinalOutput(t *testing.T) {
 	for _, tc := range []struct{ name, output, want string }{
 		{"not-json", "hello\n", "envelope"},
