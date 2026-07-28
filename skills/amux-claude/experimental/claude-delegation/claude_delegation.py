@@ -225,6 +225,48 @@ def historical_origin_fence(registry: dict[str, Any], spelling: str) -> dict[str
     return canonical_fence(registry, origin)
 
 
+def ensure_teardown_fence(
+    registry: dict[str, Any], spelling: str, *, normalize_existing: bool = False
+) -> tuple[str, dict[str, Any], bool]:
+    """Create one fence spelling while preserving exact opaque historical origins."""
+    try:
+        origin = canonical_amp_thread_id(spelling)
+    except HelperError:
+        existing = registry["teardown_fences"].get(spelling)
+        if existing is not None:
+            return spelling, existing, False
+        fence = {
+            "operation_id": hashlib.sha256(
+                f"worker-teardown\0{spelling}".encode()
+            ).hexdigest(),
+            "created_at": utc_now(),
+        }
+        registry["teardown_fences"][spelling] = fence
+        return spelling, fence, True
+    entry = canonical_fence_entry(registry, origin)
+    expected_operation = hashlib.sha256(
+        f"worker-teardown\0{origin}".encode()
+    ).hexdigest()
+    if entry is None:
+        fence = {"operation_id": expected_operation, "created_at": utc_now()}
+        registry["teardown_fences"][origin] = fence
+        return origin, fence, True
+    key, fence = entry
+    changed = False
+    if key != origin and normalize_existing:
+        del registry["teardown_fences"][key]
+        registry["teardown_fences"][origin] = fence
+        changed = True
+    if (
+        normalize_existing
+        and set(fence) == {"operation_id", "created_at"}
+        and fence.get("operation_id") != expected_operation
+    ):
+        fence["operation_id"] = expected_operation
+        changed = True
+    return origin if normalize_existing else key, fence, changed
+
+
 class LifecycleRegistry:
     def __init__(self, state_dir: pathlib.Path):
         self.state_dir = state_dir
@@ -301,7 +343,8 @@ class ReceiptStore:
             yield
 
     @contextlib.contextmanager
-    def launch_intent_mutation_lock(self, stage_a: bool) -> Iterator[None]:
+    def launch_intent_mutation_lock(self) -> Iterator[None]:
+        # Every launch intent takes the lifecycle lock to exclude origin fencing.
         with self.lifecycle.mutation_lock():
             store_lock = (
                 contextlib.nullcontext()
@@ -562,11 +605,8 @@ class ReceiptStore:
             if state_path not in lifecycle["stores"]:
                 raise HelperError("receipt store is not registered in the canonical lifecycle registry")
             verify_registered_store_object(state_path, lifecycle["legacy_store_objects"].get(state_path))
-            if origin_thread not in lifecycle["teardown_fences"]:
-                lifecycle["teardown_fences"][origin_thread] = {
-                    "operation_id": hashlib.sha256(f"worker-teardown\0{origin_thread}".encode()).hexdigest(),
-                    "created_at": utc_now(),
-                }
+            _, _, fence_changed = ensure_teardown_fence(lifecycle, origin_thread)
+            if fence_changed:
                 self.lifecycle.commit(lifecycle)
             store_lock = contextlib.nullcontext() if self.lifecycle.state_dir == self.state_dir else self.mutation_lock()
             with store_lock:
@@ -659,11 +699,8 @@ class ReceiptStore:
             if state_path not in lifecycle["stores"]:
                 raise HelperError("receipt store is not registered in the canonical lifecycle registry")
             verify_registered_store_object(state_path, lifecycle["legacy_store_objects"].get(state_path))
-            if origin_thread not in lifecycle["teardown_fences"]:
-                lifecycle["teardown_fences"][origin_thread] = {
-                    "operation_id": hashlib.sha256(f"worker-teardown\0{origin_thread}".encode()).hexdigest(),
-                    "created_at": utc_now(),
-                }
+            _, _, fence_changed = ensure_teardown_fence(lifecycle, origin_thread)
+            if fence_changed:
                 self.lifecycle.commit(lifecycle)
             store_lock = contextlib.nullcontext() if self.lifecycle.state_dir == self.state_dir else self.mutation_lock()
             with store_lock:
@@ -804,11 +841,8 @@ class ReceiptStore:
             if state_path not in lifecycle["stores"]:
                 raise HelperError("receipt store is not registered in the canonical lifecycle registry")
             verify_registered_store_object(state_path, lifecycle["legacy_store_objects"].get(state_path))
-            if origin_thread not in lifecycle["teardown_fences"]:
-                lifecycle["teardown_fences"][origin_thread] = {
-                    "operation_id": hashlib.sha256(f"worker-teardown\0{origin_thread}".encode()).hexdigest(),
-                    "created_at": utc_now(),
-                }
+            _, _, fence_changed = ensure_teardown_fence(lifecycle, origin_thread)
+            if fence_changed:
                 self.lifecycle.commit(lifecycle)
             store_lock = contextlib.nullcontext() if self.lifecycle.state_dir == self.state_dir else self.mutation_lock()
             with store_lock:
@@ -997,13 +1031,8 @@ class ReceiptStore:
             verify_registered_store_object(
                 state_path, lifecycle["legacy_store_objects"].get(state_path)
             )
-            if origin_thread not in lifecycle["teardown_fences"]:
-                lifecycle["teardown_fences"][origin_thread] = {
-                    "operation_id": hashlib.sha256(
-                        f"worker-teardown\0{origin_thread}".encode()
-                    ).hexdigest(),
-                    "created_at": utc_now(),
-                }
+            _, _, fence_changed = ensure_teardown_fence(lifecycle, origin_thread)
+            if fence_changed:
                 self.lifecycle.commit(lifecycle)
             store_lock = (
                 contextlib.nullcontext()
@@ -1154,11 +1183,10 @@ class ReceiptStore:
             else:
                 with self.lifecycle.mutation_lock():
                     lifecycle = self.lifecycle.load()
-                    if origin_thread not in lifecycle["teardown_fences"]:
-                        lifecycle["teardown_fences"][origin_thread] = {
-                            "operation_id": hashlib.sha256(f"worker-teardown\0{origin_thread}".encode()).hexdigest(),
-                            "created_at": utc_now(),
-                        }
+                    _, _, fence_changed = ensure_teardown_fence(
+                        lifecycle, origin_thread
+                    )
+                    if fence_changed:
                         self.lifecycle.commit(lifecycle)
             registered_state_paths = set(lifecycle["stores"])
             state_paths = set(registered_state_paths)
@@ -1293,12 +1321,24 @@ class ReceiptStore:
         }
 
     def release_worker_teardown(self, origin_thread: str) -> dict[str, Any]:
-        origin_thread = canonical_amp_thread_id(origin_thread)
-        origin_thread_sha256 = hashlib.sha256(origin_thread.encode()).hexdigest()
+        required_string({"origin_thread": origin_thread}, "origin_thread", 256)
+        requested_origin = origin_thread
+        origin_thread_sha256 = hashlib.sha256(requested_origin.encode()).hexdigest()
+        try:
+            canonical_origin: str | None = canonical_amp_thread_id(requested_origin)
+        except HelperError:
+            canonical_origin = None
         try:
             with self.lifecycle.mutation_lock():
                 lifecycle = self.lifecycle.load()
-                fence_entry = canonical_fence_entry(lifecycle, origin_thread)
+                if canonical_origin is None:
+                    exact_fence = lifecycle["teardown_fences"].get(requested_origin)
+                    fence_entry = (
+                        (requested_origin, exact_fence)
+                        if isinstance(exact_fence, dict) else None
+                    )
+                else:
+                    fence_entry = canonical_fence_entry(lifecycle, canonical_origin)
                 if (
                     fence_entry is not None
                     and "quarantine_operation_id" in fence_entry[1]
@@ -1307,7 +1347,7 @@ class ReceiptStore:
                         "action": "worker_teardown_release",
                         "origin_thread_sha256": origin_thread_sha256,
                         "outcome": "blocked",
-                        "blockers": [{"blocker": "quarantine_fence_requires_separate_recovery"}],
+                        "blockers": [{"blocker": "quarantine_fence_permanently_retained"}],
                     }
                 registered_state_paths = set(lifecycle["stores"])
                 state_paths = set(registered_state_paths)
@@ -1326,7 +1366,8 @@ class ReceiptStore:
                             )
                         except HelperError:
                             receipt_origin = receipt["binding"].get("origin_thread")
-                        if receipt_origin != origin_thread:
+                        target_origin = canonical_origin or requested_origin
+                        if receipt_origin != target_origin:
                             continue
                         if worker_teardown_receipt_blocker(receipt) is not None or receipt.get("state") != "verified_parked":
                             return {
@@ -1342,7 +1383,7 @@ class ReceiptStore:
                 if outcome == "released":
                     self.lifecycle.commit(lifecycle)
         except HelperError:
-            return worker_teardown_store_blocked(origin_thread, False)
+            return worker_teardown_store_blocked(requested_origin, False)
         return {
             "action": "worker_teardown_release",
             "origin_thread_sha256": origin_thread_sha256,
@@ -4041,7 +4082,7 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
                 "capacity_acknowledgement_expires_at": capacity_decision["acknowledgement_expires_at"],
             }
         )
-    with store.launch_intent_mutation_lock(components["workflow"] == "mutating"):
+    with store.launch_intent_mutation_lock():
         receipt_store = store.load_store()
         receipt = store.find(receipt_store, delegation_id)
         require_receipt_mutable(receipt)
@@ -6841,9 +6882,10 @@ def quarantine_lifecycle_lock(lifecycle: LifecycleRegistry) -> Iterator[tuple[in
         ):
             raise HelperError("quarantine lifecycle lock is unavailable")
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
-        yield directory_descriptor, directory_info
     except (OSError, ValueError) as error:
         raise HelperError("quarantine lifecycle lock is unavailable") from error
+    try:
+        yield directory_descriptor, directory_info
     finally:
         try:
             if lock_descriptor >= 0:
@@ -7261,7 +7303,11 @@ def quarantine_plan(store: ReceiptStore, request: dict[str, Any]) -> dict[str, A
     evidence = quarantine_evidence(store, request)
     evidence["planned_at"] = utc_now()
     evidence["plan_sha256"] = canonical_sha256(evidence)
-    return {"action": "quarantine_plan", "outcome": "ready", "plan": evidence}
+    origin = exact_canonical_amp_thread_id(request.get("origin_thread"))
+    return {
+        "action": "quarantine_plan", "outcome": "ready",
+        "operation_sha256": quarantine_operation_id(origin), "plan": evidence,
+    }
 
 
 def execute_core_worker_park(argv: list[str], environment: dict[str, str], pass_fds: tuple[int, ...]) -> None:
@@ -7506,12 +7552,14 @@ def quarantine_apply(store: ReceiptStore, request: dict[str, Any], park_executor
     ):
         lifecycle_raw, lifecycle = load_lifecycle_at(lifecycle_directory_descriptor)
         fence_operation = hashlib.sha256(("worker-teardown\0" + origin).encode()).hexdigest()
+        _, existing_fence, _ = ensure_teardown_fence(
+            lifecycle, origin, normalize_existing=True
+        )
         existing_entry = canonical_fence_entry(lifecycle, origin)
-        existing_fence = None
-        if existing_entry is not None:
-            existing_fence = validate_quarantine_fence(
-                existing_entry[1], fence_operation, operation_id
-            )
+        assert existing_entry is not None
+        existing_fence = validate_quarantine_fence(
+            existing_fence, fence_operation, operation_id
+        )
         # Replay precedes evidence admission: once intent exists, no changed evidence can
         # authorize another external action for this canonical origin.
         records = load_quarantine_records_at(lifecycle_directory_descriptor)
@@ -7532,14 +7580,7 @@ def quarantine_apply(store: ReceiptStore, request: dict[str, Any], park_executor
         )
         if current != comparable:
             raise HelperError("quarantine bound evidence changed")
-        if existing_entry is None:
-            fence = {"operation_id": fence_operation, "created_at": utc_now()}
-            lifecycle["teardown_fences"][origin] = fence
-        else:
-            spelling, fence = existing_entry
-            if spelling != origin:
-                del lifecycle["teardown_fences"][spelling]
-                lifecycle["teardown_fences"][origin] = fence
+        _, fence = existing_entry
         fence.update({
             "quarantine_operation_id": operation_id,
             "quarantine_plan_sha256": plan["plan_sha256"],
@@ -7562,6 +7603,7 @@ def quarantine_apply(store: ReceiptStore, request: dict[str, Any], park_executor
         write_private_bytes_at(
             lifecycle_directory_descriptor, "claude-quarantine.json", encode_private_json(records)
         )
+        park_returned = False
         try:
             final_lifecycle_raw, final_lifecycle = load_lifecycle_at(
                 lifecycle_directory_descriptor
@@ -7600,9 +7642,12 @@ def quarantine_apply(store: ReceiptStore, request: dict[str, Any], park_executor
                     )
                 try:
                     park_executor(argv, environment, pass_fds)
+                    park_returned = True
                 except Exception:
                     return quarantine_blocked(operation_id, "park_outcome_indeterminate")
         except Exception:
+            if park_returned:
+                return quarantine_blocked(operation_id, "park_outcome_indeterminate")
             return quarantine_blocked(operation_id, "quarantine_bound_evidence_changed")
         receipt["state"] = "completed"
         receipt["completed_at"] = utc_now()

@@ -23,7 +23,7 @@ func TestProviderOwnedInvalidStoreQuarantine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := `import copy, hashlib, importlib.util, json, pathlib, platform, sys, tempfile
+	script := `import contextlib, copy, hashlib, importlib.util, json, pathlib, platform, sys, tempfile
 spec=importlib.util.spec_from_file_location("m", pathlib.Path(sys.argv[1])); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 root=pathlib.Path(tempfile.mkdtemp()).resolve(); root.chmod(0o700); missing=root/"missing"
 amux=root/"amux"; amux.write_bytes(b"#!/bin/sh\nexit 0\n"); amux.chmod(0o700)
@@ -38,7 +38,8 @@ store=m.ReceiptStore(root,root); base={"origin_thread":"T-private-origin","provi
 binding={"protocol_version":1,"delegation_id":"fenced","nonce":"1"*64,"task_id":"task","question_message_id":"question","origin_thread":"https://ampcode.com/threads/T-private-origin","repository":"repo","base":"b"*40,"workdir":"/tmp/work","producer_role":"thinker","authority":"read_only","task_reference":"fixture","packet_digest":"2"*64,"launch_policy_digest":"3"*64,"launch_command_digest":"4"*64}
 assert store.create({"binding":binding,"routing":{"target":"machine_local_inbox"}})=="recorded"
 before={p:p.read_bytes() for p in [root/"lifecycle.json",root/"receipts.json",*artifacts.values()]}
-plan=m.quarantine_plan(store,base)["plan"]
+planned=m.quarantine_plan(store,base); plan=planned["plan"]
+assert planned["operation_sha256"]==m.quarantine_operation_id("T-private-origin")
 assert "T-private-origin" not in json.dumps(plan) and str(root) not in json.dumps(plan)
 assert {p:p.read_bytes() for p in before} == before
 # The production executor consumes the retained executable and config bytes, not
@@ -84,7 +85,8 @@ assert (root/"receipts.json").read_bytes()==before[root/"receipts.json"]
 registry=json.loads((root/"lifecycle.json").read_text()); fence=registry["teardown_fences"]["T-private-origin"]
 assert fence["operation_id"]==hashlib.sha256(b"worker-teardown\0T-private-origin").hexdigest()
 release=store.release_worker_teardown("https://ampcode.com/threads/T-private-origin")
-assert release["outcome"]=="blocked" and json.loads((root/"lifecycle.json").read_text())["teardown_fences"]["T-private-origin"]==fence
+assert release["outcome"]=="blocked" and release["blockers"]==[{"blocker":"quarantine_fence_permanently_retained"}]
+assert release["origin_thread_sha256"]==hashlib.sha256(b"https://ampcode.com/threads/T-private-origin").hexdigest() and json.loads((root/"lifecycle.json").read_text())["teardown_fences"]["T-private-origin"]==fence
 # The canonical fence blocks historical URL receipt and every launch-intent path.
 blocked_binding={**binding,"delegation_id":"fenced-new","nonce":"9"*64}
 try: store.create({"binding":blocked_binding,"routing":{"target":"machine_local_inbox"}})
@@ -170,6 +172,39 @@ def tamper_fence(directory,name,payload):
 m.write_private_bytes_at=tamper_fence
 fence_blocked=m.quarantine_apply(store,request5,lambda *args:attempted.append(args)); m.write_private_bytes_at=original_write
 assert fence_blocked["blocker"]=="quarantine_bound_evidence_changed" and len(attempted)==1
+# A successful executor followed by execution-capsule cleanup failure is indeterminate.
+(config/"workers.tsv").write_text("ws\tcleanup\t/tmp\tT-cleanup-failure\n")
+missing6=root/"missing6"; registry=json.loads((root/"lifecycle.json").read_text()); registry["stores"].append(str(missing6)); (root/"lifecycle.json").write_text(json.dumps(registry)); (root/"lifecycle.json").chmod(0o600)
+base6={**base,"origin_thread":"T-cleanup-failure","registered_store_sha256":hashlib.sha256(str(missing6).encode()).hexdigest(),"artifacts":[]}
+plan6=m.quarantine_plan(store,base6)["plan"]; request6={**base6,"plan":plan6,"owner_authorization":{"decision":"park","plan_sha256":plan6["plan_sha256"],"authorization_sha256":"1"*64,"authorized_at":"2026-07-28T05:00:00Z"}}
+original_boundary=m.open_quarantine_execution_boundary
+@contextlib.contextmanager
+def cleanup_failure(request,origin):
+    with original_boundary(request,origin) as boundary: yield boundary
+    if cleanup_calls: raise OSError("synthetic cleanup failure")
+m.open_quarantine_execution_boundary=cleanup_failure; cleanup_calls=[]
+cleanup_result=m.quarantine_apply(store,request6,lambda *args:cleanup_calls.append(args)); m.open_quarantine_execution_boundary=original_boundary
+assert cleanup_result["blocker"]=="park_outcome_indeterminate" and len(cleanup_calls)==1
+# A raw URL-spelled ordinary fence is normalized without duplication before enrichment.
+(config/"workers.tsv").write_text("ws\turl\t/tmp\tT-url-fence\n")
+missing7=root/"missing7"; registry=json.loads((root/"lifecycle.json").read_text()); registry["stores"].append(str(missing7)); url_origin="https://ampcode.com/threads/T-url-fence"; registry["teardown_fences"][url_origin]={"operation_id":hashlib.sha256(("worker-teardown\0"+url_origin).encode()).hexdigest(),"created_at":"2026-07-28T00:00:00Z"}; (root/"lifecycle.json").write_text(json.dumps(registry)); (root/"lifecycle.json").chmod(0o600)
+teardown=store.worker_teardown(url_origin,False); assert teardown["blockers"][0]["blocker"]=="receipt_store_invalid_or_unavailable"
+registry=json.loads((root/"lifecycle.json").read_text()); assert url_origin in registry["teardown_fences"] and "T-url-fence" not in registry["teardown_fences"]
+base7={**base,"origin_thread":"T-url-fence","registered_store_sha256":hashlib.sha256(str(missing7).encode()).hexdigest(),"artifacts":[]}; planned7=m.quarantine_plan(store,base7); plan7=planned7["plan"]; request7={**base7,"plan":plan7,"owner_authorization":{"decision":"park","plan_sha256":plan7["plan_sha256"],"authorization_sha256":"2"*64,"authorized_at":"2026-07-28T05:01:00Z"}}
+url_calls=[]; url_result=m.quarantine_apply(store,request7,lambda *args:url_calls.append(args)); assert url_result["outcome"]=="parked" and len(url_calls)==1
+assert url_result["operation_sha256"]==planned7["operation_sha256"] and m.quarantine_apply(store,request7,lambda *args:url_calls.append(args))["outcome"]=="duplicate" and len(url_calls)==1
+assert m.quarantine_inspect(store,{"operation_sha256":planned7["operation_sha256"]})["state"]=="completed"
+registry=json.loads((root/"lifecycle.json").read_text()); assert list(key for key in registry["teardown_fences"] if m.canonical_amp_thread_id(key)=="T-url-fence")==["T-url-fence"] and "quarantine_operation_id" in registry["teardown_fences"]["T-url-fence"]
+assert registry["teardown_fences"]["T-url-fence"]["operation_id"]==hashlib.sha256(b"worker-teardown\0T-url-fence").hexdigest()
+# Opaque historical origins retain exact-key release and request-hash compatibility.
+opaque_root=pathlib.Path(tempfile.mkdtemp()).resolve(); opaque_root.chmod(0o700); opaque="opaque-origin"; opaque_registry={"schema_version":1,"stores":[],"legacy_store_objects":{},"teardown_fences":{opaque:{"operation_id":hashlib.sha256(("worker-teardown\0"+opaque).encode()).hexdigest(),"created_at":"2026-07-28T00:00:00Z"}}}; (opaque_root/"lifecycle.json").write_text(json.dumps(opaque_registry)); (opaque_root/"lifecycle.json").chmod(0o600)
+opaque_store=m.ReceiptStore(opaque_root,opaque_root); released=opaque_store.release_worker_teardown(opaque); assert released["outcome"]=="released" and released["origin_thread_sha256"]==hashlib.sha256(opaque.encode()).hexdigest()
+assert not json.loads((opaque_root/"lifecycle.json").read_text())["teardown_fences"]
+# True canonical ambiguity fails closed rather than selecting either spelling.
+ambiguous={"teardown_fences":{"T-ambiguous":{},"https://ampcode.com/threads/T-ambiguous":{}}}
+try: m.ensure_teardown_fence(ambiguous,"T-ambiguous")
+except m.HelperError: pass
+else: raise AssertionError("ambiguous dual-spelling fence accepted")
 # Supplemental manifest supports files only and refuses unknown shape, symlink, and directory.
 artifact.write_bytes(before[artifact]); symlink=root/"artifact-symlink"; symlink.symlink_to(artifact)
 for unsupported in [[{"kind":"x","path":str(artifact),"complete":True}],[{"kind":"x","path":str(symlink)}],[{"kind":"x","path":str(config)}]]:
