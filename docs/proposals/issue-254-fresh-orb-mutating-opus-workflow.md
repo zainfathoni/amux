@@ -1,5 +1,5 @@
 ---
-status: proposal-awaiting-owner-review
+status: implementation-blocked-native-adapters
 issue: 254
 base: e4e1bba734fb1acd112676f4250653443b1c503f
 promotion: not-authorized
@@ -7,13 +7,26 @@ promotion: not-authorized
 
 # Issue 254 fresh-Orb mutating Claude Opus workflow
 
-This document specifies a bounded mutating Claude Opus workflow for a fresh Amp Orb, as requested by [issue #254](https://github.com/zainfathoni/amux/issues/254). It is a design specification only. It does not implement the workflow, authorize a mutating Orb launch, or promote fresh-Orb delegation to generic use. It extends the read-only [`claude-opus-orb-executor.md`](../../skills/amux-claude/reference/claude-opus-orb-executor.md) recipe with a distinct Orb lifecycle and does not reuse local tmux receipt or interactive-parking semantics by analogy.
+This document specifies the desired bounded mutating Claude Opus workflow for a fresh Amp Orb, as requested by [issue #254](https://github.com/zainfathoni/amux/issues/254). It is a design specification plus a record of the repository/Amp primitive audit. The audit proved that the workflow is not currently implementable because the authenticated native authority adapters named below do not exist. This document does not authorize a mutating Orb launch or promote fresh-Orb delegation to generic use. Requests route to the blocked [`claude-opus-orb-mutating.md`](../../skills/amux-claude/reference/claude-opus-orb-mutating.md) reference.
 
 The scope is exactly one explicitly requested bounded repository mutation by exact `claude-opus-4-8` in a fresh Orb, returning independently verifiable commit evidence to the originating coordinator while keeping delivery, acknowledgement, archive, and cleanup as separate decisions. It preserves the `stop/narrow` posture recorded for the local mutating pilots and adds no autonomous admission.
 
 ## Conclusion
 
-A fresh-Orb mutating workflow is designable as a strict superset of the existing read-only Orb recipe plus a durable commit-handoff and lifecycle contract. It is not authorized for implementation by this proposal, and generic issue delegation remains disabled until the promotion gate below is met.
+A fresh-Orb mutating workflow remains desirable as a strict superset of the existing read-only Orb recipe plus a durable commit-handoff and lifecycle contract. It is **not implementable with current repository/Amp primitives**: caller-authored identities, hashes, capability claims, and lifecycle assertions cannot substitute for authenticated native receipts, and final Git inspection cannot prove that forbidden external effects did not occur. Implementation is blocked until the audited native boundaries below exist. Issue #254 remains open, and generic issue delegation remains disabled.
+
+### Audited implementation blockers
+
+Direct inspection found no current primitive that provides all authority needed by this design. The missing Amp-owned boundaries are:
+
+1. an operation-bound, single-use owner challenge for unknown capacity;
+2. atomic native launch intent and completion for exactly one newly created Orb, bound to repository, immutable base, clean dedicated worktree/branch, execution identity, and one attempt;
+3. a credentialless, networkless mutation executor with narrow owned edit/check/commit operations, no general shell, no outside-worktree writes, and no recursive launch;
+4. complete existing Claude result-validator evidence bound unchanged to the exact native invocation and execution receipt;
+5. authenticated native artifact/report import binding exact bytes and source identity before Orb disposal; and
+6. authenticated headless-process absence plus replay-safe archive and workspace-cleanup intent/result transactions with acknowledgement gates and durable failures.
+
+Core amux can durably record caller actions and independently observe local tmux/process identity, but it does not observe these Orb boundaries. Native Amp thread and file tools do not expose the required authenticated durable receipts to this provider route. The local Claude mutation path is logical policy confinement rather than OS isolation, and the narrow Pi adapter is not a credentialless/networkless repository mutation-and-commit authority. The workflow specification below is retained as the target design, not as evidence that implementation is currently available.
 
 Three properties separate this workflow from the local Darwin Stage A path and from the read-only Orb recipe:
 
@@ -38,7 +51,7 @@ This proposal covers:
 
 It does not:
 
-- implement any workflow, helper, skill, or CLI change;
+- implement any authorizing workflow, helper, or CLI resource;
 - authorize a mutating Orb launch or a pilot run;
 - grant Claude push, PR, merge, release, issue-mutation, secret, infrastructure, archive, cleanup, or recursive-delegation authority;
 - broaden [#205](https://github.com/zainfathoni/amux/issues/205) or [#207](https://github.com/zainfathoni/amux/issues/207) implicitly;
@@ -228,4 +241,5 @@ No ADR is added. This proposal is a specification for an experimental, externall
 - [Mutating Opus workflow design grill, issue #247](issue-247-mutating-opus-workflow-design-grill.md)
 - [Mutating Pilot 2 evaluation, issue #151](issue-151-mutating-claude-pilot-2-evaluation.md)
 - [Read-only Orb executor recipe](../../skills/amux-claude/reference/claude-opus-orb-executor.md)
+- [Blocked fresh-Orb mutation route](../../skills/amux-claude/reference/claude-opus-orb-mutating.md)
 - [Local mutating delegation reference](../../skills/amux-claude/reference/claude-mutating-delegation.md)

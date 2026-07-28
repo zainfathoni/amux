@@ -109,3 +109,7 @@ If interruption leaves `acquired_retirement_intent` without `acquired_pair_retir
 ## Capacity or usage interruption
 
 Record the factual `unavailable` or `untested` capability and pause. Capacity diagnostics are implementation inputs, not permission to select Claude autonomously, exceed a reserve, or claim a useful result.
+
+## Fresh-Orb mutating recovery
+
+No fresh-Orb mutating launch or lifecycle is currently authorized, so there is no provider receipt to recover. Stop at the documented blocker and preserve any separately encountered native Orb, workspace, report, or artifact evidence without adopting it. Do not create a caller-authored receipt, import local tmux semantics, retry a launch, infer process absence, archive, or clean up. Recovery requires the missing authenticated native adapters named in [`claude-opus-orb-mutating.md`](claude-opus-orb-mutating.md).

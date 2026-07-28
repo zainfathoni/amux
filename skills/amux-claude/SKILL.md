@@ -13,7 +13,8 @@ Core Amp lifecycle remains `/amux`. Paired worker teardown and finish in `/amux`
 
 - **Delegate read-only analysis to Claude**: load [`reference/claude-read-only-delegation.md`](reference/claude-read-only-delegation.md).
 - **Delegate isolated mutating work to Claude**: only after public Pilot 1 `pass`, load [`reference/claude-mutating-delegation.md`](reference/claude-mutating-delegation.md).
-- **Delegate bounded work to Claude Opus in a fresh Amp Orb**: load [`reference/claude-opus-orb-executor.md`](reference/claude-opus-orb-executor.md). Fresh Orb, project-secret OAuth, exact `claude-opus-4-8`; fail closed on API-key or ambiguous billing.
+- **Delegate bounded read-only work to Claude Opus in a fresh Amp Orb**: load [`reference/claude-opus-orb-executor.md`](reference/claude-opus-orb-executor.md). Fresh Orb, project-secret OAuth, exact `claude-opus-4-8`; fail closed on API-key or ambiguous billing.
+- **A fresh-Orb repository mutation is requested**: load [`reference/claude-opus-orb-mutating.md`](reference/claude-opus-orb-mutating.md) and block because the required native authority adapters do not exist. Never substitute local tmux parking, caller assertions, or the read-only route.
 - **Recover indeterminate Claude worker evidence**: only after explicit owner recovery authorization, load [`reference/claude-delegation-recovery.md`](reference/claude-delegation-recovery.md).
 
 ## Load only what you need
