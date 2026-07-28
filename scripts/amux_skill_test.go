@@ -188,9 +188,16 @@ func TestExperimentalPiRoutesStayProviderSpecificAndFailClosed(t *testing.T) {
 	if !strings.Contains(skill, localPhysicalTrigger) || !strings.Contains(triggers, localPhysicalTrigger) {
 		t.Error("explicit physical-runner + dedicated worktree/tmux + no-Orb request is not recognized as the local route")
 	}
-	for _, required := range []string{"physical-host helper", "one tracked file", "not authority for arbitrary local work"} {
+	for _, required := range []string{"physical-host helper", "Pi 0.82.1", "Node `>=22.19.0`", "normal managed provider-catalog cache is allowed", "one tracked file", "not authority for arbitrary local work"} {
 		if !strings.Contains(skill, required) {
 			t.Errorf("local physical-host route is missing bound %q", required)
+		}
+	}
+	for name, contents := range map[string]string{"SKILL.md": skill, "trigger checklist": triggers} {
+		for _, required := range []string{"Pi 0.82.1", "Node `>=22.19.0`"} {
+			if !strings.Contains(contents, required) {
+				t.Errorf("%s is missing local runtime contract %q", name, required)
+			}
 		}
 	}
 	for _, required := range []string{"never the Orb recipe", "one attempt with no fallback", "no-recursive-delegation", "no-publication", "independent-review", "cleanup", "rollback"} {

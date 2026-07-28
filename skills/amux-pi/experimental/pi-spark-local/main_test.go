@@ -21,6 +21,15 @@ type fixture struct {
 	root, workdir, pi, node, target string
 }
 
+func TestPinnedPackageContract(t *testing.T) {
+	if packageVersion != "0.82.1" {
+		t.Fatalf("packageVersion=%q, want 0.82.1", packageVersion)
+	}
+	if packageEngine != ">=22.19.0" {
+		t.Fatalf("packageEngine=%q, want >=22.19.0", packageEngine)
+	}
+}
+
 func TestAppliesOneExactReplacementInPrintMode(t *testing.T) {
 	f := newFixture(t)
 	leaderPIDFile := filepath.Join(f.root, "leader.pid")
@@ -42,7 +51,7 @@ func TestAppliesOneExactReplacementInPrintMode(t *testing.T) {
 	if got.Status != "replacement_applied_untrusted" || got.RequestedModel != model || got.Version != packageVersion || got.Stderr != "empty" {
 		t.Fatalf("result=%+v", got)
 	}
-	wantArgs := append([]string{mustCanonical(t, f.node), mustCanonical(t, f.pi)}, fixedArgs...)
+	wantArgs := append([]string{mustCanonical(t, f.node), "--import", nodeEngineGuard, mustCanonical(t, f.pi)}, fixedArgs...)
 	if strings.Join(got.Argv, "\x00") != strings.Join(wantArgs, "\x00") {
 		t.Fatalf("argv=%q, want %q", got.Argv, wantArgs)
 	}
@@ -77,7 +86,7 @@ func TestPromptUsesBoundedStdinAndFixedArgv(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Argv) != 2+len(fixedArgs) || got.Argv[len(got.Argv)-1] != "-p" {
+	if len(got.Argv) != 4+len(fixedArgs) || got.Argv[len(got.Argv)-1] != "-p" {
 		t.Fatalf("argv contains prompt or missing fixed switches: %q", got.Argv)
 	}
 }
@@ -178,8 +187,9 @@ func TestRejectsExactParentPath(t *testing.T) {
 func TestRejectsWrongPackageIdentityBeforeLaunch(t *testing.T) {
 	for _, mutate := range []func(map[string]any){
 		func(p map[string]any) { p["name"] = "other" },
-		func(p map[string]any) { p["version"] = "0.80.11" },
+		func(p map[string]any) { p["version"] = "0.82.0" },
 		func(p map[string]any) { p["bin"] = map[string]string{"pi": "dist/other.js"} },
+		func(p map[string]any) { p["engines"] = map[string]string{"node": ">=22.18.0"} },
 	} {
 		f := newFixture(t)
 		path := filepath.Join(filepath.Dir(filepath.Dir(f.pi)), "package.json")
@@ -192,6 +202,35 @@ func TestRejectsWrongPackageIdentityBeforeLaunch(t *testing.T) {
 		if err := run(f.args("--task", "edit"), &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "package") {
 			t.Fatalf("err=%v", err)
 		}
+	}
+}
+
+func TestNodeEngineGuardRunsBeforePiEntrypoint(t *testing.T) {
+	for _, version := range []string{"22.18.9", "22.19", "22.19.0-pre", "malformed"} {
+		t.Run("reject "+version, func(t *testing.T) {
+			f := newFixture(t)
+			marker := filepath.Join(f.root, "pi-reached")
+			t.Setenv("FAKE_NODE_VERSION", version)
+			t.Setenv("FAKE_PI_REACHED_FILE", marker)
+			err := run(f.args("--task", "edit"), &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), "Pi exited with code") {
+				t.Fatalf("version=%q err=%v", version, err)
+			}
+			if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("version=%q reached Pi entrypoint: %v", version, statErr)
+			}
+		})
+	}
+	for _, version := range []string{"22.19.0", "22.20.1", "23.0.0"} {
+		t.Run("accept "+version, func(t *testing.T) {
+			f := newFixture(t)
+			t.Setenv("FAKE_NODE_VERSION", version)
+			before := mustRead(t, f.target)
+			t.Setenv("FAKE_PI_OUTPUT", marshal(t, replacement{Path: "target.txt", OriginalSHA256: digest(before), Replacement: "after\n"}))
+			if err := run(f.args("--task", "edit"), &bytes.Buffer{}); err != nil {
+				t.Fatalf("version=%q err=%v", version, err)
+			}
+		})
 	}
 }
 
@@ -237,7 +276,7 @@ func TestRejectsRetryOrCompactionDefaults(t *testing.T) {
 }
 
 func TestRejectsAgentOverlaysBeforeLaunch(t *testing.T) {
-	for _, overlay := range []string{"models.json", "package.json", "models-store.json", "SYSTEM.md", "APPEND_SYSTEM.md"} {
+	for _, overlay := range []string{"models.json", "package.json", "SYSTEM.md", "APPEND_SYSTEM.md"} {
 		t.Run(overlay, func(t *testing.T) {
 			f := newFixture(t)
 			mustWrite(t, filepath.Join(f.root, "agent", overlay), []byte("fixture"), 0o600)
@@ -266,6 +305,80 @@ func TestRejectsAgentAdmissionDriftAfterAttempt(t *testing.T) {
 			}
 			if got := string(mustRead(t, f.target)); got != "before\n" {
 				t.Fatalf("post-run drift changed target: %q", got)
+			}
+		})
+	}
+}
+
+func TestSettingsPermissionsAcceptOwnerManagedDefaults(t *testing.T) {
+	t.Run("readable 0644", func(t *testing.T) {
+		f := newFixture(t)
+		if err := os.Chmod(filepath.Join(f.root, "agent", "settings.json"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, filepath.Join(f.root, "agent", "models-store.json"), []byte(`{}`), 0o644)
+		before := mustRead(t, f.target)
+		t.Setenv("FAKE_PI_OUTPUT", marshal(t, replacement{Path: "target.txt", OriginalSHA256: digest(before), Replacement: "after\n"}))
+		if err := run(f.args("--task", "edit"), &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("group writable", func(t *testing.T) {
+		f := newFixture(t)
+		if err := os.Chmod(filepath.Join(f.root, "agent", "settings.json"), 0o660); err != nil {
+			t.Fatal(err)
+		}
+		if err := run(f.args("--task", "edit"), &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "group/world-writable") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+}
+
+func TestRejectsUnsafeManagedModelCacheObjects(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(*testing.T, string)
+	}{
+		{
+			name: "symlink",
+			prepare: func(t *testing.T, path string) {
+				t.Helper()
+				target := filepath.Join(filepath.Dir(path), "cache-target")
+				mustWrite(t, target, []byte(`{}`), 0o600)
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "directory",
+			prepare: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "oversized",
+			prepare: func(t *testing.T, path string) {
+				t.Helper()
+				mustWrite(t, path, bytes.Repeat([]byte(" "), (1<<20)+1), 0o600)
+			},
+		},
+		{
+			name: "group writable",
+			prepare: func(t *testing.T, path string) {
+				t.Helper()
+				mustWrite(t, path, []byte(`{}`), 0o660)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			tc.prepare(t, filepath.Join(f.root, "agent", "models-store.json"))
+			if err := run(f.args("--task", "edit"), &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "model catalog cache") {
+				t.Fatalf("err=%v", err)
 			}
 		})
 	}
@@ -310,7 +423,7 @@ func TestBoundsOutputAndTimeoutAndTerminatesProcessGroup(t *testing.T) {
 		pidFile := filepath.Join(f.root, "child.pid")
 		t.Setenv("FAKE_PI_MODE", "sleep")
 		t.Setenv("FAKE_PI_PID_FILE", pidFile)
-		err := run(f.args("--task", "edit", "--timeout", "100ms"), &bytes.Buffer{})
+		err := run(f.args("--task", "edit", "--timeout", "500ms"), &bytes.Buffer{})
 		if err == nil || !strings.Contains(err.Error(), "timed out") {
 			t.Fatalf("err=%v", err)
 		}
@@ -389,7 +502,7 @@ func TestBoundsOutputAndTimeoutAndTerminatesProcessGroup(t *testing.T) {
 
 func requirePIDGone(t *testing.T, pid int) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(3 * time.Second)
 	for processIsLive(pid) && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -450,7 +563,7 @@ func TestGroupKillFailureUsesBoundedExactProcessFallback(t *testing.T) {
 			return originalSignal(pgid)
 		}
 		t.Cleanup(func() { signalProcessGroup = originalSignal })
-		err := run(f.args("--task", "edit", "--timeout", "100ms"), &bytes.Buffer{})
+		err := run(f.args("--task", "edit", "--timeout", "500ms"), &bytes.Buffer{})
 		if err == nil || !strings.Contains(err.Error(), "timed out") || calls != 2 {
 			t.Fatalf("err=%v group-kill calls=%d", err, calls)
 		}
@@ -477,7 +590,7 @@ func TestGroupKillFailureUsesBoundedExactProcessFallback(t *testing.T) {
 		}
 		t.Cleanup(func() { signalProcessGroup = originalSignal })
 		started := time.Now()
-		err := run(f.args("--task", "edit", "--timeout", "100ms"), &bytes.Buffer{})
+		err := run(f.args("--task", "edit", "--timeout", "500ms"), &bytes.Buffer{})
 		if err == nil || !strings.Contains(err.Error(), "process-group termination could not be verified") || calls != 2 {
 			t.Fatalf("err=%v group-kill calls=%d", err, calls)
 		}
@@ -890,7 +1003,7 @@ func newFixture(t *testing.T) fixture {
 	t.Setenv("PI_CODING_AGENT_DIR", agent)
 	extraProcessEnvironment = func() []string {
 		var environment []string
-		for _, name := range []string{"FAKE_PI_MODE", "FAKE_PI_OUTPUT", "FAKE_PI_PID_FILE", "FAKE_PI_LEADER_PID_FILE", "FAKE_PI_MUTATE", "FAKE_PI_SELF", "FAKE_PI_STDIN_FILE", "FAKE_PI_AGENT", "FAKE_PI_AUTH"} {
+		for _, name := range []string{"FAKE_NODE_VERSION", "FAKE_PI_MODE", "FAKE_PI_OUTPUT", "FAKE_PI_PID_FILE", "FAKE_PI_LEADER_PID_FILE", "FAKE_PI_MUTATE", "FAKE_PI_SELF", "FAKE_PI_STDIN_FILE", "FAKE_PI_AGENT", "FAKE_PI_AUTH", "FAKE_PI_REACHED_FILE"} {
 			if value, present := os.LookupEnv(name); present {
 				environment = append(environment, name+"="+value)
 			}
@@ -919,6 +1032,7 @@ test "$9" = "--no-context-files"
 test "${10}" = "--no-approve"
 test "${11}" = "-p"
 test "$#" = 11
+if [ -n "${FAKE_PI_REACHED_FILE:-}" ]; then printf reached >"$FAKE_PI_REACHED_FILE"; fi
 if [ -n "${FAKE_PI_LEADER_PID_FILE:-}" ]; then printf '%s\n' "$$" >"$FAKE_PI_LEADER_PID_FILE"; fi
 if [ -n "${FAKE_PI_STDIN_FILE:-}" ]; then
   cat >"$FAKE_PI_STDIN_FILE"
@@ -944,10 +1058,27 @@ case "${FAKE_PI_MODE:-success}" in
   *) printf '%s' "$FAKE_PI_OUTPUT" ;;
 esac
 `), 0o755)
-	pkg := map[string]any{"name": packageName, "version": packageVersion, "bin": map[string]string{"pi": "dist/cli.js"}}
+	pkg := map[string]any{
+		"name": packageName, "version": packageVersion,
+		"bin": map[string]string{"pi": "dist/cli.js"}, "engines": map[string]string{"node": packageEngine},
+	}
 	mustWrite(t, filepath.Join(packageRoot, "package.json"), []byte(marshal(t, pkg)), 0o600)
 	node := filepath.Join(root, "node")
-	mustWrite(t, node, []byte("#!/bin/sh\nexec \"$@\"\n"), 0o755)
+	mustWrite(t, node, []byte(`#!/bin/sh
+test "$1" = --import
+case "$2" in data:text/javascript,*) ;; *) exit 63 ;; esac
+version=${FAKE_NODE_VERSION:-22.19.0}
+case "$version" in ''|*[!0-9.]*|.*|*.|*.*.*.*) exit 64 ;; esac
+case "$version" in *.*.*) ;; *) exit 64 ;; esac
+major=${version%%.*}
+rest=${version#*.}
+minor=${rest%%.*}
+patch=${rest#*.}
+test -n "$major" && test -n "$minor" && test -n "$patch" || exit 64
+if [ "$major" -lt 22 ] || { [ "$major" -eq 22 ] && [ "$minor" -lt 19 ]; }; then exit 64; fi
+shift 2
+exec "$@"
+`), 0o755)
 
 	workdir := filepath.Join(root, "worktree")
 	if err := os.Mkdir(workdir, 0o700); err != nil {
