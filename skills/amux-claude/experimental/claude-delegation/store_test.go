@@ -18,6 +18,276 @@ import (
 	"time"
 )
 
+func TestProviderOwnedInvalidStoreQuarantine(t *testing.T) {
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import contextlib, copy, hashlib, importlib.util, json, pathlib, platform, sys, tempfile
+spec=importlib.util.spec_from_file_location("m", pathlib.Path(sys.argv[1])); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+root=pathlib.Path(tempfile.mkdtemp()).resolve(); root.chmod(0o700); missing=root/"missing"
+amux=root/"amux"; amux.write_bytes(b"#!/bin/sh\nexit 0\n"); amux.chmod(0o700)
+shadow=root/"shadow"; shadow.mkdir(); (shadow/"amux").write_text("PATH shadow must not run")
+config=root/"config"; config.mkdir(mode=0o700); (config/"workers.tsv").write_text("ws\twin\t/tmp\thttps://ampcode.com/threads/T-private-origin\nws\tother\t/tmp\tT-unrelated\n")
+artifacts={kind:root/kind for kind in ["report","worktree","artifact","operation"]}
+for kind,path in artifacts.items(): path.write_bytes(("preserved "+kind).encode()); path.chmod(0o600)
+artifact=artifacts["artifact"]
+lifecycle={"schema_version":1,"stores":[str(missing)],"legacy_store_objects":{},"teardown_fences":{}}
+(root/"lifecycle.json").write_text(json.dumps(lifecycle)); (root/"lifecycle.json").chmod(0o600)
+store=m.ReceiptStore(root,root); base={"origin_thread":"T-private-origin","provider":"claude","action":"park","amux_executable":str(amux),"amux_config_dir":str(config),"registered_store_sha256":hashlib.sha256(str(missing).encode()).hexdigest(),"artifacts":[{"kind":kind,"path":str(path)} for kind,path in artifacts.items()]}
+binding={"protocol_version":1,"delegation_id":"fenced","nonce":"1"*64,"task_id":"task","question_message_id":"question","origin_thread":"https://ampcode.com/threads/T-private-origin","repository":"repo","base":"b"*40,"workdir":"/tmp/work","producer_role":"thinker","authority":"read_only","task_reference":"fixture","packet_digest":"2"*64,"launch_policy_digest":"3"*64,"launch_command_digest":"4"*64}
+assert store.create({"binding":binding,"routing":{"target":"machine_local_inbox"}})=="recorded"
+before={p:p.read_bytes() for p in [root/"lifecycle.json",root/"receipts.json",*artifacts.values()]}
+planned=m.quarantine_plan(store,base); plan=planned["plan"]
+assert planned["operation_sha256"]==m.quarantine_operation_id("T-private-origin")
+assert "T-private-origin" not in json.dumps(plan) and str(root) not in json.dumps(plan)
+assert {p:p.read_bytes() for p in before} == before
+# The production executor consumes the retained executable and config bytes, not
+# replacements at either source path, and exposes only the exact park argv.
+production_marker=root/"production-marker"; wrong_marker=root/"wrong-marker"
+production_amux=root/"production-amux"
+production_amux.write_text("#!/bin/sh\nset -eu\n[ \"$1\" = --config-dir ]\n[ \"$3\" = worker ]\n[ \"$4\" = park ]\n[ \"$5\" = --thread ]\n[ \"$6\" = T-production ]\ngrep -q 'T-production' \"$2/workers.tsv\"\nprintf exact > \""+str(production_marker)+"\"\n")
+production_amux.chmod(0o700)
+production_config=root/"production-config"; production_config.mkdir(mode=0o700)
+(production_config/"workers.tsv").write_text("ws\twin\t/tmp\tT-production\n")
+(production_config/"shelves.tsv").write_text("T-other\n")
+production_request={"amux_executable":str(production_amux),"amux_config_dir":str(production_config)}
+with m.open_quarantine_execution_boundary(production_request,"T-production") as boundary:
+    production_amux.write_text("#!/bin/sh\nprintf wrong > \""+str(wrong_marker)+"\"\n"); production_amux.chmod(0o700)
+    (production_config/"workers.tsv").write_text("ws\twrong\t/tmp\tT-wrong\n")
+    (production_config/"shelves.tsv").write_text("T-production\n")
+    m.execute_core_worker_park(boundary[1],boundary[2],boundary[3])
+assert production_marker.read_bytes()==b"exact" and not wrong_marker.exists()
+(production_config/"workspaces.tsv").write_text("legacy")
+try:
+    with m.open_quarantine_execution_boundary(production_request,"T-wrong"): pass
+except m.HelperError: pass
+else: raise AssertionError("migration input accepted")
+for action in ["remove","teardown","archive","cleanup","detach","catalog_detach","provider_cleanup"]:
+    try: m.quarantine_plan(store,{**base,"action":action})
+    except m.HelperError: pass
+    else: raise AssertionError("stronger quarantine action accepted")
+auth={"decision":"park","plan_sha256":plan["plan_sha256"],"authorization_sha256":"a"*64,"authorized_at":"2026-07-28T00:00:00Z"}
+request={**base,"plan":plan,"owner_authorization":auth}
+calls=[]; result=m.quarantine_apply(store,request,lambda argv,env,fds:calls.append((argv,env,fds)))
+assert result["outcome"]=="parked" and len(calls)==1 and calls[0][0][1:]==["--config-dir",calls[0][0][2],"worker","park","--thread","T-private-origin"]
+if platform.system()=="Linux":
+    assert calls[0][0][0].startswith("/proc/self/fd/") and calls[0][0][2].startswith("/proc/self/fd/")
+else:
+    assert pathlib.Path(calls[0][0][0]).is_absolute() and pathlib.Path(calls[0][0][2]).is_absolute() and not calls[0][0][0].startswith("/dev/fd/") and not calls[0][0][2].startswith("/dev/fd/")
+assert str(shadow) not in calls[0][1]["PATH"] and set(calls[0][1])=={"HOME","PATH","TERM"}
+assert m.quarantine_apply(store,request,lambda *args:calls.append(args))["outcome"]=="duplicate" and len(calls)==1
+inspection=m.quarantine_inspect(store,{"operation_sha256":result["operation_sha256"]}); assert inspection["outcome"]=="unresolved"
+assert "T-private-origin" not in json.dumps([result,inspection]) and str(root) not in json.dumps([result,inspection])
+assert {p:p.read_bytes() for p in artifacts.values()} == {p:before[p] for p in artifacts.values()}
+assert (root/"receipts.json").read_bytes()==before[root/"receipts.json"]
+# Fence is canonical, retained, and has worker-teardown identity.
+registry=json.loads((root/"lifecycle.json").read_text()); fence=registry["teardown_fences"]["T-private-origin"]
+assert fence["operation_id"]==hashlib.sha256(b"worker-teardown\0T-private-origin").hexdigest()
+release=store.release_worker_teardown("https://ampcode.com/threads/T-private-origin")
+assert release["outcome"]=="blocked" and release["blockers"]==[{"blocker":"quarantine_fence_permanently_retained"}]
+assert release["origin_thread_sha256"]==hashlib.sha256(b"https://ampcode.com/threads/T-private-origin").hexdigest() and json.loads((root/"lifecycle.json").read_text())["teardown_fences"]["T-private-origin"]==fence
+# The canonical fence blocks historical URL receipt and every launch-intent path.
+blocked_binding={**binding,"delegation_id":"fenced-new","nonce":"9"*64}
+try: store.create({"binding":blocked_binding,"routing":{"target":"machine_local_inbox"}})
+except m.HelperError as error: assert "fence" in str(error)
+else: raise AssertionError("canonical fence did not block historical origin")
+original_validate=m.validate_launch_request; original_policy=m.expected_launch_policy; original_components=m.launch_components
+m.expected_launch_policy=lambda request: None
+for workflow in ["read_only","mutating"]:
+    validated={"delegation_id":"fenced","event_id":"launch-"+workflow,"workdir":"/tmp/work","packet_file":"/tmp/packet","tmux_session":"Synthetic","tmux_window":"worker","claude_session_id":"550e8400-e29b-41d4-a716-446655440000","repository":"repo","base":"b"*40,"workflow":workflow}
+    m.validate_launch_request=lambda request,validated=validated: copy.deepcopy(validated)
+    components={"workflow":workflow,"packet_digest":"2"*64,"launch_policy_digest":"3"*64,"launch_command_digest":"4"*64,"expected_argv_digest":"5"*64,"expected_launcher_argv0_digest":"6"*64,"expected_launcher_identity":"file:1:2","expected_executable_object_identity":"object:1:2:3:"+"7"*64,"packet_identity":"object","workdir_identity":"directory"}
+    if workflow=="mutating": components["capacity_decision"]={"decision_digest":"8"*64,"acknowledgement_of":"ack","capacity_request_digest":"9"*64,"acknowledgement_expires_at":"2026-07-28T00:00:00Z"}
+    m.launch_components=lambda store,request,components=components: copy.deepcopy(components)
+    try: m.execute_launch(store,{})
+    except m.HelperError as error: assert "fence" in str(error)
+    else: raise AssertionError("fence did not block "+workflow+" launch intent")
+m.validate_launch_request=original_validate; m.expected_launch_policy=original_policy; m.launch_components=original_components
+# Quarantine admission rejects the historical URL even though config accepts it.
+bad={**base,"origin_thread":"https://ampcode.com/threads/T-private-origin"}
+try: m.quarantine_plan(store,bad)
+except m.HelperError: pass
+else: raise AssertionError("URL quarantine origin accepted")
+# Interrupted intent survives changed lifecycle/store/artifact/plan/authorization without re-execution.
+missing2=root/"missing2"; registry["stores"].append(str(missing2)); (root/"lifecycle.json").write_text(json.dumps(registry)); (root/"lifecycle.json").chmod(0o600)
+(config/"workers.tsv").write_text("ws\twin\t/tmp\tT-interrupted\n")
+base2={**base,"origin_thread":"T-interrupted","registered_store_sha256":hashlib.sha256(str(missing2).encode()).hexdigest()}
+plan2=m.quarantine_plan(store,base2)["plan"]; auth2={"decision":"park","plan_sha256":plan2["plan_sha256"],"authorization_sha256":"b"*64,"authorized_at":"2026-07-28T01:00:00Z"}
+request2={**base2,"plan":plan2,"owner_authorization":auth2}; attempted=[]
+blocked=m.quarantine_apply(store,request2,lambda *args:attempted.append(args) or (_ for _ in ()).throw(RuntimeError()))
+assert blocked["blocker"]=="park_outcome_indeterminate" and len(attempted)==1
+artifact.write_bytes(b"mutated supplemental evidence"); missing2.mkdir(mode=0o700); (missing2/"receipts.json").write_bytes(b"invalid"); (missing2/"receipts.json").chmod(0o600)
+alias=root/"artifact-alias"; alias.hardlink_to(artifact); alias.chmod(0o600)
+changed_base={**base2,"artifacts":[*base2["artifacts"],{"kind":"alias","path":str(alias)}]}
+fresh=m.quarantine_plan(store,changed_base)["plan"]; changed={**changed_base,"plan":fresh,"owner_authorization":{**auth2,"plan_sha256":fresh["plan_sha256"],"authorization_sha256":"c"*64}}
+try: m.quarantine_apply(store,changed,lambda *args:attempted.append(args))
+except m.HelperError: pass
+else: raise AssertionError("changed interrupted authority accepted")
+assert len(attempted)==1
+# The lifecycle fence, not the deletable ledger, is monotonic authority. Deletion,
+# valid replacement, and truncation cannot permit a second executor call.
+ledger=root/"claude-quarantine.json"; ledger.unlink()
+fenced=m.quarantine_apply(store,changed,lambda *args:attempted.append(args))
+assert fenced["blocker"]=="park_outcome_indeterminate" and len(attempted)==1
+ledger.write_text('{"schema_version":1,"receipts":[]}'); ledger.chmod(0o600)
+fenced=m.quarantine_apply(store,changed,lambda *args:attempted.append(args))
+assert fenced["blocker"]=="park_outcome_indeterminate" and len(attempted)==1
+ledger.write_bytes(b'{'); ledger.chmod(0o600)
+try: m.quarantine_apply(store,changed,lambda *args:attempted.append(args))
+except m.HelperError: pass
+else: raise AssertionError("truncated ledger accepted")
+assert len(attempted)==1
+ledger.write_text('{"schema_version":1,"receipts":[]}'); ledger.chmod(0o600)
+# Changed config and replacement config directory block before a first executor call.
+(config/"workers.tsv").write_text("ws\tdrift\t/tmp\tT-config-drift\n")
+missing3=root/"missing3"; registry=json.loads((root/"lifecycle.json").read_text()); registry["stores"].append(str(missing3)); (root/"lifecycle.json").write_text(json.dumps(registry)); (root/"lifecycle.json").chmod(0o600)
+base3={**base,"origin_thread":"T-config-drift","registered_store_sha256":hashlib.sha256(str(missing3).encode()).hexdigest(),"artifacts":[]}
+plan3=m.quarantine_plan(store,base3)["plan"]; request3={**base3,"plan":plan3,"owner_authorization":{"decision":"park","plan_sha256":plan3["plan_sha256"],"authorization_sha256":"d"*64,"authorized_at":"2026-07-28T02:00:00Z"}}
+(config/"workers.tsv").write_text("ws\tchanged\t/tmp\tT-different\n")
+try: m.quarantine_apply(store,request3,lambda *args:attempted.append(args))
+except m.HelperError: pass
+else: raise AssertionError("changed config accepted")
+assert len(attempted)==1
+# Replacing the exact config directory object also blocks before execution.
+(config/"workers.tsv").write_text("ws\treplace\t/tmp\tT-config-replace\n")
+missing4=root/"missing4"; registry=json.loads((root/"lifecycle.json").read_text()); registry["stores"].append(str(missing4)); (root/"lifecycle.json").write_text(json.dumps(registry)); (root/"lifecycle.json").chmod(0o600)
+base4={**base,"origin_thread":"T-config-replace","registered_store_sha256":hashlib.sha256(str(missing4).encode()).hexdigest(),"artifacts":[]}
+plan4=m.quarantine_plan(store,base4)["plan"]; request4={**base4,"plan":plan4,"owner_authorization":{"decision":"park","plan_sha256":plan4["plan_sha256"],"authorization_sha256":"e"*64,"authorized_at":"2026-07-28T03:00:00Z"}}
+old_config=root/"old-config"; config.rename(old_config); config.mkdir(mode=0o700); (config/"workers.tsv").write_text("ws\treplace\t/tmp\tT-config-replace\n")
+try: m.quarantine_apply(store,request4,lambda *args:attempted.append(args))
+except m.HelperError: pass
+else: raise AssertionError("replacement config accepted")
+assert len(attempted)==1
+# Tampering with the exact durable fence after intent blocks the action and retains intent.
+(config/"workers.tsv").write_text("ws\tfence\t/tmp\tT-fence-drift\n")
+missing5=root/"missing5"; registry=json.loads((root/"lifecycle.json").read_text()); registry["stores"].append(str(missing5)); (root/"lifecycle.json").write_text(json.dumps(registry)); (root/"lifecycle.json").chmod(0o600)
+base5={**base,"origin_thread":"T-fence-drift","registered_store_sha256":hashlib.sha256(str(missing5).encode()).hexdigest(),"artifacts":[]}
+plan5=m.quarantine_plan(store,base5)["plan"]; request5={**base5,"plan":plan5,"owner_authorization":{"decision":"park","plan_sha256":plan5["plan_sha256"],"authorization_sha256":"f"*64,"authorized_at":"2026-07-28T04:00:00Z"}}
+original_write=m.write_private_bytes_at
+def tamper_fence(directory,name,payload):
+    original_write(directory,name,payload)
+    if name=="claude-quarantine.json":
+        changed_registry=json.loads((root/"lifecycle.json").read_text()); changed_registry["teardown_fences"]["T-fence-drift"]["operation_id"]="0"*64; (root/"lifecycle.json").write_text(json.dumps(changed_registry)); (root/"lifecycle.json").chmod(0o600)
+m.write_private_bytes_at=tamper_fence
+fence_blocked=m.quarantine_apply(store,request5,lambda *args:attempted.append(args)); m.write_private_bytes_at=original_write
+assert fence_blocked["blocker"]=="quarantine_bound_evidence_changed" and len(attempted)==1
+# A successful executor followed by execution-capsule cleanup failure is indeterminate.
+(config/"workers.tsv").write_text("ws\tcleanup\t/tmp\tT-cleanup-failure\n")
+missing6=root/"missing6"; registry=json.loads((root/"lifecycle.json").read_text()); registry["stores"].append(str(missing6)); (root/"lifecycle.json").write_text(json.dumps(registry)); (root/"lifecycle.json").chmod(0o600)
+base6={**base,"origin_thread":"T-cleanup-failure","registered_store_sha256":hashlib.sha256(str(missing6).encode()).hexdigest(),"artifacts":[]}
+plan6=m.quarantine_plan(store,base6)["plan"]; request6={**base6,"plan":plan6,"owner_authorization":{"decision":"park","plan_sha256":plan6["plan_sha256"],"authorization_sha256":"1"*64,"authorized_at":"2026-07-28T05:00:00Z"}}
+original_boundary=m.open_quarantine_execution_boundary
+@contextlib.contextmanager
+def cleanup_failure(request,origin):
+    with original_boundary(request,origin) as boundary: yield boundary
+    if cleanup_calls: raise OSError("synthetic cleanup failure")
+m.open_quarantine_execution_boundary=cleanup_failure; cleanup_calls=[]
+cleanup_result=m.quarantine_apply(store,request6,lambda *args:cleanup_calls.append(args)); m.open_quarantine_execution_boundary=original_boundary
+assert cleanup_result["blocker"]=="park_outcome_indeterminate" and len(cleanup_calls)==1
+# A raw URL-spelled ordinary fence is normalized without duplication before enrichment.
+(config/"workers.tsv").write_text("ws\turl\t/tmp\tT-url-fence\n")
+missing7=root/"missing7"; registry=json.loads((root/"lifecycle.json").read_text()); registry["stores"].append(str(missing7)); url_origin="https://ampcode.com/threads/T-url-fence"; registry["teardown_fences"][url_origin]={"operation_id":hashlib.sha256(("worker-teardown\0"+url_origin).encode()).hexdigest(),"created_at":"2026-07-28T00:00:00Z"}; (root/"lifecycle.json").write_text(json.dumps(registry)); (root/"lifecycle.json").chmod(0o600)
+teardown=store.worker_teardown(url_origin,False); assert teardown["blockers"][0]["blocker"]=="receipt_store_invalid_or_unavailable"
+registry=json.loads((root/"lifecycle.json").read_text()); assert url_origin in registry["teardown_fences"] and "T-url-fence" not in registry["teardown_fences"]
+base7={**base,"origin_thread":"T-url-fence","registered_store_sha256":hashlib.sha256(str(missing7).encode()).hexdigest(),"artifacts":[]}; planned7=m.quarantine_plan(store,base7); plan7=planned7["plan"]; request7={**base7,"plan":plan7,"owner_authorization":{"decision":"park","plan_sha256":plan7["plan_sha256"],"authorization_sha256":"2"*64,"authorized_at":"2026-07-28T05:01:00Z"}}
+url_calls=[]; url_result=m.quarantine_apply(store,request7,lambda *args:url_calls.append(args)); assert url_result["outcome"]=="parked" and len(url_calls)==1
+assert url_result["operation_sha256"]==planned7["operation_sha256"] and m.quarantine_apply(store,request7,lambda *args:url_calls.append(args))["outcome"]=="duplicate" and len(url_calls)==1
+assert m.quarantine_inspect(store,{"operation_sha256":planned7["operation_sha256"]})["state"]=="completed"
+registry=json.loads((root/"lifecycle.json").read_text()); assert list(key for key in registry["teardown_fences"] if m.canonical_amp_thread_id(key)=="T-url-fence")==["T-url-fence"] and "quarantine_operation_id" in registry["teardown_fences"]["T-url-fence"]
+assert registry["teardown_fences"]["T-url-fence"]["operation_id"]==hashlib.sha256(b"worker-teardown\0T-url-fence").hexdigest()
+# Opaque historical origins retain exact-key release and request-hash compatibility.
+opaque_root=pathlib.Path(tempfile.mkdtemp()).resolve(); opaque_root.chmod(0o700); opaque="opaque-origin"; opaque_registry={"schema_version":1,"stores":[],"legacy_store_objects":{},"teardown_fences":{opaque:{"operation_id":hashlib.sha256(("worker-teardown\0"+opaque).encode()).hexdigest(),"created_at":"2026-07-28T00:00:00Z"}}}; (opaque_root/"lifecycle.json").write_text(json.dumps(opaque_registry)); (opaque_root/"lifecycle.json").chmod(0o600)
+opaque_store=m.ReceiptStore(opaque_root,opaque_root); released=opaque_store.release_worker_teardown(opaque); assert released["outcome"]=="released" and released["origin_thread_sha256"]==hashlib.sha256(opaque.encode()).hexdigest()
+assert not json.loads((opaque_root/"lifecycle.json").read_text())["teardown_fences"]
+# True canonical ambiguity fails closed rather than selecting either spelling.
+ambiguous={"teardown_fences":{"T-ambiguous":{},"https://ampcode.com/threads/T-ambiguous":{}}}
+try: m.ensure_teardown_fence(ambiguous,"T-ambiguous")
+except m.HelperError: pass
+else: raise AssertionError("ambiguous dual-spelling fence accepted")
+# Supplemental manifest supports files only and refuses unknown shape, symlink, and directory.
+artifact.write_bytes(before[artifact]); symlink=root/"artifact-symlink"; symlink.symlink_to(artifact)
+for unsupported in [[{"kind":"x","path":str(artifact),"complete":True}],[{"kind":"x","path":str(symlink)}],[{"kind":"x","path":str(config)}]]:
+    bad={**base,"artifacts":unsupported}
+    try: m.quarantine_plan(store,bad)
+    except m.HelperError: pass
+    else: raise AssertionError("unsupported manifest form accepted")
+# A symlinked ledger is never followed or repaired.
+target=root/"ledger-target"; ledger.rename(target); ledger.symlink_to(target)
+try: m.quarantine_inspect(store,{"operation_sha256":result["operation_sha256"]})
+except m.HelperError: pass
+else: raise AssertionError("symlinked quarantine ledger accepted")
+print("ok")`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil {
+		t.Fatalf("quarantine fixture: %v\n%s", err, output)
+	}
+	if string(output) != "ok\n" {
+		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestQuarantineLifecyclePrepareFailureReturnsPrivateJSONBlocker(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "private-lifecycle-path-sentinel")
+	if err := os.WriteFile(stateDir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := runHelper(t, stateDir, map[string]any{
+		"operation_sha256": strings.Repeat("a", 64),
+	}, "quarantine", "inspect")
+	if err == nil {
+		t.Fatal("quarantine inspect unexpectedly accepted a non-directory lifecycle state")
+	}
+	want := "{\"action\":\"quarantine_inspect\",\"blocker\":\"quarantine_evidence_invalid_or_unavailable\",\"outcome\":\"blocked\"}\n"
+	if stdout != want || stderr != "" {
+		t.Fatalf("prepare failure was not bounded private JSON: stdout %q stderr %q", stdout, stderr)
+	}
+	for _, forbidden := range []string{stateDir, "private-lifecycle-path-sentinel", "Traceback", "FileExistsError"} {
+		if strings.Contains(stdout+stderr, forbidden) {
+			t.Fatalf("prepare failure leaked %q: %s%s", forbidden, stdout, stderr)
+		}
+	}
+
+	hostileState := t.TempDir()
+	if err := os.Chmod(hostileState, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hostileState, "experimental.lock"), []byte("hostile"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fdScript := `import importlib.util, os, pathlib, sys
+spec=importlib.util.spec_from_file_location("m",pathlib.Path(sys.argv[1])); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+state=pathlib.Path(sys.argv[2]); before=len(os.listdir("/dev/fd"))
+for _ in range(128):
+    try:
+        with m.quarantine_lifecycle_lock(m.LifecycleRegistry(state)): pass
+    except m.HelperError as error:
+        assert str(error)=="quarantine lifecycle lock is unavailable"
+    else: raise AssertionError("hostile lock accepted")
+after=len(os.listdir("/dev/fd")); assert after==before,(before,after)
+print("ok")`
+	output, err := exec.Command("python3", "-c", fdScript, helper, hostileState).CombinedOutput()
+	if err != nil || string(output) != "ok\n" {
+		t.Fatalf("hostile lock leaked descriptors: %v: %s", err, output)
+	}
+	for range 3 {
+		stdout, stderr, err = runHelper(t, hostileState, map[string]any{
+			"operation_sha256": strings.Repeat("b", 64),
+		}, "quarantine", "inspect")
+		if err == nil || stdout != want || stderr != "" {
+			t.Fatalf("hostile lock failure was not bounded private JSON: %v stdout %q stderr %q", err, stdout, stderr)
+		}
+		if strings.Contains(stdout+stderr, hostileState) || strings.Contains(stdout+stderr, "Traceback") {
+			t.Fatalf("hostile lock failure leaked private state: %s%s", stdout, stderr)
+		}
+	}
+}
+
 func TestLinuxProcessIdentityRejectsAmbiguousSnapshots(t *testing.T) {
 	t.Parallel()
 	helper, err := filepath.Abs("claude_delegation.py")

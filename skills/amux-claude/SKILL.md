@@ -28,3 +28,4 @@ Core Amp lifecycle remains `/amux`. Paired worker teardown and finish in `/amux`
 - Explicit-only. No autonomous fan-out or quota filling.
 - Preserve unresolved receipts, reports, artifacts, worktrees, and origin fences unless a named recovery seam authorizes a specific terminal proof.
 - Never infer ownership from names, cwd, PID, issue number, tmux placement, or Claude session ID alone.
+- For `receipt_store_invalid_or_unavailable`, only this provider skill may plan, apply, or inspect quarantine. It requires an explicit owner-bound exact `park`; it never authorizes cleanup, detach, archive, removal, teardown, or evidence repair.

@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
@@ -42,6 +43,8 @@ MAX_TMUX_COMMAND_BYTES = 8 * 1024
 MAX_ABSENCE_PANES = 256
 MAX_ABSENCE_PROCESSES = 2048
 MAX_ABSENCE_OUTPUT_BYTES = 64 * 1024
+MAX_QUARANTINE_ARTIFACTS = 32
+MAX_QUARANTINE_ARTIFACT_BYTES = 1024 * 1024
 PRE_IDENTITY_LAUNCH_INTENT_COMPATIBILITY = "pre_identity_launch_intent_v1"
 HISTORICAL_MODERN_READ_ONLY_LAUNCH_INTENT_COMPATIBILITY = (
     "historical_modern_read_only_launch_intent_v1"
@@ -145,6 +148,125 @@ def decode_receipt_store(raw: bytes) -> dict[str, Any]:
     return store
 
 
+def canonical_amp_thread_id(value: str) -> str:
+    """Canonicalize the two historical spellings accepted by core config."""
+    thread = value
+    if "://" in value:
+        parsed = urllib.parse.urlparse(value)
+        prefix = "/threads/"
+        suffix = parsed.path[len(prefix):] if parsed.path.startswith(prefix) else ""
+        if (
+            parsed.scheme != "https" or parsed.netloc != "ampcode.com" or not suffix
+            or "/" in suffix or parsed.params or parsed.query or parsed.fragment
+        ):
+            raise HelperError("invalid Amp thread identity")
+        thread = suffix
+    if not thread.startswith("T-") or len(thread) == 2 or re.search(r"[\t\n\r/ ?#]", thread):
+        raise HelperError("invalid Amp thread identity")
+    return thread
+
+
+def exact_canonical_amp_thread_id(value: Any) -> str:
+    origin = required_string({"origin": value}, "origin", 256)
+    if canonical_amp_thread_id(origin) != origin:
+        raise HelperError("quarantine origin is not an exact canonical Amp thread ID")
+    return origin
+
+
+def decode_lifecycle_registry(raw: bytes) -> dict[str, Any]:
+    try:
+        registry = json.loads(raw, object_pairs_hook=reject_duplicate_json_pairs)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise HelperError("invalid lifecycle registry") from error
+    if not isinstance(registry, dict) or registry.get("schema_version") != LIFECYCLE_SCHEMA_VERSION:
+        raise HelperError("unsupported or invalid lifecycle registry")
+    stores = registry.get("stores")
+    legacy_objects = registry.get("legacy_store_objects", {})
+    fences = registry.get("teardown_fences")
+    if (
+        not isinstance(stores, list) or any(not isinstance(path, str) or not path for path in stores)
+        or len(stores) != len(set(stores)) or not isinstance(legacy_objects, dict)
+        or any(path not in stores or not isinstance(identity, str) or not identity.startswith("directory:") for path, identity in legacy_objects.items())
+        or not isinstance(fences, dict) or any(not isinstance(thread, str) or not isinstance(value, dict) for thread, value in fences.items())
+    ):
+        raise HelperError("invalid lifecycle registry")
+    registry["legacy_store_objects"] = legacy_objects
+    return registry
+
+
+def canonical_fence_entry(
+    registry: dict[str, Any], origin: str
+) -> tuple[str, dict[str, Any]] | None:
+    matches = []
+    for spelling, fence in registry["teardown_fences"].items():
+        try:
+            canonical = canonical_amp_thread_id(spelling)
+        except HelperError:
+            continue
+        if canonical == origin:
+            matches.append((spelling, fence))
+    if len(matches) > 1:
+        raise HelperError("ambiguous durable origin fence")
+    return matches[0] if matches else None
+
+
+def canonical_fence(registry: dict[str, Any], origin: str) -> dict[str, Any] | None:
+    entry = canonical_fence_entry(registry, origin)
+    return entry[1] if entry is not None else None
+
+
+def historical_origin_fence(registry: dict[str, Any], spelling: str) -> dict[str, Any] | None:
+    """Fence lookup preserves old opaque bindings while canonicalizing Amp identities."""
+    try:
+        origin = canonical_amp_thread_id(spelling)
+    except HelperError:
+        value = registry["teardown_fences"].get(spelling)
+        return value if isinstance(value, dict) else None
+    return canonical_fence(registry, origin)
+
+
+def ensure_teardown_fence(
+    registry: dict[str, Any], spelling: str, *, normalize_existing: bool = False
+) -> tuple[str, dict[str, Any], bool]:
+    """Create one fence spelling while preserving exact opaque historical origins."""
+    try:
+        origin = canonical_amp_thread_id(spelling)
+    except HelperError:
+        existing = registry["teardown_fences"].get(spelling)
+        if existing is not None:
+            return spelling, existing, False
+        fence = {
+            "operation_id": hashlib.sha256(
+                f"worker-teardown\0{spelling}".encode()
+            ).hexdigest(),
+            "created_at": utc_now(),
+        }
+        registry["teardown_fences"][spelling] = fence
+        return spelling, fence, True
+    entry = canonical_fence_entry(registry, origin)
+    expected_operation = hashlib.sha256(
+        f"worker-teardown\0{origin}".encode()
+    ).hexdigest()
+    if entry is None:
+        fence = {"operation_id": expected_operation, "created_at": utc_now()}
+        registry["teardown_fences"][origin] = fence
+        return origin, fence, True
+    key, fence = entry
+    changed = False
+    if key != origin and normalize_existing:
+        del registry["teardown_fences"][key]
+        registry["teardown_fences"][origin] = fence
+        changed = True
+    if (
+        normalize_existing
+        and set(fence) == {"operation_id", "created_at"}
+        and fence.get("operation_id") != expected_operation
+    ):
+        fence["operation_id"] = expected_operation
+        changed = True
+    return origin if normalize_existing else key, fence, changed
+
+
 class LifecycleRegistry:
     def __init__(self, state_dir: pathlib.Path):
         self.state_dir = state_dir
@@ -173,30 +295,7 @@ class LifecycleRegistry:
             raise HelperError("lifecycle registry is unavailable") from error
         if len(raw) > MAX_STORE_BYTES:
             raise HelperError("lifecycle registry exceeds the experimental size limit")
-        try:
-            registry = json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError) as error:
-            raise HelperError("invalid lifecycle registry") from error
-        if not isinstance(registry, dict) or registry.get("schema_version") != LIFECYCLE_SCHEMA_VERSION:
-            raise HelperError("unsupported or invalid lifecycle registry")
-        stores = registry.get("stores")
-        legacy_objects = registry.get("legacy_store_objects", {})
-        fences = registry.get("teardown_fences")
-        if (
-            not isinstance(stores, list)
-            or any(not isinstance(path, str) or not path for path in stores)
-            or len(stores) != len(set(stores))
-            or not isinstance(legacy_objects, dict)
-            or any(
-                path not in stores or not isinstance(identity, str) or not identity.startswith("directory:")
-                for path, identity in legacy_objects.items()
-            )
-            or not isinstance(fences, dict)
-            or any(not isinstance(thread, str) or not isinstance(value, dict) for thread, value in fences.items())
-        ):
-            raise HelperError("invalid lifecycle registry")
-        registry["legacy_store_objects"] = legacy_objects
-        return registry
+        return decode_lifecycle_registry(raw)
 
     def commit(self, registry: dict[str, Any]) -> None:
         payload = (json.dumps(registry, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -244,11 +343,8 @@ class ReceiptStore:
             yield
 
     @contextlib.contextmanager
-    def launch_intent_mutation_lock(self, stage_a: bool) -> Iterator[None]:
-        if not stage_a:
-            with self.mutation_lock():
-                yield
-            return
+    def launch_intent_mutation_lock(self) -> Iterator[None]:
+        # Every launch intent takes the lifecycle lock to exclude origin fencing.
         with self.lifecycle.mutation_lock():
             store_lock = (
                 contextlib.nullcontext()
@@ -363,7 +459,7 @@ class ReceiptStore:
         routing = validate_routing(request.get("routing"))
         with self.lifecycle.mutation_lock():
             lifecycle = self.lifecycle.load()
-            if binding["origin_thread"] in lifecycle["teardown_fences"]:
+            if historical_origin_fence(lifecycle, binding["origin_thread"]) is not None:
                 raise HelperError("origin Amp worker has a durable teardown fence")
             state_path = str(self.state_dir.resolve())
             if state_path not in lifecycle["stores"]:
@@ -509,11 +605,8 @@ class ReceiptStore:
             if state_path not in lifecycle["stores"]:
                 raise HelperError("receipt store is not registered in the canonical lifecycle registry")
             verify_registered_store_object(state_path, lifecycle["legacy_store_objects"].get(state_path))
-            if origin_thread not in lifecycle["teardown_fences"]:
-                lifecycle["teardown_fences"][origin_thread] = {
-                    "operation_id": hashlib.sha256(f"worker-teardown\0{origin_thread}".encode()).hexdigest(),
-                    "created_at": utc_now(),
-                }
+            _, _, fence_changed = ensure_teardown_fence(lifecycle, origin_thread)
+            if fence_changed:
                 self.lifecycle.commit(lifecycle)
             store_lock = contextlib.nullcontext() if self.lifecycle.state_dir == self.state_dir else self.mutation_lock()
             with store_lock:
@@ -606,11 +699,8 @@ class ReceiptStore:
             if state_path not in lifecycle["stores"]:
                 raise HelperError("receipt store is not registered in the canonical lifecycle registry")
             verify_registered_store_object(state_path, lifecycle["legacy_store_objects"].get(state_path))
-            if origin_thread not in lifecycle["teardown_fences"]:
-                lifecycle["teardown_fences"][origin_thread] = {
-                    "operation_id": hashlib.sha256(f"worker-teardown\0{origin_thread}".encode()).hexdigest(),
-                    "created_at": utc_now(),
-                }
+            _, _, fence_changed = ensure_teardown_fence(lifecycle, origin_thread)
+            if fence_changed:
                 self.lifecycle.commit(lifecycle)
             store_lock = contextlib.nullcontext() if self.lifecycle.state_dir == self.state_dir else self.mutation_lock()
             with store_lock:
@@ -751,11 +841,8 @@ class ReceiptStore:
             if state_path not in lifecycle["stores"]:
                 raise HelperError("receipt store is not registered in the canonical lifecycle registry")
             verify_registered_store_object(state_path, lifecycle["legacy_store_objects"].get(state_path))
-            if origin_thread not in lifecycle["teardown_fences"]:
-                lifecycle["teardown_fences"][origin_thread] = {
-                    "operation_id": hashlib.sha256(f"worker-teardown\0{origin_thread}".encode()).hexdigest(),
-                    "created_at": utc_now(),
-                }
+            _, _, fence_changed = ensure_teardown_fence(lifecycle, origin_thread)
+            if fence_changed:
                 self.lifecycle.commit(lifecycle)
             store_lock = contextlib.nullcontext() if self.lifecycle.state_dir == self.state_dir else self.mutation_lock()
             with store_lock:
@@ -944,13 +1031,8 @@ class ReceiptStore:
             verify_registered_store_object(
                 state_path, lifecycle["legacy_store_objects"].get(state_path)
             )
-            if origin_thread not in lifecycle["teardown_fences"]:
-                lifecycle["teardown_fences"][origin_thread] = {
-                    "operation_id": hashlib.sha256(
-                        f"worker-teardown\0{origin_thread}".encode()
-                    ).hexdigest(),
-                    "created_at": utc_now(),
-                }
+            _, _, fence_changed = ensure_teardown_fence(lifecycle, origin_thread)
+            if fence_changed:
                 self.lifecycle.commit(lifecycle)
             store_lock = (
                 contextlib.nullcontext()
@@ -1101,11 +1183,10 @@ class ReceiptStore:
             else:
                 with self.lifecycle.mutation_lock():
                     lifecycle = self.lifecycle.load()
-                    if origin_thread not in lifecycle["teardown_fences"]:
-                        lifecycle["teardown_fences"][origin_thread] = {
-                            "operation_id": hashlib.sha256(f"worker-teardown\0{origin_thread}".encode()).hexdigest(),
-                            "created_at": utc_now(),
-                        }
+                    _, _, fence_changed = ensure_teardown_fence(
+                        lifecycle, origin_thread
+                    )
+                    if fence_changed:
                         self.lifecycle.commit(lifecycle)
             registered_state_paths = set(lifecycle["stores"])
             state_paths = set(registered_state_paths)
@@ -1241,10 +1322,33 @@ class ReceiptStore:
 
     def release_worker_teardown(self, origin_thread: str) -> dict[str, Any]:
         required_string({"origin_thread": origin_thread}, "origin_thread", 256)
-        origin_thread_sha256 = hashlib.sha256(origin_thread.encode()).hexdigest()
+        requested_origin = origin_thread
+        origin_thread_sha256 = hashlib.sha256(requested_origin.encode()).hexdigest()
+        try:
+            canonical_origin: str | None = canonical_amp_thread_id(requested_origin)
+        except HelperError:
+            canonical_origin = None
         try:
             with self.lifecycle.mutation_lock():
                 lifecycle = self.lifecycle.load()
+                if canonical_origin is None:
+                    exact_fence = lifecycle["teardown_fences"].get(requested_origin)
+                    fence_entry = (
+                        (requested_origin, exact_fence)
+                        if isinstance(exact_fence, dict) else None
+                    )
+                else:
+                    fence_entry = canonical_fence_entry(lifecycle, canonical_origin)
+                if (
+                    fence_entry is not None
+                    and "quarantine_operation_id" in fence_entry[1]
+                ):
+                    return {
+                        "action": "worker_teardown_release",
+                        "origin_thread_sha256": origin_thread_sha256,
+                        "outcome": "blocked",
+                        "blockers": [{"blocker": "quarantine_fence_permanently_retained"}],
+                    }
                 registered_state_paths = set(lifecycle["stores"])
                 state_paths = set(registered_state_paths)
                 state_paths.add(str(self.lifecycle.state_dir.resolve()))
@@ -1256,7 +1360,14 @@ class ReceiptStore:
                         acquire_lock=pathlib.Path(state_path) != self.lifecycle.state_dir,
                     )
                     for receipt in owner_store["receipts"]:
-                        if receipt["binding"].get("origin_thread") != origin_thread:
+                        try:
+                            receipt_origin = canonical_amp_thread_id(
+                                receipt["binding"].get("origin_thread")
+                            )
+                        except HelperError:
+                            receipt_origin = receipt["binding"].get("origin_thread")
+                        target_origin = canonical_origin or requested_origin
+                        if receipt_origin != target_origin:
                             continue
                         if worker_teardown_receipt_blocker(receipt) is not None or receipt.get("state") != "verified_parked":
                             return {
@@ -1265,11 +1376,14 @@ class ReceiptStore:
                                 "outcome": "blocked",
                                 "blockers": [{"blocker": "paired_state_not_safely_parked"}],
                             }
-                outcome = "released" if lifecycle["teardown_fences"].pop(origin_thread, None) is not None else "absent"
+                outcome = "absent"
+                if fence_entry is not None:
+                    del lifecycle["teardown_fences"][fence_entry[0]]
+                    outcome = "released"
                 if outcome == "released":
                     self.lifecycle.commit(lifecycle)
         except HelperError:
-            return worker_teardown_store_blocked(origin_thread, False)
+            return worker_teardown_store_blocked(requested_origin, False)
         return {
             "action": "worker_teardown_release",
             "origin_thread_sha256": origin_thread_sha256,
@@ -2526,6 +2640,58 @@ def materialize_executable(
         os.close(output_descriptor)
         os.lseek(descriptor, 0, os.SEEK_SET)
     return pathlib.Path(output_path)
+
+
+def materialize_descriptor(descriptor: int, destination: pathlib.Path, mode: int) -> None:
+    output = os.open(
+        destination,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        mode,
+    )
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            remaining = memoryview(chunk)
+            while remaining:
+                written = os.write(output, remaining)
+                if written <= 0:
+                    raise HelperError("write verified configuration snapshot failed")
+                remaining = remaining[written:]
+        os.fsync(output)
+        os.fchmod(output, mode)
+    finally:
+        os.close(output)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+
+
+def write_sealed_snapshot_file(destination: pathlib.Path, raw: bytes, mode: int) -> int:
+    descriptor = os.open(
+        destination,
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        mode,
+    )
+    try:
+        remaining = memoryview(raw)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise HelperError("write verified configuration snapshot failed")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+        os.fchmod(descriptor, mode)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        if read_stable_descriptor(
+            descriptor, len(raw) + 1, "verified configuration snapshot"
+        ) != raw:
+            raise HelperError("verified configuration snapshot changed")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def verified_executable_descriptor(descriptor: int, display_path: str) -> tuple[int, str, str, str]:
@@ -3916,10 +4082,14 @@ def execute_launch(store: ReceiptStore, request: Any) -> dict[str, Any]:
                 "capacity_acknowledgement_expires_at": capacity_decision["acknowledgement_expires_at"],
             }
         )
-    with store.launch_intent_mutation_lock(components["workflow"] == "mutating"):
+    with store.launch_intent_mutation_lock():
         receipt_store = store.load_store()
         receipt = store.find(receipt_store, delegation_id)
         require_receipt_mutable(receipt)
+        if historical_origin_fence(
+            store.lifecycle.load(), receipt["binding"]["origin_thread"]
+        ) is not None:
+            raise HelperError("launch intent is revoked by the durable origin fence")
         if receipt["binding"].get("model") != request_data.get("model"):
             raise HelperError("model selection does not match immutable receipt binding")
         for key in ("packet_digest", "launch_policy_digest", "launch_command_digest"):
@@ -4993,7 +5163,7 @@ def require_launch_transport_allowed(store: ReceiptStore, delegation_id: str) ->
     if not valid_indeterminate_detach_candidate(receipt):
         raise HelperError("launch transport is not authorized for the current receipt state")
     origin_thread = receipt["binding"]["origin_thread"]
-    if origin_thread in store.lifecycle.load()["teardown_fences"]:
+    if historical_origin_fence(store.lifecycle.load(), origin_thread) is not None:
         raise HelperError("launch transport is revoked by the durable origin fence")
 
 
@@ -6544,8 +6714,976 @@ def worker_teardown_store_blocked(origin_thread: str, dry_run: bool) -> dict[str
         "dry_run": dry_run,
         "pairs": [],
         "blockers": [{"blocker": "receipt_store_invalid_or_unavailable"}],
-        "recovery": "repair the owner-private lifecycle registry or receipt store before retrying worker teardown",
+        "recovery": "preserve provider evidence; use explicit provider quarantine only for an owner-authorized exact park",
     }
+
+
+def descriptor_evidence(info: os.stat_result) -> list[int]:
+    return [
+        info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode), stat.S_IMODE(info.st_mode),
+        info.st_uid, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    ]
+
+
+def read_quarantine_artifact(path: pathlib.Path) -> tuple[bytes, list[int]]:
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_uid != os.geteuid()
+        ):
+            raise HelperError("quarantine artifact is unavailable")
+        raw = read_stable_descriptor(
+            descriptor, MAX_QUARANTINE_ARTIFACT_BYTES, "quarantine artifact"
+        )
+        return raw, descriptor_evidence(info)
+    except (OSError, ValueError, HelperError) as error:
+        raise HelperError("quarantine artifact is unavailable") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def quarantine_artifact_manifest(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list) or len(value) > MAX_QUARANTINE_ARTIFACTS:
+        raise HelperError("quarantine artifact manifest is invalid")
+    result = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"kind", "path"}:
+            raise HelperError("quarantine artifact manifest is invalid")
+        kind = required_string(item, "kind", 64)
+        path = pathlib.Path(required_string(item, "path", 4096))
+        if not path.is_absolute():
+            raise HelperError("quarantine artifact manifest is invalid")
+        raw, identity = read_quarantine_artifact(path)
+        result.append({
+            "kind": kind,
+            "path_sha256": hashlib.sha256(os.fsencode(path)).hexdigest(),
+            "object_sha256": canonical_sha256(identity),
+            "content_sha256": hashlib.sha256(raw).hexdigest(),
+        })
+    result = sorted(result, key=canonical_sha256)
+    if len({canonical_sha256(item) for item in result}) != len(result):
+        raise HelperError("quarantine artifact manifest is invalid")
+    return result
+
+
+def open_quarantine_directory(path: pathlib.Path, label: str, private: bool) -> tuple[int, os.stat_result]:
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        info = os.fstat(descriptor)
+    except (OSError, ValueError) as error:
+        raise HelperError(f"{label} is unavailable") from error
+    if (
+        not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+        or (private and stat.S_IMODE(info.st_mode) != 0o700)
+        or (not private and stat.S_IMODE(info.st_mode) & 0o022)
+    ):
+        os.close(descriptor)
+        raise HelperError(f"{label} is unavailable")
+    return descriptor, info
+
+
+def open_quarantine_file_at(
+    directory_descriptor: int, name: str, limit: int, label: str, private: bool
+) -> tuple[int, bytes, os.stat_result]:
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=directory_descriptor,
+        )
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or (private and stat.S_IMODE(info.st_mode) != 0o600)
+            or (not private and stat.S_IMODE(info.st_mode) & 0o022)
+        ):
+            raise HelperError(f"{label} is unavailable")
+        raw = read_stable_descriptor(descriptor, limit, label)
+        return descriptor, raw, info
+    except (OSError, HelperError) as error:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise HelperError(f"{label} is unavailable") from error
+
+
+def encode_lifecycle_registry(registry: dict[str, Any]) -> bytes:
+    payload = encode_private_json(registry)
+    if len(payload) > MAX_STORE_BYTES:
+        raise HelperError("lifecycle registry exceeds the experimental size limit")
+    return payload
+
+
+def write_private_bytes_at(directory_descriptor: int, name: str, payload: bytes) -> None:
+    temporary = f".{name}.tmp.{secrets.token_hex(16)}"
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=directory_descriptor,
+        )
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise HelperError("private metadata write failed")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.rename(
+            temporary, name,
+            src_dir_fd=directory_descriptor, dst_dir_fd=directory_descriptor,
+        )
+        os.fsync(directory_descriptor)
+    except (OSError, HelperError) as error:
+        raise HelperError("private metadata write failed") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        with contextlib.suppress(OSError):
+            os.unlink(temporary, dir_fd=directory_descriptor)
+
+
+@contextlib.contextmanager
+def quarantine_lifecycle_lock(lifecycle: LifecycleRegistry) -> Iterator[tuple[int, os.stat_result]]:
+    directory_descriptor = -1
+    lock_descriptor = -1
+    try:
+        lifecycle.prepare()
+        directory_descriptor, directory_info = open_quarantine_directory(
+            lifecycle.state_dir, "quarantine lifecycle state", private=True
+        )
+        lock_descriptor = os.open(
+            "experimental.lock",
+            os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_descriptor,
+        )
+        lock_info = os.fstat(lock_descriptor)
+        if (
+            not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.geteuid()
+            or stat.S_IMODE(lock_info.st_mode) != 0o600
+        ):
+            raise HelperError("quarantine lifecycle lock is unavailable")
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+    except (OSError, ValueError, HelperError) as error:
+        cleanup_error = None
+        for descriptor in (lock_descriptor, directory_descriptor):
+            if descriptor < 0:
+                continue
+            try:
+                os.close(descriptor)
+            except (OSError, ValueError) as close_error:
+                cleanup_error = cleanup_error or close_error
+        raise HelperError("quarantine lifecycle lock is unavailable") from (
+            cleanup_error or error
+        )
+    try:
+        yield directory_descriptor, directory_info
+    finally:
+        cleanup_error = None
+        for descriptor in (lock_descriptor, directory_descriptor):
+            try:
+                os.close(descriptor)
+            except (OSError, ValueError) as close_error:
+                cleanup_error = cleanup_error or close_error
+        if cleanup_error is not None:
+            raise HelperError("quarantine lifecycle lock cleanup is unavailable") from cleanup_error
+
+
+def exact_canonical_path(value: Any, label: str) -> str:
+    path = required_string({"path": value}, "path", 4096)
+    if not os.path.isabs(path) or "\x00" in path or any(ord(character) < 0x20 for character in path):
+        raise HelperError(f"{label} is invalid")
+    try:
+        if os.path.realpath(path) != path:
+            raise HelperError(f"{label} is invalid")
+    except (OSError, ValueError) as error:
+        raise HelperError(f"{label} is unavailable") from error
+    return path
+
+
+def quarantine_workers_targets(raw: bytes) -> list[str]:
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeError as error:
+        raise HelperError("quarantine workers config is invalid") from error
+    targets = []
+    for line in lines:
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) != 4:
+            raise HelperError("quarantine workers config is invalid")
+        targets.append(canonical_amp_thread_id(fields[3]))
+    if len(targets) != len(set(targets)):
+        raise HelperError("quarantine workers config is invalid")
+    return targets
+
+
+def open_optional_quarantine_file_at(
+    directory_descriptor: int, name: str, maximum: int, label: str
+) -> tuple[int, bytes, os.stat_result] | None:
+    try:
+        return open_quarantine_file_at(
+            directory_descriptor, name, maximum, label, private=False
+        )
+    except HelperError as error:
+        cause = error.__cause__
+        if isinstance(cause, OSError) and cause.errno == errno.ENOENT:
+            return None
+        raise
+
+
+@contextlib.contextmanager
+def materialized_quarantine_config(
+    workers_raw: bytes, shelves_raw: bytes | None
+) -> Iterator[tuple[int, list[int], str]]:
+    directory = pathlib.Path(tempfile.mkdtemp(prefix="amux-claude-quarantine."))
+    directory.chmod(0o700)
+    opened: list[int] = []
+    directory_descriptor = -1
+    try:
+        for name, raw in (
+            ("workers.tsv", workers_raw), ("shelves.tsv", shelves_raw)
+        ):
+            if raw is None:
+                continue
+            target = directory / name
+            descriptor = write_sealed_snapshot_file(target, raw, 0o400)
+            opened.append(descriptor)
+        directory_descriptor = os.open(
+            directory,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        if platform.system() == "Darwin":
+            immutable = getattr(stat, "UF_IMMUTABLE", 0x00000002)
+            for descriptor in opened:
+                darwin_fchflags(descriptor, immutable)
+            os.fchmod(directory_descriptor, 0o500)
+            darwin_fchflags(directory_descriptor, immutable)
+        else:
+            directory.chmod(0o500)
+        os.set_inheritable(directory_descriptor, True)
+        route = str(directory) if platform.system() == "Darwin" else descriptor_path(directory_descriptor)
+        yield directory_descriptor, opened, route
+    finally:
+        if platform.system() == "Darwin" and directory_descriptor >= 0:
+            with contextlib.suppress(OSError):
+                darwin_fchflags(directory_descriptor, 0)
+            for descriptor in opened:
+                with contextlib.suppress(OSError):
+                    darwin_fchflags(descriptor, 0)
+            with contextlib.suppress(OSError):
+                os.fchmod(directory_descriptor, 0o700)
+        else:
+            with contextlib.suppress(OSError):
+                directory.chmod(0o700)
+        for descriptor in opened:
+            os.close(descriptor)
+        if directory_descriptor >= 0:
+            os.close(directory_descriptor)
+        for name in ("workers.tsv", "shelves.tsv"):
+            with contextlib.suppress(OSError):
+                (directory / name).unlink()
+        with contextlib.suppress(OSError):
+            directory.rmdir()
+
+
+@contextlib.contextmanager
+def materialized_quarantine_executable(
+    source_descriptor: int, source_object: str
+) -> Iterator[tuple[int, str]]:
+    if platform.system() == "Linux":
+        descriptor = -1
+        try:
+            descriptor = os.memfd_create(
+                "amux-quarantine",
+                getattr(os, "MFD_CLOEXEC", 0x0001)
+                | getattr(os, "MFD_ALLOW_SEALING", 0x0002),
+            )
+            os.lseek(source_descriptor, 0, os.SEEK_SET)
+            while True:
+                chunk = os.read(source_descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                remaining = memoryview(chunk)
+                while remaining:
+                    written = os.write(descriptor, remaining)
+                    if written <= 0:
+                        raise HelperError("write verified amux execution copy failed")
+                    remaining = remaining[written:]
+            os.lseek(source_descriptor, 0, os.SEEK_SET)
+            os.fchmod(descriptor, 0o500)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            candidate = descriptor
+            descriptor = -1
+            descriptor, _, _, copied_object = verified_executable_descriptor(
+                candidate, "sealed amux execution copy"
+            )
+            if executable_content_identity(copied_object) != executable_content_identity(source_object):
+                raise HelperError("verified amux execution copy changed")
+            seals = (
+                getattr(fcntl, "F_SEAL_SEAL", 0x0001)
+                | getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
+                | getattr(fcntl, "F_SEAL_GROW", 0x0004)
+                | getattr(fcntl, "F_SEAL_WRITE", 0x0008)
+            )
+            fcntl.fcntl(descriptor, getattr(fcntl, "F_ADD_SEALS", 1033), seals)
+            yield descriptor, descriptor_path(descriptor)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        return
+    if platform.system() != "Darwin":
+        raise HelperError("verified amux execution copy is unavailable")
+    directory = pathlib.Path(tempfile.mkdtemp(prefix="amux-claude-quarantine-exec."))
+    directory.chmod(0o700)
+    executable = materialize_executable(source_descriptor, directory)
+    executable_descriptor = directory_descriptor = -1
+    try:
+        executable_descriptor, _, _, copied_object = open_exact_verified_executable(executable)
+        if executable_content_identity(copied_object) != executable_content_identity(source_object):
+            raise HelperError("verified amux execution copy changed")
+        directory_descriptor = os.open(
+            directory,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        seal_darwin_launch_container(directory_descriptor, executable_descriptor)
+        route = str(executable)
+        os.set_inheritable(executable_descriptor, True)
+        yield executable_descriptor, route
+    finally:
+        if directory_descriptor >= 0 and executable_descriptor >= 0:
+            with contextlib.suppress(OSError):
+                restore_darwin_launch_container(directory_descriptor, executable_descriptor)
+        if executable_descriptor >= 0:
+            os.close(executable_descriptor)
+        if directory_descriptor >= 0:
+            os.close(directory_descriptor)
+        with contextlib.suppress(OSError):
+            executable.unlink()
+        with contextlib.suppress(OSError):
+            directory.rmdir()
+
+
+def quarantine_migration_inputs(directory_descriptor: int, config: str) -> str:
+    try:
+        os.stat("workspaces.tsv", dir_fd=directory_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        local = "missing"
+    except (OSError, ValueError) as error:
+        raise HelperError("quarantine migration evidence is unavailable") from error
+    else:
+        raise HelperError("quarantine config requires migration")
+    default = os.path.abspath(os.path.expanduser("~/.config/amux"))
+    legacy = "not_applicable"
+    if config == default:
+        legacy = "missing"
+        legacy_directory = pathlib.Path(os.path.expanduser("~/.config/amp-tmux"))
+        for name in ("workspaces.tsv", "runners.tsv", "shelves.tsv"):
+            try:
+                os.stat(legacy_directory / name, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError) as error:
+                raise HelperError("quarantine migration evidence is unavailable") from error
+            else:
+                raise HelperError("quarantine config requires migration")
+    return canonical_sha256({"local_workspaces": local, "legacy_default": legacy})
+
+
+@contextlib.contextmanager
+def open_quarantine_execution_boundary(
+    request: dict[str, Any], origin: str
+) -> Iterator[tuple[dict[str, str], list[str], dict[str, str], tuple[int, ...]]]:
+    executable = exact_canonical_path(request.get("amux_executable"), "quarantine executable")
+    config = exact_canonical_path(request.get("amux_config_dir"), "quarantine config directory")
+    executable_fd = directory_fd = workers_fd = shelves_fd = -1
+    try:
+        executable_fd, _, _, executable_object = open_exact_verified_executable(executable)
+        directory_fd, directory_info = open_quarantine_directory(
+            pathlib.Path(config), "quarantine config directory", private=False
+        )
+        workers_fd, raw, workers_info = open_quarantine_file_at(
+            directory_fd, "workers.tsv", MAX_CAPACITY_SOURCE_BYTES,
+            "quarantine workers config", private=False,
+        )
+        if quarantine_workers_targets(raw).count(origin) != 1:
+            raise HelperError("quarantine workers config does not select one exact target")
+        shelves = open_optional_quarantine_file_at(
+            directory_fd, "shelves.tsv", MAX_CAPACITY_SOURCE_BYTES,
+            "quarantine shelves config",
+        )
+        shelves_raw = b""
+        shelves_info = None
+        if shelves is not None:
+            shelves_fd, shelves_raw, shelves_info = shelves
+        migration_inputs = quarantine_migration_inputs(directory_fd, config)
+        evidence = {
+            "amux_executable_path_sha256": hashlib.sha256(os.fsencode(executable)).hexdigest(),
+            "amux_executable_object_sha256": hashlib.sha256(executable_object.encode()).hexdigest(),
+            "amux_config_path_sha256": hashlib.sha256(os.fsencode(config)).hexdigest(),
+            "amux_config_directory_sha256": canonical_sha256(descriptor_evidence(directory_info)),
+            "workers_object_sha256": canonical_sha256(descriptor_evidence(workers_info)),
+            "workers_content_sha256": hashlib.sha256(raw).hexdigest(),
+            "shelves_object_sha256": canonical_sha256(
+                descriptor_evidence(shelves_info) if shelves_info is not None else {"availability": "missing"}
+            ),
+            "shelves_content_sha256": hashlib.sha256(shelves_raw).hexdigest(),
+            "migration_inputs_sha256": migration_inputs,
+        }
+        environment = {
+            "HOME": os.environ.get("HOME", "/"),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+            "TERM": os.environ.get("TERM", "dumb"),
+        }
+        evidence["amux_park_argv_sha256"] = canonical_sha256([
+            "verified-amux-descriptor", "--config-dir", "verified-config-descriptor",
+            "worker", "park", "--thread", origin,
+        ])
+        evidence["amux_environment_sha256"] = canonical_sha256(environment)
+        with materialized_quarantine_executable(
+            executable_fd, executable_object
+        ) as (execution_fd, executable_route), materialized_quarantine_config(
+            raw, shelves_raw if shelves_fd >= 0 else None
+        ) as (snapshot_directory_fd, snapshot_file_fds, config_route):
+            argv = [
+                executable_route, "--config-dir", config_route,
+                "worker", "park", "--thread", origin,
+            ]
+            inherited = (
+                execution_fd, snapshot_directory_fd,
+                *snapshot_file_fds,
+            )
+            for descriptor in inherited:
+                os.set_inheritable(descriptor, True)
+            yield evidence, argv, environment, inherited
+    except (OSError, UnicodeError, HelperError) as error:
+        raise HelperError("quarantine execution evidence is unavailable") from error
+    finally:
+        for descriptor in (shelves_fd, workers_fd, directory_fd, executable_fd):
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def quarantine_execution_evidence(request: dict[str, Any], origin: str) -> dict[str, str]:
+    with open_quarantine_execution_boundary(request, origin) as boundary:
+        return boundary[0]
+
+
+def quarantine_registered_store_evidence(path: str, expected_identity: str | None) -> tuple[str, bool]:
+    evidence: dict[str, Any] = {"availability": "missing"}
+    directory_descriptor = receipt_descriptor = lock_descriptor = -1
+    try:
+        directory_descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except (OSError, ValueError):
+        try:
+            observed = os.stat(path, follow_symlinks=False)
+        except (OSError, ValueError):
+            pass
+        else:
+            evidence = {"availability": "unsafe", "object": descriptor_evidence(observed)}
+        return canonical_sha256(evidence), False
+    try:
+        directory_info = os.fstat(directory_descriptor)
+        evidence = {
+            "availability": "observed", "directory": descriptor_evidence(directory_info),
+        }
+        try:
+            receipt_descriptor = os.open(
+                "receipts.json",
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=directory_descriptor,
+            )
+        except OSError:
+            evidence["receipt"] = "unavailable"
+            return canonical_sha256(evidence), False
+        receipt_info = os.fstat(receipt_descriptor)
+        evidence["receipt"] = descriptor_evidence(receipt_info)
+        raw: bytes | None = None
+        if stat.S_ISREG(receipt_info.st_mode):
+            try:
+                raw = read_stable_descriptor(
+                    receipt_descriptor, MAX_STORE_BYTES, "quarantine registered receipt store"
+                )
+            except HelperError:
+                evidence["content"] = "unavailable"
+            else:
+                evidence["content_sha256"] = hashlib.sha256(raw).hexdigest()
+        valid = raw is not None
+        if valid:
+            try:
+                decode_receipt_store(raw)
+            except HelperError:
+                valid = False
+        if expected_identity is not None:
+            valid = valid and (
+                directory_identity(directory_info) == expected_identity
+                and directory_info.st_uid == os.geteuid()
+                and stat.S_IMODE(directory_info.st_mode) == 0o700
+                and receipt_info.st_uid == os.geteuid()
+                and stat.S_IMODE(receipt_info.st_mode) == 0o600
+            )
+            try:
+                lock_descriptor = open_owner_private_file_at(
+                    directory_descriptor, "experimental.lock", "legacy receipt lock"
+                )
+            except HelperError:
+                valid = False
+        return canonical_sha256(evidence), valid
+    finally:
+        for descriptor in (lock_descriptor, receipt_descriptor, directory_descriptor):
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def quarantine_evidence(
+    store: ReceiptStore,
+    request: dict[str, Any],
+    *,
+    lifecycle_raw: bytes | None = None,
+    lifecycle: dict[str, Any] | None = None,
+    execution_evidence: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    origin = exact_canonical_amp_thread_id(request.get("origin_thread"))
+    if request.get("provider") != "claude" or request.get("action") != "park":
+        raise HelperError("quarantine authority is unsupported")
+    store_sha = required_string(request, "registered_store_sha256", 64)
+    if not re.fullmatch(r"[0-9a-f]{64}", store_sha):
+        raise HelperError("quarantine store selector is invalid")
+    manifest = quarantine_artifact_manifest(request.get("artifacts"))
+    if lifecycle_raw is None:
+        try:
+            lifecycle_raw, _ = read_owner_private_regular_file(
+                store.lifecycle.path, MAX_STORE_BYTES, "quarantine lifecycle registry"
+            )
+        except HelperError as error:
+            raise HelperError("quarantine lifecycle evidence is unavailable") from error
+    if lifecycle is None:
+        lifecycle = decode_lifecycle_registry(lifecycle_raw)
+    matches = [path for path in lifecycle["stores"] if hashlib.sha256(path.encode()).hexdigest() == store_sha]
+    if len(matches) != 1:
+        raise HelperError("quarantine registered store evidence is unavailable")
+    path = matches[0]
+    expected = lifecycle["legacy_store_objects"].get(path)
+    store_evidence, valid = quarantine_registered_store_evidence(path, expected)
+    if valid:
+        raise HelperError("quarantine requires invalid or unavailable registered store evidence")
+    result = {
+        "schema_version": 1,
+        "reason": "receipt_store_invalid_or_unavailable",
+        "provider": "claude",
+        "action": "park",
+        "origin_thread_sha256": hashlib.sha256(origin.encode()).hexdigest(),
+        "registered_store_sha256": store_sha,
+        "registered_store_registration_sha256": canonical_sha256({
+            "kind": "registered_object" if expected is not None else "canonical_path_registration",
+            "identity": expected or store_sha,
+        }),
+        "registered_store_evidence_sha256": store_evidence,
+        "lifecycle_sha256": hashlib.sha256(lifecycle_raw).hexdigest(),
+        "artifact_manifest_sha256": canonical_sha256(manifest),
+    }
+    result.update(execution_evidence or quarantine_execution_evidence(request, origin))
+    return result
+
+
+def quarantine_plan(store: ReceiptStore, request: dict[str, Any]) -> dict[str, Any]:
+    reject_unknown(request, {"origin_thread", "provider", "action", "registered_store_sha256", "artifacts", "amux_executable", "amux_config_dir"}, "quarantine plan")
+    evidence = quarantine_evidence(store, request)
+    evidence["planned_at"] = utc_now()
+    evidence["plan_sha256"] = canonical_sha256(evidence)
+    origin = exact_canonical_amp_thread_id(request.get("origin_thread"))
+    return {
+        "action": "quarantine_plan", "outcome": "ready",
+        "operation_sha256": quarantine_operation_id(origin), "plan": evidence,
+    }
+
+
+def execute_core_worker_park(argv: list[str], environment: dict[str, str], pass_fds: tuple[int, ...]) -> None:
+    try:
+        if platform.system() == "Darwin":
+            if (
+                not os.path.samestat(
+                    os.stat(argv[0], follow_symlinks=False), os.fstat(pass_fds[0])
+                )
+                or not os.path.samestat(
+                    os.stat(argv[2], follow_symlinks=False), os.fstat(pass_fds[1])
+                )
+            ):
+                raise HelperError("exact worker park outcome is indeterminate")
+        completed = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=30, check=False, env=environment, pass_fds=pass_fds,
+            executable=argv[0],
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired, HelperError) as error:
+        raise HelperError("exact worker park outcome is indeterminate") from error
+    if completed.returncode != 0:
+        raise HelperError("exact worker park outcome is indeterminate")
+
+
+def validate_quarantine_plan(value: Any) -> dict[str, Any]:
+    fields = {
+        "schema_version", "reason", "provider", "action", "origin_thread_sha256",
+        "registered_store_sha256", "registered_store_registration_sha256",
+        "registered_store_evidence_sha256", "lifecycle_sha256",
+        "artifact_manifest_sha256", "planned_at", "plan_sha256",
+        "amux_executable_path_sha256", "amux_executable_object_sha256",
+        "amux_config_path_sha256", "amux_config_directory_sha256",
+        "workers_object_sha256", "workers_content_sha256",
+        "shelves_object_sha256", "shelves_content_sha256",
+        "migration_inputs_sha256",
+        "amux_park_argv_sha256", "amux_environment_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise HelperError("quarantine plan is invalid")
+    if (
+        value.get("schema_version") != 1
+        or value.get("reason") != "receipt_store_invalid_or_unavailable"
+        or value.get("provider") != "claude"
+        or value.get("action") != "park"
+    ):
+        raise HelperError("quarantine plan is invalid")
+    for field in fields - {"schema_version", "reason", "provider", "action", "planned_at"}:
+        if not re.fullmatch(r"[0-9a-f]{64}", str(value.get(field, ""))):
+            raise HelperError("quarantine plan is invalid")
+    planned_at = required_string(value, "planned_at", 64)
+    try:
+        parsed_at = datetime.fromisoformat(planned_at.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise HelperError("quarantine plan is invalid") from error
+    if not planned_at.endswith("Z") or parsed_at.tzinfo is None:
+        raise HelperError("quarantine plan is invalid")
+    if canonical_sha256({key: nested for key, nested in value.items() if key != "plan_sha256"}) != value["plan_sha256"]:
+        raise HelperError("quarantine plan is invalid")
+    return copy.deepcopy(value)
+
+
+def validate_quarantine_authorization(value: Any, plan_sha256: str) -> dict[str, str]:
+    fields = {"decision", "plan_sha256", "authorization_sha256", "authorized_at"}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise HelperError("quarantine authorization is invalid")
+    if value.get("decision") != "park" or value.get("plan_sha256") != plan_sha256:
+        raise HelperError("quarantine authorization is invalid")
+    for field in {"plan_sha256", "authorization_sha256"}:
+        if not re.fullmatch(r"[0-9a-f]{64}", str(value.get(field, ""))):
+            raise HelperError("quarantine authorization is invalid")
+    authorized_at = required_string(value, "authorized_at", 64)
+    try:
+        parsed_at = datetime.fromisoformat(authorized_at.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise HelperError("quarantine authorization is invalid") from error
+    if not authorized_at.endswith("Z") or parsed_at.tzinfo is None:
+        raise HelperError("quarantine authorization is invalid")
+    return copy.deepcopy(value)
+
+
+def decode_quarantine_records(raw: bytes) -> dict[str, Any]:
+    try:
+        records = json.loads(raw, object_pairs_hook=reject_duplicate_json_pairs)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise HelperError("quarantine metadata is unavailable") from error
+    if not isinstance(records, dict) or set(records) != {"schema_version", "receipts"}:
+        raise HelperError("quarantine metadata is unavailable")
+    receipts = records.get("receipts")
+    if records.get("schema_version") != 1 or not isinstance(receipts, list):
+        raise HelperError("quarantine metadata is unavailable")
+    operation_ids: set[str] = set()
+    for receipt in receipts:
+        if not isinstance(receipt, dict):
+            raise HelperError("quarantine metadata is unavailable")
+        state = receipt.get("state")
+        fields = {
+            "operation_id", "state", "plan", "owner_authorization", "created_at",
+            "fence_operation_id", "fence_sha256", "lifecycle_post_sha256",
+        }
+        if state == "completed":
+            fields.add("completed_at")
+        if set(receipt) != fields:
+            raise HelperError("quarantine metadata is unavailable")
+        operation_id = required_string(receipt, "operation_id", 64)
+        if not re.fullmatch(r"[0-9a-f]{64}", operation_id) or operation_id in operation_ids:
+            raise HelperError("quarantine metadata is unavailable")
+        if state not in {"intent", "completed"}:
+            raise HelperError("quarantine metadata is unavailable")
+        plan = validate_quarantine_plan(receipt.get("plan"))
+        validate_quarantine_authorization(receipt.get("owner_authorization"), plan["plan_sha256"])
+        for field in {"created_at", *(set(receipt) & {"completed_at"})}:
+            timestamp = required_string(receipt, field, 64)
+            try:
+                parsed_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError as error:
+                raise HelperError("quarantine metadata is unavailable") from error
+            if not timestamp.endswith("Z") or parsed_at.tzinfo is None:
+                raise HelperError("quarantine metadata is unavailable")
+        expected_operation = hashlib.sha256(
+            ("claude-quarantine\0claude\0park\0" + plan["origin_thread_sha256"]).encode()
+        ).hexdigest()
+        if operation_id != expected_operation:
+            raise HelperError("quarantine metadata is unavailable")
+        for field in {"fence_operation_id", "fence_sha256", "lifecycle_post_sha256"}:
+            if not re.fullmatch(r"[0-9a-f]{64}", str(receipt.get(field, ""))):
+                raise HelperError("quarantine metadata is unavailable")
+        operation_ids.add(operation_id)
+    return records
+
+
+def load_quarantine_records(path: pathlib.Path) -> dict[str, Any]:
+    try:
+        os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return {"schema_version": 1, "receipts": []}
+    except OSError as error:
+        raise HelperError("quarantine metadata is unavailable") from error
+    raw, _ = read_owner_private_regular_file(path, MAX_STORE_BYTES, "quarantine metadata")
+    return decode_quarantine_records(raw)
+
+
+def load_quarantine_records_at(directory_descriptor: int) -> dict[str, Any]:
+    try:
+        descriptor, raw, _ = open_quarantine_file_at(
+            directory_descriptor, "claude-quarantine.json", MAX_STORE_BYTES,
+            "quarantine metadata", private=True,
+        )
+    except HelperError as error:
+        cause = error.__cause__
+        if isinstance(cause, OSError) and cause.errno == errno.ENOENT:
+            return {"schema_version": 1, "receipts": []}
+        raise
+    try:
+        return decode_quarantine_records(raw)
+    finally:
+        os.close(descriptor)
+
+
+def load_lifecycle_at(directory_descriptor: int) -> tuple[bytes, dict[str, Any]]:
+    descriptor, raw, _ = open_quarantine_file_at(
+        directory_descriptor, "lifecycle.json", MAX_STORE_BYTES,
+        "quarantine lifecycle registry", private=True,
+    )
+    try:
+        return raw, decode_lifecycle_registry(raw)
+    finally:
+        os.close(descriptor)
+
+
+def quarantine_operation_id(origin: str) -> str:
+    origin_sha = hashlib.sha256(origin.encode()).hexdigest()
+    return hashlib.sha256(
+        ("claude-quarantine\0claude\0park\0" + origin_sha).encode()
+    ).hexdigest()
+
+
+def valid_utc_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not value.endswith("Z") or len(value.encode()) > 64:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
+def validate_quarantine_fence(
+    fence: Any, fence_operation: str, operation_id: str | None = None
+) -> dict[str, Any]:
+    ordinary_fields = {"operation_id", "created_at"}
+    quarantine_fields = ordinary_fields | {
+        "quarantine_operation_id", "quarantine_plan_sha256",
+        "quarantine_authorization_sha256", "quarantine_intent_at",
+    }
+    if (
+        not isinstance(fence, dict)
+        or (set(fence) != ordinary_fields and set(fence) != quarantine_fields)
+    ):
+        raise HelperError("durable origin fence is invalid")
+    if fence.get("operation_id") != fence_operation or not valid_utc_timestamp(fence.get("created_at")):
+        raise HelperError("durable origin fence is invalid")
+    if set(fence) == quarantine_fields:
+        for field in {
+            "quarantine_operation_id", "quarantine_plan_sha256",
+            "quarantine_authorization_sha256",
+        }:
+            if not re.fullmatch(r"[0-9a-f]{64}", str(fence.get(field, ""))):
+                raise HelperError("durable origin fence is invalid")
+        if not valid_utc_timestamp(fence.get("quarantine_intent_at")):
+            raise HelperError("durable origin fence is invalid")
+        if operation_id is not None and fence["quarantine_operation_id"] != operation_id:
+            raise HelperError("durable origin fence conflicts with quarantine authority")
+    return fence
+
+
+def quarantine_blocked(operation_id: str, blocker: str) -> dict[str, str]:
+    return {
+        "action": "quarantine_apply", "outcome": "blocked",
+        "blocker": blocker, "operation_sha256": operation_id,
+    }
+
+
+def quarantine_apply(store: ReceiptStore, request: dict[str, Any], park_executor: Any = execute_core_worker_park) -> dict[str, Any]:
+    reject_unknown(request, {"origin_thread", "provider", "action", "registered_store_sha256", "artifacts", "amux_executable", "amux_config_dir", "plan", "owner_authorization", "recover"}, "quarantine apply")
+    if "recover" in request and not isinstance(request["recover"], bool):
+        raise HelperError("quarantine recovery selector is invalid")
+    plan = validate_quarantine_plan(request.get("plan"))
+    authorization = validate_quarantine_authorization(
+        request.get("owner_authorization"), plan["plan_sha256"]
+    )
+    comparable = {
+        key: value for key, value in plan.items() if key not in {"planned_at", "plan_sha256"}
+    }
+    origin = exact_canonical_amp_thread_id(request.get("origin_thread"))
+    if request.get("provider") != "claude" or request.get("action") != "park":
+        raise HelperError("quarantine authority is unsupported")
+    operation_id = quarantine_operation_id(origin)
+    with quarantine_lifecycle_lock(store.lifecycle) as (
+        lifecycle_directory_descriptor, lifecycle_directory_info,
+    ):
+        lifecycle_raw, lifecycle = load_lifecycle_at(lifecycle_directory_descriptor)
+        fence_operation = hashlib.sha256(("worker-teardown\0" + origin).encode()).hexdigest()
+        _, existing_fence, _ = ensure_teardown_fence(
+            lifecycle, origin, normalize_existing=True
+        )
+        existing_fence = validate_quarantine_fence(
+            existing_fence, fence_operation, operation_id
+        )
+        # Replay precedes evidence admission: once intent exists, no changed evidence can
+        # authorize another external action for this canonical origin.
+        records = load_quarantine_records_at(lifecycle_directory_descriptor)
+        prior = next((item for item in records.get("receipts", []) if item.get("operation_id") == operation_id), None)
+        if prior is not None:
+            if prior.get("plan") != plan or prior.get("owner_authorization") != authorization:
+                raise HelperError("quarantine operation conflicts with its original authority")
+            if prior.get("state") == "completed":
+                return {"action": "quarantine_apply", "outcome": "duplicate", "operation_sha256": operation_id}
+            if not request.get("recover"):
+                raise HelperError("quarantine park is indeterminate; explicit recovery is required")
+            # The external park may already have happened. Never authorize a second action.
+            return quarantine_blocked(operation_id, "park_outcome_indeterminate")
+        if existing_fence is not None and "quarantine_operation_id" in existing_fence:
+            return quarantine_blocked(operation_id, "park_outcome_indeterminate")
+        current = quarantine_evidence(
+            store, request, lifecycle_raw=lifecycle_raw, lifecycle=lifecycle
+        )
+        if current != comparable:
+            raise HelperError("quarantine bound evidence changed")
+        fence = existing_fence
+        fence.update({
+            "quarantine_operation_id": operation_id,
+            "quarantine_plan_sha256": plan["plan_sha256"],
+            "quarantine_authorization_sha256": canonical_sha256(authorization),
+            "quarantine_intent_at": utc_now(),
+        })
+        lifecycle_post = encode_lifecycle_registry(lifecycle)
+        write_private_bytes_at(
+            lifecycle_directory_descriptor, "lifecycle.json", lifecycle_post
+        )
+        fence_sha = canonical_sha256(fence)
+        lifecycle_post_sha = hashlib.sha256(lifecycle_post).hexdigest()
+        receipt = {
+            "operation_id": operation_id, "state": "intent", "plan": plan,
+            "owner_authorization": authorization, "created_at": utc_now(),
+            "fence_operation_id": fence_operation, "fence_sha256": fence_sha,
+            "lifecycle_post_sha256": lifecycle_post_sha,
+        }
+        records["receipts"].append(receipt)
+        write_private_bytes_at(
+            lifecycle_directory_descriptor, "claude-quarantine.json", encode_private_json(records)
+        )
+        park_returned = False
+        try:
+            final_lifecycle_raw, final_lifecycle = load_lifecycle_at(
+                lifecycle_directory_descriptor
+            )
+            if hashlib.sha256(final_lifecycle_raw).hexdigest() != lifecycle_post_sha:
+                return quarantine_blocked(
+                    operation_id, "quarantine_bound_evidence_changed"
+                )
+            final_fence = canonical_fence(final_lifecycle, origin)
+            if final_fence is None or canonical_sha256(final_fence) != fence_sha:
+                return quarantine_blocked(
+                    operation_id, "quarantine_bound_evidence_changed"
+                )
+            current_directory = os.stat(
+                store.lifecycle.state_dir, follow_symlinks=False
+            )
+            if not os.path.samestat(lifecycle_directory_info, current_directory):
+                return quarantine_blocked(
+                    operation_id, "quarantine_bound_evidence_changed"
+                )
+            with open_quarantine_execution_boundary(request, origin) as boundary:
+                execution_evidence, argv, environment, pass_fds = boundary
+                final = quarantine_evidence(
+                    store, request,
+                    lifecycle_raw=final_lifecycle_raw,
+                    lifecycle=final_lifecycle,
+                    execution_evidence=execution_evidence,
+                )
+                if any(
+                    final[key] != value
+                    for key, value in comparable.items()
+                    if key != "lifecycle_sha256"
+                ):
+                    return quarantine_blocked(
+                        operation_id, "quarantine_bound_evidence_changed"
+                    )
+                try:
+                    park_executor(argv, environment, pass_fds)
+                    park_returned = True
+                except Exception:
+                    return quarantine_blocked(operation_id, "park_outcome_indeterminate")
+        except Exception:
+            if park_returned:
+                return quarantine_blocked(operation_id, "park_outcome_indeterminate")
+            return quarantine_blocked(operation_id, "quarantine_bound_evidence_changed")
+        receipt["state"] = "completed"
+        receipt["completed_at"] = utc_now()
+        try:
+            write_private_bytes_at(
+                lifecycle_directory_descriptor,
+                "claude-quarantine.json",
+                encode_private_json(records),
+            )
+        except Exception:
+            return quarantine_blocked(operation_id, "park_outcome_indeterminate")
+    return {"action": "quarantine_apply", "outcome": "parked", "operation_sha256": operation_id}
+
+
+def quarantine_inspect(store: ReceiptStore, request: dict[str, Any]) -> dict[str, Any]:
+    reject_unknown(request, {"operation_sha256"}, "quarantine inspect")
+    operation_id = required_string(request, "operation_sha256", 64)
+    if not re.fullmatch(r"[0-9a-f]{64}", operation_id):
+        raise HelperError("quarantine receipt is unavailable")
+    with quarantine_lifecycle_lock(store.lifecycle) as (directory_descriptor, _):
+        records = load_quarantine_records_at(directory_descriptor)
+        receipt = next(
+            (item for item in records["receipts"] if item["operation_id"] == operation_id), None
+        )
+    if receipt is None:
+        raise HelperError("quarantine receipt is unavailable")
+    return {"action": "quarantine_inspect", "outcome": "unresolved", "operation_sha256": operation_id, "state": receipt.get("state"), "reason": "receipt_store_invalid_or_unavailable"}
 
 
 def valid_worker_lifecycle_chain(receipt: dict[str, Any], parked: bool) -> bool:
@@ -6701,6 +7839,11 @@ def parser() -> argparse.ArgumentParser:
     lifecycle_commands.add_parser("retire-live-indeterminate-pair")
     lifecycle_commands.add_parser("retire-live-acquired-no-report-pair")
     lifecycle_commands.add_parser("dispose-exact-pre-identity-acquired-pair")
+    quarantine = commands.add_parser("quarantine")
+    quarantine_commands = quarantine.add_subparsers(dest="command", required=True)
+    quarantine_commands.add_parser("plan")
+    quarantine_commands.add_parser("apply")
+    quarantine_commands.add_parser("inspect")
     commands.add_parser("diagnose")
     return root
 
@@ -6715,6 +7858,19 @@ def main() -> int:
     else:
         lifecycle_state_dir = default_state_dir().expanduser().resolve()
     store = ReceiptStore(state_dir, lifecycle_state_dir)
+    if arguments.area == "quarantine":
+        request = read_input()
+        try:
+            if arguments.command == "plan":
+                result = quarantine_plan(store, request)
+            elif arguments.command == "apply":
+                result = quarantine_apply(store, request)
+            else:
+                result = quarantine_inspect(store, request)
+        except HelperError:
+            result = {"action": "quarantine_" + arguments.command, "outcome": "blocked", "blocker": "quarantine_evidence_invalid_or_unavailable"}
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 2 if result["outcome"] == "blocked" else 0
     if arguments.area == "mcp" and arguments.command == "serve":
         return serve_mcp(store, arguments.delegation_id)
     if arguments.area == "launch" and arguments.command == "transport":
