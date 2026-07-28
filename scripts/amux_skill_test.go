@@ -188,7 +188,7 @@ func TestExperimentalPiRoutesStayProviderSpecificAndFailClosed(t *testing.T) {
 	if !strings.Contains(skill, localPhysicalTrigger) || !strings.Contains(triggers, localPhysicalTrigger) {
 		t.Error("explicit physical-runner + dedicated worktree/tmux + no-Orb request is not recognized as the local route")
 	}
-	for _, required := range []string{"physical-host helper", "Pi 0.82.1", "Node `>=22.19.0`", "models-store.json", "rejects an `openai-codex` entry", "one tracked file", "not authority for arbitrary local work"} {
+	for _, required := range []string{"physical-host helper", "Pi 0.82.1", "Node `>=22.19.0`", "normal managed provider-catalog cache is allowed", "one tracked file", "not authority for arbitrary local work"} {
 		if !strings.Contains(skill, required) {
 			t.Errorf("local physical-host route is missing bound %q", required)
 		}
