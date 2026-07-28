@@ -99,7 +99,7 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 	}
 }
 
-func TestExperimentalPiSparkOrbRecipeStaysProviderSpecificAndFailClosed(t *testing.T) {
+func TestExperimentalPiRoutesStayProviderSpecificAndFailClosed(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux-pi", "SKILL.md"))
@@ -115,6 +115,12 @@ func TestExperimentalPiSparkOrbRecipeStaysProviderSpecificAndFailClosed(t *testi
 	}
 	if !strings.Contains(skill, "reference/pi-spark-orb-executor.md") || !strings.Contains(triggers, "pi-spark-orb-executor.md") {
 		t.Error("Pi/Spark reference is missing from skill routing or trigger checklist")
+	}
+	if !strings.Contains(skill, "Spike one bounded local file replacement") || !strings.Contains(triggers, "Spike one bounded local file replacement") {
+		t.Error("local Pi replacement trigger is missing from skill routing or trigger checklist")
+	}
+	if !strings.Contains(skill, "experimental/pi-spark-local") || !strings.Contains(triggers, "experimental/pi-spark-local") {
+		t.Error("local Pi replacement route is missing from skill routing or trigger checklist")
 	}
 	for _, required := range []string{
 		"openai-codex/gpt-5.3-codex-spark",
