@@ -109,3 +109,9 @@ If interruption leaves `acquired_retirement_intent` without `acquired_pair_retir
 ## Capacity or usage interruption
 
 Record the factual `unavailable` or `untested` capability and pause. Capacity diagnostics are implementation inputs, not permission to select Claude autonomously, exceed a reserve, or claim a useful result.
+
+## Fresh-Orb mutating recovery
+
+Fresh-Orb mutation uses the separate `fresh_orb_workflow.py` receipt and never local tmux acquisition, parking, retirement, quarantine, or paired-worker teardown. Inspect the exact operation with `show`; resume only the next unrecorded stage. Replay an interrupted event only with its same event ID and exact payload. Changed identity or payload, a second launch, absent transfer, corrupt bundle, dirty/divergent handoff, failed independent check, or indeterminate process evidence remains unresolved.
+
+Preserve coordinator receipt and packet before mutation authority and preserve the transferred handoff before Orb disposal. Semantic completion, process termination/absence, transfer, verification, isolated-check attestation, delivery, notification, owner acknowledgement, archive authority/result, and cleanup authority/result never imply one another. Never describe headless absence as parking. Archive and cleanup remain unavailable before acknowledgement; both require fresh exact identity and clean-HEAD validation, while cleanup also requires process absence. Cleanup is external and never automatic. Preserve each failed attempt as durable non-success; a later retry needs fresh authorization and appends success or failure without overwriting history.
