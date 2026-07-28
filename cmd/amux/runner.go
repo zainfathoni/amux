@@ -171,6 +171,17 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 			reconcilePIDDiagnostics[row.Workdir] = pidInspection.diagnostic
 		}
 	}
+	if lifecycleCommandStopsRunner(in.Command.Name) {
+		panes := make([]tmux.WindowPane, 0, len(rows))
+		for _, row := range rows {
+			if inspection := inspections[row.Workdir]; inspection.state == runnerPaneExact {
+				panes = append(panes, inspection.pane)
+			}
+		}
+		if err := preflightLifecycleExecutor("runner "+in.Command.Name, panes); err != nil {
+			return &env, result.Preflight(err)
+		}
+	}
 
 	restartFailed := false
 	for _, row := range rows {

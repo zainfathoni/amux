@@ -139,11 +139,14 @@ type RunnerDetails struct {
 }
 
 type WorkerDetails struct {
-	Workspace     string `json:"workspace"`
-	Window        string `json:"window"`
-	Workdir       string `json:"workdir"`
-	LocalState    string `json:"local_state"`
-	ReceiptSource string `json:"receipt_source,omitempty"`
+	Workspace         string `json:"workspace"`
+	Window            string `json:"window"`
+	Workdir           string `json:"workdir"`
+	LocalState        string `json:"local_state"`
+	ReceiptSource     string `json:"receipt_source,omitempty"`
+	NativeExecutor    string `json:"native_executor"`
+	NativeRunnerID    string `json:"native_runner_id"`
+	ExecutionAffinity string `json:"execution_affinity"`
 }
 
 type GroupDetails struct {

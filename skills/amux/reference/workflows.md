@@ -4,7 +4,7 @@ These are skill workflows. Only commands beginning with literal `amux` are CLI c
 
 ## Spawn a fresh worker
 
-Create one thread with Amp's authenticated native creation, delivering the complete task-only assignment in that creation request. Select `medium` unless the owner explicitly names another mode, and select `orb`, local execution where supported, or one exact Amp runner ID without fallback. Include one line naming the absolute path to the loaded skill's `reference/contract-v1.md` for a one-time read.
+Create one thread with Amp's authenticated native creation, delivering the complete task-only assignment in that creation request. Select `medium` unless the owner explicitly names another mode, and select `orb`, local execution where supported, or one exact Amp runner ID without fallback. Create it directly on the executor and workdir intended for the work. When physical files or local state matter, the assignment names the exact physical runner ID and canonical workdir; do not use Orb creation followed by physical adoption as migration. Adoption neither changes nor verifies continued affinity. Include one line naming the absolute path to the loaded skill's `reference/contract-v1.md` for a one-time read.
 
 Then adopt the exact returned thread:
 
@@ -13,7 +13,7 @@ amux --dry-run --json worker adopt --thread <exact-native-thread> --workspace <w
 amux --json worker adopt --thread <exact-native-thread> --workspace <workspace> --window <semantic-slug> --workdir <path> [--group <exact-group>]
 ```
 
-The coordinator makes one native creation invocation and preserves its authenticated request plus successful returned thread identity as the bounded receipt. Native creation does not return a prompt digest or separate delivery acknowledgement, so do not claim exactly-once delivery or independently re-prove it through amux. amux adoption owns only local catalog/group/tmux state: it sends no message, presses no Enter, parses no composer, and reads no transcript. If native creation is indeterminate, stop rather than creating another thread. `amux spawn` and `amux worker spawn` are removed tombstones; never use them to retry or reconcile legacy operation evidence.
+The coordinator makes one native creation invocation and preserves its authenticated request plus successful returned thread identity as the bounded receipt. Native creation does not return a prompt digest or separate delivery acknowledgement, so do not claim exactly-once delivery or independently re-prove it through amux. amux adoption owns only local catalog/group/tmux state: it sends no message, presses no Enter, parses no composer, reads no transcript, and does not re-home native execution. New adoption canonicalizes the owner-supplied workdir; doctor preserves legacy catalog spelling and never promotes a relative legacy value into a location claim. Adoption/doctor report native executor, runner ID, and execution affinity as `unknown` because those facts are not in amux's local source of truth; never infer them from its pane or workdir. If native creation is indeterminate, stop rather than creating another thread. `amux spawn` and `amux worker spawn` are removed tombstones; never use them to retry or reconcile legacy operation evidence.
 
 Runner identity is exact: Amp-native `runner(id)` selects that runner, while amux Runner means the separately configured local `amp --no-tui` process. Never substitute one for the other or fall back between them. Native creation currently provides no durable workdir/message receipt that amux can independently verify; retain the returned identity and stop on an indeterminate result.
 
@@ -29,9 +29,13 @@ Use an issue-bearing branch/worktree and an issue-unprefixed semantic window. Cr
 
 Durable group, report, and callback stores—not tmux text—are authoritative.
 
+Every durable task-group Lead title starts with `🎖️ `. Reserve that prefix for Leads and never deliberately apply it to member workers. The task Lead is the exact thread coordinating this task, independent of the group's authoritative coordinator role. The marker is presentation only: it conveys neither executor placement nor authoritative group role. Apply this convention independently of executor choice.
+
 ### 1. Preflight authoritative state and bootstrap the CLI
 
 Fetch `origin/main`; read issue bodies/comments and native parent/sub-issue/blocked-by/blocking relationships; compare active branches, PRs, worktrees, and likely file/API overlap. Establish one exact durable group and stable report ID before mutation. Resolve the loaded skill's `reference/contract-v1.md` to an absolute path (including installed roots such as `~/.agents/skills/amux`, `~/.config/agents/skills/amux`, or `~/.config/amp/skills/amux`); never send an unresolved relative path. Verify current help contains `group`, `callback`, `report`, and `worker adopt`; if not, build one absolute CLI path from a fresh `origin/main` archive and use it consistently—do not fall back to stale bare `amux`. Do not hand-edit registries. Treat the resolved group/report identity as immutable coordination input. No thread, worktree, group, callback, label, or report mutation may precede this step. Create branches/worktrees only after identity is fixed, and serialize mutations protected by the machine lock.
+
+After this preflight succeeds, set the exact durable task-group Lead title with `amp threads rename <lead-thread> "🎖️ <task-title>"`; do not rely on a generated title. If rename fails, preserve the exact native thread identity and caller-side receipt, create no replacement, and stop before group or adoption mutations.
 
 ### 2. Declare the group and register the verified coordinator lease
 
@@ -44,7 +48,7 @@ Independently verify the coordinator pane and returned lease identity. A restart
 
 ### 3. Native-create and adopt the authoritative thread
 
-Create a dedicated worktree from fresh `origin/main`. Native-create one thread with the task-only assignment, explicit executor, explicit mode, exact group/report binding, and the absolute path to `reference/contract-v1.md`. Then adopt the exact returned identity:
+Create a dedicated worktree from fresh `origin/main`. Native-create one thread on the executor/workdir intended for the work, with the task-only assignment naming any required physical runner ID and canonical workdir, explicit mode, exact group/report binding, and the absolute path to `reference/contract-v1.md`. Then adopt the exact returned identity; adoption neither changes nor verifies continued affinity. For dirty physical-worktree recovery, create on that exact physical runner or make a separate explicit handoff that preserves immutable physical-worker ownership; never imply that Orb-create → physical-adopt migrates execution.
 
 ```sh
 amux --dry-run --json worker adopt --thread <member-thread> --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --group <durable-issue-group>
@@ -93,6 +97,8 @@ amux report submit --report-id <stable-report-id> --group <durable-issue-group> 
 ```
 
 `merged` is terminal. The callback remains a wake-up; the coordinator inspects and acknowledges the merged event. Then the coordinator explicitly directs `/amux finish`. Finish verifies GitHub/Git/worktree/runner ownership, cleans the worktree and safe branch state, and invokes `amux teardown --thread <member-thread>` last. Group membership and report history survive teardown unless a separate explicit group removal is requested. Never force-delete a branch, infer finish from a callback, or release automatically.
+
+Run the final park/remove/teardown from a verified independent executor, never from the worker or runner transport being stopped. amux checks exact process incarnation and ancestry before mutation and fails closed for the whole invocation when any target relationship is ambiguous; pane names, cwd, and other presentation are not independence evidence. A rejected maintenance safety preflight reports the error without rewriting its prior checkpoint.
 
 ### 7. Coordinator-owned deadline queue
 
@@ -147,6 +153,8 @@ amux teardown --current
 Use `--thread <id>` for `amux` when current identity is unavailable. When the helper runs, both dry-runs must succeed before mutation. Paired execution fences the origin, may park only terminal-safe verified pairs, and never removes artifacts, worktrees, receipts, reports, or group history. Any unsafe pair blocks; stop without Amp teardown. Indeterminate recovery is owner-authorized via `/amux-claude` only.
 
 After paired success (or when no pair preflight applies), invoke `amux teardown` immediately. Teardown is worker-only and fails closed on ambiguous Amp identity. It archives the verified remote thread, removes worker and shelf configuration, and stops the verified local client; an already absent verified local process is a benign skip. Worker teardown remains the final action.
+
+Invoke teardown from a verified independent executor. The target worker cannot safely teardown the Amp transport executing its own command, and unavailable or changed process-incarnation/ancestry evidence blocks before archive, catalog, shelf, or tmux mutation.
 
 ## Finish a merged worker
 

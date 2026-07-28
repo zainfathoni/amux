@@ -17,7 +17,7 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/3423576da804a2578990d9a62791fc9fe46c5f3b/install.sh --output /tmp/install-dcg.sh
-          bash /tmp/install-dcg.sh --no-configure
+          bash /tmp/install-dcg.sh --version v0.6.7 --no-configure
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Scan repository
