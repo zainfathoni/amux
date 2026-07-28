@@ -25,7 +25,7 @@ func TestProviderOwnedInvalidStoreQuarantine(t *testing.T) {
 	}
 	script := `import copy, hashlib, importlib.util, json, pathlib, platform, sys, tempfile
 spec=importlib.util.spec_from_file_location("m", pathlib.Path(sys.argv[1])); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-root=pathlib.Path(tempfile.mkdtemp()); root.chmod(0o700); missing=root/"missing"
+root=pathlib.Path(tempfile.mkdtemp()).resolve(); root.chmod(0o700); missing=root/"missing"
 amux=root/"amux"; amux.write_bytes(b"#!/bin/sh\nexit 0\n"); amux.chmod(0o700)
 shadow=root/"shadow"; shadow.mkdir(); (shadow/"amux").write_text("PATH shadow must not run")
 config=root/"config"; config.mkdir(mode=0o700); (config/"workers.tsv").write_text("ws\twin\t/tmp\thttps://ampcode.com/threads/T-private-origin\nws\tother\t/tmp\tT-unrelated\n")
