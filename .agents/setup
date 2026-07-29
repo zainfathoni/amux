@@ -11,18 +11,6 @@ if ((${#missing_tools[@]})); then
 	sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git tmux
 fi
 
-if ! command -v dcg >/dev/null 2>&1; then
-	echo "Installing Destructive Command Guard..."
-	dcg_installer=$(mktemp)
-	trap 'rm -f "$dcg_installer"' EXIT
-	curl -fsSL \
-		https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/3423576da804a2578990d9a62791fc9fe46c5f3b/install.sh \
-		-o "$dcg_installer"
-	bash "$dcg_installer" --no-configure
-	rm -f "$dcg_installer"
-	trap - EXIT
-fi
-
 go_minor=$(awk '$1 == "go" { print $2; exit }' go.mod)
 case "$go_minor" in
 	[0-9]*.[0-9]*) ;;
@@ -80,5 +68,17 @@ export PATH="$HOME/.local/bin:$PATH"
 
 echo "Downloading Go module dependencies..."
 go mod download
+
+if ! command -v dcg >/dev/null 2>&1; then
+	echo "Installing Destructive Command Guard..."
+	dcg_installer=$(mktemp)
+	trap 'rm -f "$dcg_installer"' EXIT
+	curl -fsSL \
+		https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/3423576da804a2578990d9a62791fc9fe46c5f3b/install.sh \
+		-o "$dcg_installer"
+	bash "$dcg_installer" --no-configure
+	rm -f "$dcg_installer"
+	trap - EXIT
+fi
 
 echo "Orb setup complete: $(go version); $(tmux -V)"
