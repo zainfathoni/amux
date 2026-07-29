@@ -93,7 +93,7 @@ This opt-in mode creates absolute links under `~/.agents/skills`. Existing real 
 
 `/amux` teaches canonical selectors, side-effect boundaries, skill-only health/sprawl/finish workflows, and progressive disclosure via `reference/contract-v1.md` (workers read once) and `reference/deadline-v1.md` (deadlines only). Do not paste full protocol into spawn messages or reload the full skill on wake-ups. See the [dedicated skill guide](https://amux.zainf.dev/skill/).
 
-`/amux-claude` is a separate unstable skill for explicit Amp-to-Claude delegation (local thinker/writer and fresh-Orb Opus). It is not an `amux` lifecycle command, worker, runner, group member, or compatibility promise. `/amux-pi` is a separate disposable Pi/Spark Orb recipe. Neither installs with core `/amux` unless requested.
+`/amux-claude` is a separate unstable skill for explicit Amp-to-Claude delegation (local thinker/writer and fresh-Orb Opus). It is not an `amux` lifecycle command, worker, runner, group member, or compatibility promise. `/amux-pi` is a separate disposable Pi/Spark Orb recipe. Neither installs with core `/amux` unless requested. Consult the [provider executor readiness matrix](docs/provider-executor-readiness.md) before selecting either route; CLI support alone does not prove model, runtime, or mutation readiness.
 
 ## Quick start
 

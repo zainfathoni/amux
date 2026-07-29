@@ -61,7 +61,7 @@ REQUIRED_CLAUDE_FLAGS = [
     "--no-chrome", "--permission-mode", "--prompt-suggestions", "--session-id",
     "--setting-sources", "--settings", "--strict-mcp-config", "--tools",
 ]
-APPROVED_READ_ONLY_MODELS = {"claude-fable-5", "claude-opus-4-8"}
+APPROVED_READ_ONLY_MODELS = {"claude-fable-5", "claude-opus-5", "claude-opus-4-8"}
 MUTATING_MODEL = "claude-opus-4-8"
 
 

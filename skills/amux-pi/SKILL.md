@@ -7,6 +7,8 @@ description: "Experimental Pi on Spark for amux, either in a fresh Amp Orb or th
 
 Disposable provider-specific experiment. **Not** an amux CLI resource, worker, runner, or provider-neutral orchestration state.
 
+Before choosing an executor, consult the repository's [provider executor readiness matrix](https://github.com/zainfathoni/amux/blob/main/docs/provider-executor-readiness.md). Static recipe support and a physical-host smoke do not promote the distinct fresh-Orb or general-mutation routes.
+
 ## Route
 
 - **Run Pi on Spark in an Amp Orb**: only after an explicit owner request, load [`reference/pi-spark-orb-executor.md`](reference/pi-spark-orb-executor.md).

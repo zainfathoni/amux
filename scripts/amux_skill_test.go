@@ -592,6 +592,45 @@ func TestExperimentalClaudeDelegationReferencesStayNarrowAndConsistent(t *testin
 	}
 }
 
+func TestProviderExecutorReadinessMatrixIsLinkedAndKeepsAuthorityBoundaries(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	matrix := readSkillFile(t, root, filepath.Join("docs", "provider-executor-readiness.md"))
+	matrixURL := "https://github.com/zainfathoni/amux/blob/main/docs/provider-executor-readiness.md"
+	for _, skillPath := range []string{
+		filepath.Join("skills", "amux-claude", "SKILL.md"),
+		filepath.Join("skills", "amux-pi", "SKILL.md"),
+	} {
+		if skill := readSkillFile(t, root, skillPath); !strings.Contains(skill, matrixURL) {
+			t.Errorf("%s does not link the installed-skill-safe readiness matrix URL", skillPath)
+		}
+	}
+	for _, required := range []string{
+		"| Claude local Darwin read-only thinker | Proven experimental |",
+		"`claude-fable-5`, `claude-opus-5`, or `claude-opus-4-8`",
+		"| Claude local Darwin mutating Stage A | Conditional |",
+		"| Claude fresh-Orb mutation | Blocked |",
+		"| Claude operator-assisted local tmux adoption | Proven experimental |",
+		"| Pi physical-host bounded replacement | Proven experimental |",
+		"| Pi fresh-Orb Spark | Runtime-unverified |",
+		"| Pi general repository mutation | Unsupported |",
+	} {
+		if !strings.Contains(matrix, required) {
+			t.Errorf("provider executor readiness matrix is missing %q", required)
+		}
+	}
+	for _, line := range strings.Split(matrix, "\n") {
+		if strings.HasPrefix(line, "| Claude local Darwin mutating Stage A |") &&
+			(!strings.Contains(line, "Exact `claude-opus-4-8` only") || strings.Contains(line, "claude-opus-5")) {
+			t.Errorf("mutating Claude readiness row broadened beyond exact Opus 4.8: %s", line)
+		}
+		if strings.HasPrefix(line, "| Claude operator-assisted local tmux adoption |") &&
+			(!strings.Contains(line, "Exact owner-confirmed `claude-opus-5` only") || strings.Contains(line, "claude-opus-4-8")) {
+			t.Errorf("operator-assisted Claude adoption row does not retain exact Opus 5: %s", line)
+		}
+	}
+}
+
 func TestClaudeOpusOrbExecutorRecipeStaysProviderSpecificAndBounded(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)

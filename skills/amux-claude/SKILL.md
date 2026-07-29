@@ -9,6 +9,8 @@ Unstable skill-owned Claude delegation. **Not** an `amux` worker, runner, group 
 
 Core Amp lifecycle remains `/amux`. Paired worker teardown and finish in `/amux` call into this skill's lifecycle helper when Claude pairs may exist.
 
+Before choosing an executor, consult the repository's [provider executor readiness matrix](https://github.com/zainfathoni/amux/blob/main/docs/provider-executor-readiness.md). A CLI flag, model name, or prior run does not broaden the route-specific authority recorded there.
+
 ## Route triggers
 
 - **Delegate read-only analysis to Claude**: load [`reference/claude-read-only-delegation.md`](reference/claude-read-only-delegation.md).
