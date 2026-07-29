@@ -596,6 +596,7 @@ func TestProviderExecutorReadinessMatrixIsLinkedAndKeepsAuthorityBoundaries(t *t
 	t.Parallel()
 	root := repoRoot(t)
 	matrix := readSkillFile(t, root, filepath.Join("docs", "provider-executor-readiness.md"))
+	promotion := readSkillFile(t, root, filepath.Join("docs", "proposals", "issue-309-read-only-claude-cli-promotion-gate.md"))
 	matrixURL := "https://github.com/zainfathoni/amux/blob/main/docs/provider-executor-readiness.md"
 	for _, skillPath := range []string{
 		filepath.Join("skills", "amux-claude", "SKILL.md"),
@@ -618,6 +619,21 @@ func TestProviderExecutorReadinessMatrixIsLinkedAndKeepsAuthorityBoundaries(t *t
 		if !strings.Contains(matrix, required) {
 			t.Errorf("provider executor readiness matrix is missing %q", required)
 		}
+	}
+	for _, required := range []string{
+		"decision: repeat-keep-experimental",
+		"Do not add a stable Go `amux` command",
+		"one accepted real delivery or lifecycle failure recovered",
+		"existing-receipt coexistence or migration semantics",
+		"one demonstrated reliability problem or trusted additional consumer",
+		"It is not proof of OS-level filesystem confinement",
+	} {
+		if !strings.Contains(promotion, required) {
+			t.Errorf("read-only Claude CLI promotion decision is missing %q", required)
+		}
+	}
+	if !strings.Contains(matrix, "[#309](https://github.com/zainfathoni/amux/issues/309) keeps the Go CLI promotion gate at `repeat`") {
+		t.Error("Darwin read-only readiness row does not link the repeat promotion decision")
 	}
 	for _, line := range strings.Split(matrix, "\n") {
 		if strings.HasPrefix(line, "| Claude local Darwin mutating Stage A |") &&
