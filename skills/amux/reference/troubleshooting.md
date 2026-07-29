@@ -16,7 +16,7 @@ Do not treat a tmux server command, name similarity, or stale output as ownershi
 
 ## Partial success and retries
 
-Exit `1` means mutation may have started. Inspect `successful`, `skipped`, and `failed`, then inspect config, tmux, Git worktrees, and remote thread state before retrying. Exit `2` means request/preflight rejection before mutation. Both spawn aliases always exit `2`; follow their guidance to create a thread natively and run `amux worker adopt --thread <thread> --workspace <workspace> --window <window> --workdir <workdir>`. Never retry, reconcile, convert, delete, or mark successful a preserved legacy spawn operation record.
+Exit `1` means mutation may have started. Inspect `successful`, `skipped`, and `failed`, then inspect config, tmux, Git worktrees, and remote thread state before retrying. Exit `2` means request/preflight rejection before mutation. A projectless physical-host spawn failure after thread creation prints the exact thread and requested/created tmux identity; preserve both and stop. Never rerun it blindly, archive the thread, kill the window, repaste, or press Enter again. Never retry, reconcile, convert, delete, or mark successful a preserved legacy spawn operation record.
 
 `shelve` records intent before remote archive and local park. `unshelve` removes intent only after remote unarchive. Visible partial synchronization is retryable desired state, not a reason to roll back by hand.
 

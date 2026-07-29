@@ -4,7 +4,7 @@ These are skill workflows. Only commands beginning with literal `amux` are CLI c
 
 ## Spawn a fresh worker
 
-Create one thread with Amp's authenticated native creation, delivering the complete task-only assignment in that creation request. Select `medium` unless the owner explicitly names another mode, and select `orb`, local execution where supported, or one exact Amp runner ID without fallback. Create it directly on the executor and workdir intended for the work. When physical files or local state matter, the assignment names the exact physical runner ID and canonical workdir; do not use Orb creation followed by physical adoption as migration. Adoption neither changes nor verifies continued affinity. Include one line naming the absolute path to the loaded skill's `reference/contract-v1.md` for a one-time read.
+For an Amp Workspace Project, create one thread with Amp's authenticated native creation, delivering the complete task-only assignment in that creation request. Select `medium` unless the owner explicitly names another mode, and select `orb`, local execution where supported, or one exact Amp runner ID without fallback. Create it directly on the executor and workdir intended for the work. When physical files or local state matter, the assignment names the exact physical runner ID and canonical workdir; do not use Orb creation followed by physical adoption as migration. Adoption neither changes nor verifies continued affinity. Include one line naming the absolute path to the loaded skill's `reference/contract-v1.md` for a one-time read.
 
 Then adopt the exact returned thread:
 
@@ -13,7 +13,16 @@ amux --dry-run --json worker adopt --thread <exact-native-thread> --workspace <w
 amux --json worker adopt --thread <exact-native-thread> --workspace <workspace> --window <semantic-slug> --workdir <path> [--group <exact-group>]
 ```
 
-The coordinator makes one native creation invocation and preserves its authenticated request plus successful returned thread identity as the bounded receipt. Native creation does not return a prompt digest or separate delivery acknowledgement, so do not claim exactly-once delivery or independently re-prove it through amux. amux adoption owns only local catalog/group/tmux state: it sends no message, presses no Enter, parses no composer, reads no transcript, and does not re-home native execution. New adoption canonicalizes the owner-supplied workdir; doctor preserves legacy catalog spelling and never promotes a relative legacy value into a location claim. Adoption/doctor report native executor, runner ID, and execution affinity as `unknown` because those facts are not in amux's local source of truth; never infer them from its pane or workdir. If native creation is indeterminate, stop rather than creating another thread. `amux spawn` and `amux worker spawn` are removed tombstones; never use them to retry or reconcile legacy operation evidence.
+The coordinator makes one native creation invocation and preserves its authenticated request plus successful returned thread identity as the bounded receipt. Native creation does not return a prompt digest or separate delivery acknowledgement, so do not claim exactly-once delivery or independently re-prove it through amux. amux adoption owns only local catalog/group/tmux state: it sends no message, presses no Enter, parses no composer, reads no transcript, and does not re-home native execution. New adoption canonicalizes the owner-supplied workdir; doctor preserves legacy catalog spelling and never promotes a relative legacy value into a location claim. Adoption/doctor report native executor, runner ID, and execution affinity as `unknown` because those facts are not in amux's local source of truth; never infer them from its pane or workdir. If native creation is indeterminate, stop rather than creating another thread.
+
+For a projectless repository that is not an Amp Workspace Project but already has one exact live local physical runner, use the lean local exception:
+
+```sh
+amux --dry-run --json spawn --runner-id <exact-native-id> --workdir <canonical-path> --workspace <workspace> --window <semantic-slug> [--group <existing-group>] --mode medium --prompt-file -
+amux --json spawn --runner-id <exact-native-id> --workdir <canonical-path> --workspace <workspace> --window <semantic-slug> [--group <existing-group>] --mode medium --prompt-file -
+```
+
+The command validates and consumes the complete bounded prompt in dry-run. The real invocation creates one empty thread in the exact cwd, opens one exact continue pane, performs one literal paste and one Enter, then persists local ownership. It does not read pane text or thread history. Any post-create error is indeterminate: retain the printed thread/window, do not retry, repaste, submit, archive, kill, clean up, or search for another receiver. The native runner ID and amux Runner identity are unrelated.
 
 Runner identity is exact: Amp-native `runner(id)` selects that runner, while amux Runner means the separately configured local `amp --no-tui` process. Never substitute one for the other or fall back between them. Native creation currently provides no durable workdir/message receipt that amux can independently verify; retain the returned identity and stop on an indeterminate result.
 

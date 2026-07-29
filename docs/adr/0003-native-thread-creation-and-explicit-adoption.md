@@ -6,6 +6,12 @@ status: accepted
 
 ## Decision
 
+### Projectless physical-host exception (issue #297)
+
+The owner subsequently accepted one narrow exception to the preferred native-create/adopt architecture. A lean local `amux spawn` path may serve a repository that is not an Amp Workspace Project when one explicitly named physical `amp --no-tui --runner-id` process is live in the exact canonical target cwd. This restores the historical local sequence: invoke `amp threads new --mode <exact-mode>` once with that cwd, create one exact tmux `amp threads continue <thread>` worker, paste the bounded prompt once, press Enter once, then persist the worker and optional existing group. `amux worker spawn` is an exact alias, not another implementation.
+
+This exception is deliberately non-atomic and local. It does not invoke an Amp server tool, register a project, dispatch remotely, or fall back to an Orb. A post-create failure preserves and reports the exact thread and tmux identity; there is no retry, transcript read, alternate receiver, reconciliation, archive, kill, or cleanup. The native runner ID identifies the selected live Amp process and remains distinct from an amux Runner's canonical-workdir identity. The original decision and migration evidence below remain the historical and preferred architecture for repositories supported by native creation.
+
 Worker assignment becomes a two-owner protocol:
 
 1. Amp's authenticated native thread-creation tool, invoked by the `/amux` skill, owns the single creation invocation and submission of its initial prompt. The skill must choose an explicit executor (`orb`, local execution where supported, or one exact Amp runner ID) and an explicit mode (`medium` unless the owner names another mode). It never silently falls back to another executor or mode.
@@ -13,7 +19,7 @@ Worker assignment becomes a two-owner protocol:
 
 Native creation owns intended execution placement. Adoption does not re-home, migrate, or retarget the thread's native executor, does not verify continued affinity, and a local continued-thread pane is not evidence that later turns run in that pane's workdir. Create the thread directly on the executor and physical workdir intended for its work. In particular, Orb creation followed by physical adoption is never an execution-migration mechanism.
 
-The amux CLI does not invoke, wrap, or pretend to invoke an Amp server tool. Adoption sends no message, presses no Enter, parses no composer or box-drawing frame, and reads no transcript. Legacy `amux spawn` and `amux worker spawn` are deterministic, non-mutating exit-2 migration tombstones.
+The amux CLI does not invoke, wrap, or pretend to invoke an Amp server tool. Adoption sends no message, presses no Enter, parses no composer or box-drawing frame, and reads no transcript. At the time of this decision, legacy `amux spawn` and `amux worker spawn` became deterministic, non-mutating exit-2 migration tombstones; the issue #297 exception above later restored only the lean historical local route.
 
 The prototype command is:
 

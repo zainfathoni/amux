@@ -35,7 +35,7 @@ var completionCommands = []completionCommand{
 			{Name: "restart", Description: "Restart workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "remove", Description: "Remove workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "adopt", Description: "Adopt a native-created thread", Flags: []string{"--workspace", "--window", "--workdir", "--thread", "--group", "-w", "-W", "-d", "-t"}},
-			{Name: "spawn", Description: "Removed; create a native Amp thread, then use worker adopt"},
+			{Name: "spawn", Description: "Create one projectless local physical-host worker", Flags: []string{"--runner-id", "--workdir", "--workspace", "--window", "--group", "--mode", "--prompt-file", "-d", "-w", "-W", "-m"}},
 			{Name: "shelve", Description: "Shelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "unshelve", Description: "Unshelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "teardown", Description: "Teardown workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
@@ -67,7 +67,7 @@ var completionCommands = []completionCommand{
 		{Name: "list", Description: "List worker and runner workspaces", Flags: []string{"--mode", "-m"}},
 	}},
 	{Name: "workspaces", Description: "Exact alias for workspace list", Flags: []string{"--mode", "-m"}},
-	{Name: "spawn", Description: "Removed; create a native Amp thread, then use worker adopt"},
+	{Name: "spawn", Description: "Create one projectless local physical-host worker", Flags: []string{"--runner-id", "--workdir", "--workspace", "--window", "--group", "--mode", "--prompt-file", "-d", "-w", "-W", "-m"}},
 	{Name: "shelve", Description: "Shelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 	{Name: "unshelve", Description: "Unshelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 	{Name: "teardown", Description: "Teardown workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
@@ -152,7 +152,7 @@ _amux_complete() {
       else
         case "$leaf" in
 		  adopt) COMPREPLY=( $(compgen -W "--workspace --window --workdir --thread --group -w -W -d -t" -- "$cur") ) ;;
-          spawn) COMPREPLY=() ;;
+          spawn) COMPREPLY=( $(compgen -W "--runner-id --workdir --workspace --window --group --mode --prompt-file -d -w -W -m" -- "$cur") ) ;;
           pin) COMPREPLY=( $(compgen -W "--workspace --window --workdir --thread --current -w -W -d -t" -- "$cur") ) ;;
           unpin) COMPREPLY=( $(compgen -W "--thread --current -t" -- "$cur") ) ;;
           list) COMPREPLY=( $(compgen -W "--workspace --thread --shelf --current --all -w -t" -- "$cur") ) ;;
@@ -217,7 +217,7 @@ _amux_complete() {
         esac
       fi
       ;;
-    spawn) COMPREPLY=() ;;
+    spawn) COMPREPLY=( $(compgen -W "--runner-id --workdir --workspace --window --group --mode --prompt-file -d -w -W -m" -- "$cur") ) ;;
     shelve|unshelve|teardown) COMPREPLY=( $(compgen -W "--workspace --thread --current --all -w -t" -- "$cur") ) ;;
     list|launch|park|restart|remove|doctor|reconcile) COMPREPLY=( $(compgen -W "--workspace --thread --workdir --current --all -w -t -d" -- "$cur") ) ;;
     workspaces) COMPREPLY=( $(compgen -W "--mode -m" -- "$cur") ) ;;
@@ -331,7 +331,7 @@ case $state in
         else
           case $leaf in
 		    adopt) _arguments '--workspace[workspace]:workspace:' '--window[window]:window:' '--workdir[working directory]:directory:_directories' '--thread[exact native-created thread id or URL]:thread:' '--group[optional exact durable group]:group:' '-w[workspace]:workspace:' '-W[window]:window:' '-d[working directory]:directory:_directories' '-t[thread id or URL]:thread:' ;;
-            spawn) _arguments ;;
+            spawn) _arguments '--runner-id[exact local Amp runner ID]:runner:' '--workdir[canonical physical workdir]:directory:_directories' '--workspace[tmux workspace]:workspace:' '--window[semantic window]:window:' '--group[optional existing group]:group:' '--mode[exact mode]:mode:(low medium high ultra)' '--prompt-file[prompt path or -]:file:_files' '-d[canonical physical workdir]:directory:_directories' '-w[tmux workspace]:workspace:' '-W[semantic window]:window:' '-m[exact mode]:mode:(low medium high ultra)' ;;
             pin) _arguments '--workspace[workspace]:workspace:' '--window[window]:window:' '--workdir[working directory]:directory:_directories' '--thread[thread id or URL]:thread:' '--current[current worker]' '-w[workspace]:workspace:' '-W[window]:window:' '-d[working directory]:directory:_directories' '-t[thread id or URL]:thread:' ;;
             unpin) _arguments '--thread[thread id or URL]:thread:' '--current[current worker]' '-t[thread id or URL]:thread:' ;;
             list) _arguments '--workspace[workspace]:workspace:' '--thread[thread id or URL]:thread:' '--shelf[shelf intent]:intent:(shelved unshelved)' '--current[current worker]' '--all[all workers]' '-w[workspace]:workspace:' '-t[thread id or URL]:thread:' ;;
@@ -409,7 +409,7 @@ case $state in
         _arguments '--thread[select by thread id or URL]:thread:' '--workspace[select workspace]:workspace:' '--current[current worker]' '--all[all workers]' '-t[select by thread id or URL]:thread:' '-w[select workspace]:workspace:'
         ;;
       spawn)
-        _arguments
+        _arguments '--runner-id[exact local Amp runner ID]:runner:' '--workdir[canonical physical workdir]:directory:_directories' '--workspace[tmux workspace]:workspace:' '--window[semantic window]:window:' '--group[optional existing group]:group:' '--mode[exact mode]:mode:(low medium high ultra)' '--prompt-file[prompt path or -]:file:_files' '-d[canonical physical workdir]:directory:_directories' '-w[tmux workspace]:workspace:' '-W[semantic window]:window:' '-m[exact mode]:mode:(low medium high ultra)'
         ;;
       teardown)
         _arguments '--thread[select by thread id or URL]:thread:' '--workspace[select workspace]:workspace:' '--current[current worker]' '--all[all workers]' '-t[select by thread id or URL]:thread:' '-w[select workspace]:workspace:'

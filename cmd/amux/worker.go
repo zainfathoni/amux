@@ -93,6 +93,9 @@ func boundedDiagnosticField(value string) string {
 
 func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelope, error) {
 	env := result.NewEnvelope(strings.Join(in.Path, " "), in.Options.DryRun)
+	if in.Command.Name == "spawn" {
+		return a.workerSpawn(in, dir, &env)
+	}
 	if in.Command.Name == "adopt" {
 		return a.workerAdopt(in, dir, &env)
 	}
