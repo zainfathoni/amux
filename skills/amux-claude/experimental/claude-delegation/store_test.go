@@ -5613,29 +5613,33 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 	}
 	defaultPolicy := decodeJSONMap(t, defaultStdout)
 	explicitStdout, explicitStderr, err := runHelper(t, fixture.stateDir, map[string]any{
-		"workflow": "read_only", "model": "claude-opus-4-8",
+		"workflow": "read_only", "model": "claude-opus-5",
 	}, "launch", "policy-digest")
 	if err != nil {
 		t.Fatalf("explicit policy digest: %v: %s", err, explicitStderr)
 	}
 	explicitPolicy := decodeJSONMap(t, explicitStdout)
-	if explicitPolicy["model"] != "claude-opus-4-8" {
+	if explicitPolicy["model"] != "claude-opus-5" {
 		t.Fatalf("explicit policy model = %#v", explicitPolicy["model"])
 	}
 	if explicitPolicy["launch_policy_digest"] == defaultPolicy["launch_policy_digest"] {
 		t.Fatal("explicit model did not change launch policy digest")
 	}
-	fableStdout, fableStderr, err := runHelper(t, fixture.stateDir, map[string]any{
-		"workflow": "read_only", "model": "claude-fable-5",
-	}, "launch", "policy-digest")
-	if err != nil {
-		t.Fatalf("fable policy digest: %v: %s", err, fableStderr)
+	legacyPolicies := make(map[string]map[string]any)
+	for _, model := range []string{"claude-fable-5", "claude-opus-4-8"} {
+		stdout, stderr, err := runHelper(t, fixture.stateDir, map[string]any{
+			"workflow": "read_only", "model": model,
+		}, "launch", "policy-digest")
+		if err != nil {
+			t.Fatalf("%s policy digest: %v: %s", model, err, stderr)
+		}
+		policy := decodeJSONMap(t, stdout)
+		if policy["model"] != model || policy["launch_policy_digest"] == explicitPolicy["launch_policy_digest"] {
+			t.Fatalf("%s policy = %#v", model, policy)
+		}
+		legacyPolicies[model] = policy
 	}
-	fablePolicy := decodeJSONMap(t, fableStdout)
-	if fablePolicy["model"] != "claude-fable-5" ||
-		fablePolicy["launch_policy_digest"] == explicitPolicy["launch_policy_digest"] {
-		t.Fatalf("fable policy = %#v", fablePolicy)
-	}
+	fablePolicy := legacyPolicies["claude-fable-5"]
 
 	for _, test := range []struct {
 		name  string
@@ -5643,6 +5647,9 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 	}{
 		{name: "wrong type", model: 5},
 		{name: "malformed", model: "claude-fable-5 --danger"},
+		{name: "case variant", model: "Claude-Opus-5"},
+		{name: "leading whitespace", model: " claude-opus-5"},
+		{name: "trailing whitespace", model: "claude-opus-5 "},
 		{name: "unknown", model: "claude-unknown-5"},
 		{name: "empty", model: ""},
 	} {
@@ -5681,7 +5688,7 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 	mutatingRequest := cloneJSONMap(t, fixture.request)
 	mutatingRequest["workflow"] = "mutating"
 	delete(mutatingRequest, "expected_launch_policy_digest")
-	mutatingRequest["model"] = "claude-fable-5"
+	mutatingRequest["model"] = "claude-opus-5"
 	if _, stderr, err := runHelperEnv(t, fixture.stateDir, fixture.environment, mutatingRequest, "launch", "plan"); err == nil || !strings.Contains(stderr, "claude-opus-4-8") {
 		t.Fatalf("mutating launch model error = %v, stderr %q", err, stderr)
 	}
@@ -5693,7 +5700,7 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 	mutatingBinding["integration_owner"] = "amp_coordinator"
 	mutatingBinding["handoff"] = "one_clean_local_commit"
 	mutatingBinding["capacity_decision_digest"] = strings.Repeat("e", 64)
-	mutatingBinding["model"] = "claude-fable-5"
+	mutatingBinding["model"] = "claude-opus-5"
 	if _, stderr, err := runHelper(t, t.TempDir(), map[string]any{
 		"binding": mutatingBinding, "routing": map[string]any{"target": "machine_local_inbox"},
 	}, "receipt", "create"); err == nil || !strings.Contains(stderr, "claude-opus-4-8") {
@@ -5701,7 +5708,7 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 	}
 
 	request := cloneJSONMap(t, fixture.request)
-	request["model"] = "claude-opus-4-8"
+	request["model"] = "claude-opus-5"
 	request["expected_launch_policy_digest"] = explicitPolicy["launch_policy_digest"]
 	if err := os.WriteFile(fixture.session, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -5711,7 +5718,7 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 		t.Fatalf("explicit model launch plan: %v: %s", err, stderr)
 	}
 	plan := decodeJSONMap(t, stdout)
-	if plan["model"] != "claude-opus-4-8" || plan["launch_policy_digest"] != explicitPolicy["launch_policy_digest"] {
+	if plan["model"] != "claude-opus-5" || plan["launch_policy_digest"] != explicitPolicy["launch_policy_digest"] {
 		t.Fatalf("explicit model plan = %#v", plan)
 	}
 	binding := testBinding(request["delegation_id"].(string))
@@ -5720,7 +5727,7 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 	binding["packet_digest"] = plan["packet_digest"]
 	binding["launch_policy_digest"] = plan["launch_policy_digest"]
 	binding["launch_command_digest"] = plan["launch_command_digest"]
-	binding["model"] = "claude-opus-4-8"
+	binding["model"] = "claude-opus-5"
 	assertHelperOutcomeEnv(t, fixture.stateDir, fixture.environment, "recorded", map[string]any{
 		"binding": binding, "routing": map[string]any{"target": "machine_local_inbox"},
 	}, "receipt", "create")
@@ -5798,12 +5805,12 @@ func TestReadOnlyLaunchModelSelectionIsCanonicalAndReceiptBound(t *testing.T) {
 	for index, argument := range transport.Argv {
 		arguments[index] = []byte(argument)
 	}
-	assertExactArgValue(t, arguments, "--model", "claude-opus-4-8")
+	assertExactArgValue(t, arguments, "--model", "claude-opus-5")
 	finalReceipt, err := os.ReadFile(receiptPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(finalReceipt, []byte(`"model":"claude-opus-4-8"`)) || !bytes.Contains(finalReceipt, []byte(plan["expected_argv_digest"].(string))) {
+	if !bytes.Contains(finalReceipt, []byte(`"model":"claude-opus-5"`)) || !bytes.Contains(finalReceipt, []byte(plan["expected_argv_digest"].(string))) {
 		t.Fatalf("receipt does not bind model command identity: %s", finalReceipt)
 	}
 	launchLog, err := os.ReadFile(fixture.tmuxLog)
