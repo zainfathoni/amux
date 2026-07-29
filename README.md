@@ -2,6 +2,8 @@
 
 `amux` is the local tmux lifecycle layer for [Amp](https://ampcode.com/). It manages interactive **workers**, non-interactive **runners**, and named **workspaces** with explicit, agent-safe side effects.
 
+> **Maintenance direction:** amux's current lifecycle behavior remains implemented and supported, but orchestration framework expansion is frozen. New work is limited to critical fixes, safety-preserving cleanup, measurement, and gradual migration. Permanent per-machine Lead/coordinator threads are no longer the target architecture; new delegation should be bounded to the task that needs it and must prove lower coordination cost without reducing result quality. No command, schema, or runtime behavior is deprecated by this notice. See [ADR 0004](docs/adr/0004-freeze-orchestration-and-retire-permanent-leads.md) for the evidence, scorecard, and phased retirement plan.
+
 - A **worker** is an interactive Amp client identified machine-wide by its canonical thread ID.
 - A **runner** is an `amp --no-tui` client identified machine-wide by its canonical workdir. It enables Amp Agents Anywhere but does not own remote agent threads.
 - A **workspace** groups workers and runners in one same-named tmux session.
@@ -207,6 +209,8 @@ amux teardown --thread T-example
 ## Durable work groups
 
 Work groups are explicit, durable many-to-many associations between Amp thread IDs and byte-preserving group IDs. Declare a group with one coordinator, then add any worker, archived, recovered, evidence, duplicate, or runner-managed thread by its canonical ID:
+
+This section describes current implemented compatibility, not a recommendation to create a permanent coordinator. New workflows should use coordinator authority only for one bounded task or workflow. Existing groups, coordinator fields, reports, callbacks, and finish authorization continue to behave as documented; any later deprecation requires the separate migration gates in [ADR 0004](docs/adr/0004-freeze-orchestration-and-retire-permanent-leads.md).
 
 ```sh
 amux group declare --group amux-131 --thread T-coordinator

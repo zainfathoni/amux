@@ -1,8 +1,11 @@
 ---
-status: proposed
+status: superseded
+superseded-by: 0004
 ---
 
 # Post-lifecycle long-term vision and horizons
+
+> **Historical proposal:** [ADR 0004](0004-freeze-orchestration-and-retire-permanent-leads.md) supersedes these expansion horizons. ADR 0002 remains available as design history and pilot context; it is not the current roadmap and does not authorize new framework work.
 
 amux's long-term direction after the agent-first client lifecycle work is recorded here as proposed direction, not accepted work. ADR 0001 remains the accepted lifecycle plan; its delivered contracts are unchanged by this document, and on any conflict ADR 0001 and those contracts take precedence. Each horizon below becomes real only through its own future accepted ADR — never by editing ADR 0001 or silently revising delivered behavior.
 
