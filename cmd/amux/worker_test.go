@@ -22,7 +22,7 @@ func TestWorkerListIsDeterministicLocalJSONAndFiltersShelfIntent(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkerRegistry(t, dir,
 		"zeta\tz\t/tmp/z\tT-z\n"+
-			"alpha\ta\t/tmp/a\tT-a\n")
+			"alpha\ta\t/tmp/a\tT-a\tretained_indeterminate\n")
 	if err := os.WriteFile(filepath.Join(dir, "shelves.tsv"), []byte("# amux-schema: shelves/v1\nT-z\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestWorkerListIsDeterministicLocalJSONAndFiltersShelfIntent(t *testing.T) {
 	if err := json.NewDecoder(&stdout).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Successful) != 1 || got.Successful[0].Resource.Thread != "T-a" || got.Successful[0].Message != "unshelved" {
+	if len(got.Successful) != 1 || got.Successful[0].Resource.Thread != "T-a" || got.Successful[0].Message != "unshelved" || got.Successful[0].Worker == nil || got.Successful[0].Worker.AssignmentState != "retained_indeterminate" {
 		t.Fatalf("worker list result = %+v", got)
 	}
 	if _, err := os.Stat(called); !os.IsNotExist(err) {
@@ -1047,7 +1047,7 @@ func TestScopedWorkerDoctorReusesOneThreadInventory(t *testing.T) {
 	legacyWorkdir := "legacy/../worker"
 	rows := []config.Row{
 		{Workspace: "alpha", Window: "b", Workdir: legacyWorkdir, Thread: "T-b"},
-		{Workspace: "alpha", Window: "a", Workdir: "/tmp/a", Thread: "T-a"},
+		{Workspace: "alpha", Window: "a", Workdir: "/tmp/a", Thread: "T-a", AssignmentState: config.WorkerAssignmentRetainedIndeterminate},
 		{Workspace: "beta", Window: "c", Workdir: "/tmp/c", Thread: "T-c"},
 	}
 	writeWorkerRegistry(t, dir, rows[0].String()+"\n"+rows[1].String()+"\n"+rows[2].String()+"\n")
@@ -1067,6 +1067,9 @@ func TestScopedWorkerDoctorReusesOneThreadInventory(t *testing.T) {
 		if out.Worker == nil || out.Worker.Workdir == "" || out.Worker.NativeExecutor != unknownNativePlacement || out.Worker.NativeRunnerID != unknownNativePlacement || out.Worker.ExecutionAffinity != unknownNativePlacement || !strings.Contains(out.Message, "execution_affinity=unknown") {
 			t.Fatalf("worker doctor placement diagnostic = %+v", out)
 		}
+	}
+	if got.Successful[0].Worker.AssignmentState != "retained_indeterminate" || !strings.Contains(got.Successful[0].Message, "assignment=retained_indeterminate") {
+		t.Fatalf("worker doctor lost retained assignment state = %+v", got.Successful[0])
 	}
 	if got.Successful[1].Worker.LocalState != "exact" || got.Successful[1].Worker.Workdir != "legacy/../worker" || !strings.Contains(got.Successful[1].Message, "local=exact") {
 		t.Fatalf("worker doctor legacy catalog spelling = %+v", got.Successful[1])

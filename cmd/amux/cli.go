@@ -162,7 +162,7 @@ func workerLeaf(name, summary string, mutating bool, flags ...string) *commandSp
 }
 
 func workerSpawnCommand(usage string) *commandSpec {
-	return workerLeaf("spawn", "Create and assign one projectless local physical-host worker", true,
+	return workerLeaf("spawn", "Retain one projectless local worker with indeterminate delivery", true,
 		"--workdir, -d <canonical-path>", "--workspace, -w <name>",
 		"--window, -W <name>", "--group <existing-id>", "--mode, -m <mode> (default medium)",
 		"--prompt-file <path|->")

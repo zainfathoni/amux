@@ -159,6 +159,19 @@ func TestParseRejectsMalformedRows(t *testing.T) {
 	}
 }
 
+func TestWorkerAssignmentStateRoundTripsWithoutChangingLegacyRows(t *testing.T) {
+	rows, err := Parse(strings.NewReader("legacy\tworker\t/tmp/legacy\tT-legacy\nalpha\tretained\t/tmp/retained\tT-retained\tretained_indeterminate\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].AssignmentState != WorkerAssignmentUnknown || rows[0].String() != "legacy\tworker\t/tmp/legacy\tT-legacy" || rows[1].AssignmentState != WorkerAssignmentRetainedIndeterminate || rows[1].String() != "alpha\tretained\t/tmp/retained\tT-retained\tretained_indeterminate" {
+		t.Fatalf("assignment-state rows=%+v", rows)
+	}
+	if _, err := Parse(strings.NewReader("alpha\tworker\t/tmp/worker\tT-worker\tdelivered\n")); err == nil || !strings.Contains(err.Error(), "invalid worker assignment state") {
+		t.Fatalf("invalid assignment state error=%v", err)
+	}
+}
+
 func TestStoreReplacesAndPreservesComments(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/workspaces.tsv"

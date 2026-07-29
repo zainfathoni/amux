@@ -53,7 +53,7 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	if !filepath.IsAbs(s.Workdir) || s.Workdir != workdir {
 		return env, result.Preflight(fmt.Errorf("--workdir must be the canonical existing path %s", workdir))
 	}
-	row := config.Row{Workspace: s.Workspace, Window: s.Window, Workdir: workdir}
+	row := config.Row{Workspace: s.Workspace, Window: s.Window, Workdir: workdir, AssignmentState: config.WorkerAssignmentRetainedIndeterminate}
 	if !in.Options.DryRun {
 		held, err := acquireMutationLock(in.Path)
 		if err != nil {
@@ -87,7 +87,7 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		}
 	}
 	if in.Options.DryRun {
-		out := result.Outcome{Resource: result.CommandResource(), Action: "spawn", Message: fmt.Sprintf("would locally run amp threads new --mode %s once in canonical cwd %s; create tmux worker %s/%s; attempt one bounded literal prompt paste and, only after paste success, one Enter; then persist and report the exact worker%s", mode, workdir, row.Workspace, row.Window, optionalGroupPlan(s.Group))}
+		out := result.Outcome{Resource: result.CommandResource(), Action: "spawn", Message: fmt.Sprintf("would locally run amp threads new --mode %s once in canonical cwd %s; create tmux worker %s/%s; attempt one bounded literal prompt paste and, only after paste success, one Enter; persist and report exact retained local ownership%s; then return retained-indeterminate because no supported delivery acknowledgement is available", mode, workdir, row.Workspace, row.Window, optionalGroupPlan(s.Group))}
 		env.Planned = append(env.Planned, out)
 		if !in.Options.JSON {
 			fmt.Fprintln(a.stdout, out.Message)
@@ -123,16 +123,26 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	if err := waitForSpawnPane(created, row, command); err != nil {
 		return env, postCreateSpawnError(thread, created, row, "wait for exact tmux worker readiness", err)
 	}
+	inputStatus := "one-paste-one-enter-completed"
+	inputOut := spawnWorkerOutcome(row, created, "attempt-input", "input_attempt_completed")
 	if err := runner.PasteLiteral(created.PaneID, prompt); err != nil {
-		return env, postCreateSpawnError(thread, created, row, "paste prompt once; Enter was not attempted", err)
+		inputStatus = "paste-failed-enter-not-attempted"
+		inputOut.Message = "the sole prompt paste command failed; Enter was not attempted; assignment delivery and task execution are unproven"
+		inputOut.Error = &result.Failure{Kind: result.ErrorRuntime, Message: "local input attempt failed at the sole paste command; Enter was not attempted"}
+		env.Failed = append(env.Failed, inputOut)
+	} else if err := runner.SendEnter(created.PaneID); err != nil {
+		inputStatus = "paste-completed-enter-failed-indeterminate"
+		inputOut.Message = "the sole prompt paste completed locally and the sole Enter command failed; assignment delivery and task execution are unproven"
+		inputOut.Error = &result.Failure{Kind: result.ErrorRuntime, Message: "local input attempt became indeterminate when the sole Enter command failed"}
+		env.Failed = append(env.Failed, inputOut)
+	} else {
+		inputOut.Message = "one prompt paste and one Enter completed locally; assignment delivery and task execution are not acknowledged"
+		env.Successful = append(env.Successful, inputOut)
 	}
-	if err := runner.SendEnter(created.PaneID); err != nil {
-		return env, postCreateSpawnError(thread, created, row, "press Enter once after successful paste", err)
-	}
-	workerOut := workerOutcome(row, "persist-worker", "running")
-	workerOut.Message = "one prompt paste and one Enter were attempted; persisted the exact worker"
+	workerOut := spawnWorkerOutcome(row, created, "persist-worker", "retained")
+	workerOut.Message = "persisted exact local worker ownership; assignment delivery and task execution remain unproven"
 	if _, err := config.Store(dir.WorkersPath(), row); err != nil {
-		failure := postCreateSpawnError(thread, created, row, "persist exact worker", err)
+		failure := retainedIndeterminateSpawnPhaseError(thread, created, row, inputStatus, nil, "persist exact worker", err)
 		appendSpawnFailure(env, workerOut, failure)
 		return env, failure
 	}
@@ -146,7 +156,7 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		groupOut := groupOutcome(membership, "persist-group")
 		groupOut.Message = "persisted exact group member intent"
 		if err := config.WriteGroups(dir.GroupsPath(), memberships); err != nil {
-			failure := postCreateSpawnError(thread, created, row, "persist exact group member", err)
+			failure := retainedIndeterminateSpawnPhaseError(thread, created, row, inputStatus, []string{"persist-worker"}, "persist exact group member", err)
 			appendSpawnFailure(env, groupOut, failure)
 			return env, failure
 		}
@@ -156,14 +166,26 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		}
 		labelOut := groupOutcome(membership, "ensure-label")
 		if _, err := a.ensureGroupLabel(env, labelOut, groupAmpPath, membership, in.Options.JSON); err != nil {
-			failure := postCreateSpawnError(thread, created, row, "add-only ensure exact group member label", err)
+			failure := retainedIndeterminateSpawnPhaseError(thread, created, row, inputStatus, []string{"persist-worker", "persist-group"}, "add-only ensure exact group member label", err)
 			if len(env.Failed) != 0 && env.Failed[len(env.Failed)-1].Error != nil {
 				env.Failed[len(env.Failed)-1].Error.Message = failure.Error()
 			}
 			return env, failure
 		}
 	}
-	return env, nil
+	completed := []string{"persist-worker"}
+	if s.Group != "" {
+		completed = append(completed, "persist-group", "ensure-label")
+	}
+	failure := retainedIndeterminateSpawnError(thread, created, row, inputStatus, completed)
+	out := spawnWorkerOutcome(row, created, "acknowledge-delivery", "retained_indeterminate")
+	out.Message = "input attempt and local ownership persistence completed, but assignment delivery was not acknowledged"
+	out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: failure.Error()}
+	env.Failed = append(env.Failed, out)
+	if !in.Options.JSON {
+		fmt.Fprintf(a.stdout, "RETAINED-INDETERMINATE\t%s\t%s/%s\t%s\t%s\tinput=%s\tcompleted=%s\tdelivery=unacknowledged\n", thread, row.Workspace, row.Window, created.WindowID, created.PaneID, inputStatus, strings.Join(completed, ","))
+	}
+	return env, failure
 }
 
 func (a app) readSpawnPrompt(path string) (string, error) {
@@ -285,6 +307,31 @@ func postCreateSpawnErrorBeforeTmux(thread string, row config.Row, step string, 
 
 func creationIndeterminateSpawnError(row config.Row) error {
 	return result.Runtime(fmt.Errorf("thread creation was indeterminate: thread=creation-indeterminate tmux=not-created requested=%s/%s; state was preserved without retry or cleanup", row.Workspace, row.Window))
+}
+
+func retainedIndeterminateSpawnError(thread string, pane tmux.WindowPane, row config.Row, inputStatus string, completed []string) error {
+	return retainedIndeterminateSpawnPhaseError(thread, pane, row, inputStatus, completed, "", nil)
+}
+
+func retainedIndeterminateSpawnPhaseError(thread string, pane tmux.WindowPane, row config.Row, inputStatus string, completed []string, step string, cause error) error {
+	phases := strings.Join(completed, ",")
+	if phases == "" {
+		phases = "none"
+	}
+	message := fmt.Sprintf("spawn retained-indeterminate: thread=%s tmux=%s/%s window=%s pane=%s; input-attempt=%s delivery-acknowledgement=unavailable completed-persistence-phases=%s", thread, row.Workspace, row.Window, pane.WindowID, pane.PaneID, inputStatus, phases)
+	if step != "" {
+		message += fmt.Sprintf(" stopped-at=%s: %v", step, cause)
+	}
+	message += "; assignment delivery and task execution are unproven; automatic retry, repaste, submit, cleanup, archive, search, reconciliation, and alternate receivers are prohibited; the composer may contain unsent prompt bytes"
+	return result.Runtime(errors.New(message))
+}
+
+func spawnWorkerOutcome(row config.Row, pane tmux.WindowPane, action, localState string) result.Outcome {
+	out := workerOutcome(row, action, "")
+	out.Worker = workerPlacementDetails(row, localState)
+	out.Worker.WindowID = pane.WindowID
+	out.Worker.PaneID = pane.PaneID
+	return out
 }
 
 func appendSpawnFailure(env *result.Envelope, out result.Outcome, failure error) {

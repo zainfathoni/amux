@@ -19,7 +19,7 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 - **Credit defaults (explicit owner permission required to override):** no automatic/`low` mode; no Read Thread for task context; Oracle reviews get supplied diff/context only—never Read Thread to feed Oracle. Details in [`reference/contract-v1.md`](reference/contract-v1.md).
 - Before automatic spawn mode selection, creating a native Amp child, reading another Amp thread, or sending a native child message, load [`reference/amp-invocation-policy.md`](reference/amp-invocation-policy.md). Never bypass a binding `ask` or `reject`. Read Thread remains instruction-only until a promoted gate exists—still do not use it without explicit permission.
 - `/amux health`, `/amux sprawl`, and `/amux finish` are skill-only. Never invoke `amux health|sprawl|finish` as CLI commands.
-- Prefer `--dry-run` and `--json`. Exit `2` = preflight rejection; exit `1` = runtime failure. Never retry indeterminate spawn blindly. Lock contention is exit `2`: retry the identical operation.
+- Prefer `--dry-run` and `--json`. Exit `2` = preflight rejection; exit `1` = runtime failure. Projectless local spawn returns exit `1` as retained-indeterminate after its bounded input attempt because delivery is unacknowledged; persisted ownership is not a running-task claim. Never automatically retry, repaste, submit, clean up, archive, search, reconcile, or use another receiver. Lock contention is exit `2`: retry the identical operation.
 - Work-group reports and wake-ups never authorize finish. A `ready` report is not cleanup authority.
 
 ## Route triggers
