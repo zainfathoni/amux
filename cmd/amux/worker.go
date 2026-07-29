@@ -241,7 +241,11 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 	var doctorStatuses map[string]threadStatus
 	var doctorStatusErr error
 	if in.Command.Name == "doctor" && !in.Options.DryRun {
-		doctorStatuses, doctorStatusErr = threadArchiveStatuses(rows)
+		if in.Selectors.All {
+			doctorStatuses, doctorStatusErr = threadArchiveStatuses(rows)
+		} else {
+			doctorStatuses, doctorStatusErr = exactThreadArchiveStatuses(rows)
+		}
 	}
 	for _, thread := range shelfOnly {
 		resource, _ := result.WorkerResource(thread)

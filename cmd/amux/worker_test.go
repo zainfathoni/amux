@@ -1042,7 +1042,7 @@ func TestThreadArchiveStatusesBoundsAmpThreadsListFailures(t *testing.T) {
 	}
 }
 
-func TestScopedWorkerDoctorReusesOneThreadInventory(t *testing.T) {
+func TestScopedWorkerDoctorUsesBoundedExactThreadQueries(t *testing.T) {
 	dir := t.TempDir()
 	legacyWorkdir := "legacy/../worker"
 	rows := []config.Row{
@@ -1052,13 +1052,18 @@ func TestScopedWorkerDoctorReusesOneThreadInventory(t *testing.T) {
 	}
 	writeWorkerRegistry(t, dir, rows[0].String()+"\n"+rows[1].String()+"\n"+rows[2].String()+"\n")
 	installWorkerDoctorTmux(t, rows)
-	calls := injectAmpThreadsListProcess(t, func([]string) (string, string) {
-		return "output", `[{"id":"T-a"},{"id":"T-b"},{"id":"T-c"}]`
+	calls := injectAmpThreadsListProcess(t, func(args []string) (string, string) {
+		for _, id := range []string{"T-a", "T-b"} {
+			if slicesContain(args, "id:"+id+" archived:false") {
+				return "output", `[{"id":"` + id + `"}]`
+			}
+		}
+		return "nonzero", ""
 	})
 
 	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "doctor", "--workspace", "alpha")
-	if *calls != 1 {
-		t.Fatalf("amp threads list calls = %d, want one active inventory", *calls)
+	if *calls != 2 {
+		t.Fatalf("amp threads search calls = %d, want one exact active query per selected thread", *calls)
 	}
 	if len(got.Successful) != 2 || got.Successful[0].Resource.Thread != "T-a" || got.Successful[1].Resource.Thread != "T-b" || len(got.Failed) != 0 {
 		t.Fatalf("scoped worker doctor = %+v", got)
@@ -1073,6 +1078,203 @@ func TestScopedWorkerDoctorReusesOneThreadInventory(t *testing.T) {
 	}
 	if got.Successful[1].Worker.LocalState != "exact" || got.Successful[1].Worker.Workdir != "legacy/../worker" || !strings.Contains(got.Successful[1].Message, "local=exact") {
 		t.Fatalf("worker doctor legacy catalog spelling = %+v", got.Successful[1])
+	}
+}
+
+func TestScopedWorkerDoctorIgnoresOversizedUnrelatedArchivedInventory(t *testing.T) {
+	dir := t.TempDir()
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: "/tmp/worker", Thread: "T-active"}
+	writeWorkerRegistry(t, dir, row.String()+"\n")
+	installWorkerDoctorTmux(t, []config.Row{row})
+	oldLimit := ampThreadsListOutputLimit
+	t.Cleanup(func() { ampThreadsListOutputLimit = oldLimit })
+	ampThreadsListOutputLimit = 65_536
+	largeArchivedInventory := `[` + strings.Repeat(`{"id":"T-unrelated-archived"},`, 3_000) + `{"id":"T-unrelated-archived"}]`
+	if len(largeArchivedInventory) <= ampThreadsListOutputLimit {
+		t.Fatalf("archived inventory fixture = %d bytes, want over %d", len(largeArchivedInventory), ampThreadsListOutputLimit)
+	}
+	calls := injectAmpThreadsListProcess(t, func(args []string) (string, string) {
+		if slicesContain(args, "id:T-active archived:false") && slicesContain(args, "--limit") && slicesContain(args, "2") {
+			return "output", `[{"id":"T-active"}]`
+		}
+		if slicesContain(args, "--include-archived") {
+			return "output", largeArchivedInventory
+		}
+		return "nonzero", ""
+	})
+
+	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "doctor", "--thread", "T-active")
+	if *calls != 1 {
+		t.Fatalf("amp thread queries = %d, want only one exact active query", *calls)
+	}
+	if len(got.Successful) != 1 || !strings.Contains(got.Successful[0].Message, "local=exact remote=active") || len(got.Failed) != 0 {
+		t.Fatalf("scoped worker doctor = %+v", got)
+	}
+}
+
+func TestScopedWorkerDoctorBoundsCumulativeExactQueryOutput(t *testing.T) {
+	dir := t.TempDir()
+	rows := []config.Row{
+		{Workspace: "alpha", Window: "a", Workdir: "/tmp/a", Thread: "T-a"},
+		{Workspace: "alpha", Window: "b", Workdir: "/tmp/b", Thread: "T-b"},
+		{Workspace: "alpha", Window: "c", Workdir: "/tmp/c", Thread: "T-c"},
+	}
+	writeWorkerRegistry(t, dir, rows[0].String()+"\n"+rows[1].String()+"\n"+rows[2].String()+"\n")
+	installWorkerDoctorTmux(t, rows)
+	oldTimeout := ampThreadsListTimeout
+	oldLimit := ampThreadsListOutputLimit
+	t.Cleanup(func() {
+		ampThreadsListTimeout = oldTimeout
+		ampThreadsListOutputLimit = oldLimit
+	})
+	ampThreadsListTimeout = 2 * time.Second
+	ampThreadsListOutputLimit = 65_536
+	exactResult := func(id string) string {
+		return `[{"id":"` + id + `","padding":"` + strings.Repeat("x", 40_000) + `"}]`
+	}
+	first := exactResult("T-a")
+	second := exactResult("T-b")
+	if len(first) >= ampThreadsListOutputLimit || len(second) >= ampThreadsListOutputLimit || len(first)+len(second) <= ampThreadsListOutputLimit {
+		t.Fatalf("exact fixtures = %d + %d bytes, want each below and sum above %d", len(first), len(second), ampThreadsListOutputLimit)
+	}
+	calls := injectAmpThreadsListProcess(t, func(args []string) (string, string) {
+		switch {
+		case slicesContain(args, "id:T-a archived:false"):
+			return "output", first
+		case slicesContain(args, "id:T-b archived:false"):
+			return "output-stall", second
+		default:
+			return "nonzero", ""
+		}
+	})
+
+	started := time.Now()
+	got, err := executeWorkerJSONResult(t, "--json", "--config-dir", dir, "worker", "doctor", "--workspace", "alpha")
+	if err == nil || result.ErrorKindOf(err) != result.ErrorRuntime {
+		t.Fatalf("scoped worker doctor error = %v", err)
+	}
+	if time.Since(started) >= time.Second {
+		t.Fatalf("cumulative overflow did not stop current query promptly: %s", time.Since(started))
+	}
+	if *calls != 2 {
+		t.Fatalf("amp threads search calls = %d, want overflow on second query and no T-c query", *calls)
+	}
+	if len(got.Successful) != 3 {
+		t.Fatalf("worker outcomes = %+v", got)
+	}
+	for _, out := range got.Successful {
+		if !strings.Contains(out.Message, "remote=unknown") {
+			t.Fatalf("worker outcome did not fail closed: %+v", out)
+		}
+	}
+	if len(got.Failed) != 1 || got.Failed[0].Resource.Kind != "command" || got.Failed[0].Error == nil || got.Failed[0].Error.Message != "active thread query: amp threads search output exceeded 65536-byte limit" {
+		t.Fatalf("scoped cumulative failure = %+v", got.Failed)
+	}
+}
+
+func TestExactActiveAndArchivedQueriesShareOutputAllowance(t *testing.T) {
+	oldLimit := ampThreadsListOutputLimit
+	t.Cleanup(func() { ampThreadsListOutputLimit = oldLimit })
+	ampThreadsListOutputLimit = 64
+	active := strings.Repeat(" ", 40) + `[]`
+	archived := `[{"id":"T-worker","padding":"` + strings.Repeat("x", 20) + `"}]`
+	if len(active) >= ampThreadsListOutputLimit || len(archived) >= ampThreadsListOutputLimit || len(active)+len(archived) <= ampThreadsListOutputLimit {
+		t.Fatalf("exact fixtures = %d + %d bytes, want each below and sum above %d", len(active), len(archived), ampThreadsListOutputLimit)
+	}
+	calls := injectAmpThreadsListProcess(t, func(args []string) (string, string) {
+		if slicesContain(args, "id:T-worker archived:true") {
+			return "output", archived
+		}
+		return "output", active
+	})
+
+	_, err := exactThreadArchiveStatuses([]config.Row{{Workspace: "alpha", Window: "worker", Workdir: "/tmp/worker", Thread: "T-worker"}})
+	if err == nil || err.Error() != "archived thread query: amp threads search output exceeded 64-byte limit" {
+		t.Fatalf("exactThreadArchiveStatuses error = %v", err)
+	}
+	if *calls != 2 {
+		t.Fatalf("amp threads search calls = %d, want active and archived queries only", *calls)
+	}
+}
+
+func TestExactThreadArchiveStatusesAreBoundedAndFailClosed(t *testing.T) {
+	oldLimit := ampThreadsListOutputLimit
+	t.Cleanup(func() { ampThreadsListOutputLimit = oldLimit })
+	ampThreadsListOutputLimit = 64
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: "/tmp/worker", Thread: "T-worker"}
+
+	for _, test := range []struct {
+		name      string
+		behavior  func([]string) (string, string)
+		want      threadStatus
+		wantError string
+		calls     int
+	}{
+		{
+			name: "active",
+			behavior: func(args []string) (string, string) {
+				if slicesContain(args, "id:T-worker archived:false") {
+					return "output", `[{"id":"T-worker"}]`
+				}
+				return "nonzero", ""
+			},
+			want: threadStatusActive, calls: 1,
+		},
+		{
+			name: "archived",
+			behavior: func(args []string) (string, string) {
+				if slicesContain(args, "id:T-worker archived:true") {
+					return "output", `[{"id":"T-worker"}]`
+				}
+				return "output", `[]`
+			},
+			want: threadStatusArchived, calls: 2,
+		},
+		{
+			name:     "missing",
+			behavior: func([]string) (string, string) { return "output", `[]` },
+			want:     threadStatusMissing, calls: 2,
+		},
+		{
+			name:      "malformed active result",
+			behavior:  func([]string) (string, string) { return "malformed", "" },
+			wantError: "active thread query: amp threads search returned malformed JSON", calls: 1,
+		},
+		{
+			name:      "unexpected active result",
+			behavior:  func([]string) (string, string) { return "output", `[{"id":"T-other"}]` },
+			wantError: "active thread query: amp threads search returned an unexpected exact result", calls: 1,
+		},
+		{
+			name:      "active command failure",
+			behavior:  func([]string) (string, string) { return "nonzero", "" },
+			wantError: "active thread query: amp threads search failed with exit code 7", calls: 1,
+		},
+		{
+			name: "oversized archived result",
+			behavior: func(args []string) (string, string) {
+				if slicesContain(args, "id:T-worker archived:true") {
+					return "overflow", ""
+				}
+				return "output", `[]`
+			},
+			wantError: "archived thread query: amp threads search output exceeded 64-byte limit", calls: 2,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := injectAmpThreadsListProcess(t, test.behavior)
+			statuses, err := exactThreadArchiveStatuses([]config.Row{row})
+			if test.wantError != "" {
+				if err == nil || err.Error() != test.wantError {
+					t.Fatalf("exactThreadArchiveStatuses error = %v, want %q", err, test.wantError)
+				}
+			} else if err != nil || statuses[row.Thread] != test.want {
+				t.Fatalf("exactThreadArchiveStatuses = %v, %v; want %s", statuses, err, test.want)
+			}
+			if *calls != test.calls {
+				t.Fatalf("amp threads search calls = %d, want %d", *calls, test.calls)
+			}
+		})
 	}
 }
 
@@ -1163,6 +1365,9 @@ func TestAmpThreadsListSyntheticProcess(t *testing.T) {
 		_, _ = io.WriteString(os.Stderr, strings.Repeat("synthetic-private-output", 20))
 	case "overflow-stall":
 		_, _ = io.WriteString(os.Stdout, strings.Repeat("synthetic-private-output", 20))
+		time.Sleep(10 * time.Second)
+	case "output-stall":
+		fmt.Fprint(os.Stdout, os.Getenv("AMUX_AMP_THREADS_LIST_TEST_OUTPUT"))
 		time.Sleep(10 * time.Second)
 	case "descendant":
 		cmd := exec.Command(os.Args[0], "-test.run=^TestAmpThreadsListSyntheticProcess$")
