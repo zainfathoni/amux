@@ -63,12 +63,14 @@ func preflightLifecycleExecutorEvidence(command string, panes []tmux.WindowPane)
 		if ancestryErr != nil {
 			return nil, lifecycleExecutorEvidenceError(command, ancestryErr)
 		}
-		targetProcess, targetIsAncestor := current[target.PID]
-		currentProcess, targetIsDescendant := targetAncestry[currentPID]
-		if targetIsAncestor && !sameLifecycleProcess(targetProcess, targetAncestry[target.PID]) {
+		targetProcess, targetInCurrentAncestry := current[target.PID]
+		currentProcess, currentInTargetAncestry := targetAncestry[currentPID]
+		targetIsAncestor := targetInCurrentAncestry || target.PID == 1
+		targetIsDescendant := currentInTargetAncestry || currentPID == 1
+		if targetInCurrentAncestry && !sameLifecycleProcess(targetProcess, targetAncestry[target.PID]) {
 			return nil, lifecycleExecutorEvidenceError(command, errors.New("intersecting target process identity differs between ancestry snapshots"))
 		}
-		if targetIsDescendant && !sameLifecycleProcess(currentProcess, current[currentPID]) {
+		if currentInTargetAncestry && !sameLifecycleProcess(currentProcess, current[currentPID]) {
 			return nil, lifecycleExecutorEvidenceError(command, errors.New("intersecting current process identity differs between ancestry snapshots"))
 		}
 		targets = append(targets, targetEvidence{pane: target, ancestry: targetAncestry, conflict: targetIsAncestor || targetIsDescendant})
@@ -153,6 +155,12 @@ func lifecycleProcessAncestry(pid int) (map[int]tmux.ProcessMetadata, error) {
 		if pid == 1 {
 			if process.ParentPID != 0 {
 				return nil, errors.New("PID 1 returned a nonzero parent PID")
+			}
+			return ancestry, nil
+		}
+		if process.ParentPID == 1 {
+			if steps+2 > lifecycleAncestryLimit {
+				return nil, errors.New("process ancestry exceeded safety limit")
 			}
 			return ancestry, nil
 		}
