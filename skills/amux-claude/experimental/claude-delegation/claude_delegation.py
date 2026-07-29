@@ -7099,6 +7099,19 @@ def quarantine_migration_file_evidence(
     }
 
 
+def quarantine_default_config_directory() -> str:
+    selected = os.environ.get("AMUX_CONFIG_DIR", "")
+    home = os.environ.get("HOME", "")
+    if not selected:
+        if not home:
+            raise HelperError("quarantine migration evidence is unavailable")
+        selected = os.path.join(home, ".config", "amux")
+    elif selected == "~" or selected.startswith("~/"):
+        if home:
+            selected = home if selected == "~" else os.path.join(home, selected[2:])
+    return os.path.abspath(selected)
+
+
 def quarantine_migration_inputs(
     directory_descriptor: int,
     config: str,
@@ -7133,15 +7146,16 @@ def quarantine_migration_inputs(
             opened.append(descriptor)
             evidence["local_workspaces"] = source
 
-        default = os.path.abspath(os.path.expanduser("~/.config/amux"))
+        default = quarantine_default_config_directory()
         if config == default:
+            home = os.environ.get("HOME", "")
+            if not home:
+                raise HelperError("quarantine migration evidence is unavailable")
             evidence["legacy_default"] = {
                 name: {"availability": "missing"}
                 for name in ("workspaces", "runners", "shelves")
             }
-            legacy_directory = pathlib.Path(
-                os.path.expanduser("~/.config/amp-tmux")
-            )
+            legacy_directory = pathlib.Path(home) / ".config" / "amp-tmux"
             try:
                 legacy_directory_descriptor, _ = open_quarantine_directory(
                     legacy_directory, "quarantine migration evidence", private=False

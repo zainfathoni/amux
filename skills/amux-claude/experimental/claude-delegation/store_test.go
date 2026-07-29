@@ -269,6 +269,25 @@ result=m.quarantine_apply(store,{**base,"plan":plan,"owner_authorization":auth},
 assert result["outcome"]=="parked" and len(calls)==1
 assert {path:path.read_bytes() for path in all_config}==all_config
 
+# Core treats AMUX_CONFIG_DIR as the default namespace for global migration
+# sources; another explicitly selected config must ignore those global sources.
+custom=root/"custom-default"; custom.mkdir(mode=0o700)
+custom_workers=custom/"workers.tsv"; custom_runners=custom/"runners.tsv"; custom_shelves=custom/"shelves.tsv"
+custom_workers.write_bytes(b"# amux-schema: workers/v1\nws\tcustom\t/tmp\tT-custom-default\n")
+custom_runners.write_bytes(b"# amux-schema: runners/v1\n"); custom_shelves.write_bytes(b"# amux-schema: shelves/v1\n")
+for path in (custom_workers,custom_runners,custom_shelves): path.chmod(0o600)
+os.environ["AMUX_CONFIG_DIR"]=str(custom)
+custom_request={"amux_executable":str(amux),"amux_config_dir":str(custom)}
+with m.open_quarantine_execution_boundary(custom_request,"T-custom-default"): pass
+custom_runners.unlink()
+try:
+    with m.open_quarantine_execution_boundary(custom_request,"T-custom-default"): pass
+except m.HelperError: pass
+else: raise AssertionError("environment-selected default ignored pending global migration")
+other=root/"other-default"; os.environ["AMUX_CONFIG_DIR"]=str(other)
+with m.open_quarantine_execution_boundary(custom_request,"T-custom-default"): pass
+os.environ["AMUX_CONFIG_DIR"]=str(config)
+
 # The retained bytes are re-read at the final boundary adjacent to park.
 missing2=root/"missing-store-2"; registry=json.loads((root/"lifecycle.json").read_text()); registry["stores"].append(str(missing2)); (root/"lifecycle.json").write_text(json.dumps(registry)); (root/"lifecycle.json").chmod(0o600)
 (config/"workers.tsv").write_bytes(b"# amux-schema: workers/v1\nws\tdrift\t/tmp\tT-adjacent-drift\n")
