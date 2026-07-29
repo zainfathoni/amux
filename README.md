@@ -20,7 +20,7 @@ Install the latest Linux or macOS release at the canonical self-updating path, `
 curl -fsSL https://amux.zainf.dev/install.sh | sh
 ```
 
-The installer detects arm64/amd64, downloads the matching GitHub release archive and published checksum, verifies SHA-256, and atomically replaces the canonical binary without touching an existing installation on failure. It reports any PATH setup or shadowing and prints the exact `amux install doctor` command to run next.
+The installer detects arm64/amd64, downloads the matching GitHub release archive and published checksum, verifies SHA-256, and atomically replaces the canonical binary. Any failure before that replacement leaves the existing binary untouched. It reports any PATH setup or shadowing and prints the exact `amux install doctor` command to run next.
 
 For automation that needs a pinned release, set a published tag:
 
@@ -81,7 +81,17 @@ npx skills add zainfathoni/amux --skill amux-claude --global
 npx skills add zainfathoni/amux --skill amux-pi --global
 ```
 
-`/amux` teaches canonical selectors, side-effect boundaries, skill-only health/sprawl/finish workflows, and progressive disclosure via `reference/contract-v1.md` (workers read once) and `reference/deadline-v1.md` (deadlines only). Do not paste full protocol into spawn messages or reload the full skill on wake-ups. See the [dedicated skill guide](https://amux.zainf.dev/skill/). Local symlinking is only for contributors; see [CONTRIBUTING.md](CONTRIBUTING.md#develop-the-bundled-skills).
+For a machine that maintains a clean local `main` checkout, the shell installer can instead link all three bundled skills directly to that checkout. Update the checkout explicitly first; the installer never pulls or changes it:
+
+```sh
+AMUX_REPO="$HOME/Code/GitHub/zainfathoni/amux"
+git -C "$AMUX_REPO" pull --ff-only origin main
+curl -fsSL https://amux.zainf.dev/install.sh | AMUX_SKILLS_SOURCE="$AMUX_REPO" sh
+```
+
+This opt-in mode creates absolute links under `~/.agents/skills`. Existing real installations and same-name legacy duplicates are preserved as timestamped sibling backups rather than deleted. The skill migration is sequential: a later filesystem failure exits nonzero without rolling back already reported links or backups. Future skill updates need only another fast-forward pull followed by an Amp reload or a new thread; the `amux` binary still updates separately.
+
+`/amux` teaches canonical selectors, side-effect boundaries, skill-only health/sprawl/finish workflows, and progressive disclosure via `reference/contract-v1.md` (workers read once) and `reference/deadline-v1.md` (deadlines only). Do not paste full protocol into spawn messages or reload the full skill on wake-ups. See the [dedicated skill guide](https://amux.zainf.dev/skill/).
 
 `/amux-claude` is a separate unstable skill for explicit Amp-to-Claude delegation (local thinker/writer and fresh-Orb Opus). It is not an `amux` lifecycle command, worker, runner, group member, or compatibility promise. `/amux-pi` is a separate disposable Pi/Spark Orb recipe. Neither installs with core `/amux` unless requested.
 

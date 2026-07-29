@@ -4,6 +4,9 @@ set -eu
 repository=https://github.com/zainfathoni/amux
 install_dir=${HOME:+"$HOME/.local/bin"}
 install_path=${install_dir:+"$install_dir/amux"}
+skills_source=${AMUX_SKILLS_SOURCE:-}
+skills_root=${HOME:+"$HOME/.agents/skills"}
+skills_backup_suffix=
 work_dir=
 install_tmp=
 
@@ -14,6 +17,34 @@ say() {
 fail() {
 	printf 'amux installer: %s\n' "$*" >&2
 	exit 1
+}
+
+preflight_mutation_directory() {
+	directory=$1
+	if [ -L "$directory" ]; then
+		fail "managed path must not contain symlinked directories: $directory"
+	fi
+	if [ -e "$directory" ] && [ ! -d "$directory" ]; then
+		fail "managed directory path exists and is not a directory: $directory"
+	fi
+	if [ -d "$directory" ] && { [ ! -w "$directory" ] || [ ! -x "$directory" ]; }; then
+		fail "managed directory is not writable and searchable: $directory"
+	fi
+}
+
+paths_overlap() {
+	left=$1
+	right=$2
+	if [ "$left" = / ] || [ "$right" = / ]; then
+		return 0
+	fi
+	case "$left" in
+		"$right" | "$right"/*) return 0 ;;
+	esac
+	case "$right" in
+		"$left" | "$left"/*) return 0 ;;
+	esac
+	return 1
 }
 
 cleanup() {
@@ -40,6 +71,57 @@ case "$HOME" in
 	/*) ;;
 	*) fail "HOME must be an absolute path (got $HOME)" ;;
 esac
+[ -d "$HOME" ] || fail "HOME is not a directory: $HOME"
+canonical_home=$(CDPATH= cd -- "$HOME" 2>/dev/null && pwd -P) || fail "could not canonicalize HOME: $HOME"
+for managed_directory in "$HOME" "$HOME/.local" "$install_dir"; do
+	preflight_mutation_directory "$managed_directory"
+done
+
+if [ -n "$skills_source" ]; then
+	for managed_directory in "$HOME/.agents" "$skills_root"; do
+		preflight_mutation_directory "$managed_directory"
+	done
+	for command_name in date ln readlink; do
+		command -v "$command_name" >/dev/null 2>&1 || fail "required command not found for AMUX_SKILLS_SOURCE: $command_name"
+	done
+	case "$skills_source" in
+		/*) ;;
+		*) fail "AMUX_SKILLS_SOURCE must be an absolute path (got $skills_source)" ;;
+	esac
+	[ -d "$skills_source" ] || fail "AMUX_SKILLS_SOURCE is not a directory: $skills_source"
+	canonical_skills_source=$(CDPATH= cd -- "$skills_source" 2>/dev/null && pwd -P) || fail "could not canonicalize AMUX_SKILLS_SOURCE: $skills_source"
+	[ "$skills_source" = "$canonical_skills_source" ] || fail "AMUX_SKILLS_SOURCE must be the canonical path $canonical_skills_source"
+	for skill_name in amux amux-claude amux-pi; do
+		skill_source="$skills_source/skills/$skill_name"
+		[ -d "$skill_source" ] || fail "missing bundled skill directory: $skill_source"
+		[ -f "$skill_source/SKILL.md" ] && [ -r "$skill_source/SKILL.md" ] || fail "missing readable bundled skill entrypoint: $skill_source/SKILL.md"
+	done
+	for managed_physical_root in "$canonical_home/.local/bin" "$canonical_home/.agents/skills"; do
+		if paths_overlap "$canonical_skills_source" "$managed_physical_root"; then
+			fail "AMUX_SKILLS_SOURCE must not overlap a managed install directory: $managed_physical_root"
+		fi
+	done
+	skills_backup_suffix=$(date -u '+%Y%m%dT%H%M%SZ') || fail 'could not create a skill backup timestamp'
+	for skill_name in amux amux-claude amux-pi; do
+		skill_destination="$skills_root/$skill_name"
+		if [ -e "$skill_destination" ] && [ ! -L "$skill_destination" ]; then
+			skill_backup="$skill_destination.backup-$skills_backup_suffix"
+			[ ! -e "$skill_backup" ] && [ ! -L "$skill_backup" ] || fail "skill backup already exists: $skill_backup"
+		fi
+		for legacy_root in "$HOME/.config/amp/skills" "$HOME/.config/agents/skills"; do
+			legacy_destination="$legacy_root/$skill_name"
+			if [ -e "$legacy_destination" ] || [ -L "$legacy_destination" ]; then
+				preflight_mutation_directory "$legacy_root"
+				legacy_physical_root=$(CDPATH= cd -- "$legacy_root" 2>/dev/null && pwd -P) || fail "could not canonicalize managed legacy skill directory: $legacy_root"
+				if paths_overlap "$canonical_skills_source" "$legacy_physical_root"; then
+					fail "AMUX_SKILLS_SOURCE must not overlap a managed legacy skill directory: $legacy_physical_root"
+				fi
+				legacy_backup="$legacy_destination.backup-$skills_backup_suffix"
+				[ ! -e "$legacy_backup" ] && [ ! -L "$legacy_backup" ] || fail "skill backup already exists: $legacy_backup"
+			fi
+		done
+	done
+fi
 
 case "$(uname -s 2>/dev/null || true)" in
 	Darwin) os=darwin ;;
@@ -128,6 +210,40 @@ mv -f "$install_tmp" "$install_path" || fail "could not atomically replace $inst
 install_tmp=
 
 say "Installed amux at $install_path"
+
+if [ -n "$skills_source" ]; then
+	for managed_directory in "$HOME" "$HOME/.agents" "$skills_root"; do
+		preflight_mutation_directory "$managed_directory"
+	done
+	mkdir -p "$skills_root" || fail "could not create $skills_root"
+	for skill_name in amux amux-claude amux-pi; do
+		skill_source="$skills_source/skills/$skill_name"
+		skill_destination="$skills_root/$skill_name"
+		if [ -L "$skill_destination" ] && [ "$(readlink "$skill_destination" 2>/dev/null || true)" = "$skill_source" ]; then
+			say "Skill $skill_name already links to $skill_source"
+		else
+			if [ -L "$skill_destination" ]; then
+				rm -f "$skill_destination" || fail "could not replace skill symlink $skill_destination"
+			elif [ -e "$skill_destination" ]; then
+				skill_backup="$skill_destination.backup-$skills_backup_suffix"
+				mv "$skill_destination" "$skill_backup" || fail "could not preserve existing skill at $skill_backup"
+				say "Preserved existing skill at $skill_backup"
+			fi
+			ln -s "$skill_source" "$skill_destination" || fail "could not link $skill_destination to $skill_source"
+			say "Linked skill $skill_name to $skill_source"
+		fi
+		for legacy_root in "$HOME/.config/amp/skills" "$HOME/.config/agents/skills"; do
+			legacy_destination="$legacy_root/$skill_name"
+			if [ -e "$legacy_destination" ] || [ -L "$legacy_destination" ]; then
+				legacy_backup="$legacy_destination.backup-$skills_backup_suffix"
+				mv "$legacy_destination" "$legacy_backup" || fail "could not preserve duplicate skill at $legacy_backup"
+				say "Preserved duplicate skill at $legacy_backup"
+			fi
+		done
+	done
+	say "Linked bundled skills from $skills_source"
+	say "Reload Amp or start a new thread after the source checkout changes."
+fi
 
 case ":${PATH:-}:" in
 	*:"$install_dir":*) path_has_install_dir=true ;;

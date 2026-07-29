@@ -1218,6 +1218,12 @@ func TestPublicInstallationUsesSkillsCLI(t *testing.T) {
 			t.Errorf("%s exposes contributor symlinking as public installation", relativePath)
 		}
 	}
+	for _, relativePath := range []string{"README.md", filepath.Join("docs", "skill", "index.html")} {
+		contents := readSkillFile(t, root, relativePath)
+		if !strings.Contains(contents, "AMUX_SKILLS_SOURCE") {
+			t.Errorf("%s does not document the opt-in local-checkout skill links", relativePath)
+		}
+	}
 	contributing := readSkillFile(t, root, "CONTRIBUTING.md")
 	if !strings.Contains(contributing, `ln -sfn "$PWD/skills/amux"`) {
 		t.Error("CONTRIBUTING.md does not document local skill development symlinking")
