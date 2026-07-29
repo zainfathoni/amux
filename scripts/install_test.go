@@ -411,6 +411,11 @@ type installerFixture struct {
 func newInstallerFixture(t *testing.T, unameS, unameM, archiveName string) *installerFixture {
 	t.Helper()
 	root := t.TempDir()
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root = canonicalRoot
 	f := &installerFixture{
 		root: root, home: filepath.Join(root, "home"), bin: filepath.Join(root, "bin"),
 		assets: filepath.Join(root, "assets"), log: filepath.Join(root, "curl.log"),
