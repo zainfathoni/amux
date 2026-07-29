@@ -2521,6 +2521,67 @@ func threadArchiveStatuses(rows []config.Row) (map[string]threadStatus, error) {
 	return statuses, nil
 }
 
+func exactThreadArchiveStatuses(rows []config.Row) (map[string]threadStatus, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), ampThreadsListTimeout)
+	defer cancel()
+	statuses := make(map[string]threadStatus, len(rows))
+	for _, row := range rows {
+		id := canonicalThreadID(row.Thread)
+		if _, exists := statuses[id]; exists {
+			continue
+		}
+		active, err := exactAmpThreadMatch(ctx, id, false)
+		if err != nil {
+			return nil, fmt.Errorf("active thread query: %w", err)
+		}
+		if active {
+			statuses[id] = threadStatusActive
+			continue
+		}
+		archived, err := exactAmpThreadMatch(ctx, id, true)
+		if err != nil {
+			return nil, fmt.Errorf("archived thread query: %w", err)
+		}
+		if archived {
+			statuses[id] = threadStatusArchived
+		} else {
+			statuses[id] = threadStatusMissing
+		}
+	}
+	return statuses, nil
+}
+
+func exactAmpThreadMatch(ctx context.Context, id string, archived bool) (bool, error) {
+	query := "id:" + id + " archived:" + strconv.FormatBool(archived)
+	out, err := runAmpThreadsSearch(ctx, "threads", "search", query, "--limit", "2", "--json")
+	if err != nil {
+		return false, err
+	}
+	var payload any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return false, errors.New("amp threads search returned malformed JSON")
+	}
+	results, ok := payload.([]any)
+	if !ok {
+		return false, errors.New("amp threads search returned a malformed exact result")
+	}
+	if len(results) == 0 {
+		return false, nil
+	}
+	if len(results) != 1 {
+		return false, errors.New("amp threads search returned an ambiguous exact result")
+	}
+	result, ok := results[0].(map[string]any)
+	if !ok {
+		return false, errors.New("amp threads search returned a malformed exact result")
+	}
+	resultID, ok := result["id"].(string)
+	if !ok || resultID != id {
+		return false, errors.New("amp threads search returned an unexpected exact result")
+	}
+	return true, nil
+}
+
 func ampThreadIDSet(ctx context.Context, includeArchived bool, targets map[string]bool) (map[string]bool, error) {
 	ids := make(map[string]bool)
 	for offset := 0; ; offset += 500 {
@@ -2619,8 +2680,16 @@ func (b *outputBudget) exceeded() bool {
 }
 
 func runAmpThreadsList(ctx context.Context, args ...string) ([]byte, error) {
+	return runBoundedAmpThreads(ctx, "list", args...)
+}
+
+func runAmpThreadsSearch(ctx context.Context, args ...string) ([]byte, error) {
+	return runBoundedAmpThreads(ctx, "search", args...)
+}
+
+func runBoundedAmpThreads(ctx context.Context, operation string, args ...string) ([]byte, error) {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return nil, fmt.Errorf("amp threads list timed out after %s", ampThreadsListTimeout)
+		return nil, fmt.Errorf("amp threads %s timed out after %s", operation, ampThreadsListTimeout)
 	}
 	cmdCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -2649,17 +2718,17 @@ func runAmpThreadsList(ctx context.Context, args ...string) ([]byte, error) {
 		_ = cmd.Cancel()
 	}
 	if budget.exceeded() {
-		return nil, fmt.Errorf("amp threads list output exceeded %d-byte limit", ampThreadsListOutputLimit)
+		return nil, fmt.Errorf("amp threads %s output exceeded %d-byte limit", operation, ampThreadsListOutputLimit)
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, exec.ErrWaitDelay) {
-		return nil, fmt.Errorf("amp threads list timed out after %s", ampThreadsListTimeout)
+		return nil, fmt.Errorf("amp threads %s timed out after %s", operation, ampThreadsListTimeout)
 	}
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return nil, fmt.Errorf("amp threads list failed with exit code %d", exitErr.ExitCode())
+			return nil, fmt.Errorf("amp threads %s failed with exit code %d", operation, exitErr.ExitCode())
 		}
-		return nil, errors.New("amp threads list failed to start")
+		return nil, fmt.Errorf("amp threads %s failed to start", operation)
 	}
 	return stdout.buffer.Bytes(), nil
 }
