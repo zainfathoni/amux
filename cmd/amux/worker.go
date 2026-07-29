@@ -150,9 +150,10 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 				continue
 			}
 			out := workerOutcome(row, "list", map[bool]string{true: "shelved", false: "unshelved"}[shelved[row.Thread]])
+			out.Worker = workerPlacementDetails(row, "catalog")
 			env.Successful = append(env.Successful, out)
 			if !in.Options.JSON {
-				fmt.Fprintf(a.stdout, "%s\t%s\t%s\t%s\t%s\n", row.Workspace, row.Window, row.Workdir, row.Thread, out.Message)
+				fmt.Fprintf(a.stdout, "%s\t%s\t%s\t%s\t%s\tassignment=%s\n", row.Workspace, row.Window, row.Workdir, row.Thread, out.Message, workerAssignmentState(row))
 			}
 		}
 		return &env, nil
@@ -272,7 +273,7 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			continue
 		}
 		if in.Command.Name == "launch" && inspections[row.Thread].state == workerPaneExact {
-			out.Message = "already running"
+			out.Message = "local client already running; assignment=" + workerAssignmentState(row)
 			env.Skipped = append(env.Skipped, out)
 			continue
 		}
@@ -390,8 +391,11 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 				remote = string(doctorStatuses[canonicalThreadID(row.Thread)])
 			}
 			out.Worker = workerPlacementDetails(row, string(inspections[row.Thread].state))
-			out.Message = fmt.Sprintf("local=%s remote=%s intent=%t native_executor=%s native_runner_id=%s execution_affinity=%s", inspections[row.Thread].state, remote, shelved[row.Thread], unknownNativePlacement, unknownNativePlacement, unknownNativePlacement)
+			out.Message = fmt.Sprintf("local=%s remote=%s intent=%t assignment=%s native_executor=%s native_runner_id=%s execution_affinity=%s", inspections[row.Thread].state, remote, shelved[row.Thread], workerAssignmentState(row), unknownNativePlacement, unknownNativePlacement, unknownNativePlacement)
 			env.Successful = append(env.Successful, out)
+			if !in.Options.JSON {
+				fmt.Fprintf(a.stdout, "%s\t%s\n", row.Thread, out.Message)
+			}
 			continue
 		case "reconcile":
 			if shelved[row.Thread] {
@@ -678,10 +682,18 @@ func workerPlacementDetails(row config.Row, localState string) *result.WorkerDet
 		Window:            row.Window,
 		Workdir:           row.Workdir,
 		LocalState:        localState,
+		AssignmentState:   workerAssignmentState(row),
 		NativeExecutor:    unknownNativePlacement,
 		NativeRunnerID:    unknownNativePlacement,
 		ExecutionAffinity: unknownNativePlacement,
 	}
+}
+
+func workerAssignmentState(row config.Row) string {
+	if row.AssignmentState == config.WorkerAssignmentRetainedIndeterminate {
+		return string(row.AssignmentState)
+	}
+	return "unknown"
 }
 
 func verifyAdoptionThreadAndTmux(row config.Row) (workerInspection, error) {
