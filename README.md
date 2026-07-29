@@ -158,9 +158,9 @@ Removed aliases and positional forms fail with remediation. In particular, do no
 
 ## Worker-only lifecycle
 
-`shelve`, `unshelve`, and `teardown` are worker-only and have concise top-level routes. Both `amux spawn` and `amux worker spawn` are non-mutating migration tombstones that exit `2`.
+`spawn`, `shelve`, `unshelve`, and `teardown` are worker-only and have concise top-level routes. `amux worker spawn` is an exact alias of the primary lean `amux spawn` implementation.
 
-Create the thread and deliver its initial assignment with Amp's native thread creation, then adopt the exact returned identity:
+For an Amp Workspace Project, create the thread and deliver its initial assignment with Amp's native thread creation, then adopt the exact returned identity:
 
 ```sh
 amux worker adopt --thread <thread> --workspace <workspace> --window <window> --workdir <workdir>
@@ -168,7 +168,15 @@ amux worker adopt --thread <thread> --workspace <workspace> --window <window> --
 
 Native creation owns execution placement; adoption owns only local catalog, group, workdir, and tmux state. Adoption never re-homes the thread or proves where future turns run. New adoption canonicalizes its owner-supplied workdir before storing or launching it. `worker doctor` reports preserved catalog spelling unchanged, so a legacy relative value is not a canonical or physical-location claim. Adoption and doctor report native executor, runner ID, and execution affinity as `unknown` rather than inferring them from the local pane. Create directly on the exact executor/workdir required for future work, and name an exact physical runner ID and owner-supplied canonical workdir whenever physical state matters. Orb-create → physical-adopt is not migration.
 
-The tombstones do not read message files or stdin, resolve or migrate configuration, acquire the mutation lock, invoke Amp/tmux, or write operations. Preserved legacy spawn operation records remain immutable diagnostic evidence and are never retried or reconciled.
+For the projectless physical-host exception, use the historical local route explicitly:
+
+```sh
+amux spawn --mode medium --workdir <canonical-path> \
+  --workspace <workspace> --window <semantic-window> [--group <existing-group>] \
+  --prompt-file <path|->
+```
+
+Executor selection routes this command to the intended physical host; `amux spawn` itself is local by construction and canonicalizes the requested workdir. It reads and bounds the prompt before taking the machine mutation lock, runs `amp threads new --mode ...` once in that cwd, creates one exact tmux continue window, attempts one literal prompt paste, and only after a successful paste attempts one Enter. It then reports and stores the worker. When an existing group is supplied, it preflights Amp's additive label capability, persists and reports membership, and add-only ensures the member label. It never registers a project or falls back to an Orb, and it does not require or inspect the optional local `amp --no-tui --runner-id` argv alias. Unparseable creation results are reported as creation-indeterminate without echoing raw output. After an exact thread is returned, every failure reports that thread and the exact tmux identity when returned, otherwise an explicitly indeterminate requested tmux identity; completed worker/group state is preserved without retry or cleanup. `--dry-run` reads and bounds the prompt but never prints it, takes no mutation lock, and mutates no state. Preserved legacy spawn operation records remain immutable diagnostic evidence and are never retried or reconciled.
 
 ```sh
 amux shelve --thread T-example
@@ -259,7 +267,7 @@ Coordinator soft budgets to `ready` are Small 30m, Medium 1h (default), Large 2h
 | `park` / `restart` | preserve | preserve | stop/restart verified | none |
 | `remove` | remove worker/shelf | remove runner | stop verified | none |
 | `shelve` / `unshelve` | preserve worker; mutate intent | none | shelve parks only | archive/unarchive |
-| `spawn` | removed tombstone; none | none | none | none |
+| `spawn` | persist exact worker; optional group intent then additive label ensure after input attempts | reject overlapping amux Runner workdir | create one exact worker pane; attempt one paste, then Enter only after paste success | create one empty local thread in the canonical local cwd |
 | `teardown` | remove worker/shelf | none | stop verified worker | archive |
 | `reconcile` | synchronize drift | repair stale ownership | verified repairs only | worker sync only |
 | `callback register` / `clear` | none; mutate machine runtime lease only | none | inspect exact pane/process | none |

@@ -43,6 +43,41 @@ func TestSessionExistsDistinguishesAbsenceFromInspectionFailure(t *testing.T) {
 	}
 }
 
+func TestPasteLiteralReportsLoadAndExactBufferCleanupFailures(t *testing.T) {
+	bin := t.TempDir()
+	log := filepath.Join(bin, "tmux.log")
+	consumed := filepath.Join(bin, "consumed")
+	writeExecutable(t, filepath.Join(bin, "tmux"), fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$1" in
+  load-buffer) cat > %q; echo 'load failed' >&2; exit 1 ;;
+  delete-buffer) echo 'delete failed' >&2; exit 1 ;;
+  paste-buffer) echo 'paste must not run' >&2; exit 99 ;;
+esac
+exit 98
+`, log, consumed))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	err := (Runner{}).PasteLiteral("%1", "sensitive transport input")
+	if err == nil || !strings.Contains(err.Error(), "load failed") || !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("PasteLiteral error=%v", err)
+	}
+	if data, readErr := os.ReadFile(consumed); readErr != nil || string(data) != "sensitive transport input" {
+		t.Fatalf("consumed=%q err=%v", data, readErr)
+	}
+	data, readErr := os.ReadFile(log)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("tmux calls=%q", lines)
+	}
+	loadFields, deleteFields := strings.Fields(lines[0]), strings.Fields(lines[1])
+	if len(loadFields) != 4 || loadFields[0] != "load-buffer" || loadFields[1] != "-b" || len(deleteFields) != 3 || deleteFields[0] != "delete-buffer" || deleteFields[1] != "-b" || loadFields[2] != deleteFields[2] || !strings.HasPrefix(loadFields[2], "amux-spawn-") {
+		t.Fatalf("tmux calls=%q", lines)
+	}
+}
+
 func TestAllWindowPanesTreatsMissingServerAsEmpty(t *testing.T) {
 	for _, test := range []struct {
 		name      string

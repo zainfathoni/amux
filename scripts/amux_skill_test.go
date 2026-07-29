@@ -1381,23 +1381,14 @@ func readSkillFile(t *testing.T, root, relativePath string) string {
 	return string(contents)
 }
 
-func TestPublicDocsContainNoExecutableSpawnExamples(t *testing.T) {
+func TestPublicDocsDescribeNarrowProjectlessSpawnException(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	paths := []string{"README.md", "CONTRIBUTING.md", filepath.Join("docs", "index.html"), filepath.Join("docs", "skill", "index.html"), filepath.Join("skills", "amux", "SKILL.md")}
-	paths = append(paths,
-		filepath.Join("skills", "amux", "reference", "commands.md"),
-		filepath.Join("skills", "amux", "reference", "workflows.md"),
-		filepath.Join("skills", "amux", "reference", "troubleshooting.md"),
-		filepath.Join("skills", "amux", "reference", "trigger-phrases.md"),
-		filepath.Join("skills", "amux", "reference", "amp-invocation-policy.md"),
-	)
-	for _, path := range paths {
+	for _, path := range []string{"README.md", filepath.Join("skills", "amux", "SKILL.md"), filepath.Join("skills", "amux", "reference", "commands.md"), filepath.Join("skills", "amux", "reference", "workflows.md")} {
 		contents := readSkillFile(t, root, path)
-		for lineNumber, line := range strings.Split(contents, "\n") {
-			trimmed := strings.TrimSpace(strings.TrimPrefix(line, ">"))
-			if strings.HasPrefix(trimmed, "$ amux spawn ") || strings.HasPrefix(trimmed, "amux spawn ") || strings.HasPrefix(trimmed, "$ amux worker spawn ") || strings.HasPrefix(trimmed, "amux worker spawn ") {
-				t.Errorf("%s:%d contains executable removed spawn example: %s", path, lineNumber+1, trimmed)
+		for _, required := range []string{"projectless", "physical", "runner"} {
+			if !strings.Contains(strings.ToLower(contents), required) {
+				t.Errorf("%s does not describe narrow spawn term %q", path, required)
 			}
 		}
 	}

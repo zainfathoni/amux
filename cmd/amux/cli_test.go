@@ -276,16 +276,18 @@ func completionLineContains(completion string, values ...string) bool {
 	return false
 }
 
-func TestSpawnTombstoneHelpHasMigrationGuidanceWithoutMutationFlags(t *testing.T) {
+func TestSpawnAliasesExposeTheSameLeanFlags(t *testing.T) {
 	for _, path := range [][]string{{"help", "spawn"}, {"help", "worker", "spawn"}} {
 		var stdout bytes.Buffer
 		if err := (app{stdout: &stdout}).execute(path); err != nil {
 			t.Fatalf("execute(%q): %v", path, err)
 		}
-		if !strings.Contains(stdout.String(), spawnMigrationGuidance) {
-			t.Fatalf("help for %q lacks migration guidance:\n%s", path, stdout.String())
+		for _, required := range []string{"--workdir", "--workspace", "--window", "--group", "--mode", "--prompt-file"} {
+			if !strings.Contains(stdout.String(), required) {
+				t.Fatalf("help for %q lacks %q:\n%s", path, required, stdout.String())
+			}
 		}
-		for _, removed := range []string{"--message", "--message-file", "--reconcile", "--idempotency-key", "--title-prefix"} {
+		for _, removed := range []string{"--runner-id", "--message", "--message-file", "--reconcile", "--idempotency-key", "--title-prefix"} {
 			if strings.Contains(stdout.String(), removed) {
 				t.Fatalf("help for %q retains removed flag %q:\n%s", path, removed, stdout.String())
 			}
@@ -293,74 +295,15 @@ func TestSpawnTombstoneHelpHasMigrationGuidanceWithoutMutationFlags(t *testing.T
 	}
 }
 
-func TestDirectSpawnHelpFlagsRemainRejectedTombstones(t *testing.T) {
+func TestDirectSpawnHelpIsAvailableOnBothAliases(t *testing.T) {
 	for _, path := range [][]string{{"spawn", "--help"}, {"spawn", "-h"}, {"worker", "spawn", "--help"}, {"worker", "spawn", "-h"}} {
 		var stdout bytes.Buffer
-		err := (app{stdout: &stdout}).execute(path)
-		if err == nil || result.ExitCode(err) != result.ExitRejected {
-			t.Fatalf("execute(%q) error = %v, exit = %d; want exit 2", path, err, result.ExitCode(err))
+		if err := (app{stdout: &stdout}).execute(path); err != nil {
+			t.Fatalf("execute(%q): %v", path, err)
 		}
-		if stdout.Len() != 0 {
-			t.Fatalf("execute(%q) unexpectedly wrote help: %q", path, stdout.String())
+		if !strings.Contains(stdout.String(), "--prompt-file") || strings.Contains(stdout.String(), "--runner-id") {
+			t.Fatalf("execute(%q) lacks spawn help: %q", path, stdout.String())
 		}
-		if !strings.Contains(err.Error(), spawnMigrationGuidance) {
-			t.Fatalf("execute(%q) lacks migration guidance: %v", path, err)
-		}
-	}
-}
-
-type rejectingReader struct{ read bool }
-
-func (r *rejectingReader) Read([]byte) (int, error) {
-	r.read = true
-	return 0, errors.New("stdin must not be read")
-}
-
-func TestSpawnTombstonesRejectBeforeAnyInputConfigLockSubprocessOrWrite(t *testing.T) {
-	for _, command := range [][]string{{"spawn"}, {"worker", "spawn"}} {
-		t.Run(strings.Join(command, "-"), func(t *testing.T) {
-			dir := t.TempDir()
-			if err := os.WriteFile(filepath.Join(dir, "workspaces.tsv"), []byte("malformed\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			runtimeDir := t.TempDir()
-			t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-			lockPath := filepath.Join(runtimeDir, "amux", lock.FileName)
-			held, err := lock.Acquire(context.Background(), lockPath, lock.Owner{Command: "test holder"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer held.Release()
-			marker := filepath.Join(t.TempDir(), "subprocess-called")
-			bin := t.TempDir()
-			for _, name := range []string{"amp", "tmux"} {
-				if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\ntouch '"+marker+"'\nexit 99\n"), 0o700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			t.Setenv("PATH", bin)
-			stdin := &rejectingReader{}
-			args := append([]string{"--json", "--config-dir", dir}, command...)
-			args = append(args, "--message-file", filepath.Join(dir, "missing-message"), "--message-stdin", "--reconcile")
-			var stdout bytes.Buffer
-			err = (app{stdin: stdin, stdout: &stdout}).execute(args)
-			if err == nil || result.ExitCode(err) != result.ExitRejected {
-				t.Fatalf("error = %v, exit = %d", err, result.ExitCode(err))
-			}
-			var envelope result.Envelope
-			if decodeErr := json.Unmarshal(stdout.Bytes(), &envelope); decodeErr != nil || len(envelope.Failed) != 1 || envelope.Failed[0].Error.Kind != result.ErrorRequest {
-				t.Fatalf("JSON tombstone = %+v, decode error = %v, output = %q", envelope, decodeErr, stdout.String())
-			}
-			if stdin.read {
-				t.Fatal("tombstone read stdin")
-			}
-			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("tombstone invoked a subprocess: %v", err)
-			}
-			if _, err := os.Stat(filepath.Join(dir, "operations.json")); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("tombstone wrote operations: %v", err)
-			}
-		})
 	}
 }
 

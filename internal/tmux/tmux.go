@@ -2,6 +2,8 @@ package tmux
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -497,6 +499,10 @@ func (r Runner) NewRunnerPane(session, window, command string, createSession boo
 	return WindowPane{Session: fields[0], Window: fields[1], WindowID: fields[2], PaneID: fields[3]}, nil
 }
 
+func (r Runner) NewWorkerPane(session, window, command string, createSession bool) (WindowPane, error) {
+	return r.NewRunnerPane(session, window, command, createSession)
+}
+
 func (r Runner) SendLiteral(target, text string) error {
 	args := []string{"send-keys", "-t", target, "-l", text}
 	if r.DryRun {
@@ -504,6 +510,29 @@ func (r Runner) SendLiteral(target, text string) error {
 		return nil
 	}
 	return tmuxRun(args...)
+}
+
+// PasteLiteral transfers text over stdin so multiline or sensitive input is
+// not exposed in argv. It performs one paste into the exact target pane.
+func (r Runner) PasteLiteral(target, text string) error {
+	nonce := make([]byte, 12)
+	if _, err := rand.Read(nonce); err != nil {
+		return fmt.Errorf("name literal paste buffer: %w", err)
+	}
+	bufferName := "amux-spawn-" + hex.EncodeToString(nonce)
+	if err := tmuxRunInput(text, "load-buffer", "-b", bufferName, "-"); err != nil {
+		if deleteErr := tmuxRun("delete-buffer", "-b", bufferName); deleteErr != nil {
+			return errors.Join(fmt.Errorf("load literal paste buffer: %w", err), fmt.Errorf("delete sensitive tmux buffer: %w", deleteErr))
+		}
+		return err
+	}
+	if err := tmuxRun("paste-buffer", "-dpr", "-b", bufferName, "-t", target); err != nil {
+		if deleteErr := tmuxRun("delete-buffer", "-b", bufferName); deleteErr != nil {
+			return errors.Join(fmt.Errorf("paste literal: %w", err), fmt.Errorf("delete sensitive tmux buffer: %w", deleteErr))
+		}
+		return err
+	}
+	return nil
 }
 
 func (r Runner) SendEnter(target string) error {
@@ -757,6 +786,19 @@ func displayMessageForTarget(target, format string) (string, error) {
 func tmuxRun(args ...string) error {
 	_, err := tmuxOutput(args...)
 	return err
+}
+
+func tmuxRunInput(input string, args ...string) error {
+	cmd := exec.Command("tmux", args...)
+	cmd.Stdin = strings.NewReader(input)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return commandError(args, stdout.Bytes(), stderr.Bytes(), err)
+	}
+	return nil
 }
 
 func tmuxOutput(args ...string) ([]byte, error) {
