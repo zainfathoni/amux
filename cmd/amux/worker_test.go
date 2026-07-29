@@ -1109,6 +1109,91 @@ func TestScopedWorkerDoctorIgnoresOversizedUnrelatedArchivedInventory(t *testing
 	}
 }
 
+func TestScopedWorkerDoctorBoundsCumulativeExactQueryOutput(t *testing.T) {
+	dir := t.TempDir()
+	rows := []config.Row{
+		{Workspace: "alpha", Window: "a", Workdir: "/tmp/a", Thread: "T-a"},
+		{Workspace: "alpha", Window: "b", Workdir: "/tmp/b", Thread: "T-b"},
+		{Workspace: "alpha", Window: "c", Workdir: "/tmp/c", Thread: "T-c"},
+	}
+	writeWorkerRegistry(t, dir, rows[0].String()+"\n"+rows[1].String()+"\n"+rows[2].String()+"\n")
+	installWorkerDoctorTmux(t, rows)
+	oldTimeout := ampThreadsListTimeout
+	oldLimit := ampThreadsListOutputLimit
+	t.Cleanup(func() {
+		ampThreadsListTimeout = oldTimeout
+		ampThreadsListOutputLimit = oldLimit
+	})
+	ampThreadsListTimeout = 2 * time.Second
+	ampThreadsListOutputLimit = 65_536
+	exactResult := func(id string) string {
+		return `[{"id":"` + id + `","padding":"` + strings.Repeat("x", 40_000) + `"}]`
+	}
+	first := exactResult("T-a")
+	second := exactResult("T-b")
+	if len(first) >= ampThreadsListOutputLimit || len(second) >= ampThreadsListOutputLimit || len(first)+len(second) <= ampThreadsListOutputLimit {
+		t.Fatalf("exact fixtures = %d + %d bytes, want each below and sum above %d", len(first), len(second), ampThreadsListOutputLimit)
+	}
+	calls := injectAmpThreadsListProcess(t, func(args []string) (string, string) {
+		switch {
+		case slicesContain(args, "id:T-a archived:false"):
+			return "output", first
+		case slicesContain(args, "id:T-b archived:false"):
+			return "output-stall", second
+		default:
+			return "nonzero", ""
+		}
+	})
+
+	started := time.Now()
+	got, err := executeWorkerJSONResult(t, "--json", "--config-dir", dir, "worker", "doctor", "--workspace", "alpha")
+	if err == nil || result.ErrorKindOf(err) != result.ErrorRuntime {
+		t.Fatalf("scoped worker doctor error = %v", err)
+	}
+	if time.Since(started) >= time.Second {
+		t.Fatalf("cumulative overflow did not stop current query promptly: %s", time.Since(started))
+	}
+	if *calls != 2 {
+		t.Fatalf("amp threads search calls = %d, want overflow on second query and no T-c query", *calls)
+	}
+	if len(got.Successful) != 3 {
+		t.Fatalf("worker outcomes = %+v", got)
+	}
+	for _, out := range got.Successful {
+		if !strings.Contains(out.Message, "remote=unknown") {
+			t.Fatalf("worker outcome did not fail closed: %+v", out)
+		}
+	}
+	if len(got.Failed) != 1 || got.Failed[0].Resource.Kind != "command" || got.Failed[0].Error == nil || got.Failed[0].Error.Message != "active thread query: amp threads search output exceeded 65536-byte limit" {
+		t.Fatalf("scoped cumulative failure = %+v", got.Failed)
+	}
+}
+
+func TestExactActiveAndArchivedQueriesShareOutputAllowance(t *testing.T) {
+	oldLimit := ampThreadsListOutputLimit
+	t.Cleanup(func() { ampThreadsListOutputLimit = oldLimit })
+	ampThreadsListOutputLimit = 64
+	active := strings.Repeat(" ", 40) + `[]`
+	archived := `[{"id":"T-worker","padding":"` + strings.Repeat("x", 20) + `"}]`
+	if len(active) >= ampThreadsListOutputLimit || len(archived) >= ampThreadsListOutputLimit || len(active)+len(archived) <= ampThreadsListOutputLimit {
+		t.Fatalf("exact fixtures = %d + %d bytes, want each below and sum above %d", len(active), len(archived), ampThreadsListOutputLimit)
+	}
+	calls := injectAmpThreadsListProcess(t, func(args []string) (string, string) {
+		if slicesContain(args, "id:T-worker archived:true") {
+			return "output", archived
+		}
+		return "output", active
+	})
+
+	_, err := exactThreadArchiveStatuses([]config.Row{{Workspace: "alpha", Window: "worker", Workdir: "/tmp/worker", Thread: "T-worker"}})
+	if err == nil || err.Error() != "archived thread query: amp threads search output exceeded 64-byte limit" {
+		t.Fatalf("exactThreadArchiveStatuses error = %v", err)
+	}
+	if *calls != 2 {
+		t.Fatalf("amp threads search calls = %d, want active and archived queries only", *calls)
+	}
+}
+
 func TestExactThreadArchiveStatusesAreBoundedAndFailClosed(t *testing.T) {
 	oldLimit := ampThreadsListOutputLimit
 	t.Cleanup(func() { ampThreadsListOutputLimit = oldLimit })
@@ -1277,6 +1362,9 @@ func TestAmpThreadsListSyntheticProcess(t *testing.T) {
 		_, _ = io.WriteString(os.Stderr, strings.Repeat("synthetic-private-output", 20))
 	case "overflow-stall":
 		_, _ = io.WriteString(os.Stdout, strings.Repeat("synthetic-private-output", 20))
+		time.Sleep(10 * time.Second)
+	case "output-stall":
+		fmt.Fprint(os.Stdout, os.Getenv("AMUX_AMP_THREADS_LIST_TEST_OUTPUT"))
 		time.Sleep(10 * time.Second)
 	case "descendant":
 		cmd := exec.Command(os.Args[0], "-test.run=^TestAmpThreadsListSyntheticProcess$")

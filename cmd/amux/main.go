@@ -2524,13 +2524,14 @@ func threadArchiveStatuses(rows []config.Row) (map[string]threadStatus, error) {
 func exactThreadArchiveStatuses(rows []config.Row) (map[string]threadStatus, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), ampThreadsListTimeout)
 	defer cancel()
+	allowance := &outputAllowance{remaining: ampThreadsListOutputLimit}
 	statuses := make(map[string]threadStatus, len(rows))
 	for _, row := range rows {
 		id := canonicalThreadID(row.Thread)
 		if _, exists := statuses[id]; exists {
 			continue
 		}
-		active, err := exactAmpThreadMatch(ctx, id, false)
+		active, err := exactAmpThreadMatch(ctx, allowance, id, false)
 		if err != nil {
 			return nil, fmt.Errorf("active thread query: %w", err)
 		}
@@ -2538,7 +2539,7 @@ func exactThreadArchiveStatuses(rows []config.Row) (map[string]threadStatus, err
 			statuses[id] = threadStatusActive
 			continue
 		}
-		archived, err := exactAmpThreadMatch(ctx, id, true)
+		archived, err := exactAmpThreadMatch(ctx, allowance, id, true)
 		if err != nil {
 			return nil, fmt.Errorf("archived thread query: %w", err)
 		}
@@ -2551,9 +2552,9 @@ func exactThreadArchiveStatuses(rows []config.Row) (map[string]threadStatus, err
 	return statuses, nil
 }
 
-func exactAmpThreadMatch(ctx context.Context, id string, archived bool) (bool, error) {
+func exactAmpThreadMatch(ctx context.Context, allowance *outputAllowance, id string, archived bool) (bool, error) {
 	query := "id:" + id + " archived:" + strconv.FormatBool(archived)
-	out, err := runAmpThreadsSearch(ctx, "threads", "search", query, "--limit", "2", "--json")
+	out, err := runAmpThreadsSearch(ctx, allowance, "threads", "search", query, "--limit", "2", "--json")
 	if err != nil {
 		return false, err
 	}
@@ -2639,9 +2640,13 @@ func collectThreadIDs(value any) []string {
 	return ids
 }
 
-type outputBudget struct {
+type outputAllowance struct {
 	mu        sync.Mutex
 	remaining int
+}
+
+type outputBudget struct {
+	allowance *outputAllowance
 	overflow  bool
 	cancel    context.CancelFunc
 }
@@ -2652,21 +2657,21 @@ type cappedOutput struct {
 }
 
 func (w *cappedOutput) Write(p []byte) (int, error) {
-	w.budget.mu.Lock()
-	remaining := w.budget.remaining
+	w.budget.allowance.mu.Lock()
+	remaining := w.budget.allowance.remaining
 	if remaining > 0 {
 		if remaining > len(p) {
 			remaining = len(p)
 		}
 		_, _ = w.buffer.Write(p[:remaining])
-		w.budget.remaining -= remaining
+		w.budget.allowance.remaining -= remaining
 	}
 	cancel := false
 	if len(p) > remaining {
 		cancel = !w.budget.overflow
 		w.budget.overflow = true
 	}
-	w.budget.mu.Unlock()
+	w.budget.allowance.mu.Unlock()
 	if cancel {
 		w.budget.cancel()
 	}
@@ -2674,26 +2679,37 @@ func (w *cappedOutput) Write(p []byte) (int, error) {
 }
 
 func (b *outputBudget) exceeded() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	b.allowance.mu.Lock()
+	defer b.allowance.mu.Unlock()
 	return b.overflow
 }
 
+func (a *outputAllowance) exhausted() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.remaining == 0
+}
+
 func runAmpThreadsList(ctx context.Context, args ...string) ([]byte, error) {
-	return runBoundedAmpThreads(ctx, "list", args...)
+	return runBoundedAmpThreads(ctx, "list", nil, args...)
 }
 
-func runAmpThreadsSearch(ctx context.Context, args ...string) ([]byte, error) {
-	return runBoundedAmpThreads(ctx, "search", args...)
+func runAmpThreadsSearch(ctx context.Context, allowance *outputAllowance, args ...string) ([]byte, error) {
+	return runBoundedAmpThreads(ctx, "search", allowance, args...)
 }
 
-func runBoundedAmpThreads(ctx context.Context, operation string, args ...string) ([]byte, error) {
+func runBoundedAmpThreads(ctx context.Context, operation string, allowance *outputAllowance, args ...string) ([]byte, error) {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return nil, fmt.Errorf("amp threads %s timed out after %s", operation, ampThreadsListTimeout)
 	}
+	if allowance == nil {
+		allowance = &outputAllowance{remaining: ampThreadsListOutputLimit}
+	} else if allowance.exhausted() {
+		return nil, fmt.Errorf("amp threads %s output exceeded %d-byte limit", operation, ampThreadsListOutputLimit)
+	}
 	cmdCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	budget := outputBudget{remaining: ampThreadsListOutputLimit, cancel: cancel}
+	budget := outputBudget{allowance: allowance, cancel: cancel}
 	stdout := cappedOutput{budget: &budget}
 	stderr := cappedOutput{budget: &budget}
 	cmd := ampThreadsListCommand(cmdCtx, args...)
