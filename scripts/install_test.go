@@ -68,6 +68,224 @@ func TestInstallerVersionOverrideUsesVersionedAssets(t *testing.T) {
 	}
 }
 
+func TestInstallerLinksBundledSkillsAndPreservesExistingInstalls(t *testing.T) {
+	fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
+	source := filepath.Join(fixture.root, "amux source")
+	for _, skill := range []string{"amux", "amux-claude", "amux-pi"} {
+		writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
+		writeFile(t, filepath.Join(fixture.home, ".agents", "skills", skill, "old"), "preserved\n", 0o600)
+	}
+	writeFile(t, filepath.Join(fixture.home, ".config", "amp", "skills", "amux", "old"), "legacy amp\n", 0o600)
+	writeFile(t, filepath.Join(fixture.home, ".config", "agents", "skills", "amux-pi", "old"), "legacy agents\n", 0o600)
+	fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
+
+	output, err := fixture.run()
+	if err != nil {
+		t.Fatalf("installer failed: %v\n%s", err, output)
+	}
+	for _, skill := range []string{"amux", "amux-claude", "amux-pi"} {
+		destination := filepath.Join(fixture.home, ".agents", "skills", skill)
+		info, statErr := os.Lstat(destination)
+		if statErr != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("skill %s is not a symlink: mode=%v err=%v", skill, info, statErr)
+		}
+		target, readErr := os.Readlink(destination)
+		if readErr != nil || target != filepath.Join(source, "skills", skill) {
+			t.Fatalf("skill %s target=%q err=%v", skill, target, readErr)
+		}
+		backups, globErr := filepath.Glob(destination + ".backup-*")
+		if globErr != nil || len(backups) != 1 || readFile(t, filepath.Join(backups[0], "old")) != "preserved\n" {
+			t.Fatalf("skill %s backups=%v err=%v", skill, backups, globErr)
+		}
+	}
+	for _, legacy := range []string{
+		filepath.Join(fixture.home, ".config", "amp", "skills", "amux"),
+		filepath.Join(fixture.home, ".config", "agents", "skills", "amux-pi"),
+	} {
+		if _, statErr := os.Lstat(legacy); !os.IsNotExist(statErr) {
+			t.Fatalf("legacy skill remains active at %s: %v", legacy, statErr)
+		}
+		backups, globErr := filepath.Glob(legacy + ".backup-*")
+		if globErr != nil || len(backups) != 1 {
+			t.Fatalf("legacy backups=%v err=%v", backups, globErr)
+		}
+	}
+	if !strings.Contains(output, "Linked bundled skills from "+source) || !strings.Contains(output, "Reload Amp") {
+		t.Fatalf("skill installation output:\n%s", output)
+	}
+}
+
+func TestInstallerSkillLinksAreIdempotent(t *testing.T) {
+	fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
+	source := filepath.Join(fixture.root, "amux-source")
+	for _, skill := range []string{"amux", "amux-claude", "amux-pi"} {
+		writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
+	}
+	fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
+	if output, err := fixture.run(); err != nil {
+		t.Fatalf("first installer run failed: %v\n%s", err, output)
+	}
+	output, err := fixture.run()
+	if err != nil {
+		t.Fatalf("second installer run failed: %v\n%s", err, output)
+	}
+	if strings.Count(output, "already links to") != 3 {
+		t.Fatalf("idempotent output:\n%s", output)
+	}
+	backups, globErr := filepath.Glob(filepath.Join(fixture.home, ".agents", "skills", "*.backup-*"))
+	if globErr != nil || len(backups) != 0 {
+		t.Fatalf("idempotent install created backups=%v err=%v", backups, globErr)
+	}
+}
+
+func TestInstallerReplacesWrongAndBrokenSkillSymlinks(t *testing.T) {
+	fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
+	source := filepath.Join(fixture.root, "amux-source")
+	for _, skill := range []string{"amux", "amux-claude", "amux-pi"} {
+		writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
+	}
+	destinationRoot := filepath.Join(fixture.home, ".agents", "skills")
+	if err := os.MkdirAll(destinationRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(fixture.root, "wrong"), filepath.Join(destinationRoot, "amux")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(fixture.root, "missing"), filepath.Join(destinationRoot, "amux-claude")); err != nil {
+		t.Fatal(err)
+	}
+	fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
+
+	if output, err := fixture.run(); err != nil {
+		t.Fatalf("installer failed: %v\n%s", err, output)
+	}
+	for _, skill := range []string{"amux", "amux-claude", "amux-pi"} {
+		target, err := os.Readlink(filepath.Join(destinationRoot, skill))
+		if err != nil || target != filepath.Join(source, "skills", skill) {
+			t.Fatalf("skill %s target=%q err=%v", skill, target, err)
+		}
+	}
+	backups, err := filepath.Glob(filepath.Join(destinationRoot, "*.backup-*"))
+	if err != nil || len(backups) != 0 {
+		t.Fatalf("replaced symlinks created backups=%v err=%v", backups, err)
+	}
+}
+
+func TestInstallerRejectsInvalidSkillSourceBeforeDownload(t *testing.T) {
+	fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
+	fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE=relative/source")
+	output, err := fixture.run()
+	if err == nil || !strings.Contains(output, "AMUX_SKILLS_SOURCE must be an absolute path") {
+		t.Fatalf("output=%q err=%v", output, err)
+	}
+	if _, statErr := os.Stat(fixture.log); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid skill source reached download: %v", statErr)
+	}
+}
+
+func TestInstallerPreflightsEverySkillBeforeMutation(t *testing.T) {
+	fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
+	source := filepath.Join(fixture.root, "amux-source")
+	for _, skill := range []string{"amux", "amux-claude"} {
+		writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
+	}
+	existing := filepath.Join(fixture.home, ".agents", "skills", "amux", "old")
+	writeFile(t, existing, "preserved\n", 0o600)
+	fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
+
+	output, err := fixture.run()
+	if err == nil || !strings.Contains(output, "missing bundled skill directory") {
+		t.Fatalf("output=%q err=%v", output, err)
+	}
+	if got := readFile(t, existing); got != "preserved\n" {
+		t.Fatalf("preflight changed existing skill to %q", got)
+	}
+	if _, statErr := os.Stat(fixture.log); !os.IsNotExist(statErr) {
+		t.Fatalf("incomplete skill source reached download: %v", statErr)
+	}
+}
+
+func TestInstallerRejectsSkillSourceOverlappingManagedDestinations(t *testing.T) {
+	for _, relativeSource := range []string{
+		filepath.Join(".agents", "skills", "amux"),
+		filepath.Join(".config", "amp", "skills", "amux"),
+	} {
+		t.Run(relativeSource, func(t *testing.T) {
+			fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
+			source := filepath.Join(fixture.home, relativeSource)
+			for _, skill := range []string{"amux", "amux-claude", "amux-pi"} {
+				writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
+			}
+			fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
+
+			output, err := fixture.run()
+			if err == nil || !strings.Contains(output, "must not overlap") {
+				t.Fatalf("output=%q err=%v", output, err)
+			}
+			if got := readFile(t, filepath.Join(source, "skills", "amux", "SKILL.md")); got != "name: amux\n" {
+				t.Fatalf("overlap preflight changed source to %q", got)
+			}
+			if _, statErr := os.Stat(fixture.log); !os.IsNotExist(statErr) {
+				t.Fatalf("overlap reached download: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestInstallerRejectsInvalidSkillDestinationParentsBeforeDownload(t *testing.T) {
+	for _, relativeParent := range []string{".agents", filepath.Join(".agents", "skills")} {
+		t.Run(relativeParent, func(t *testing.T) {
+			fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
+			source := filepath.Join(fixture.root, "amux-source")
+			for _, skill := range []string{"amux", "amux-claude", "amux-pi"} {
+				writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
+			}
+			writeFile(t, filepath.Join(fixture.home, relativeParent), "not a directory\n", 0o600)
+			fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
+
+			output, err := fixture.run()
+			if err == nil || !strings.Contains(output, "is not a directory") {
+				t.Fatalf("output=%q err=%v", output, err)
+			}
+			if _, statErr := os.Stat(fixture.log); !os.IsNotExist(statErr) {
+				t.Fatalf("invalid destination parent reached download: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestInstallerWithoutSkillSourceDoesNotInspectAgentSkillPaths(t *testing.T) {
+	fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
+	writeFile(t, filepath.Join(fixture.home, ".agents"), "unrelated file\n", 0o600)
+	if output, err := fixture.run(); err != nil {
+		t.Fatalf("binary-only installer changed behavior: %v\n%s", err, output)
+	}
+}
+
+func TestInstallerReportsSequentialSkillFailureAndPreservesBackup(t *testing.T) {
+	fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
+	source := filepath.Join(fixture.root, "amux-source")
+	for _, skill := range []string{"amux", "amux-claude", "amux-pi"} {
+		writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
+	}
+	destination := filepath.Join(fixture.home, ".agents", "skills", "amux")
+	writeFile(t, filepath.Join(destination, "old"), "recoverable\n", 0o600)
+	writeFile(t, filepath.Join(fixture.bin, "ln"), "#!/bin/sh\nexit 1\n", 0o755)
+	fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
+
+	output, err := fixture.run()
+	if err == nil || !strings.Contains(output, "Preserved existing skill") || strings.Contains(output, "Linked bundled skills") {
+		t.Fatalf("sequential failure output=%q err=%v", output, err)
+	}
+	backups, globErr := filepath.Glob(destination + ".backup-*")
+	if globErr != nil || len(backups) != 1 || readFile(t, filepath.Join(backups[0], "old")) != "recoverable\n" {
+		t.Fatalf("recoverable backups=%v err=%v", backups, globErr)
+	}
+	if _, statErr := os.Lstat(destination); !os.IsNotExist(statErr) {
+		t.Fatalf("failed link unexpectedly exists: %v", statErr)
+	}
+}
+
 func TestInstallerChecksumFailurePreservesExistingBinary(t *testing.T) {
 	fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
 	writeFile(t, fixture.installPath(), "working old binary\n", 0o755)
@@ -193,6 +411,11 @@ type installerFixture struct {
 func newInstallerFixture(t *testing.T, unameS, unameM, archiveName string) *installerFixture {
 	t.Helper()
 	root := t.TempDir()
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root = canonicalRoot
 	f := &installerFixture{
 		root: root, home: filepath.Join(root, "home"), bin: filepath.Join(root, "bin"),
 		assets: filepath.Join(root, "assets"), log: filepath.Join(root, "curl.log"),

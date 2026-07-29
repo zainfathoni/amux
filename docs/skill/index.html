@@ -48,7 +48,11 @@
 # optional experiments only:
 npx skills add zainfathoni/amux --skill amux-claude --global
 npx skills add zainfathoni/amux --skill amux-pi --global</code></pre>
-          <p>skills.sh is the primary installation path. Core <code>/amux</code> stays thin: workers read <code>reference/contract-v1.md</code> once; deadlines use <code>reference/deadline-v1.md</code> without reloading the full skill. Experimental Claude/Pi routes are separate skills. Reload Amp if a new skill is not indexed immediately. Local symlinking is only a contributor workflow documented in the repository’s CONTRIBUTING guide.</p>
+          <p>skills.sh is the primary installation path. A machine with a clean local <code>main</code> checkout may opt into installer-managed links for all three skills:</p>
+          <pre><code>AMUX_REPO="$HOME/Code/GitHub/zainfathoni/amux"
+git -C "$AMUX_REPO" pull --ff-only origin main
+curl -fsSL https://amux.zainf.dev/install.sh | AMUX_SKILLS_SOURCE="$AMUX_REPO" sh</code></pre>
+          <p>The installer does not update the checkout. It preserves replaced installations as timestamped backups and creates absolute links under <code>~/.agents/skills</code>. Pull again and reload Amp (or start a new thread) after <code>main</code> changes. Core <code>/amux</code> stays thin: workers read <code>reference/contract-v1.md</code> once; deadlines use <code>reference/deadline-v1.md</code> without reloading the full skill. Experimental Claude/Pi routes are separate skills.</p>
 
           <h2 id="model">Terminology</h2>
           <ul><li><strong>Worker:</strong> interactive TUI client identified by canonical Amp thread ID.</li><li><strong>Runner:</strong> non-interactive <code>amp --no-tui</code> client identified by canonical workdir. It enables remote work but does not own remote agent threads.</li><li><strong>Workspace:</strong> worker/runner lifecycle group represented by one same-named tmux session.</li></ul>
