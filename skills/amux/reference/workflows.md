@@ -15,14 +15,14 @@ amux --json worker adopt --thread <exact-native-thread> --workspace <workspace> 
 
 The coordinator makes one native creation invocation and preserves its authenticated request plus successful returned thread identity as the bounded receipt. Native creation does not return a prompt digest or separate delivery acknowledgement, so do not claim exactly-once delivery or independently re-prove it through amux. amux adoption owns only local catalog/group/tmux state: it sends no message, presses no Enter, parses no composer, reads no transcript, and does not re-home native execution. New adoption canonicalizes the owner-supplied workdir; doctor preserves legacy catalog spelling and never promotes a relative legacy value into a location claim. Adoption/doctor report native executor, runner ID, and execution affinity as `unknown` because those facts are not in amux's local source of truth; never infer them from its pane or workdir. If native creation is indeterminate, stop rather than creating another thread.
 
-For a projectless repository that is not an Amp Workspace Project but already has one exact live local physical runner, use the lean local exception:
+For a projectless repository that is not an Amp Workspace Project, select the intended physical executor and use the lean local exception there:
 
 ```sh
-amux --dry-run --json spawn --runner-id <exact-native-id> --workdir <canonical-path> --workspace <workspace> --window <semantic-slug> [--group <existing-group>] --mode medium --prompt-file -
-amux --json spawn --runner-id <exact-native-id> --workdir <canonical-path> --workspace <workspace> --window <semantic-slug> [--group <existing-group>] --mode medium --prompt-file -
+amux --dry-run --json spawn --workdir <canonical-path> --workspace <workspace> --window <semantic-slug> [--group <existing-group>] --mode medium --prompt-file -
+amux --json spawn --workdir <canonical-path> --workspace <workspace> --window <semantic-slug> [--group <existing-group>] --mode medium --prompt-file -
 ```
 
-The command validates and consumes the complete bounded prompt in dry-run. The real invocation creates one empty thread in the exact cwd, opens one exact continue pane, performs one literal paste and one Enter, then persists local ownership. It does not read pane text or thread history. Any post-create error is indeterminate: retain the printed thread/window, do not retry, repaste, submit, archive, kill, clean up, or search for another receiver. The native runner ID and amux Runner identity are unrelated.
+The command validates and consumes the complete bounded prompt in dry-run. The real invocation canonicalizes the cwd, creates one empty thread there, opens one exact continue pane, attempts one literal paste and one Enter, then persists and reports local worker ownership. With a group it preflights additive Amp label support before creation, then persists/reports membership and add-only ensures/reports its label after the input attempts. It does not read pane text or thread history. Any post-create error is indeterminate: retain the printed thread/window and every reported completed phase; do not retry, repaste, submit, archive, kill, clean up, or search for another receiver. Executor selection, not a required local process `--runner-id` argv alias, routes the invocation to the intended physical host.
 
 Runner identity is exact: Amp-native `runner(id)` selects that runner, while amux Runner means the separately configured local `amp --no-tui` process. Never substitute one for the other or fall back between them. Native creation currently provides no durable workdir/message receipt that amux can independently verify; retain the returned identity and stop on an indeterminate result.
 

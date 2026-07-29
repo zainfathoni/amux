@@ -171,12 +171,12 @@ Native creation owns execution placement; adoption owns only local catalog, grou
 For the projectless physical-host exception, use the historical local route explicitly:
 
 ```sh
-amux spawn --runner-id <exact-live-native-id> --mode medium --workdir <canonical-path> \
+amux spawn --mode medium --workdir <canonical-path> \
   --workspace <workspace> --window <semantic-window> [--group <existing-group>] \
   --prompt-file <path|->
 ```
 
-This route proves one exact live local `amp --no-tui --runner-id` process and its canonical cwd, runs `amp threads new --mode ...` once in that cwd, creates one exact tmux continue window, performs one literal prompt paste and one Enter, then stores the worker and optional existing group. It never registers a project or falls back to an Orb. The Amp-native runner ID selects the physical process; an amux Runner remains a separate catalog resource identified by canonical workdir. After thread creation, every failure reports the exact thread and tmux identity and preserves them without retry or cleanup. `--dry-run` reads and bounds the prompt but never prints it or mutates state. Preserved legacy spawn operation records remain immutable diagnostic evidence and are never retried or reconciled.
+Executor selection routes this command to the intended physical host; `amux spawn` itself is local by construction and canonicalizes the requested workdir. It runs `amp threads new --mode ...` once in that cwd, creates one exact tmux continue window, attempts one literal prompt paste and one Enter, then reports and stores the worker. When an existing group is supplied, it preflights Amp's additive label capability, persists and reports membership, and add-only ensures the member label. It never registers a project or falls back to an Orb, and it does not require or inspect the optional local `amp --no-tui --runner-id` argv alias. After thread creation, every failure reports the exact thread and the exact tmux identity when returned, otherwise an explicitly indeterminate requested tmux identity; completed worker/group state is preserved without retry or cleanup. `--dry-run` reads and bounds the prompt but never prints it or mutates state. Preserved legacy spawn operation records remain immutable diagnostic evidence and are never retried or reconciled.
 
 ```sh
 amux shelve --thread T-example
@@ -267,7 +267,7 @@ Coordinator soft budgets to `ready` are Small 30m, Medium 1h (default), Large 2h
 | `park` / `restart` | preserve | preserve | stop/restart verified | none |
 | `remove` | remove worker/shelf | remove runner | stop verified | none |
 | `shelve` / `unshelve` | preserve worker; mutate intent | none | shelve parks only | archive/unarchive |
-| `spawn` | persist exact worker and optional existing group after submit | reject overlapping amux Runner workdir | create one exact worker pane; one paste and Enter | create one empty local thread in the exact runner cwd |
+| `spawn` | persist exact worker; optional group intent then additive label ensure after input attempts | reject overlapping amux Runner workdir | create one exact worker pane; attempt one paste and Enter | create one empty local thread in the canonical local cwd |
 | `teardown` | remove worker/shelf | none | stop verified worker | archive |
 | `reconcile` | synchronize drift | repair stale ownership | verified repairs only | worker sync only |
 | `callback register` / `clear` | none; mutate machine runtime lease only | none | inspect exact pane/process | none |

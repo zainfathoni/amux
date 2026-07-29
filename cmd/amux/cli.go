@@ -53,7 +53,6 @@ type selectors struct {
 	Message        string
 	MessageFile    string
 	MessageStdin   bool
-	RunnerID       string
 	PromptFile     string
 	Reconcile      bool
 }
@@ -164,7 +163,7 @@ func workerLeaf(name, summary string, mutating bool, flags ...string) *commandSp
 
 func workerSpawnCommand(usage string) *commandSpec {
 	return workerLeaf("spawn", "Create and assign one projectless local physical-host worker", true,
-		"--runner-id <exact-native-id>", "--workdir, -d <canonical-path>", "--workspace, -w <name>",
+		"--workdir, -d <canonical-path>", "--workspace, -w <name>",
 		"--window, -W <name>", "--group <existing-id>", "--mode, -m <mode> (default medium)",
 		"--prompt-file <path|->")
 }
@@ -551,7 +550,7 @@ func commandOptionRequiresValue(arg string) bool {
 	case "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--thread", "-t",
 		"--group", "--mode", "-m", "--title-prefix", "--work-item-id", "--worker-ordinal", "--shelf", "--idempotency-key",
 		"--report-id", "--pane", "--status", "--issue", "--reference", "--pr", "--summary",
-		"--message", "--message-file", "--runner-id", "--prompt-file", "--update-owner":
+		"--message", "--message-file", "--prompt-file", "--update-owner":
 		return true
 	default:
 		return false
@@ -748,17 +747,13 @@ func parseSelectors(args []string) (selectors, []string, error) {
 			if err := setSelector(target, value, name); err != nil {
 				return parsed, nil, err
 			}
-		case "--runner-id", "--prompt-file":
+		case "--prompt-file":
 			value, next, err := selectorValue(args, i, name, inline, hasInline)
 			if err != nil {
 				return parsed, nil, err
 			}
 			i = next
-			target := &parsed.RunnerID
-			if name == "--prompt-file" {
-				target = &parsed.PromptFile
-			}
-			if err := setSelector(target, value, name); err != nil {
+			if err := setSelector(&parsed.PromptFile, value, name); err != nil {
 				return parsed, nil, err
 			}
 		case "--message-stdin":
@@ -847,7 +842,6 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 		{"--summary", parsed.Summary},
 		{"--message", parsed.Message},
 		{"--message-file", parsed.MessageFile},
-		{"--runner-id", parsed.RunnerID},
 		{"--prompt-file", parsed.PromptFile},
 	}
 	for _, test := range tests {
@@ -971,7 +965,7 @@ func compactStrings(values []string) []string {
 }
 
 func selectorsEmpty(parsed selectors) bool {
-	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && parsed.WorkItemID == "" && parsed.WorkerOrdinal == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && parsed.RunnerID == "" && parsed.PromptFile == "" && !parsed.Reconcile
+	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && parsed.WorkItemID == "" && parsed.WorkerOrdinal == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && parsed.PromptFile == "" && !parsed.Reconcile
 }
 
 func isGroupPath(path []string) bool {

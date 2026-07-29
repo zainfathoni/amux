@@ -2,23 +2,27 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/zainfathoni/amux/internal/config"
 	"github.com/zainfathoni/amux/internal/lock"
+	"github.com/zainfathoni/amux/internal/result"
 	"github.com/zainfathoni/amux/internal/tmux"
 )
 
-func TestSpawnCreatesOncePastesOnceSubmitsOnceAndPersists(t *testing.T) {
+func TestSpawnPlainRunnerCaseCreatesOnceAttemptsInputOnceAndPersists(t *testing.T) {
 	dir, workdir, log, pasted := setupSpawnTest(t, "")
 	if err := config.WriteGroups(filepath.Join(dir, config.GroupsFile), []config.GroupMembership{{Group: "issue-297", Thread: "T-coordinator", Role: config.GroupCoordinator}}); err != nil {
 		t.Fatal(err)
 	}
+	groupCalls := installSupportedGroupAmp(t, nil)
 	var createCalls int
 	spawnCreateThread = func(gotWorkdir, mode string) (string, error) {
 		createCalls++
@@ -34,8 +38,11 @@ func TestSpawnCreatesOncePastesOnceSubmitsOnceAndPersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if createCalls != 1 || strings.TrimSpace(stdout.String()) != "T-new" {
+	if createCalls != 1 || !strings.HasPrefix(stdout.String(), "T-new\n") {
 		t.Fatalf("create calls=%d stdout=%q", createCalls, stdout.String())
+	}
+	if countMutationCommands(*groupCalls) != 1 {
+		t.Fatalf("group label mutations=%d calls=%+v", countMutationCommands(*groupCalls), *groupCalls)
 	}
 	gotLog := readSpawnTestFile(t, log)
 	for _, pair := range []struct {
@@ -109,25 +116,55 @@ func TestSpawnDryRunValidatesEverythingWithoutMutation(t *testing.T) {
 	}
 }
 
-func TestSpawnRejectsRunnerWorkdirAndOwnershipConflictsBeforeCreate(t *testing.T) {
+func TestSpawnGroupDryRunPreflightsCapabilityWithoutMutation(t *testing.T) {
+	dir, workdir, log, _ := setupSpawnTest(t, "")
+	runtimeDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	groupsPath := filepath.Join(dir, config.GroupsFile)
+	if err := config.WriteGroups(groupsPath, []config.GroupMembership{{Group: "group", Thread: "T-coordinator", Role: config.GroupCoordinator}}); err != nil {
+		t.Fatal(err)
+	}
+	before := readSpawnTestFile(t, groupsPath)
+	commands := installSupportedGroupAmp(t, nil)
+	createCalls := 0
+	spawnCreateThread = func(string, string) (string, error) {
+		createCalls++
+		return "T-unexpected", nil
+	}
+	var stdout bytes.Buffer
+	args := append([]string{"--dry-run"}, spawnArgs(dir, workdir, "--group", "group", "--prompt-file", "-")...)
+	if err := (app{stdin: strings.NewReader("bounded prompt"), stdout: &stdout}).execute(args); err != nil {
+		t.Fatal(err)
+	}
+	if createCalls != 0 || countMutationCommands(*commands) != 0 || len(*commands) != 2 {
+		t.Fatalf("dry-run creates=%d Amp calls=%+v", createCalls, *commands)
+	}
+	if !strings.Contains(stdout.String(), "add-only ensure its Amp label") {
+		t.Fatalf("dry-run omitted label plan: %q", stdout.String())
+	}
+	if got := readSpawnTestFile(t, groupsPath); got != before {
+		t.Fatalf("dry-run mutated groups: before=%q after=%q", before, got)
+	}
+	if got := readSpawnTestFile(t, log); strings.Contains(got, "new-session") || strings.Contains(got, "load-buffer") || strings.Contains(got, "send-keys") {
+		t.Fatalf("dry-run mutated tmux:\n%s", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, config.WorkersFile)); !os.IsNotExist(err) {
+		t.Fatalf("dry-run wrote worker catalog: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(runtimeDir, "amux", lock.FileName)); !os.IsNotExist(err) {
+		t.Fatalf("dry-run wrote mutation lock: %v", err)
+	}
+}
+
+func TestSpawnRejectsOwnershipConflictsBeforeCreate(t *testing.T) {
 	dir, workdir, _, _ := setupSpawnTest(t, "")
 	createCalls := 0
 	spawnCreateThread = func(string, string) (string, error) {
 		createCalls++
 		return "T-unexpected", nil
 	}
-	spawnProcessWorkdir = func(int) (string, error) { return t.TempDir(), nil }
-	err := (app{stdin: strings.NewReader("prompt")}).execute(spawnArgs(dir, workdir, "--prompt-file", "-"))
-	if err == nil || !strings.Contains(err.Error(), "does not own canonical workdir") {
-		t.Fatalf("runner mismatch error=%v", err)
-	}
-	if createCalls != 0 {
-		t.Fatalf("runner mismatch created %d threads", createCalls)
-	}
-
-	spawnProcessWorkdir = func(int) (string, error) { return workdir, nil }
 	writeWorkerRegistry(t, dir, "alpha\tworker\t"+t.TempDir()+"\tT-existing\n")
-	err = (app{stdin: strings.NewReader("prompt")}).execute(spawnArgs(dir, workdir, "--prompt-file", "-"))
+	err := (app{stdin: strings.NewReader("prompt")}).execute(spawnArgs(dir, workdir, "--prompt-file", "-"))
 	if err == nil || !strings.Contains(err.Error(), "already configured") {
 		t.Fatalf("catalog conflict error=%v", err)
 	}
@@ -188,6 +225,22 @@ func TestSpawnCreateErrorWithExactThreadPreservesIdentityWithoutTmux(t *testing.
 	}
 }
 
+func TestSpawnTmuxCreateFailureReportsIndeterminateIdentityWithoutRetry(t *testing.T) {
+	dir, workdir, log, _ := setupSpawnTest(t, "create")
+	createCalls := 0
+	spawnCreateThread = func(string, string) (string, error) {
+		createCalls++
+		return "T-created", nil
+	}
+	err := (app{stdin: strings.NewReader("prompt")}).execute(spawnArgs(dir, workdir, "--prompt-file", "-"))
+	if err == nil || !strings.Contains(err.Error(), "thread=T-created") || !strings.Contains(err.Error(), "tmux=creation-indeterminate requested=alpha/worker") {
+		t.Fatalf("tmux create error=%v", err)
+	}
+	if got := readSpawnTestFile(t, log); createCalls != 1 || strings.Count(got, "new-session ") != 1 || strings.Contains(got, "load-buffer") || strings.Contains(got, "kill-window") {
+		t.Fatalf("tmux failure create=%d log:\n%s", createCalls, got)
+	}
+}
+
 func TestCreateLocalAmpThreadUsesExactModeAndCwdOnce(t *testing.T) {
 	workdir := t.TempDir()
 	bin := t.TempDir()
@@ -231,7 +284,7 @@ func TestSpawnPostCreateFailuresPreserveIdentityWithoutRetryOrCleanup(t *testing
 			if createCalls != 1 || strings.Count(got, "new-session ") != 1 || strings.Count(got, "load-buffer ") != 1 || strings.Contains(got, "kill-window") || strings.Contains(got, "archive") {
 				t.Fatalf("phase=%s create=%d log:\n%s", phase, createCalls, got)
 			}
-			if strings.Count(got, "paste-buffer ") != 1 || strings.Count(got, "send-keys -t %1 Enter") > 1 {
+			if strings.Count(got, "paste-buffer ") != 1 || strings.Count(got, "send-keys -t %1 Enter") != 1 {
 				t.Fatalf("phase=%s duplicate input log:\n%s", phase, got)
 			}
 			if phase == "paste" && strings.Count(got, "delete-buffer ") != 1 {
@@ -244,6 +297,95 @@ func TestSpawnPostCreateFailuresPreserveIdentityWithoutRetryOrCleanup(t *testing
 	}
 }
 
+func TestSpawnGroupCapabilityRejectsBeforeThreadCreation(t *testing.T) {
+	dir, workdir, _, _ := setupSpawnTest(t, "")
+	if err := config.WriteGroups(filepath.Join(dir, config.GroupsFile), []config.GroupMembership{{Group: "group", Thread: "T-coordinator", Role: config.GroupCoordinator}}); err != nil {
+		t.Fatal(err)
+	}
+	installGroupAmp(t, "old\n", supportedGroupHelp, nil)
+	createCalls := 0
+	spawnCreateThread = func(string, string) (string, error) {
+		createCalls++
+		return "T-unexpected", nil
+	}
+	err := (app{stdin: strings.NewReader("prompt")}).execute(spawnArgs(dir, workdir, "--group", "group", "--prompt-file", "-"))
+	if err == nil || result.ExitCode(err) != result.ExitRejected || createCalls != 0 {
+		t.Fatalf("capability preflight error=%v exit=%d creates=%d", err, result.ExitCode(err), createCalls)
+	}
+}
+
+func TestSpawnReportsWorkerAndGroupBeforeLabelFailureWithoutRollback(t *testing.T) {
+	dir, workdir, log, _ := setupSpawnTest(t, "")
+	if err := config.WriteGroups(filepath.Join(dir, config.GroupsFile), []config.GroupMembership{{Group: "group", Thread: "T-coordinator", Role: config.GroupCoordinator}}); err != nil {
+		t.Fatal(err)
+	}
+	commands := installSupportedGroupAmp(t, func(args []string) ([]byte, error) {
+		if reflect.DeepEqual(args, []string{"threads", "label", "T-group-fail", "group"}) {
+			return []byte("label rejected"), errors.New("exit status 1")
+		}
+		return nil, nil
+	})
+	spawnCreateThread = func(string, string) (string, error) { return "T-group-fail", nil }
+	setReadySpawnPane(t, workdir, "T-group-fail")
+	var stdout bytes.Buffer
+	err := (app{stdin: strings.NewReader("prompt"), stdout: &stdout}).execute(append([]string{"--json"}, spawnArgs(dir, workdir, "--group", "group", "--prompt-file", "-")...))
+	if err == nil || !strings.Contains(err.Error(), "thread=T-group-fail") || !strings.Contains(err.Error(), "tmux=alpha/worker window=@1 pane=%1") {
+		t.Fatalf("group label failure=%v", err)
+	}
+	var env result.Envelope
+	if decodeErr := json.NewDecoder(&stdout).Decode(&env); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if len(env.Successful) != 2 || env.Successful[0].Action != "persist-worker" || env.Successful[1].Action != "persist-group" || len(env.Failed) != 1 || env.Failed[0].Action != "ensure-label" || env.Failed[0].Error == nil || !strings.Contains(env.Failed[0].Error.Message, "thread=T-group-fail") {
+		t.Fatalf("partial group envelope=%+v", env)
+	}
+	if countMutationCommands(*commands) != 1 {
+		t.Fatalf("label attempts=%d calls=%+v", countMutationCommands(*commands), *commands)
+	}
+	if got := readSpawnTestFile(t, log); strings.Count(got, "new-session ") != 1 || strings.Count(got, "paste-buffer ") != 1 || strings.Count(got, "send-keys -t %1 Enter") != 1 || strings.Contains(got, "kill-window") {
+		t.Fatalf("group failure retried or cleaned state:\n%s", got)
+	}
+	rows, loadErr := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
+	memberships, groupErr := config.LoadGroupsReadOnly(filepath.Join(dir, config.GroupsFile))
+	if loadErr != nil || len(rows) != 1 || groupErr != nil || membershipIndex(memberships, "group", "T-group-fail") < 0 {
+		t.Fatalf("preserved worker=%+v workerErr=%v groups=%+v groupErr=%v", rows, loadErr, memberships, groupErr)
+	}
+}
+
+func TestSpawnReportsPersistedWorkerWhenGroupStoreFails(t *testing.T) {
+	dir, workdir, _, _ := setupSpawnTest(t, "")
+	groupsPath := filepath.Join(dir, config.GroupsFile)
+	if err := config.WriteGroups(groupsPath, []config.GroupMembership{{Group: "group", Thread: "T-coordinator", Role: config.GroupCoordinator}}); err != nil {
+		t.Fatal(err)
+	}
+	spawnCreateThread = func(string, string) (string, error) {
+		if err := os.Remove(groupsPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(groupsPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return "T-group-store-fail", nil
+	}
+	setReadySpawnPane(t, workdir, "T-group-store-fail")
+	var stdout bytes.Buffer
+	err := (app{stdin: strings.NewReader("prompt"), stdout: &stdout}).execute(append([]string{"--json"}, spawnArgs(dir, workdir, "--group", "group", "--prompt-file", "-")...))
+	if err == nil || !strings.Contains(err.Error(), "persist exact group member") || !strings.Contains(err.Error(), "thread=T-group-store-fail") {
+		t.Fatalf("group store failure=%v", err)
+	}
+	var env result.Envelope
+	if decodeErr := json.NewDecoder(&stdout).Decode(&env); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if len(env.Successful) != 1 || env.Successful[0].Action != "persist-worker" || len(env.Failed) != 1 || env.Failed[0].Action != "persist-group" {
+		t.Fatalf("group store envelope=%+v", env)
+	}
+	rows, loadErr := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
+	if loadErr != nil || len(rows) != 1 || rows[0].Thread != "T-group-store-fail" {
+		t.Fatalf("preserved worker=%+v err=%v", rows, loadErr)
+	}
+}
+
 func setupSpawnTest(t *testing.T, fail string) (dir, workdir, log, pasted string) {
 	t.Helper()
 	dir, workdir = t.TempDir(), t.TempDir()
@@ -253,7 +395,7 @@ func setupSpawnTest(t *testing.T, fail string) (dir, workdir, log, pasted string
 printf '%s\n' "$*" >> ` + shellSingleQuote(log) + `
 case "$1" in
   has-session) test "` + fail + `" = window; exit $? ;;
-  new-session) printf 'alpha\tworker\t@1\t%%1\n'; exit 0 ;;
+  new-session) test "` + fail + `" = create && exit 1; printf 'alpha\tworker\t@1\t%%1\n'; exit 0 ;;
   load-buffer) cat > ` + shellSingleQuote(pasted) + `; exit 0 ;;
   paste-buffer) test "` + fail + `" != paste; exit $? ;;
   delete-buffer) exit 0 ;;
@@ -265,19 +407,16 @@ exit 77
 	writeExecutable(t, filepath.Join(bin, "tmux"), script)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-	oldIDs, oldArgs, oldIdentity, oldWorkdir, oldCreate := spawnProcessIDs, spawnProcessArgs, spawnProcessIdentity, spawnProcessWorkdir, spawnCreateThread
+	installSupportedGroupAmp(t, nil)
+	oldCreate := spawnCreateThread
 	oldInspect, oldLimit, oldPoll, oldSettle := spawnInspectPaneByID, spawnReadinessLimit, spawnReadinessPoll, spawnReadinessSettle
-	spawnProcessIDs = func() ([]int, error) { return []int{4242}, nil }
-	spawnProcessArgs = func(int) ([]string, error) { return []string{"amp", "--no-tui", "--runner-id", "physical-1"}, nil }
-	spawnProcessIdentity = func(int) (string, error) { return "start-4242", nil }
-	spawnProcessWorkdir = func(int) (string, error) { return workdir, nil }
 	spawnCreateThread = func(string, string) (string, error) {
 		t.Fatal("preflight test unexpectedly reached Amp thread creation")
 		return "", errors.New("unreachable")
 	}
 	spawnReadinessLimit, spawnReadinessPoll, spawnReadinessSettle = time.Millisecond, time.Microsecond, 0
 	t.Cleanup(func() {
-		spawnProcessIDs, spawnProcessArgs, spawnProcessIdentity, spawnProcessWorkdir, spawnCreateThread = oldIDs, oldArgs, oldIdentity, oldWorkdir, oldCreate
+		spawnCreateThread = oldCreate
 		spawnInspectPaneByID, spawnReadinessLimit, spawnReadinessPoll, spawnReadinessSettle = oldInspect, oldLimit, oldPoll, oldSettle
 	})
 	return dir, workdir, log, pasted
@@ -294,7 +433,7 @@ func setReadySpawnPane(t *testing.T, workdir, thread string) {
 }
 
 func spawnArgs(dir, workdir string, tail ...string) []string {
-	args := []string{"--config-dir", dir, "spawn", "--runner-id", "physical-1", "--workdir", workdir, "--workspace", "alpha", "--window", "worker"}
+	args := []string{"--config-dir", dir, "spawn", "--workdir", workdir, "--workspace", "alpha", "--window", "worker"}
 	return append(args, tail...)
 }
 

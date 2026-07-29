@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -20,10 +19,6 @@ import (
 const maxSpawnPromptBytes = 1 << 20
 
 var (
-	spawnProcessIDs      = localProcessIDs
-	spawnProcessArgs     = tmux.ProcessArgs
-	spawnProcessIdentity = tmux.ProcessIdentity
-	spawnProcessWorkdir  = tmux.ProcessWorkdir
 	spawnCreateThread    = createLocalAmpThread
 	spawnReadinessLimit  = 10 * time.Second
 	spawnReadinessPoll   = 100 * time.Millisecond
@@ -33,14 +28,11 @@ var (
 
 func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelope) (*result.Envelope, error) {
 	s := in.Selectors
-	if s.RunnerID == "" || s.Workdir == "" || s.Workspace == "" || s.Window == "" || s.PromptFile == "" {
-		return env, result.Request(errors.New("spawn requires --runner-id, --workdir, --workspace, --window, and --prompt-file <path|->"))
+	if s.Workdir == "" || s.Workspace == "" || s.Window == "" || s.PromptFile == "" {
+		return env, result.Request(errors.New("spawn requires --workdir, --workspace, --window, and --prompt-file <path|->"))
 	}
 	if len(in.Args) != 0 {
 		return env, result.Request(errors.New("spawn accepts no positional prompt or identity arguments"))
-	}
-	if err := config.ValidateField("Amp runner ID", s.RunnerID); err != nil {
-		return env, result.Request(err)
 	}
 	mode := s.Mode
 	if mode == "" {
@@ -61,13 +53,17 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	if !filepath.IsAbs(s.Workdir) || s.Workdir != workdir {
 		return env, result.Preflight(fmt.Errorf("--workdir must be the canonical existing path %s", workdir))
 	}
-	if err := preflightPhysicalAmpRunner(s.RunnerID, workdir); err != nil {
-		return env, result.Preflight(err)
-	}
 	row := config.Row{Workspace: s.Workspace, Window: s.Window, Workdir: workdir}
 	memberships, err := preflightSpawnOwnership(dir, row, s.Group)
 	if err != nil {
 		return env, result.Preflight(err)
+	}
+	var groupAmpPath string
+	if s.Group != "" {
+		groupAmpPath, err = preflightGroupAmp()
+		if err != nil {
+			return env, result.Preflight(err)
+		}
 	}
 	runner := tmux.Runner{}
 	sessionExists, err := runner.SessionExists(row.Workspace)
@@ -84,7 +80,7 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		}
 	}
 	if in.Options.DryRun {
-		out := result.Outcome{Resource: result.CommandResource(), Action: "spawn", Message: fmt.Sprintf("would use exact live local Amp runner %s at %s; run amp threads new --mode %s once in that cwd; create tmux worker %s/%s; paste the bounded prompt once and press Enter once; then persist the exact worker%s", s.RunnerID, workdir, mode, row.Workspace, row.Window, optionalGroupPlan(s.Group))}
+		out := result.Outcome{Resource: result.CommandResource(), Action: "spawn", Message: fmt.Sprintf("would locally run amp threads new --mode %s once in canonical cwd %s; create tmux worker %s/%s; attempt one bounded literal prompt paste and one Enter; then persist and report the exact worker%s", mode, workdir, row.Workspace, row.Window, optionalGroupPlan(s.Group))}
 		env.Planned = append(env.Planned, out)
 		if !in.Options.JSON {
 			fmt.Fprintln(a.stdout, out.Message)
@@ -97,7 +93,7 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	if createErr != nil {
 		if exact, identityErr := config.CanonicalThreadID(thread); identityErr == nil {
 			row.Thread = exact
-			return env, postCreateSpawnError(exact, tmux.WindowPane{}, row, "create thread returned an error after an exact identity", createErr)
+			return env, postCreateSpawnErrorBeforeTmux(exact, row, "create thread returned an error after an exact identity", createErr)
 		}
 		return env, result.Runtime(fmt.Errorf("amp threads new rejected before returning a thread: %w", createErr))
 	}
@@ -120,27 +116,46 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	if err := waitForSpawnPane(created, row, command); err != nil {
 		return env, postCreateSpawnError(thread, created, row, "wait for exact tmux worker readiness", err)
 	}
-	if err := runner.PasteLiteral(created.PaneID, prompt); err != nil {
-		return env, postCreateSpawnError(thread, created, row, "paste prompt once", err)
+	pasteErr := runner.PasteLiteral(created.PaneID, prompt)
+	enterErr := runner.SendEnter(created.PaneID)
+	if pasteErr != nil || enterErr != nil {
+		step := "attempt prompt paste and Enter once each"
+		cause := errors.Join(wrapSpawnAttemptError("paste prompt", pasteErr), wrapSpawnAttemptError("press Enter", enterErr))
+		return env, postCreateSpawnError(thread, created, row, step, cause)
 	}
-	if err := runner.SendEnter(created.PaneID); err != nil {
-		return env, postCreateSpawnError(thread, created, row, "submit prompt once", err)
-	}
+	workerOut := workerOutcome(row, "persist-worker", "running")
+	workerOut.Message = "one prompt paste and one Enter were attempted; persisted the exact worker"
 	if _, err := config.Store(dir.WorkersPath(), row); err != nil {
-		return env, postCreateSpawnError(thread, created, row, "persist exact worker", err)
+		failure := postCreateSpawnError(thread, created, row, "persist exact worker", err)
+		appendSpawnFailure(env, workerOut, failure)
+		return env, failure
+	}
+	env.Successful = append(env.Successful, workerOut)
+	if !in.Options.JSON {
+		fmt.Fprintln(a.stdout, thread)
 	}
 	if s.Group != "" {
 		membership := config.GroupMembership{Group: s.Group, Thread: thread, Role: config.GroupMember}
 		memberships = append(memberships, membership)
+		groupOut := groupOutcome(membership, "persist-group")
+		groupOut.Message = "persisted exact group member intent"
 		if err := config.WriteGroups(dir.GroupsPath(), memberships); err != nil {
-			return env, postCreateSpawnError(thread, created, row, "persist exact group member", err)
+			failure := postCreateSpawnError(thread, created, row, "persist exact group member", err)
+			appendSpawnFailure(env, groupOut, failure)
+			return env, failure
 		}
-	}
-	out := workerOutcome(row, "spawn", "running")
-	out.Message = "created one local thread, submitted one prompt, and persisted the exact worker"
-	env.Successful = append(env.Successful, out)
-	if !in.Options.JSON {
-		fmt.Fprintln(a.stdout, thread)
+		env.Successful = append(env.Successful, groupOut)
+		if !in.Options.JSON {
+			fmt.Fprintf(a.stdout, "%s\t%s\t%s\tlocal membership persisted\n", membership.Group, membership.Thread, membership.Role)
+		}
+		labelOut := groupOutcome(membership, "ensure-label")
+		if _, err := a.ensureGroupLabel(env, labelOut, groupAmpPath, membership, in.Options.JSON); err != nil {
+			failure := postCreateSpawnError(thread, created, row, "add-only ensure exact group member label", err)
+			if len(env.Failed) != 0 && env.Failed[len(env.Failed)-1].Error != nil {
+				env.Failed[len(env.Failed)-1].Error.Message = failure.Error()
+			}
+			return env, failure
+		}
 	}
 	return env, nil
 }
@@ -170,57 +185,6 @@ func (a app) readSpawnPrompt(path string) (string, error) {
 	return string(data), nil
 }
 
-func preflightPhysicalAmpRunner(runnerID, workdir string) error {
-	pids, err := spawnProcessIDs()
-	if err != nil {
-		return fmt.Errorf("inspect local processes for Amp runner %q: %w", runnerID, err)
-	}
-	wantArgs := []string{"amp", "--no-tui", "--runner-id", runnerID}
-	matchedID := false
-	for _, pid := range pids {
-		args, err := spawnProcessArgs(pid)
-		if err != nil || len(args) != len(wantArgs) || filepath.Base(args[0]) != wantArgs[0] || args[1] != wantArgs[1] || args[2] != wantArgs[2] || args[3] != wantArgs[3] {
-			continue
-		}
-		matchedID = true
-		before, err := spawnProcessIdentity(pid)
-		if err != nil || before == "" {
-			continue
-		}
-		cwd, err := spawnProcessWorkdir(pid)
-		if err != nil {
-			continue
-		}
-		canonical, err := config.CanonicalWorkdir(cwd)
-		revalidated, argsErr := spawnProcessArgs(pid)
-		after, identityErr := spawnProcessIdentity(pid)
-		if err == nil && canonical == workdir && identityErr == nil && before == after && argsErr == nil && strings.Join(args, "\x00") == strings.Join(revalidated, "\x00") {
-			return nil
-		}
-	}
-	if matchedID {
-		return fmt.Errorf("exact live local Amp runner %q does not own canonical workdir %s", runnerID, workdir)
-	}
-	return fmt.Errorf("exact live local Amp runner %q was not found; expected argv amp --no-tui --runner-id %s", runnerID, runnerID)
-}
-
-func localProcessIDs() ([]int, error) {
-	out, err := exec.Command("ps", "-ax", "-o", "pid=").Output()
-	if err != nil {
-		return nil, err
-	}
-	fields := strings.Fields(string(out))
-	pids := make([]int, 0, len(fields))
-	for _, field := range fields {
-		pid, err := strconv.Atoi(field)
-		if err != nil || pid <= 0 {
-			return nil, fmt.Errorf("unexpected process PID %q", field)
-		}
-		pids = append(pids, pid)
-	}
-	return pids, nil
-}
-
 func preflightSpawnOwnership(dir config.Directory, row config.Row, group string) ([]config.GroupMembership, error) {
 	rows, err := config.LoadReadOnly(dir.WorkersPath())
 	if err != nil {
@@ -241,7 +205,7 @@ func preflightSpawnOwnership(dir config.Directory, row config.Row, group string)
 	}
 	for _, existing := range runners {
 		if existing.Workdir == row.Workdir {
-			return nil, fmt.Errorf("workdir %s is already owned by amux Runner workspace %s; Amp-native runner ID and amux Runner identity are distinct", row.Workdir, existing.Workspace)
+			return nil, fmt.Errorf("workdir %s is already owned by amux Runner workspace %s", row.Workdir, existing.Workspace)
 		}
 	}
 	memberships, err := config.LoadGroupsReadOnly(dir.GroupsPath())
@@ -302,16 +266,33 @@ func waitForSpawnPane(created tmux.WindowPane, row config.Row, command string) e
 }
 
 func postCreateSpawnError(thread string, pane tmux.WindowPane, row config.Row, step string, cause error) error {
-	identity := "not-created requested=" + row.Workspace + "/" + row.Window
+	identity := "creation-indeterminate requested=" + row.Workspace + "/" + row.Window
 	if pane.WindowID != "" || pane.PaneID != "" {
 		identity = fmt.Sprintf("%s/%s window=%s pane=%s", row.Workspace, row.Window, pane.WindowID, pane.PaneID)
 	}
 	return result.Runtime(fmt.Errorf("post-create spawn stopped at %s: thread=%s tmux=%s; state was preserved without retry or cleanup: %w", step, thread, identity, cause))
 }
 
+func postCreateSpawnErrorBeforeTmux(thread string, row config.Row, step string, cause error) error {
+	return result.Runtime(fmt.Errorf("post-create spawn stopped at %s: thread=%s tmux=not-created requested=%s/%s; state was preserved without retry or cleanup: %w", step, thread, row.Workspace, row.Window, cause))
+}
+
+func wrapSpawnAttemptError(action string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", action, err)
+}
+
+func appendSpawnFailure(env *result.Envelope, out result.Outcome, failure error) {
+	out.Message = "post-create phase failed; completed state was preserved"
+	out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: failure.Error()}
+	env.Failed = append(env.Failed, out)
+}
+
 func optionalGroupPlan(group string) string {
 	if group == "" {
 		return ""
 	}
-	return " and existing group " + group
+	return ", then persist and report existing group " + group + " and add-only ensure its Amp label"
 }

@@ -282,12 +282,12 @@ func TestSpawnAliasesExposeTheSameLeanFlags(t *testing.T) {
 		if err := (app{stdout: &stdout}).execute(path); err != nil {
 			t.Fatalf("execute(%q): %v", path, err)
 		}
-		for _, required := range []string{"--runner-id", "--workdir", "--workspace", "--window", "--group", "--mode", "--prompt-file"} {
+		for _, required := range []string{"--workdir", "--workspace", "--window", "--group", "--mode", "--prompt-file"} {
 			if !strings.Contains(stdout.String(), required) {
 				t.Fatalf("help for %q lacks %q:\n%s", path, required, stdout.String())
 			}
 		}
-		for _, removed := range []string{"--message", "--message-file", "--reconcile", "--idempotency-key", "--title-prefix"} {
+		for _, removed := range []string{"--runner-id", "--message", "--message-file", "--reconcile", "--idempotency-key", "--title-prefix"} {
 			if strings.Contains(stdout.String(), removed) {
 				t.Fatalf("help for %q retains removed flag %q:\n%s", path, removed, stdout.String())
 			}
@@ -301,7 +301,7 @@ func TestDirectSpawnHelpIsAvailableOnBothAliases(t *testing.T) {
 		if err := (app{stdout: &stdout}).execute(path); err != nil {
 			t.Fatalf("execute(%q): %v", path, err)
 		}
-		if !strings.Contains(stdout.String(), "--runner-id") {
+		if !strings.Contains(stdout.String(), "--prompt-file") || strings.Contains(stdout.String(), "--runner-id") {
 			t.Fatalf("execute(%q) lacks spawn help: %q", path, stdout.String())
 		}
 	}
