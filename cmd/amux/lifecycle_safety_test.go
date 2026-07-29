@@ -53,40 +53,75 @@ func TestLifecycleExecutorPreflightUsesExactAncestry(t *testing.T) {
 	}
 }
 
-func TestLifecycleProcessAncestryRecordsPID1AndUsesExactLimit(t *testing.T) {
+func TestLifecycleProcessAncestryStopsAtVerifiedPID1BoundaryAndUsesExactLimit(t *testing.T) {
 	oldInspect := lifecycleProcessLink
 	t.Cleanup(func() { lifecycleProcessLink = oldInspect })
+	inspectedPID1 := false
 	lifecycleProcessLink = func(pid int) (tmux.ProcessMetadata, error) {
-		parent := pid - 1
 		if pid == 1 {
-			parent = 0
+			inspectedPID1 = true
+			return tmux.ProcessMetadata{}, errors.New("operation not permitted")
 		}
+		parent := pid - 1
 		return tmux.ProcessMetadata{PID: pid, ParentPID: parent, Identity: fmt.Sprintf("start-%d", pid)}, nil
 	}
 	ancestry, err := lifecycleProcessAncestry(lifecycleAncestryLimit)
-	if err != nil || len(ancestry) != lifecycleAncestryLimit || ancestry[1].Identity == "" {
-		t.Fatalf("exact-limit ancestry = %d records, PID 1 = %+v, error = %v", len(ancestry), ancestry[1], err)
+	if err != nil || len(ancestry) != lifecycleAncestryLimit-1 || ancestry[2].ParentPID != 1 {
+		t.Fatalf("exact-limit ancestry = %d records, PID 2 = %+v, error = %v", len(ancestry), ancestry[2], err)
+	}
+	if inspectedPID1 {
+		t.Fatal("ancestry queried PID 1 after verifying a parent-to-1 boundary")
 	}
 	if _, err := lifecycleProcessAncestry(lifecycleAncestryLimit + 1); err == nil || !strings.Contains(err.Error(), "exceeded safety limit") {
 		t.Fatalf("over-limit ancestry error = %v", err)
 	}
+
 	lifecycleProcessLink = func(pid int) (tmux.ProcessMetadata, error) {
 		if pid == 1 {
 			return tmux.ProcessMetadata{}, errors.New("PID 1 unavailable")
 		}
 		return tmux.ProcessMetadata{PID: pid, ParentPID: 1, Identity: fmt.Sprintf("start-%d", pid)}, nil
 	}
-	if _, err := lifecycleProcessAncestry(2); err == nil || !strings.Contains(err.Error(), "PID 1 unavailable") {
-		t.Fatalf("unavailable PID 1 error = %v", err)
+	if _, err := lifecycleProcessAncestry(1); err == nil || !strings.Contains(err.Error(), "PID 1 unavailable") {
+		t.Fatalf("explicit unavailable PID 1 error = %v", err)
 	}
+
 	lifecycleProcessLink = func(pid int) (tmux.ProcessMetadata, error) {
 		if pid == 1 {
 			return tmux.ProcessMetadata{PID: 1, ParentPID: 1, Identity: "start-1"}, nil
 		}
 		return tmux.ProcessMetadata{PID: pid, ParentPID: 1, Identity: fmt.Sprintf("start-%d", pid)}, nil
 	}
-	if _, err := lifecycleProcessAncestry(2); err == nil || !strings.Contains(err.Error(), "PID 1 returned a nonzero parent") {
+	if _, err := lifecycleProcessAncestry(1); err == nil || !strings.Contains(err.Error(), "PID 1 returned a nonzero parent") {
 		t.Fatalf("malformed PID 1 parent error = %v", err)
+	}
+}
+
+func TestLifecycleProcessAncestryRejectsUnavailableOrIncompleteIntermediateNode(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		process tmux.ProcessMetadata
+		err     error
+	}{
+		{name: "unavailable", err: errors.New("operation not permitted")},
+		{name: "incomplete", process: tmux.ProcessMetadata{PID: 80, ParentPID: 1}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			oldInspect := lifecycleProcessLink
+			t.Cleanup(func() { lifecycleProcessLink = oldInspect })
+			lifecycleProcessLink = func(pid int) (tmux.ProcessMetadata, error) {
+				if pid == 90 {
+					return tmux.ProcessMetadata{PID: 90, ParentPID: 80, Identity: "start-90"}, nil
+				}
+				if pid == 80 {
+					return test.process, test.err
+				}
+				return tmux.ProcessMetadata{}, fmt.Errorf("unexpected PID %d", pid)
+			}
+			if _, err := lifecycleProcessAncestry(90); err == nil {
+				t.Fatal("incomplete intermediate ancestry was accepted")
+			}
+		})
 	}
 }
 
@@ -172,6 +207,23 @@ func TestLifecycleExecutorRevalidatesCurrentAncestryAfterPaneConfirmation(t *tes
 	err := preflightLifecycleExecutor("runner restart", []tmux.WindowPane{{Session: "alpha", Window: "runner", WindowID: "@1"}})
 	if err == nil || !strings.Contains(err.Error(), "process 90 ancestry identity changed") {
 		t.Fatalf("late current ancestry drift error = %v", err)
+	}
+}
+
+func TestLifecycleExecutorRejectsPID1BoundaryParentDrift(t *testing.T) {
+	calls := map[int]int{}
+	installLifecycleSafetyFixture(t, 90, 70, func(pid int) (tmux.ProcessMetadata, error) {
+		calls[pid]++
+		process := lifecycleFixtureProcess(pid)
+		if pid == 60 && calls[pid] > 1 {
+			process.ParentPID = 55
+		}
+		return process, nil
+	})
+
+	err := preflightLifecycleExecutor("runner restart", []tmux.WindowPane{{Session: "alpha", Window: "runner", WindowID: "@1"}})
+	if err == nil || !strings.Contains(err.Error(), "process 60 ancestry identity changed") {
+		t.Fatalf("PID 1 boundary parent drift error = %v", err)
 	}
 }
 
@@ -428,6 +480,70 @@ func TestRunnerMaintenanceSelfTargetPrecedesExecutableValidationFailure(t *testi
 	afterResult, readErr := os.ReadFile(fixture.dir.MaintenanceResultPath())
 	if readErr != nil || !bytes.Equal(beforeResult, afterResult) {
 		t.Fatalf("early validation path changed result: err=%v before=%q after=%q", readErr, beforeResult, afterResult)
+	}
+}
+
+func TestIndependentLifecycleCallersDoNotInspectPID1AfterVerifiedBoundary(t *testing.T) {
+	dir := t.TempDir()
+	workerWorkdir, runnerWorkdir := t.TempDir(), t.TempDir()
+	worker := config.Row{Workspace: "workers", Window: "worker", Workdir: workerWorkdir, Thread: "T-worker"}
+	writeWorkerRegistry(t, dir, worker.String()+"\n")
+	writeRunnerRegistry(t, dir, "runners\t"+runnerWorkdir+"\n")
+	runnerWindow := config.RunnerWindow(runnerWorkdir)
+	workerStart := teardownExpectedStartCommand(teardownIdentity{Workspace: worker.Workspace, Session: worker.Workspace, Window: worker.Window, Thread: worker.Thread}, worker)
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) exit 0 ;;
+  list-panes)
+    case "$*" in
+      *runners*) printf 'runners\t`+runnerWindow+`\t@7\t%%7\t`+runnerWorkdir+`\tzsh\t%s\t0\t70\t123\n' `+shellSingleQuote(runnerStartCommand(runnerWorkdir))+` ;;
+      *workers*) printf 'worker\t@8\t%s\n' `+shellSingleQuote(workerStart)+` ;;
+      *) exit 2 ;;
+    esac ;;
+  *) exit 2 ;;
+esac
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	pid1Queries := 0
+	oldCurrent, oldInspect, oldPane := lifecycleCurrentPID, lifecycleProcessLink, lifecyclePaneProcess
+	lifecycleCurrentPID = func() int { return 90 }
+	lifecycleProcessLink = func(pid int) (tmux.ProcessMetadata, error) {
+		if pid == 1 {
+			pid1Queries++
+			return tmux.ProcessMetadata{}, errors.New("operation not permitted")
+		}
+		parents := map[int]int{90: 80, 80: 1, 70: 60, 60: 1}
+		parent, ok := parents[pid]
+		if !ok {
+			return tmux.ProcessMetadata{}, fmt.Errorf("unexpected PID %d", pid)
+		}
+		return tmux.ProcessMetadata{PID: pid, ParentPID: parent, Identity: fmt.Sprintf("start-%d", pid)}, nil
+	}
+	lifecyclePaneProcess = func(pane tmux.WindowPane) (tmux.WindowPane, error) {
+		pane.PID = 70
+		pane.StartTime = 123
+		return pane, nil
+	}
+	t.Cleanup(func() {
+		lifecycleCurrentPID, lifecycleProcessLink, lifecyclePaneProcess = oldCurrent, oldInspect, oldPane
+	})
+
+	workerResult, err := executeWorkerJSONResult(t, "--json", "--dry-run", "--config-dir", dir, "worker", "teardown", "--thread", worker.Thread)
+	if err != nil || len(workerResult.Planned) != 1 {
+		t.Fatalf("independent worker teardown = %+v, %v", workerResult, err)
+	}
+	runnerResult := executeRunnerJSON(t, "--json", "--dry-run", "--config-dir", dir, "runner", "restart", "--workdir", runnerWorkdir)
+	if len(runnerResult.Planned) != 1 {
+		t.Fatalf("independent runner restart = %+v", runnerResult)
+	}
+	aggregateResult := executeAggregateJSON(t, "--json", "--dry-run", "--config-dir", dir, "restart", "--all")
+	if keys := aggregateResourceKeys(aggregateResult.Planned); strings.Join(keys, ",") != "runner:"+runnerWorkdir+",worker:"+worker.Thread {
+		t.Fatalf("independent aggregate restart --all = %+v", aggregateResult)
+	}
+	if pid1Queries != 0 {
+		t.Fatalf("independent lifecycle callers queried PID 1 %d times", pid1Queries)
 	}
 }
 
