@@ -22,7 +22,7 @@ func TestWorkerListIsDeterministicLocalJSONAndFiltersShelfIntent(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkerRegistry(t, dir,
 		"zeta\tz\t/tmp/z\tT-z\n"+
-			"alpha\ta\t/tmp/a\tT-a\n")
+			"alpha\ta\t/tmp/a\tT-a\tretained_indeterminate\n")
 	if err := os.WriteFile(filepath.Join(dir, "shelves.tsv"), []byte("# amux-schema: shelves/v1\nT-z\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestWorkerListIsDeterministicLocalJSONAndFiltersShelfIntent(t *testing.T) {
 	if err := json.NewDecoder(&stdout).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Successful) != 1 || got.Successful[0].Resource.Thread != "T-a" || got.Successful[0].Message != "unshelved" {
+	if len(got.Successful) != 1 || got.Successful[0].Resource.Thread != "T-a" || got.Successful[0].Message != "unshelved" || got.Successful[0].Worker == nil || got.Successful[0].Worker.AssignmentState != "retained_indeterminate" {
 		t.Fatalf("worker list result = %+v", got)
 	}
 	if _, err := os.Stat(called); !os.IsNotExist(err) {
@@ -1047,7 +1047,7 @@ func TestScopedWorkerDoctorUsesBoundedExactThreadQueries(t *testing.T) {
 	legacyWorkdir := "legacy/../worker"
 	rows := []config.Row{
 		{Workspace: "alpha", Window: "b", Workdir: legacyWorkdir, Thread: "T-b"},
-		{Workspace: "alpha", Window: "a", Workdir: "/tmp/a", Thread: "T-a"},
+		{Workspace: "alpha", Window: "a", Workdir: "/tmp/a", Thread: "T-a", AssignmentState: config.WorkerAssignmentRetainedIndeterminate},
 		{Workspace: "beta", Window: "c", Workdir: "/tmp/c", Thread: "T-c"},
 	}
 	writeWorkerRegistry(t, dir, rows[0].String()+"\n"+rows[1].String()+"\n"+rows[2].String()+"\n")
@@ -1073,8 +1073,44 @@ func TestScopedWorkerDoctorUsesBoundedExactThreadQueries(t *testing.T) {
 			t.Fatalf("worker doctor placement diagnostic = %+v", out)
 		}
 	}
+	if got.Successful[0].Worker.AssignmentState != "retained_indeterminate" || !strings.Contains(got.Successful[0].Message, "assignment=retained_indeterminate") {
+		t.Fatalf("worker doctor lost retained assignment state = %+v", got.Successful[0])
+	}
 	if got.Successful[1].Worker.LocalState != "exact" || got.Successful[1].Worker.Workdir != "legacy/../worker" || !strings.Contains(got.Successful[1].Message, "local=exact") {
 		t.Fatalf("worker doctor legacy catalog spelling = %+v", got.Successful[1])
+	}
+}
+
+func TestWorkerDoctorHumanPrintsRetainedAndLegacyAssignmentStates(t *testing.T) {
+	dir := t.TempDir()
+	rows := []config.Row{
+		{Workspace: "alpha", Window: "a", Workdir: "/tmp/retained", Thread: "T-retained", AssignmentState: config.WorkerAssignmentRetainedIndeterminate},
+		{Workspace: "alpha", Window: "b", Workdir: "/tmp/legacy", Thread: "T-legacy"},
+	}
+	writeWorkerRegistry(t, dir, rows[0].String()+"\n"+rows[1].String()+"\n")
+	installWorkerDoctorTmux(t, rows)
+	calls := injectAmpThreadsListProcess(t, func(args []string) (string, string) {
+		for _, id := range []string{"T-retained", "T-legacy"} {
+			if slicesContain(args, "id:"+id+" archived:false") {
+				return "output", `[{"id":"` + id + `"}]`
+			}
+		}
+		return "nonzero", ""
+	})
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).execute([]string{"--config-dir", dir, "worker", "doctor", "--workspace", "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	if *calls != 2 {
+		t.Fatalf("amp threads search calls=%d, want 2", *calls)
+	}
+	for _, want := range []string{
+		"T-retained\tlocal=exact remote=active intent=false assignment=retained_indeterminate",
+		"T-legacy\tlocal=exact remote=active intent=false assignment=unknown",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("human doctor lacks %q: %q", want, stdout.String())
+		}
 	}
 }
 

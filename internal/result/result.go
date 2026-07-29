@@ -141,8 +141,11 @@ type RunnerDetails struct {
 type WorkerDetails struct {
 	Workspace         string `json:"workspace"`
 	Window            string `json:"window"`
+	WindowID          string `json:"window_id,omitempty"`
+	PaneID            string `json:"pane_id,omitempty"`
 	Workdir           string `json:"workdir"`
 	LocalState        string `json:"local_state"`
+	AssignmentState   string `json:"assignment_state,omitempty"`
 	ReceiptSource     string `json:"receipt_source,omitempty"`
 	NativeExecutor    string `json:"native_executor"`
 	NativeRunnerID    string `json:"native_runner_id"`

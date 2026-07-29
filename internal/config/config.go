@@ -18,11 +18,19 @@ const (
 )
 
 type Row struct {
-	Workspace string
-	Window    string
-	Workdir   string
-	Thread    string
+	Workspace       string
+	Window          string
+	Workdir         string
+	Thread          string
+	AssignmentState WorkerAssignmentState
 }
+
+type WorkerAssignmentState string
+
+const (
+	WorkerAssignmentUnknown               WorkerAssignmentState = ""
+	WorkerAssignmentRetainedIndeterminate WorkerAssignmentState = "retained_indeterminate"
+)
 
 type RunnerRow struct {
 	Workspace string
@@ -155,14 +163,17 @@ func Parse(r io.Reader) ([]Row, error) {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 4 {
-			return nil, fmt.Errorf("invalid row on line %d: expected 4 tab-separated fields", lineNo)
+		if len(fields) != 4 && len(fields) != 5 {
+			return nil, fmt.Errorf("invalid row on line %d: expected 4 or 5 tab-separated fields", lineNo)
 		}
 		thread, err := CanonicalThreadID(fields[3])
 		if err != nil {
 			return nil, fmt.Errorf("invalid row on line %d: %w", lineNo, err)
 		}
 		row := Row{Workspace: fields[0], Window: fields[1], Workdir: fields[2], Thread: thread}
+		if len(fields) == 5 {
+			row.AssignmentState = WorkerAssignmentState(fields[4])
+		}
 		if err := row.Validate(); err != nil {
 			return nil, fmt.Errorf("invalid row on line %d: %w", lineNo, err)
 		}
@@ -429,10 +440,13 @@ func RemoveRows(path string, shouldRemove func(Row) bool) (int, error) {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 4 {
-			return 0, fmt.Errorf("invalid row: expected 4 tab-separated fields")
+		if len(fields) != 4 && len(fields) != 5 {
+			return 0, fmt.Errorf("invalid row: expected 4 or 5 tab-separated fields")
 		}
 		row := Row{Workspace: fields[0], Window: fields[1], Workdir: fields[2], Thread: fields[3]}
+		if len(fields) == 5 {
+			row.AssignmentState = WorkerAssignmentState(fields[4])
+		}
 		if err := row.Validate(); err != nil {
 			return 0, err
 		}
@@ -451,7 +465,11 @@ func RemoveRows(path string, shouldRemove func(Row) bool) (int, error) {
 }
 
 func (r Row) String() string {
-	return strings.Join([]string{r.Workspace, r.Window, r.Workdir, r.Thread}, "\t")
+	fields := []string{r.Workspace, r.Window, r.Workdir, r.Thread}
+	if r.AssignmentState != WorkerAssignmentUnknown {
+		fields = append(fields, string(r.AssignmentState))
+	}
+	return strings.Join(fields, "\t")
 }
 
 func (r RunnerRow) String() string {
@@ -517,6 +535,9 @@ func (r Row) Validate() error {
 	if err := validateField("thread", r.Thread); err != nil {
 		return err
 	}
+	if r.AssignmentState != WorkerAssignmentUnknown && r.AssignmentState != WorkerAssignmentRetainedIndeterminate {
+		return fmt.Errorf("invalid worker assignment state %q", r.AssignmentState)
+	}
 	_, err := CanonicalThreadID(r.Thread)
 	return err
 }
@@ -562,7 +583,7 @@ func ExpandHome(path string) string {
 }
 
 const defaultConfig = `# amux-schema: workers/v1
-# workspace	window	workdir	thread-id
+# workspace	window	workdir	thread-id	[assignment-state]
 #
 # Worker identity is the canonical Amp thread ID.
 `
