@@ -271,12 +271,12 @@ assert {path:path.read_bytes() for path in all_config}==all_config
 
 # Core treats AMUX_CONFIG_DIR as the default namespace for global migration
 # sources; another explicitly selected config must ignore those global sources.
-custom=root/"custom-default"; custom.mkdir(mode=0o700)
+custom=home/"custom-default"; custom.mkdir(mode=0o700)
 custom_workers=custom/"workers.tsv"; custom_runners=custom/"runners.tsv"; custom_shelves=custom/"shelves.tsv"
 custom_workers.write_bytes(b"# amux-schema: workers/v1\nws\tcustom\t/tmp\tT-custom-default\n")
 custom_runners.write_bytes(b"# amux-schema: runners/v1\n"); custom_shelves.write_bytes(b"# amux-schema: shelves/v1\n")
 for path in (custom_workers,custom_runners,custom_shelves): path.chmod(0o600)
-os.environ["AMUX_CONFIG_DIR"]=str(custom)
+os.environ["AMUX_CONFIG_DIR"]="~//custom-default"
 custom_request={"amux_executable":str(amux),"amux_config_dir":str(custom)}
 with m.open_quarantine_execution_boundary(custom_request,"T-custom-default"): pass
 custom_runners.unlink()

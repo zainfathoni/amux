@@ -7108,8 +7108,13 @@ def quarantine_default_config_directory() -> str:
         selected = os.path.join(home, ".config", "amux")
     elif selected == "~" or selected.startswith("~/"):
         if home:
-            selected = home if selected == "~" else os.path.join(home, selected[2:])
-    return os.path.abspath(selected)
+            selected = home if selected == "~" else (
+                home.rstrip(os.sep) + os.sep + selected[2:].lstrip(os.sep)
+            )
+    resolved = os.path.abspath(selected)
+    if resolved.startswith(os.sep * 2):
+        resolved = os.sep + resolved.lstrip(os.sep)
+    return resolved
 
 
 def quarantine_migration_inputs(
