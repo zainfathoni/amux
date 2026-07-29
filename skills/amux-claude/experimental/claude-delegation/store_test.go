@@ -50,6 +50,7 @@ production_amux.write_text("#!/bin/sh\nset -eu\n[ \"$1\" = --config-dir ]\n[ \"$
 production_amux.chmod(0o700)
 production_config=root/"production-config"; production_config.mkdir(mode=0o700)
 (production_config/"workers.tsv").write_text("ws\twin\t/tmp\tT-production\n")
+(production_config/"runners.tsv").write_text("# amux-schema: runners/v1\n")
 (production_config/"shelves.tsv").write_text("T-other\n")
 production_request={"amux_executable":str(production_amux),"amux_config_dir":str(production_config)}
 with m.open_quarantine_execution_boundary(production_request,"T-production") as boundary:
@@ -59,10 +60,10 @@ with m.open_quarantine_execution_boundary(production_request,"T-production") as 
     m.execute_core_worker_park(boundary[1],boundary[2],boundary[3])
 assert production_marker.read_bytes()==b"exact" and not wrong_marker.exists()
 (production_config/"workspaces.tsv").write_text("legacy")
-try:
-    with m.open_quarantine_execution_boundary(production_request,"T-wrong"): pass
-except m.HelperError: pass
-else: raise AssertionError("migration input accepted")
+legacy_before=(production_config/"workspaces.tsv").read_bytes()
+with m.open_quarantine_execution_boundary(production_request,"T-wrong") as boundary:
+    assert len(boundary[0]["migration_inputs_sha256"])==64
+assert (production_config/"workspaces.tsv").read_bytes()==legacy_before
 for action in ["remove","teardown","archive","cleanup","detach","catalog_detach","provider_cleanup"]:
     try: m.quarantine_plan(store,{**base,"action":action})
     except m.HelperError: pass
@@ -221,6 +222,117 @@ print("ok")`
 	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
 	if err != nil {
 		t.Fatalf("quarantine fixture: %v\n%s", err, output)
+	}
+	if string(output) != "ok\n" {
+		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestQuarantineRetainedCompletedMigrationEvidence(t *testing.T) {
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import hashlib, importlib.util, json, os, pathlib, sys, tempfile
+spec=importlib.util.spec_from_file_location("m",pathlib.Path(sys.argv[1])); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+root=pathlib.Path(tempfile.mkdtemp()).resolve(); root.chmod(0o700)
+home=root/"private-home-sentinel"; home.mkdir(mode=0o700); os.environ["HOME"]=str(home)
+config=home/".config"/"amux"; config.mkdir(parents=True,mode=0o700)
+legacy=home/".config"/"amp-tmux"; legacy.mkdir(mode=0o700)
+origin="T-migration-evidence"; missing=root/"missing-store"
+amux=root/"amux"; amux.write_bytes(b"#!/bin/sh\nexit 0\n"); amux.chmod(0o700)
+canonical={
+    config/"workers.tsv":b"# amux-schema: workers/v1\nws\tworker\t/tmp\t"+origin.encode()+b"\n",
+    config/"runners.tsv":b"# amux-schema: runners/v1\n",
+    config/"shelves.tsv":b"# amux-schema: shelves/v1\n",
+}
+retained={
+    config/"workspaces.tsv":b"config-local-private-content-sentinel\n",
+    legacy/"workspaces.tsv":b"global-workspaces-private-content-sentinel\n",
+    legacy/"runners.tsv":b"global-runners-private-content-sentinel\n",
+    legacy/"shelves.tsv":b"global-shelves-private-content-sentinel\n",
+}
+for path,raw in {**canonical,**retained}.items(): path.write_bytes(raw); path.chmod(0o600)
+lifecycle={"schema_version":1,"stores":[str(missing)],"legacy_store_objects":{},"teardown_fences":{}}
+(root/"lifecycle.json").write_text(json.dumps(lifecycle)); (root/"lifecycle.json").chmod(0o600)
+store=m.ReceiptStore(root,root)
+base={"origin_thread":origin,"provider":"claude","action":"park","amux_executable":str(amux),"amux_config_dir":str(config),"registered_store_sha256":hashlib.sha256(str(missing).encode()).hexdigest(),"artifacts":[]}
+all_config={path:path.read_bytes() for path in [*canonical,*retained]}
+planned=m.quarantine_plan(store,base); plan=planned["plan"]
+assert len(plan["migration_inputs_sha256"])==64
+serialized=json.dumps(plan)
+assert str(home) not in serialized and "private-content-sentinel" not in serialized
+assert {path:path.read_bytes() for path in all_config}==all_config
+auth={"decision":"park","plan_sha256":plan["plan_sha256"],"authorization_sha256":"a"*64,"authorized_at":"2026-07-29T00:00:00Z"}
+calls=[]
+result=m.quarantine_apply(store,{**base,"plan":plan,"owner_authorization":auth},lambda *args:calls.append(args))
+assert result["outcome"]=="parked" and len(calls)==1
+assert {path:path.read_bytes() for path in all_config}==all_config
+
+# Core treats AMUX_CONFIG_DIR as the default namespace for global migration
+# sources; another explicitly selected config must ignore those global sources.
+custom=home/"custom-default"; custom.mkdir(mode=0o700)
+custom_workers=custom/"workers.tsv"; custom_runners=custom/"runners.tsv"; custom_shelves=custom/"shelves.tsv"
+custom_workers.write_bytes(b"# amux-schema: workers/v1\nws\tcustom\t/tmp\tT-custom-default\n")
+custom_runners.write_bytes(b"# amux-schema: runners/v1\n"); custom_shelves.write_bytes(b"# amux-schema: shelves/v1\n")
+for path in (custom_workers,custom_runners,custom_shelves): path.chmod(0o600)
+os.environ["AMUX_CONFIG_DIR"]="~//custom-default"
+custom_request={"amux_executable":str(amux),"amux_config_dir":str(custom)}
+with m.open_quarantine_execution_boundary(custom_request,"T-custom-default"): pass
+custom_runners.unlink()
+try:
+    with m.open_quarantine_execution_boundary(custom_request,"T-custom-default"): pass
+except m.HelperError: pass
+else: raise AssertionError("environment-selected default ignored pending global migration")
+other=root/"other-default"; os.environ["AMUX_CONFIG_DIR"]=str(other)
+with m.open_quarantine_execution_boundary(custom_request,"T-custom-default"): pass
+os.environ["AMUX_CONFIG_DIR"]=str(config)
+
+# The retained bytes are re-read at the final boundary adjacent to park.
+missing2=root/"missing-store-2"; registry=json.loads((root/"lifecycle.json").read_text()); registry["stores"].append(str(missing2)); (root/"lifecycle.json").write_text(json.dumps(registry)); (root/"lifecycle.json").chmod(0o600)
+(config/"workers.tsv").write_bytes(b"# amux-schema: workers/v1\nws\tdrift\t/tmp\tT-adjacent-drift\n")
+base2={**base,"origin_thread":"T-adjacent-drift","registered_store_sha256":hashlib.sha256(str(missing2).encode()).hexdigest()}
+plan2=m.quarantine_plan(store,base2)["plan"]; auth2={**auth,"plan_sha256":plan2["plan_sha256"]}
+original_evidence=m.quarantine_evidence
+def drift_after_final_reconstruction(*args,**kwargs):
+    result=original_evidence(*args,**kwargs)
+    if kwargs.get("execution_evidence") is not None: (legacy/"runners.tsv").write_bytes(b"adjacent-drift-private-content-sentinel\n")
+    return result
+m.quarantine_evidence=drift_after_final_reconstruction; drift_calls=[]
+drifted=m.quarantine_apply(store,{**base2,"plan":plan2,"owner_authorization":auth2},lambda *args:drift_calls.append(args))
+m.quarantine_evidence=original_evidence
+assert drifted["blocker"]=="quarantine_bound_evidence_changed" and drift_calls==[]
+(legacy/"runners.tsv").write_bytes(retained[legacy/"runners.tsv"])
+
+# Any missing canonical destination remains pending once one effective source exists.
+(config/"workers.tsv").write_bytes(b"# amux-schema: workers/v1\nws\tpending\t/tmp\tT-pending\n")
+missing3=root/"missing-store-3"; registry=json.loads((root/"lifecycle.json").read_text()); registry["stores"].append(str(missing3)); (root/"lifecycle.json").write_text(json.dumps(registry)); (root/"lifecycle.json").chmod(0o600)
+pending_base={**base,"origin_thread":"T-pending","registered_store_sha256":hashlib.sha256(str(missing3).encode()).hexdigest()}
+for missing_destination in (config/"runners.tsv",config/"shelves.tsv"):
+    saved=missing_destination.read_bytes(); missing_destination.unlink()
+    try: m.quarantine_plan(store,pending_base)
+    except m.HelperError as error:
+        message=str(error); assert message=="quarantine execution evidence is unavailable"
+    else: raise AssertionError("pending migration was admitted")
+    assert str(home) not in message and "private-content-sentinel" not in message
+    missing_destination.write_bytes(saved); missing_destination.chmod(0o600)
+
+# Unsafe and oversized retained evidence fails with the same bounded private error.
+runner=legacy/"runners.tsv"; target=legacy/"private-target-sentinel"
+runner.rename(target); runner.symlink_to(target)
+for setup in ("symlink","oversized"):
+    if setup=="oversized":
+        runner.unlink(); runner.write_bytes(b"x"*(m.MAX_CAPACITY_SOURCE_BYTES+1)); runner.chmod(0o600)
+    unsafe_origin="T-unsafe-"+setup; (config/"workers.tsv").write_bytes(b"# amux-schema: workers/v1\nws\tunsafe\t/tmp\t"+unsafe_origin.encode()+b"\n")
+    try: m.quarantine_plan(store,{**base,"origin_thread":unsafe_origin})
+    except m.HelperError as error:
+        message=str(error); assert message=="quarantine execution evidence is unavailable"
+    else: raise AssertionError(setup+" migration evidence was admitted")
+    assert str(home) not in message and "private-target-sentinel" not in message
+print("ok")`
+	output, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
+	if err != nil {
+		t.Fatalf("completed migration quarantine fixture: %v\n%s", err, output)
 	}
 	if string(output) != "ok\n" {
 		t.Fatalf("output = %q", output)

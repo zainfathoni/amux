@@ -7083,36 +7083,135 @@ def materialized_quarantine_executable(
             directory.rmdir()
 
 
-def quarantine_migration_inputs(directory_descriptor: int, config: str) -> str:
+def quarantine_migration_file_evidence(
+    directory_descriptor: int, name: str
+) -> tuple[int, dict[str, str]] | None:
+    opened = open_optional_quarantine_file_at(
+        directory_descriptor, name, MAX_CAPACITY_SOURCE_BYTES,
+        "quarantine migration evidence",
+    )
+    if opened is None:
+        return None
+    descriptor, raw, info = opened
+    return descriptor, {
+        "object_sha256": canonical_sha256(descriptor_evidence(info)),
+        "content_sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def quarantine_default_config_directory() -> str:
+    selected = os.environ.get("AMUX_CONFIG_DIR", "")
+    home = os.environ.get("HOME", "")
+    if not selected:
+        if not home:
+            raise HelperError("quarantine migration evidence is unavailable")
+        selected = os.path.join(home, ".config", "amux")
+    elif selected == "~" or selected.startswith("~/"):
+        if home:
+            selected = home if selected == "~" else (
+                home.rstrip(os.sep) + os.sep + selected[2:].lstrip(os.sep)
+            )
+    resolved = os.path.abspath(selected)
+    if resolved.startswith(os.sep * 2):
+        resolved = os.sep + resolved.lstrip(os.sep)
+    return resolved
+
+
+def quarantine_migration_inputs(
+    directory_descriptor: int,
+    config: str,
+    destinations: dict[str, dict[str, str] | None],
+) -> str:
+    evidence: dict[str, Any] = {
+        "local_workspaces": {"availability": "missing"},
+        "legacy_default": "not_applicable",
+        "destinations": "not_applicable",
+    }
+    opened: list[int] = []
+    legacy_directory_descriptor = -1
+
+    def destination_evidence(name: str) -> dict[str, str] | None:
+        if name != "runners":
+            return destinations[name]
+        destination = quarantine_migration_file_evidence(
+            directory_descriptor, "runners.tsv"
+        )
+        if destination is None:
+            return None
+        descriptor, result = destination
+        opened.append(descriptor)
+        return result
+
     try:
-        os.stat("workspaces.tsv", dir_fd=directory_descriptor, follow_symlinks=False)
-    except FileNotFoundError:
-        local = "missing"
-    except (OSError, ValueError) as error:
-        raise HelperError("quarantine migration evidence is unavailable") from error
-    else:
-        raise HelperError("quarantine config requires migration")
-    default = os.path.abspath(os.path.expanduser("~/.config/amux"))
-    legacy = "not_applicable"
-    if config == default:
-        legacy = "missing"
-        legacy_directory = pathlib.Path(os.path.expanduser("~/.config/amp-tmux"))
-        for name in ("workspaces.tsv", "runners.tsv", "shelves.tsv"):
+        local = quarantine_migration_file_evidence(
+            directory_descriptor, "workspaces.tsv"
+        )
+        if local is not None:
+            descriptor, source = local
+            opened.append(descriptor)
+            evidence["local_workspaces"] = source
+
+        default = quarantine_default_config_directory()
+        if config == default:
+            home = os.environ.get("HOME", "")
+            if not home:
+                raise HelperError("quarantine migration evidence is unavailable")
+            evidence["legacy_default"] = {
+                name: {"availability": "missing"}
+                for name in ("workspaces", "runners", "shelves")
+            }
+            legacy_directory = pathlib.Path(home) / ".config" / "amp-tmux"
             try:
-                os.stat(legacy_directory / name, follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            except (OSError, ValueError) as error:
-                raise HelperError("quarantine migration evidence is unavailable") from error
-            else:
+                legacy_directory_descriptor, _ = open_quarantine_directory(
+                    legacy_directory, "quarantine migration evidence", private=False
+                )
+            except HelperError as error:
+                cause = error.__cause__
+                if not isinstance(cause, OSError) or cause.errno != errno.ENOENT:
+                    raise
+            if legacy_directory_descriptor >= 0:
+                for source_name, destination_name in (
+                    ("workspaces.tsv", "workers"),
+                    ("runners.tsv", "runners"),
+                    ("shelves.tsv", "shelves"),
+                ):
+                    if destination_name == "workers" and local is not None:
+                        continue
+                    source = quarantine_migration_file_evidence(
+                        legacy_directory_descriptor, source_name
+                    )
+                    if source is None:
+                        continue
+                    descriptor, source_evidence = source
+                    opened.append(descriptor)
+                    evidence["legacy_default"][destination_name] = source_evidence
+
+        sources = [evidence["local_workspaces"]]
+        if isinstance(evidence["legacy_default"], dict):
+            sources.extend(evidence["legacy_default"].values())
+        if any("availability" not in source for source in sources):
+            evidence["destinations"] = {
+                name: destination_evidence(name)
+                for name in ("workers", "runners", "shelves")
+            }
+            if any(destination is None for destination in evidence["destinations"].values()):
                 raise HelperError("quarantine config requires migration")
-    return canonical_sha256({"local_workspaces": local, "legacy_default": legacy})
+        return canonical_sha256(evidence)
+    except (OSError, ValueError, HelperError) as error:
+        if isinstance(error, HelperError) and str(error) == "quarantine config requires migration":
+            raise
+        raise HelperError("quarantine migration evidence is unavailable") from error
+    finally:
+        for descriptor in opened:
+            os.close(descriptor)
+        if legacy_directory_descriptor >= 0:
+            os.close(legacy_directory_descriptor)
 
 
 @contextlib.contextmanager
 def open_quarantine_execution_boundary(
     request: dict[str, Any], origin: str
-) -> Iterator[tuple[dict[str, str], list[str], dict[str, str], tuple[int, ...]]]:
+) -> Iterator[tuple[dict[str, str], list[str], dict[str, str], tuple[int, ...], Any]]:
     executable = exact_canonical_path(request.get("amux_executable"), "quarantine executable")
     config = exact_canonical_path(request.get("amux_config_dir"), "quarantine config directory")
     executable_fd = directory_fd = workers_fd = shelves_fd = -1
@@ -7135,7 +7234,46 @@ def open_quarantine_execution_boundary(
         shelves_info = None
         if shelves is not None:
             shelves_fd, shelves_raw, shelves_info = shelves
-        migration_inputs = quarantine_migration_inputs(directory_fd, config)
+        destinations = {
+            "workers": {
+                "object_sha256": canonical_sha256(descriptor_evidence(workers_info)),
+                "content_sha256": hashlib.sha256(raw).hexdigest(),
+            },
+            "runners": None,
+            "shelves": ({
+                "object_sha256": canonical_sha256(descriptor_evidence(shelves_info)),
+                "content_sha256": hashlib.sha256(shelves_raw).hexdigest(),
+            } if shelves_info is not None else None),
+        }
+        migration_inputs = quarantine_migration_inputs(
+            directory_fd, config, destinations
+        )
+
+        def revalidate_migration_inputs() -> str:
+            revalidation_descriptors: list[int] = []
+            try:
+                current_destinations: dict[str, dict[str, str] | None] = {}
+                for registry, name in (
+                    ("workers", "workers.tsv"),
+                    ("shelves", "shelves.tsv"),
+                ):
+                    current = quarantine_migration_file_evidence(
+                        directory_fd, name
+                    )
+                    if current is None:
+                        current_destinations[registry] = None
+                        continue
+                    descriptor, current_evidence = current
+                    revalidation_descriptors.append(descriptor)
+                    current_destinations[registry] = current_evidence
+                current_destinations["runners"] = None
+                return quarantine_migration_inputs(
+                    directory_fd, config, current_destinations
+                )
+            finally:
+                for descriptor in revalidation_descriptors:
+                    os.close(descriptor)
+
         evidence = {
             "amux_executable_path_sha256": hashlib.sha256(os.fsencode(executable)).hexdigest(),
             "amux_executable_object_sha256": hashlib.sha256(executable_object.encode()).hexdigest(),
@@ -7174,7 +7312,7 @@ def open_quarantine_execution_boundary(
             )
             for descriptor in inherited:
                 os.set_inheritable(descriptor, True)
-            yield evidence, argv, environment, inherited
+            yield evidence, argv, environment, inherited, revalidate_migration_inputs
     except (OSError, UnicodeError, HelperError) as error:
         raise HelperError("quarantine execution evidence is unavailable") from error
     finally:
@@ -7634,7 +7772,10 @@ def quarantine_apply(store: ReceiptStore, request: dict[str, Any], park_executor
                     operation_id, "quarantine_bound_evidence_changed"
                 )
             with open_quarantine_execution_boundary(request, origin) as boundary:
-                execution_evidence, argv, environment, pass_fds = boundary
+                (
+                    execution_evidence, argv, environment, pass_fds,
+                    revalidate_migration_inputs,
+                ) = boundary
                 final = quarantine_evidence(
                     store, request,
                     lifecycle_raw=final_lifecycle_raw,
@@ -7645,6 +7786,13 @@ def quarantine_apply(store: ReceiptStore, request: dict[str, Any], park_executor
                     final[key] != value
                     for key, value in comparable.items()
                     if key != "lifecycle_sha256"
+                ):
+                    return quarantine_blocked(
+                        operation_id, "quarantine_bound_evidence_changed"
+                    )
+                if (
+                    revalidate_migration_inputs()
+                    != comparable["migration_inputs_sha256"]
                 ):
                     return quarantine_blocked(
                         operation_id, "quarantine_bound_evidence_changed"
