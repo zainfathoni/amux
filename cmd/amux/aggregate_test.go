@@ -449,13 +449,18 @@ case "$1" in
 esac
 `)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	calls := injectAmpThreadsListProcess(t, func([]string) (string, string) {
-		return "output", `[{"id":"T-a"},{"id":"T-b"}]`
+	calls := injectAmpThreadsListProcess(t, func(args []string) (string, string) {
+		for _, id := range []string{"T-a", "T-b"} {
+			if slicesContain(args, "id:"+id+" archived:false") {
+				return "output", `[{"id":"` + id + `"}]`
+			}
+		}
+		return "nonzero", ""
 	})
 
 	got := executeAggregateJSON(t, "--json", "--config-dir", dir, "doctor", "--workspace", "alpha")
-	if *calls != 1 {
-		t.Fatalf("aggregate doctor amp threads list calls = %d, want one active inventory", *calls)
+	if *calls != 2 {
+		t.Fatalf("aggregate doctor amp threads search calls = %d, want one exact active query per worker", *calls)
 	}
 	if keys := aggregateResourceKeys(got.Successful); strings.Join(keys, ",") != "runner:"+runnerDir+",worker:T-a,worker:T-b" {
 		t.Fatalf("aggregate doctor = %+v", got)
