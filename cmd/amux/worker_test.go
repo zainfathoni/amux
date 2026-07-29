@@ -1081,6 +1081,39 @@ func TestScopedWorkerDoctorUsesBoundedExactThreadQueries(t *testing.T) {
 	}
 }
 
+func TestWorkerDoctorHumanPrintsRetainedAndLegacyAssignmentStates(t *testing.T) {
+	dir := t.TempDir()
+	rows := []config.Row{
+		{Workspace: "alpha", Window: "a", Workdir: "/tmp/retained", Thread: "T-retained", AssignmentState: config.WorkerAssignmentRetainedIndeterminate},
+		{Workspace: "alpha", Window: "b", Workdir: "/tmp/legacy", Thread: "T-legacy"},
+	}
+	writeWorkerRegistry(t, dir, rows[0].String()+"\n"+rows[1].String()+"\n")
+	installWorkerDoctorTmux(t, rows)
+	calls := injectAmpThreadsListProcess(t, func(args []string) (string, string) {
+		for _, id := range []string{"T-retained", "T-legacy"} {
+			if slicesContain(args, "id:"+id+" archived:false") {
+				return "output", `[{"id":"` + id + `"}]`
+			}
+		}
+		return "nonzero", ""
+	})
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).execute([]string{"--config-dir", dir, "worker", "doctor", "--workspace", "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	if *calls != 2 {
+		t.Fatalf("amp threads search calls=%d, want 2", *calls)
+	}
+	for _, want := range []string{
+		"T-retained\tlocal=exact remote=active intent=false assignment=retained_indeterminate",
+		"T-legacy\tlocal=exact remote=active intent=false assignment=unknown",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("human doctor lacks %q: %q", want, stdout.String())
+		}
+	}
+}
+
 func TestScopedWorkerDoctorIgnoresOversizedUnrelatedArchivedInventory(t *testing.T) {
 	dir := t.TempDir()
 	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: "/tmp/worker", Thread: "T-active"}

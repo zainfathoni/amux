@@ -127,20 +127,20 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	inputOut := spawnWorkerOutcome(row, created, "attempt-input", "input_attempt_completed")
 	if err := runner.PasteLiteral(created.PaneID, prompt); err != nil {
 		inputStatus = "paste-failed-enter-not-attempted"
-		inputOut.Message = "the sole prompt paste command failed; Enter was not attempted; assignment delivery and task execution are unproven"
+		inputOut.Message = "the sole prompt paste command failed; Enter was not attempted; delivery and execution are unproven"
 		inputOut.Error = &result.Failure{Kind: result.ErrorRuntime, Message: "local input attempt failed at the sole paste command; Enter was not attempted"}
 		env.Failed = append(env.Failed, inputOut)
 	} else if err := runner.SendEnter(created.PaneID); err != nil {
 		inputStatus = "paste-completed-enter-failed-indeterminate"
-		inputOut.Message = "the sole prompt paste completed locally and the sole Enter command failed; assignment delivery and task execution are unproven"
+		inputOut.Message = "the sole prompt paste completed locally and the sole Enter command failed; delivery and execution are unproven"
 		inputOut.Error = &result.Failure{Kind: result.ErrorRuntime, Message: "local input attempt became indeterminate when the sole Enter command failed"}
 		env.Failed = append(env.Failed, inputOut)
 	} else {
-		inputOut.Message = "one prompt paste and one Enter completed locally; assignment delivery and task execution are not acknowledged"
+		inputOut.Message = "one prompt paste and one Enter completed locally; delivery and execution are unproven"
 		env.Successful = append(env.Successful, inputOut)
 	}
 	workerOut := spawnWorkerOutcome(row, created, "persist-worker", "retained")
-	workerOut.Message = "persisted exact local worker ownership; assignment delivery and task execution remain unproven"
+	workerOut.Message = "persisted exact local worker ownership; delivery and execution are unproven"
 	if _, err := config.Store(dir.WorkersPath(), row); err != nil {
 		failure := retainedIndeterminateSpawnPhaseError(thread, created, row, inputStatus, nil, "persist exact worker", err)
 		appendSpawnFailure(env, workerOut, failure)
@@ -148,7 +148,7 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	}
 	env.Successful = append(env.Successful, workerOut)
 	if !in.Options.JSON {
-		fmt.Fprintln(a.stdout, thread)
+		fmt.Fprintf(a.stdout, "PERSIST-WORKER\tthread=%s\tworkspace=%s\twindow=%s\twindow-id=%s\tpane-id=%s\tassignment=%s\n", thread, row.Workspace, row.Window, created.WindowID, created.PaneID, workerAssignmentState(row))
 	}
 	if s.Group != "" {
 		membership := config.GroupMembership{Group: s.Group, Thread: thread, Role: config.GroupMember}
@@ -178,12 +178,12 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		completed = append(completed, "persist-group", "ensure-label")
 	}
 	failure := retainedIndeterminateSpawnError(thread, created, row, inputStatus, completed)
-	out := spawnWorkerOutcome(row, created, "acknowledge-delivery", "retained_indeterminate")
-	out.Message = "input attempt and local ownership persistence completed, but assignment delivery was not acknowledged"
+	out := spawnWorkerOutcome(row, created, "report-delivery-indeterminate", "retained_indeterminate")
+	out.Message = "input attempt and local ownership persistence completed; delivery is indeterminate, acknowledgement is unavailable, and delivery and execution are unproven"
 	out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: failure.Error()}
 	env.Failed = append(env.Failed, out)
 	if !in.Options.JSON {
-		fmt.Fprintf(a.stdout, "RETAINED-INDETERMINATE\t%s\t%s/%s\t%s\t%s\tinput=%s\tcompleted=%s\tdelivery=unacknowledged\n", thread, row.Workspace, row.Window, created.WindowID, created.PaneID, inputStatus, strings.Join(completed, ","))
+		fmt.Fprintf(a.stdout, "RETAINED-INDETERMINATE\tthread=%s\tworkspace=%s\twindow=%s\twindow-id=%s\tpane-id=%s\tassignment=%s\tinput=%s\tcompleted=%s\tdelivery=indeterminate\tacknowledgement=unavailable\n", thread, row.Workspace, row.Window, created.WindowID, created.PaneID, workerAssignmentState(row), inputStatus, strings.Join(completed, ","))
 	}
 	return env, failure
 }
@@ -318,11 +318,11 @@ func retainedIndeterminateSpawnPhaseError(thread string, pane tmux.WindowPane, r
 	if phases == "" {
 		phases = "none"
 	}
-	message := fmt.Sprintf("spawn retained-indeterminate: thread=%s tmux=%s/%s window=%s pane=%s; input-attempt=%s delivery-acknowledgement=unavailable completed-persistence-phases=%s", thread, row.Workspace, row.Window, pane.WindowID, pane.PaneID, inputStatus, phases)
+	message := fmt.Sprintf("spawn retained-indeterminate: thread=%s tmux=%s/%s window=%s pane=%s; input-attempt=%s delivery=indeterminate acknowledgement=unavailable completed-persistence-phases=%s", thread, row.Workspace, row.Window, pane.WindowID, pane.PaneID, inputStatus, phases)
 	if step != "" {
 		message += fmt.Sprintf(" stopped-at=%s: %v", step, cause)
 	}
-	message += "; assignment delivery and task execution are unproven; automatic retry, repaste, submit, cleanup, archive, search, reconciliation, and alternate receivers are prohibited; the composer may contain unsent prompt bytes"
+	message += "; delivery and execution are unproven; automatic retry, repaste, submit, cleanup, archive, search, reconciliation, and alternate receivers are prohibited; the composer may contain unsent prompt bytes"
 	return result.Runtime(errors.New(message))
 }
 

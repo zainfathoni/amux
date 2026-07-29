@@ -393,6 +393,9 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			out.Worker = workerPlacementDetails(row, string(inspections[row.Thread].state))
 			out.Message = fmt.Sprintf("local=%s remote=%s intent=%t assignment=%s native_executor=%s native_runner_id=%s execution_affinity=%s", inspections[row.Thread].state, remote, shelved[row.Thread], workerAssignmentState(row), unknownNativePlacement, unknownNativePlacement, unknownNativePlacement)
 			env.Successful = append(env.Successful, out)
+			if !in.Options.JSON {
+				fmt.Fprintf(a.stdout, "%s\t%s\n", row.Thread, out.Message)
+			}
 			continue
 		case "reconcile":
 			if shelved[row.Thread] {

@@ -37,12 +37,14 @@ func TestSpawnRetainsExactOwnershipButReturnsIndeterminateWhenInputCommandsLackD
 	prompt := "first line\nsecond line\n"
 	var stdout bytes.Buffer
 	err := (app{stdin: strings.NewReader(prompt), stdout: &stdout}).execute(spawnArgs(dir, workdir, "--group", "issue-297", "--prompt-file", "-"))
-	for _, want := range []string{"spawn retained-indeterminate", "thread=T-new", "tmux=alpha/worker window=@1 pane=%1", "input-attempt=one-paste-one-enter-completed", "delivery-acknowledgement=unavailable", "completed-persistence-phases=persist-worker,persist-group,ensure-label", "assignment delivery and task execution are unproven", "automatic retry, repaste, submit, cleanup, archive, search, reconciliation, and alternate receivers are prohibited"} {
+	for _, want := range []string{"spawn retained-indeterminate", "thread=T-new", "tmux=alpha/worker window=@1 pane=%1", "input-attempt=one-paste-one-enter-completed", "delivery=indeterminate", "acknowledgement=unavailable", "completed-persistence-phases=persist-worker,persist-group,ensure-label", "delivery and execution are unproven", "automatic retry, repaste, submit, cleanup, archive, search, reconciliation, and alternate receivers are prohibited"} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("retained-indeterminate error lacks %q: %v", want, err)
 		}
 	}
-	if result.ExitCode(err) != result.ExitRuntimeFailure || createCalls != 1 || !strings.HasPrefix(stdout.String(), "T-new\n") || !strings.Contains(stdout.String(), "RETAINED-INDETERMINATE\tT-new\talpha/worker\t@1\t%1\tinput=one-paste-one-enter-completed\tcompleted=persist-worker,persist-group,ensure-label\tdelivery=unacknowledged") {
+	persisted := "PERSIST-WORKER\tthread=T-new\tworkspace=alpha\twindow=worker\twindow-id=@1\tpane-id=%1\tassignment=retained_indeterminate"
+	summary := "RETAINED-INDETERMINATE\tthread=T-new\tworkspace=alpha\twindow=worker\twindow-id=@1\tpane-id=%1\tassignment=retained_indeterminate\tinput=one-paste-one-enter-completed\tcompleted=persist-worker,persist-group,ensure-label\tdelivery=indeterminate\tacknowledgement=unavailable"
+	if result.ExitCode(err) != result.ExitRuntimeFailure || createCalls != 1 || !strings.Contains(stdout.String(), persisted) || !strings.Contains(stdout.String(), summary) {
 		t.Fatalf("create calls=%d stdout=%q", createCalls, stdout.String())
 	}
 	if countMutationCommands(*groupCalls) != 1 {
@@ -98,7 +100,7 @@ func TestSpawnAliasesReturnExactRetainedIndeterminateJSONWithoutLeakingPrompt(t 
 			if decodeErr := json.NewDecoder(&stdout).Decode(&env); decodeErr != nil {
 				t.Fatal(decodeErr)
 			}
-			if len(env.Successful) != 2 || env.Successful[0].Action != "attempt-input" || env.Successful[1].Action != "persist-worker" || len(env.Failed) != 1 || env.Failed[0].Action != "acknowledge-delivery" {
+			if len(env.Successful) != 2 || env.Successful[0].Action != "attempt-input" || env.Successful[1].Action != "persist-worker" || len(env.Failed) != 1 || env.Failed[0].Action != "report-delivery-indeterminate" {
 				t.Fatalf("retained JSON phases=%+v", env)
 			}
 			failed := env.Failed[0]
@@ -141,7 +143,7 @@ func TestSpawnGroupRetainedIndeterminateJSONPreservesEveryPersistencePhase(t *te
 			t.Fatalf("successful phase %d=%q, want %q", i, env.Successful[i].Action, want)
 		}
 	}
-	if len(env.Failed) != 1 || env.Failed[0].Action != "acknowledge-delivery" || env.Failed[0].Error == nil || !strings.Contains(env.Failed[0].Error.Message, "completed-persistence-phases=persist-worker,persist-group,ensure-label") {
+	if len(env.Failed) != 1 || env.Failed[0].Action != "report-delivery-indeterminate" || env.Failed[0].Error == nil || !strings.Contains(env.Failed[0].Error.Message, "delivery=indeterminate acknowledgement=unavailable") || !strings.Contains(env.Failed[0].Error.Message, "completed-persistence-phases=persist-worker,persist-group,ensure-label") {
 		t.Fatalf("delivery acknowledgement outcome=%+v", env.Failed)
 	}
 }
@@ -607,6 +609,40 @@ func TestSpawnReportsWorkerAndGroupBeforeLabelFailureWithoutRollback(t *testing.
 	}
 }
 
+func TestSpawnHumanLabelFailureStillReportsExactRetainedWorker(t *testing.T) {
+	dir, workdir, log, _ := setupSpawnTest(t, "")
+	if err := config.WriteGroups(filepath.Join(dir, config.GroupsFile), []config.GroupMembership{{Group: "group", Thread: "T-coordinator", Role: config.GroupCoordinator}}); err != nil {
+		t.Fatal(err)
+	}
+	commands := installSupportedGroupAmp(t, func(args []string) ([]byte, error) {
+		if reflect.DeepEqual(args, []string{"threads", "label", "T-human-label-fail", "group"}) {
+			return []byte("label rejected"), errors.New("exit status 1")
+		}
+		return nil, nil
+	})
+	spawnCreateThread = func(string, string) (string, error) { return "T-human-label-fail", nil }
+	setReadySpawnPane(t, workdir, "T-human-label-fail")
+	var stdout bytes.Buffer
+	err := (app{stdin: strings.NewReader("private prompt"), stdout: &stdout}).execute(spawnArgs(dir, workdir, "--group", "group", "--prompt-file", "-"))
+	want := "PERSIST-WORKER\tthread=T-human-label-fail\tworkspace=alpha\twindow=worker\twindow-id=@1\tpane-id=%1\tassignment=retained_indeterminate"
+	if err == nil || !strings.Contains(err.Error(), "completed-persistence-phases=persist-worker,persist-group") || !strings.Contains(stdout.String(), want) {
+		t.Fatalf("label failure=%v stdout=%q", err, stdout.String())
+	}
+	if strings.Contains(stdout.String(), "RETAINED-INDETERMINATE") {
+		t.Fatalf("partial failure emitted false terminal delivery summary: %q", stdout.String())
+	}
+	if countMutationCommands(*commands) != 1 {
+		t.Fatalf("label attempts=%d calls=%+v", countMutationCommands(*commands), *commands)
+	}
+	if got := readSpawnTestFile(t, log); strings.Count(got, "paste-buffer ") != 1 || strings.Count(got, "send-keys -t %1 Enter") != 1 || strings.Contains(got, "kill-window") {
+		t.Fatalf("label failure retried or cleaned state:\n%s", got)
+	}
+	rows, loadErr := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
+	if loadErr != nil || len(rows) != 1 || rows[0].AssignmentState != config.WorkerAssignmentRetainedIndeterminate {
+		t.Fatalf("retained worker=%+v err=%v", rows, loadErr)
+	}
+}
+
 func TestSpawnReportsPersistedWorkerWhenGroupStoreFails(t *testing.T) {
 	dir, workdir, _, _ := setupSpawnTest(t, "")
 	groupsPath := filepath.Join(dir, config.GroupsFile)
@@ -638,6 +674,40 @@ func TestSpawnReportsPersistedWorkerWhenGroupStoreFails(t *testing.T) {
 	rows, loadErr := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
 	if loadErr != nil || len(rows) != 1 || rows[0].Thread != "T-group-store-fail" {
 		t.Fatalf("preserved worker=%+v err=%v", rows, loadErr)
+	}
+}
+
+func TestSpawnHumanGroupFailureStillReportsExactRetainedWorker(t *testing.T) {
+	dir, workdir, log, _ := setupSpawnTest(t, "")
+	groupsPath := filepath.Join(dir, config.GroupsFile)
+	if err := config.WriteGroups(groupsPath, []config.GroupMembership{{Group: "group", Thread: "T-coordinator", Role: config.GroupCoordinator}}); err != nil {
+		t.Fatal(err)
+	}
+	spawnCreateThread = func(string, string) (string, error) {
+		if err := os.Remove(groupsPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(groupsPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return "T-human-group-fail", nil
+	}
+	setReadySpawnPane(t, workdir, "T-human-group-fail")
+	var stdout bytes.Buffer
+	err := (app{stdin: strings.NewReader("private prompt"), stdout: &stdout}).execute(spawnArgs(dir, workdir, "--group", "group", "--prompt-file", "-"))
+	want := "PERSIST-WORKER\tthread=T-human-group-fail\tworkspace=alpha\twindow=worker\twindow-id=@1\tpane-id=%1\tassignment=retained_indeterminate"
+	if err == nil || !strings.Contains(err.Error(), "completed-persistence-phases=persist-worker") || !strings.Contains(stdout.String(), want) {
+		t.Fatalf("group failure=%v stdout=%q", err, stdout.String())
+	}
+	if strings.Contains(stdout.String(), "RETAINED-INDETERMINATE") {
+		t.Fatalf("partial failure emitted terminal summary: %q", stdout.String())
+	}
+	if got := readSpawnTestFile(t, log); strings.Count(got, "paste-buffer ") != 1 || strings.Count(got, "send-keys -t %1 Enter") != 1 || strings.Contains(got, "kill-window") {
+		t.Fatalf("group failure retried or cleaned state:\n%s", got)
+	}
+	rows, loadErr := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
+	if loadErr != nil || len(rows) != 1 || rows[0].Thread != "T-human-group-fail" || rows[0].AssignmentState != config.WorkerAssignmentRetainedIndeterminate {
+		t.Fatalf("retained worker=%+v err=%v", rows, loadErr)
 	}
 }
 
