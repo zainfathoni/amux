@@ -54,6 +54,13 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		return env, result.Preflight(fmt.Errorf("--workdir must be the canonical existing path %s", workdir))
 	}
 	row := config.Row{Workspace: s.Workspace, Window: s.Window, Workdir: workdir}
+	if !in.Options.DryRun {
+		held, err := acquireMutationLock(in.Path)
+		if err != nil {
+			return env, result.Preflight(err)
+		}
+		defer held.Release()
+	}
 	memberships, err := preflightSpawnOwnership(dir, row, s.Group)
 	if err != nil {
 		return env, result.Preflight(err)
@@ -80,7 +87,7 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		}
 	}
 	if in.Options.DryRun {
-		out := result.Outcome{Resource: result.CommandResource(), Action: "spawn", Message: fmt.Sprintf("would locally run amp threads new --mode %s once in canonical cwd %s; create tmux worker %s/%s; attempt one bounded literal prompt paste and one Enter; then persist and report the exact worker%s", mode, workdir, row.Workspace, row.Window, optionalGroupPlan(s.Group))}
+		out := result.Outcome{Resource: result.CommandResource(), Action: "spawn", Message: fmt.Sprintf("would locally run amp threads new --mode %s once in canonical cwd %s; create tmux worker %s/%s; attempt one bounded literal prompt paste and, only after paste success, one Enter; then persist and report the exact worker%s", mode, workdir, row.Workspace, row.Window, optionalGroupPlan(s.Group))}
 		env.Planned = append(env.Planned, out)
 		if !in.Options.JSON {
 			fmt.Fprintln(a.stdout, out.Message)
@@ -93,13 +100,13 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	if createErr != nil {
 		if exact, identityErr := config.CanonicalThreadID(thread); identityErr == nil {
 			row.Thread = exact
-			return env, postCreateSpawnErrorBeforeTmux(exact, row, "create thread returned an error after an exact identity", createErr)
+			return env, postCreateSpawnErrorBeforeTmux(exact, row, "create thread returned an error after an exact identity", errors.New("amp threads new returned nonzero after an exact thread identity"))
 		}
-		return env, result.Runtime(fmt.Errorf("amp threads new rejected before returning a thread: %w", createErr))
+		return env, creationIndeterminateSpawnError(row)
 	}
 	thread, err = config.CanonicalThreadID(thread)
 	if err != nil {
-		return env, result.Runtime(fmt.Errorf("amp threads new returned an invalid thread identity: %w", err))
+		return env, creationIndeterminateSpawnError(row)
 	}
 	row.Thread = thread
 	command := tmux.ContinueCommandWithEnv(workdir, thread, map[string]string{
@@ -116,12 +123,11 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	if err := waitForSpawnPane(created, row, command); err != nil {
 		return env, postCreateSpawnError(thread, created, row, "wait for exact tmux worker readiness", err)
 	}
-	pasteErr := runner.PasteLiteral(created.PaneID, prompt)
-	enterErr := runner.SendEnter(created.PaneID)
-	if pasteErr != nil || enterErr != nil {
-		step := "attempt prompt paste and Enter once each"
-		cause := errors.Join(wrapSpawnAttemptError("paste prompt", pasteErr), wrapSpawnAttemptError("press Enter", enterErr))
-		return env, postCreateSpawnError(thread, created, row, step, cause)
+	if err := runner.PasteLiteral(created.PaneID, prompt); err != nil {
+		return env, postCreateSpawnError(thread, created, row, "paste prompt once; Enter was not attempted", err)
+	}
+	if err := runner.SendEnter(created.PaneID); err != nil {
+		return env, postCreateSpawnError(thread, created, row, "press Enter once after successful paste", err)
 	}
 	workerOut := workerOutcome(row, "persist-worker", "running")
 	workerOut.Message = "one prompt paste and one Enter were attempted; persisted the exact worker"
@@ -277,11 +283,8 @@ func postCreateSpawnErrorBeforeTmux(thread string, row config.Row, step string, 
 	return result.Runtime(fmt.Errorf("post-create spawn stopped at %s: thread=%s tmux=not-created requested=%s/%s; state was preserved without retry or cleanup: %w", step, thread, row.Workspace, row.Window, cause))
 }
 
-func wrapSpawnAttemptError(action string, err error) error {
-	if err == nil {
-		return nil
-	}
-	return fmt.Errorf("%s: %w", action, err)
+func creationIndeterminateSpawnError(row config.Row) error {
+	return result.Runtime(fmt.Errorf("thread creation was indeterminate: thread=creation-indeterminate tmux=not-created requested=%s/%s; state was preserved without retry or cleanup", row.Workspace, row.Window))
 }
 
 func appendSpawnFailure(env *result.Envelope, out result.Outcome, failure error) {

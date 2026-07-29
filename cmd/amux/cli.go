@@ -1030,7 +1030,7 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 	}
 
 	var held *lock.Lock
-	if parsed.Command.Mutating && !(parsed.Options.DryRun && parsed.Command.Name == "spawn") {
+	if parsed.Command.Mutating && parsed.Command.Name != "spawn" {
 		held, err = acquireMutationLock(parsed.Path)
 		if err != nil {
 			return nil, result.Preflight(err)

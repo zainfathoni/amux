@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -197,31 +199,90 @@ func TestSpawnRejectsNoncanonicalWorkdirAndExistingGroupOrTmuxConflicts(t *testi
 	})
 }
 
-func TestSpawnNativeRejectionCreatesNothing(t *testing.T) {
-	dir, workdir, log, _ := setupSpawnTest(t, "")
-	createCalls := 0
-	spawnCreateThread = func(string, string) (string, error) {
-		createCalls++
-		return "", errors.New("native rejection")
-	}
-	err := (app{stdin: strings.NewReader("prompt")}).execute(spawnArgs(dir, workdir, "--prompt-file", "-"))
-	if err == nil || !strings.Contains(err.Error(), "rejected before returning a thread") || createCalls != 1 {
-		t.Fatalf("rejection error=%v calls=%d", err, createCalls)
-	}
-	if got := readSpawnTestFile(t, log); strings.Contains(got, "new-session") || strings.Contains(got, "new-window") {
-		t.Fatalf("native rejection created tmux state:\n%s", got)
+func TestSpawnUnparseableCreationResultsAreIndeterminateWithoutRawOutput(t *testing.T) {
+	for _, resultCase := range []struct {
+		name   string
+		thread string
+		err    error
+	}{
+		{name: "nonzero without parseable ID", thread: "private stdout from amp", err: errors.New("private stderr from amp")},
+		{name: "zero with invalid ID", thread: "private invalid output from amp"},
+	} {
+		for _, jsonOutput := range []bool{false, true} {
+			name := resultCase.name + "/human"
+			if jsonOutput {
+				name = resultCase.name + "/json"
+			}
+			t.Run(name, func(t *testing.T) {
+				dir, workdir, log, _ := setupSpawnTest(t, "")
+				createCalls := 0
+				spawnCreateThread = func(string, string) (string, error) {
+					createCalls++
+					return resultCase.thread, resultCase.err
+				}
+				args := spawnArgs(dir, workdir, "--prompt-file", "-")
+				if jsonOutput {
+					args = append([]string{"--json"}, args...)
+				}
+				var stdout bytes.Buffer
+				err := (app{stdin: strings.NewReader("prompt"), stdout: &stdout}).execute(args)
+				if err == nil || createCalls != 1 {
+					t.Fatalf("creation error=%v calls=%d", err, createCalls)
+				}
+				want := "thread=creation-indeterminate tmux=not-created requested=alpha/worker"
+				if !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "preserved without retry or cleanup") || strings.Contains(err.Error(), "private") {
+					t.Fatalf("indeterminate error=%v", err)
+				}
+				if jsonOutput {
+					var env result.Envelope
+					if decodeErr := json.NewDecoder(&stdout).Decode(&env); decodeErr != nil {
+						t.Fatal(decodeErr)
+					}
+					if len(env.Failed) != 1 || env.Failed[0].Error == nil || !strings.Contains(env.Failed[0].Error.Message, want) || strings.Contains(env.Failed[0].Error.Message, "private") {
+						t.Fatalf("indeterminate JSON=%+v", env)
+					}
+				} else if stdout.Len() != 0 {
+					t.Fatalf("human indeterminate stdout=%q", stdout.String())
+				}
+				if got := readSpawnTestFile(t, log); strings.Contains(got, "new-session") || strings.Contains(got, "new-window") {
+					t.Fatalf("indeterminate creation created tmux state:\n%s", got)
+				}
+			})
+		}
 	}
 }
 
 func TestSpawnCreateErrorWithExactThreadPreservesIdentityWithoutTmux(t *testing.T) {
-	dir, workdir, log, _ := setupSpawnTest(t, "")
-	spawnCreateThread = func(string, string) (string, error) { return "T-created", errors.New("late create error") }
-	err := (app{stdin: strings.NewReader("prompt")}).execute(spawnArgs(dir, workdir, "--prompt-file", "-"))
-	if err == nil || !strings.Contains(err.Error(), "thread=T-created") || !strings.Contains(err.Error(), "tmux=not-created requested=alpha/worker") || !strings.Contains(err.Error(), "preserved without retry or cleanup") {
-		t.Fatalf("late create error=%v", err)
-	}
-	if got := readSpawnTestFile(t, log); strings.Contains(got, "new-session") || strings.Contains(got, "new-window") {
-		t.Fatalf("late create error created tmux state:\n%s", got)
+	for _, jsonOutput := range []bool{false, true} {
+		name := "human"
+		if jsonOutput {
+			name = "json"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir, workdir, log, _ := setupSpawnTest(t, "")
+			spawnCreateThread = func(string, string) (string, error) { return "T-created", errors.New("private late create error") }
+			args := spawnArgs(dir, workdir, "--prompt-file", "-")
+			if jsonOutput {
+				args = append([]string{"--json"}, args...)
+			}
+			var stdout bytes.Buffer
+			err := (app{stdin: strings.NewReader("prompt"), stdout: &stdout}).execute(args)
+			if err == nil || !strings.Contains(err.Error(), "thread=T-created") || !strings.Contains(err.Error(), "tmux=not-created requested=alpha/worker") || !strings.Contains(err.Error(), "preserved without retry or cleanup") || strings.Contains(err.Error(), "private") {
+				t.Fatalf("late create error=%v", err)
+			}
+			if jsonOutput {
+				var env result.Envelope
+				if decodeErr := json.NewDecoder(&stdout).Decode(&env); decodeErr != nil {
+					t.Fatal(decodeErr)
+				}
+				if len(env.Failed) != 1 || env.Failed[0].Error == nil || !strings.Contains(env.Failed[0].Error.Message, "thread=T-created") || strings.Contains(env.Failed[0].Error.Message, "private") {
+					t.Fatalf("late create JSON=%+v", env)
+				}
+			}
+			if got := readSpawnTestFile(t, log); strings.Contains(got, "new-session") || strings.Contains(got, "new-window") {
+				t.Fatalf("late create error created tmux state:\n%s", got)
+			}
+		})
 	}
 }
 
@@ -284,7 +345,11 @@ func TestSpawnPostCreateFailuresPreserveIdentityWithoutRetryOrCleanup(t *testing
 			if createCalls != 1 || strings.Count(got, "new-session ") != 1 || strings.Count(got, "load-buffer ") != 1 || strings.Contains(got, "kill-window") || strings.Contains(got, "archive") {
 				t.Fatalf("phase=%s create=%d log:\n%s", phase, createCalls, got)
 			}
-			if strings.Count(got, "paste-buffer ") != 1 || strings.Count(got, "send-keys -t %1 Enter") != 1 {
+			wantEnter := 1
+			if phase == "paste" {
+				wantEnter = 0
+			}
+			if strings.Count(got, "paste-buffer ") != 1 || strings.Count(got, "send-keys -t %1 Enter") != wantEnter {
 				t.Fatalf("phase=%s duplicate input log:\n%s", phase, got)
 			}
 			if phase == "paste" && strings.Count(got, "delete-buffer ") != 1 {
@@ -294,6 +359,103 @@ func TestSpawnPostCreateFailuresPreserveIdentityWithoutRetryOrCleanup(t *testing
 				t.Fatalf("failed spawn persisted worker: %v", err)
 			}
 		})
+	}
+}
+
+func TestSpawnLoadBufferFailureScrubsExactBufferAndDoesNotPasteOrEnter(t *testing.T) {
+	dir, workdir, log, pasted := setupSpawnTest(t, "load")
+	spawnCreateThread = func(string, string) (string, error) { return "T-load-fail", nil }
+	setReadySpawnPane(t, workdir, "T-load-fail")
+	prompt := "sensitive prompt"
+	err := (app{stdin: strings.NewReader(prompt)}).execute(spawnArgs(dir, workdir, "--prompt-file", "-"))
+	if err == nil || !strings.Contains(err.Error(), "Enter was not attempted") {
+		t.Fatalf("load failure=%v", err)
+	}
+	if got := readSpawnTestFile(t, pasted); got != prompt {
+		t.Fatalf("load did not consume complete stdin: %q", got)
+	}
+	got := readSpawnTestFile(t, log)
+	if strings.Count(got, "load-buffer ") != 1 || strings.Count(got, "delete-buffer ") != 1 || strings.Contains(got, "paste-buffer ") || strings.Contains(got, "send-keys -t %1 Enter") {
+		t.Fatalf("load failure transport log:\n%s", got)
+	}
+	var loadName, deleteName string
+	for _, line := range strings.Split(got, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[0] == "load-buffer" && fields[1] == "-b" {
+			loadName = fields[2]
+		}
+		if len(fields) >= 3 && fields[0] == "delete-buffer" && fields[1] == "-b" {
+			deleteName = fields[2]
+		}
+	}
+	if loadName == "" || loadName != deleteName || !strings.HasPrefix(loadName, "amux-spawn-") {
+		t.Fatalf("load buffer=%q delete buffer=%q log:\n%s", loadName, deleteName, got)
+	}
+}
+
+func TestSpawnReadsPromptBeforeLockAndHoldsLockThroughCreate(t *testing.T) {
+	dir, workdir, _, _ := setupSpawnTest(t, "")
+	lockPath, err := lock.MachinePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	external, err := lock.Acquire(context.Background(), lockPath, lock.Owner{Command: "test prompt gate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = external.Release() })
+	oldWait := mutationLockWait
+	mutationLockWait = time.Second
+	t.Cleanup(func() { mutationLockWait = oldWait })
+
+	createHeld := make(chan bool, 1)
+	spawnCreateThread = func(string, string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+		defer cancel()
+		contender, acquireErr := lock.Acquire(ctx, lockPath, lock.Owner{Command: "create contender"})
+		if acquireErr == nil {
+			_ = contender.Release()
+			createHeld <- false
+		} else {
+			var busy *lock.BusyError
+			createHeld <- errors.As(acquireErr, &busy)
+		}
+		return "T-lock-order", nil
+	}
+	setReadySpawnPane(t, workdir, "T-lock-order")
+	reader, writer := io.Pipe()
+	resultCh := make(chan error, 1)
+	go func() {
+		resultCh <- (app{stdin: reader}).execute(spawnArgs(dir, workdir, "--prompt-file", "-"))
+	}()
+	writeDone := make(chan error, 1)
+	go func() {
+		_, writeErr := io.WriteString(writer, "prompt before lock")
+		closeErr := writer.Close()
+		if writeErr != nil {
+			writeDone <- writeErr
+			return
+		}
+		writeDone <- closeErr
+	}()
+	select {
+	case writeErr := <-writeDone:
+		if writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	case <-time.After(500 * time.Millisecond):
+		_ = external.Release()
+		_ = writer.CloseWithError(errors.New("prompt read remained blocked behind mutation lock"))
+		t.Fatal("spawn did not read prompt before attempting the mutation lock")
+	}
+	if err := external.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-resultCh; err != nil {
+		t.Fatal(err)
+	}
+	if held := <-createHeld; !held {
+		t.Fatal("spawnCreateThread ran without holding the machine mutation lock")
 	}
 }
 
@@ -396,7 +558,7 @@ printf '%s\n' "$*" >> ` + shellSingleQuote(log) + `
 case "$1" in
   has-session) test "` + fail + `" = window; exit $? ;;
   new-session) test "` + fail + `" = create && exit 1; printf 'alpha\tworker\t@1\t%%1\n'; exit 0 ;;
-  load-buffer) cat > ` + shellSingleQuote(pasted) + `; exit 0 ;;
+  load-buffer) cat > ` + shellSingleQuote(pasted) + `; test "` + fail + `" != load; exit $? ;;
   paste-buffer) test "` + fail + `" != paste; exit $? ;;
   delete-buffer) exit 0 ;;
   send-keys) test "` + fail + `" != enter; exit $? ;;

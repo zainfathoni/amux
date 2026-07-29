@@ -521,11 +521,14 @@ func (r Runner) PasteLiteral(target, text string) error {
 	}
 	bufferName := "amux-spawn-" + hex.EncodeToString(nonce)
 	if err := tmuxRunInput(text, "load-buffer", "-b", bufferName, "-"); err != nil {
+		if deleteErr := tmuxRun("delete-buffer", "-b", bufferName); deleteErr != nil {
+			return errors.Join(fmt.Errorf("load literal paste buffer: %w", err), fmt.Errorf("delete sensitive tmux buffer: %w", deleteErr))
+		}
 		return err
 	}
 	if err := tmuxRun("paste-buffer", "-dpr", "-b", bufferName, "-t", target); err != nil {
 		if deleteErr := tmuxRun("delete-buffer", "-b", bufferName); deleteErr != nil {
-			return fmt.Errorf("paste literal: %w; delete sensitive tmux buffer: %v", err, deleteErr)
+			return errors.Join(fmt.Errorf("paste literal: %w", err), fmt.Errorf("delete sensitive tmux buffer: %w", deleteErr))
 		}
 		return err
 	}
