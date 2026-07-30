@@ -1,12 +1,12 @@
 ---
-status: proposed
+status: accepted
 date: 2026-07-30
 depends-on: 0005
 ---
 
 # Bound thread delegation and require preservation before retirement
 
-> **Proposed direction:** this ADR is not operative. Its rules below are written in the present tense as the proposed contract, not as current policy, and they bind nothing until the owner accepts this ADR. Acceptance is the explicit owner decision that [ADR 0005](0005-maintain-amux-as-a-local-worker-lifecycle-and-recovery-tool.md) reserved for delegation admission. Nothing here changes instructions, skills, commands, schemas, or runtime behavior on merge.
+> **Accepted direction:** this ADR establishes the bounded delegation and preservation-before-retirement policy that [ADR 0005](0005-maintain-amux-as-a-local-worker-lifecycle-and-recovery-tool.md) reserved for a later owner decision. Acceptance does not itself change instructions, skills, commands, schemas, or runtime behavior; those adoption changes require separate review.
 
 ## Context
 
@@ -29,7 +29,7 @@ This decision depends on [ADR 0005](0005-maintain-amux-as-a-local-worker-lifecyc
 
 ## Adoption surface
 
-This ADR selects no carrier or enforcement mechanism for these rules. Consistent with ADR 0004's retained constraints, operating guidance reaches agents only through a separately reviewed documentation or skill change, and enforced behavior requires its own accepted design. Accepting this ADR alone authorizes neither.
+This ADR selects policy, not a carrier or enforcement mechanism. Consistent with ADR 0004's retained constraints, operating guidance reaches agents only through a separately reviewed documentation or skill change, and enforced behavior requires its own accepted design and implementation. [Issue #320](https://github.com/zainfathoni/amux/issues/320) plans symmetric creation and retirement with explicit per-resource dispositions; this acceptance does not preselect that design.
 
 ## Consequences
 
