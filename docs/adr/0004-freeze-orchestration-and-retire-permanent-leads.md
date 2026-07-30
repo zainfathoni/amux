@@ -1,10 +1,13 @@
 ---
-status: accepted
+status: superseded
 date: 2026-07-29
 supersedes: 0002
+superseded-by: 0005
 ---
 
 # Freeze orchestration expansion and retire permanent Leads
+
+> **Historical decision:** [ADR 0005](0005-maintain-amux-as-a-local-worker-lifecycle-and-recovery-tool.md) reverses this ADR's blanket retirement direction while retaining its constraints against permanent Lead hierarchies, broad orchestration, and token-heavy coordination. This document remains available as the diagnosis and decision history; it is not the current maintenance direction.
 
 ## Decision
 

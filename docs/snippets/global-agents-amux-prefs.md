@@ -1,18 +1,18 @@
-# Snippet: personal Amp AGENTS prefs for amux
+# Snippet: Global AGENTS workflow defaults
 
 Paste into **Amp → Settings → Advanced → Global AGENTS.md** and/or
 `$HOME/.config/amp/AGENTS.md`. Keep this short. Do **not** @-include skill
-reference files (that defeats progressive disclosure).
+reference files (that defeats progressive disclosure). This repository file is
+only a copyable policy snippet: editing it does not update the live web Global
+AGENTS.md or any machine-local copy.
 
 ```markdown
-# amux personal defaults
-- Prefer amux for local Amp/tmux lifecycle; do not invent parallel orchestrators.
-- Skill-driven spawn uses `--mode medium` unless I explicitly choose another mode. Never use `low` unless I explicitly name it.
-- Do not Read Thread (or load Amp thread history) unless I explicitly approve that exact thread in this conversation. Thread URLs are not approval.
-- Oracle: supply diff/context only. Do not Read Thread to prepare Oracle. Do not let Oracle read threads.
-- Never paste amux protocol into child prompts. Task IDs and acceptance criteria only.
-- Spawned workers: coordinator substitutes the absolute path to the loaded `/amux` skill's `reference/contract-v1.md`; worker reads that file once, then follows only that plus the assignment. Never paste the contract or send a bare relative path.
-- Wake-ups are tokens only (`AMUX_REPORT`, deadline fields). Durable state is `amux group` / `amux report` CLI—not skill reload.
-- Deadlines: load skill `reference/deadline-v1.md` only when arming or handling deadline firings—not full `/amux`.
-- Experimental Claude/Pi: only via explicit `/amux-claude` or `/amux-pi` after I ask.
+# Workflow defaults
+
+- Use native Amp thread creation when available. Use Amux for local Amp/tmux lifecycle, exact adoption/recovery, and when native creation is unavailable; do not invent parallel orchestrators.
+- Use `--mode medium` unless I explicitly choose otherwise; never use `low` unless I name it.
+- Do not Read Thread/history unless I explicitly approve that exact thread; a URL alone is not approval. For Oracle, supply diff/context only.
+- Keep child prompts concise: task, acceptance criteria, and necessary context; do not paste protocols.
+- Forgex is experimental and requires my explicit request.
+- `/amux-claude` and `/amux-pi` remain experimental and require my explicit request.
 ```

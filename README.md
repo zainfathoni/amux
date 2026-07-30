@@ -2,7 +2,7 @@
 
 `amux` is the local tmux lifecycle layer for [Amp](https://ampcode.com/). It manages interactive **workers**, non-interactive **runners**, and named **workspaces** with explicit, agent-safe side effects.
 
-> **Maintenance direction:** amux's current lifecycle behavior remains implemented and supported, but orchestration framework expansion is frozen. New work is limited to critical fixes, safety-preserving cleanup, measurement, and gradual migration. Permanent per-machine Lead/coordinator threads are no longer the target architecture; new delegation should be bounded to the task that needs it and must prove lower coordination cost without reducing result quality. No command, schema, or runtime behavior is deprecated by this notice. See [ADR 0004](docs/adr/0004-freeze-orchestration-and-retire-permanent-leads.md) for the evidence, scorecard, and phased retirement plan.
+> **Maintenance direction:** amux is maintained as a local Amp worker lifecycle and recovery tool. Prefer native Amp thread creation when available, then use exact adoption where local ownership or recovery is needed. Amux remains appropriate for exact adoption/recovery, shelve/unshelve, teardown, doctor/preflight, local tmux/worktree lifecycle, and the local-creation exception when native creation is unavailable. Permanent Lead hierarchies, universal delegation, broad orchestration, and expanding provider-policy machinery remain non-goals. Forgex and the provider-specific skills are experimental and orthogonal, not replacements for core amux. See [ADR 0005](docs/adr/0005-maintain-amux-as-a-local-worker-lifecycle-and-recovery-tool.md).
 
 - A **worker** is an interactive Amp client identified machine-wide by its canonical thread ID.
 - A **runner** is an `amp --no-tui` client identified machine-wide by its canonical workdir. It enables Amp Agents Anywhere but does not own remote agent threads.
@@ -210,7 +210,7 @@ amux teardown --thread T-example
 
 Work groups are explicit, durable many-to-many associations between Amp thread IDs and byte-preserving group IDs. Declare a group with one coordinator, then add any worker, archived, recovered, evidence, duplicate, or runner-managed thread by its canonical ID:
 
-This section describes current implemented compatibility, not a recommendation to create a permanent coordinator. New workflows should use coordinator authority only for one bounded task or workflow. Existing groups, coordinator fields, reports, callbacks, and finish authorization continue to behave as documented; any later deprecation requires the separate migration gates in [ADR 0004](docs/adr/0004-freeze-orchestration-and-retire-permanent-leads.md).
+This section describes maintained identity and recovery contracts, not a recommendation to create a permanent coordinator. Use groups, coordinator fields, reports, callbacks, and finish authorization only where their durable correlation or lifecycle-safety properties help one bounded task or workflow. See [ADR 0005](docs/adr/0005-maintain-amux-as-a-local-worker-lifecycle-and-recovery-tool.md).
 
 ```sh
 amux group declare --group amux-131 --thread T-coordinator
@@ -260,11 +260,9 @@ The single lease for each config-directory/group is machine runtime state, not p
 
 Identical replay is a benign durable-state skip that may retry notification; conflicting reuse and illegal transitions reject before mutation. `reports.json` also carries coordinator-owned soft-deadline generations, demonstrated external-wait evidence, and durable stale/overdue/blocker diagnostics. These records provide a nearest-deadline scheduling seam only: amux creates no supervisor, sleeping worker timer, polling loop, or destructive expiry action.
 
-### Coordinator workflow
+### Task-scoped coordinator workflow
 
-The bundled `/amux` skill provides the coordinator procedure. Worker assignments stay task-only and include the absolute path to the loaded skill's `reference/contract-v1.md` for a one-time read. In summary: inspect native dependencies and active PR/branch/worktree/API overlap; fetch and create dedicated worktrees from fresh `origin/main`; use semantic issue-unprefixed windows and explicit `medium` mode unless overridden; declare the group and register the exact verified coordinator pane; then create the thread directly on its required executor/workdir and adopt its exact returned identity with `--group`.
-
-Every durable task-group Lead thread title begins with `🎖️ `; reserve that prefix for Leads and never deliberately apply it to member workers. After coordination preflight, set the Lead title explicitly with `amp threads rename <lead-thread> "🎖️ <task-title>"`. On rename failure, preserve the exact native identity and caller-side receipt, create no replacement, and stop before group/adoption mutations. This is presentation only and is independent of executor identity: it implies neither placement nor authoritative group role.
+The bundled `/amux` skill provides a bounded coordinator procedure for cases where durable group/report identity or finish authorization is useful. Worker assignments stay concise and task-scoped. In summary: inspect native dependencies and active PR/branch/worktree/API overlap; fetch and create dedicated worktrees from fresh `origin/main`; use semantic issue-unprefixed windows and explicit `medium` mode unless overridden; declare the group and register the exact verified coordinator pane; then create the thread directly on its required executor/workdir and adopt its exact returned identity with `--group`. This role ends with the task or explicitly bounded workflow; it is not a permanent Lead persona or hierarchy.
 
 Workers use one stable report ID for `blocked`, `ready`, and terminal `merged`. `ready` means implementation, tests, one review, PR, and normal CI are complete. A callback token only wakes the coordinator. The coordinator acknowledges receipt separately, independently verifies PR URL/head/scope/mergeability/closing issue, worktree and CI, merges only with separate authority, verifies post-merge CI (and Pages when triggered), and records durable finish authorization. The child then submits `merged` with the same binding/payload and runs `/amux finish` only when explicitly directed; worktree/Git safety comes first and `amux teardown` is last. Group/report history survives finish.
 
