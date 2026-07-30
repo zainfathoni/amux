@@ -23,7 +23,7 @@ Thread, group, report, and receipt identities remain durable evidence and must b
 
 ## Evidence and retained diagnosis
 
-ADR 0004 correctly diagnosed the costs of permanent Lead hierarchies, broad orchestration, and token-heavy coordination. Those patterns create stale context, ambiguous authority, unnecessary handoff state, and coordination cost that can exceed the bounded work itself. That diagnosis remains in force.
+ADR 0004 correctly diagnosed the costs of permanent Lead hierarchies, broad orchestration, and token-heavy coordination. Those patterns create stale context, ambiguous authority, unnecessary handoff state, and coordination cost that can exceed the bounded work itself. That diagnosis remains in force. ADR 0004 was accepted before the recovery evidence below surfaced, which is why its blanket retirement direction is reversed here so soon after acceptance while its constraints are retained.
 
 Recent production evidence from [Amp thread T-019fad29-0354-746a-8523-5d188a167c99](https://ampcode.com/threads/T-019fad29-0354-746a-8523-5d188a167c99) also demonstrated that the narrower lifecycle substrate is actively valuable. In that recovery, exact `amux worker adopt`, fail-closed dry runs and doctor checks, local tmux/worktree recovery, and preservation of thread/group/report/receipt identity supported safe continuation without inventing replacement identities or discarding durable evidence. This operational value invalidates blanket retirement of Amux, not the constraints on orchestration expansion.
 
@@ -47,11 +47,13 @@ Amux will not pursue:
 
 Task-scoped coordination may use existing group and report contracts when their durable identity or finish-safety properties are useful. It must remain bounded to the task or explicit workflow, and must not become a standing Lead persona or hierarchy.
 
-## Native Amp and experimental providers
+## Native Amp and provider boundary
 
 Use native Amp thread creation when available, then use exact Amux adoption when local lifecycle ownership or recovery is needed. Use Amux's local creation path only where native creation is unavailable and preserve its fail-closed, retained-indeterminate contract.
 
-Forgex is experimental and orthogonal. It is not an Amux replacement and does not alter this maintenance decision. `/amux-claude` and `/amux-pi` likewise remain separate experimental, explicit-request-only surfaces; their existence does not widen core Amux into provider-policy machinery.
+Provider execution is outside Amux's maintained lifecycle and recovery core. Tycho may own machine and provider routing for Claude Code and Pi/Codex Spark. `/amux-claude` and `/amux-pi` remain experimental, explicit-request-only fallback and reference paths; they do not widen core Amux into provider-policy machinery. Forgex remains experimental and orthogonal, not an Amux replacement.
+
+A later ADR may define delegation admission and a provider-neutral Amp↔Tycho task/result package. This ADR neither selects that design nor specifies its routing, package schema, authority, transport, or promotion criteria.
 
 ## Issue governance
 
@@ -70,6 +72,7 @@ The narrower mission rejects both extremes: Amux is neither on blanket retiremen
 The following still require explicit owner decisions:
 
 - any command, schema, or durable-state deprecation or removal;
+- delegation admission and any provider-neutral Amp↔Tycho task/result package;
 - any proposed stable Forgex integration or change in its relationship to Amux;
 - any expansion that introduces new orchestration authority rather than lifecycle/recovery safety; and
 - promotion of `/amux-claude` or `/amux-pi` from experimental status.
