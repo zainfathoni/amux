@@ -592,6 +592,37 @@ func TestExperimentalClaudeDelegationReferencesStayNarrowAndConsistent(t *testin
 	}
 }
 
+func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	contract := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "tycho-report-bridge.md"))
+	recovery := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "troubleshooting.md"))
+	matrix := readSkillFile(t, root, filepath.Join("docs", "provider-executor-readiness.md"))
+	for _, required := range []string{
+		"created → valid_report → delivered → acknowledged",
+		"report_only",
+		"Notification is never delivery or acknowledgement",
+		"no arbitrary Amp Web-thread delivery claim",
+		"There is no resident watcher",
+		"no compatibility guarantee",
+		"two useful real cycles",
+	} {
+		if !strings.Contains(contract, required) {
+			t.Errorf("experimental Tycho contract is missing %q", required)
+		}
+	}
+	for _, required := range []string{"never delivery", "never automatically resent", "no watcher", "finish authority"} {
+		if !strings.Contains(recovery, required) {
+			t.Errorf("experimental Tycho recovery is missing %q", required)
+		}
+	}
+	if !strings.Contains(matrix, "| Tycho semantic-report receipt/inbox | Runtime-unverified |") ||
+		!strings.Contains(matrix, "Tycho has `report_only` authority") ||
+		!strings.Contains(matrix, "no live Tycho cycle") {
+		t.Error("readiness matrix overstates or omits the experimental Tycho route")
+	}
+}
+
 func TestProviderExecutorReadinessMatrixIsLinkedAndKeepsAuthorityBoundaries(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)

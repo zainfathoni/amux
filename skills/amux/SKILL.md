@@ -42,7 +42,7 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 
 Deadlines (optional): load [`reference/deadline-v1.md`](reference/deadline-v1.md) only when arming or handling deadline wake-ups—not on every `/amux` load.
 
-Experimental provider delegation: load **`/amux-claude`** or **`/amux-pi`** only after an explicit owner request for those skills. Do not activate them from incidental mentions.
+Experimental provider delegation: load **`/amux-claude`** or **`/amux-pi`** only after an explicit owner request for those skills. Do not activate them from incidental mentions. The skill-owned Tycho semantic-report receipt/inbox adapter is documented in [`reference/tycho-report-bridge.md`](reference/tycho-report-bridge.md); it grants report submission only and does not make Tycho an Amp worker or coordinator.
 
 ## Load only what you need
 
@@ -53,6 +53,7 @@ Experimental provider delegation: load **`/amux-claude`** or **`/amux-pi`** only
 - Stuck clients / recovery: [`reference/troubleshooting.md`](reference/troubleshooting.md)
 - Trigger checklist: [`reference/trigger-phrases.md`](reference/trigger-phrases.md)
 - Amp invocation preflight: [`reference/amp-invocation-policy.md`](reference/amp-invocation-policy.md)
+- Experimental Tycho report-only inbox and recovery: [`reference/tycho-report-bridge.md`](reference/tycho-report-bridge.md)
 
 ## Safety
 
