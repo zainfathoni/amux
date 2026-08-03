@@ -125,7 +125,7 @@ def canonical_origin(value: dict[str, Any]) -> str:
 def canonical_workdir(value: dict[str, Any]) -> str:
     workdir = text(value, "workdir", 4096)
     path = pathlib.Path(workdir)
-    if not path.is_absolute() or str(path.resolve(strict=False)) != workdir:
+    if not path.is_absolute() or os.path.abspath(workdir) != workdir:
         raise BridgeError("workdir must be an absolute canonical path")
     return workdir
 
