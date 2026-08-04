@@ -624,6 +624,46 @@ func TestAbandonRequiresTheExactBoundCustodyDirectory(t *testing.T) {
 	if err := os.Remove(realCustody); err != nil {
 		t.Fatal(err)
 	}
+
+	// A custody directory replaced by a regular file, or made unsearchable, is
+	// indeterminate rather than absent, and must not read as token loss.
+	replaced := stateDir + "-custody-replaced"
+	for _, indeterminate := range []struct {
+		name    string
+		prepare func()
+	}{
+		{"replaced_by_file", func() {
+			if err := os.Rename(custodyDir, replaced); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(custodyDir, []byte("not a directory\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"unsearchable", func() {
+			if err := os.Remove(custodyDir); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(replaced, custodyDir); err != nil {
+				t.Fatal(err)
+			}
+			chmodDir(t, custodyDir, 0o000)
+		}},
+	} {
+		name := indeterminate.name
+		indeterminate.prepare()
+		_, stderr, err := runDirs(t, stateDir, custodyDir, abandonmentDir, abandonRequest(), "abandon")
+		if err == nil || !strings.Contains(stderr, "presence cannot be determined") {
+			t.Fatalf("%s custody directory abandoned receipt: %v: %s", name, err, stderr)
+		}
+		if strings.Contains(stderr, "Traceback") || strings.Contains(stderr, custodyDir) {
+			t.Fatalf("%s custody directory leaked a traceback or owner path: %s", name, stderr)
+		}
+	}
+	if err := os.Chmod(custodyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
 	if result := requireOutcome(t, stateDir, "recorded", abandonRequest(), "abandon"); result["state"] != "abandoned" ||
 		result["capability_cleanup"] != "removed" {
 		t.Fatalf("bound abandonment result = %#v", result)

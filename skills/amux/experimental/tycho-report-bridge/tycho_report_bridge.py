@@ -431,7 +431,7 @@ class Custody:
             record[self.bound_field] = bound_value
         if path.exists():
             if self.read_record(path) != record:
-                raise BridgeError("coordinator token custody conflicts with the receipt binding")
+                raise BridgeError(f"{self.label} conflicts with the receipt binding")
             return
         payload = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
         descriptor, temporary = tempfile.mkstemp(prefix=f"{receipt_id}.json.tmp.", dir=self.custody_dir)
@@ -482,13 +482,19 @@ class Custody:
         return record[self.token_field]
 
     def entry_present(self, receipt_id: str) -> bool:
-        """Report whether any directory entry, including a dangling link, holds this record."""
+        """Report whether any directory entry, including a dangling link, holds this record.
+
+        Only a definite absence counts as absence. Every other failure, such as
+        an unsearchable or replaced custody directory, rejects rather than
+        reading as irrecoverable token loss, and keeps the owner path out of an
+        uncaught traceback.
+        """
         try:
             os.lstat(self.path(receipt_id))
         except FileNotFoundError:
             return False
-        except NotADirectoryError:
-            return False
+        except OSError as error:
+            raise BridgeError(f"{self.label} presence cannot be determined") from error
         return True
 
     def remove(self, receipt_id: str, origin: str) -> None:
