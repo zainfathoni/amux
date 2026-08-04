@@ -375,11 +375,38 @@ def validate_store(raw: bytes) -> dict[str, Any]:
     return value
 
 
+CUSTODY_IDENTITY_DOMAIN = b"amux-tycho-report-bridge/custody-directory\0"
+
+
+def directory_identity(directory: pathlib.Path) -> str:
+    """Return a stable owner-private digest of one canonical directory path."""
+    try:
+        canonical = directory.resolve(strict=False)
+    except OSError as error:
+        raise BridgeError("capability directory path cannot be canonicalized") from error
+    return hashlib.sha256(CUSTODY_IDENTITY_DOMAIN + os.fsencode(canonical)).hexdigest()
+
+
 class Custody:
-    def __init__(self, custody_dir: pathlib.Path, token_field: str, label: str):
+    def __init__(
+        self,
+        custody_dir: pathlib.Path,
+        token_field: str,
+        label: str,
+        bound_field: str | None = None,
+        bound_label: str | None = None,
+    ):
         self.custody_dir = custody_dir
         self.token_field = token_field
         self.label = label
+        self.bound_field = bound_field
+        self.bound_label = bound_label or bound_field
+
+    def fields(self) -> set[str]:
+        allowed = {"receipt_id", "origin_thread", self.token_field}
+        if self.bound_field is not None:
+            allowed.add(self.bound_field)
+        return allowed
 
     def prepare(self) -> None:
         self.custody_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -394,10 +421,14 @@ class Custody:
             raise BridgeError("receipt_id has an invalid format")
         return self.custody_dir / f"{receipt_id}.json"
 
-    def persist(self, receipt_id: str, origin: str, token: str) -> None:
+    def persist(self, receipt_id: str, origin: str, token: str, bound_value: str | None = None) -> None:
         self.prepare()
         path = self.path(receipt_id)
         record = {"receipt_id": receipt_id, "origin_thread": origin, self.token_field: token}
+        if self.bound_field is not None:
+            if bound_value is None:
+                raise BridgeError(f"{self.label} requires its bound {self.bound_label}")
+            record[self.bound_field] = bound_value
         if path.exists():
             if self.read_record(path) != record:
                 raise BridgeError("coordinator token custody conflicts with the receipt binding")
@@ -433,31 +464,58 @@ class Custody:
                 raise BridgeError(f"{self.label} must be an owner-private regular file")
             raw = source.read(MAX_INPUT_BYTES + 1)
         record = decode_json(raw, "coordinator token custody")
-        exact_fields(record, {"receipt_id", "origin_thread", self.token_field}, self.label)
+        exact_fields(record, self.fields(), self.label)
         text(record, "receipt_id", 128, TOKEN_RE)
         canonical_origin(record)
         text(record, self.token_field, 128, NONCE_RE)
+        if self.bound_field is not None:
+            text(record, self.bound_field, 64, SHA256_RE)
         return record
 
-    def load(self, receipt_id: str, origin: str) -> str:
+    def load(self, receipt_id: str, origin: str, bound_value: str | None = None) -> str:
         record = self.read_record(self.path(receipt_id))
         if record["receipt_id"] != receipt_id or record["origin_thread"] != origin:
             raise BridgeError(f"{self.label} does not match the receipt binding")
+        if self.bound_field is not None:
+            if bound_value is None or not hmac.compare_digest(str(record[self.bound_field]), bound_value):
+                raise BridgeError(f"{self.label} is bound to a different {self.bound_label}")
         return record[self.token_field]
 
-    def remove(self, receipt_id: str, origin: str, missing_ok: bool = False) -> None:
-        self.prepare()
+    def entry_present(self, receipt_id: str) -> bool:
+        """Report whether any directory entry, including a dangling link, holds this record."""
+        try:
+            os.lstat(self.path(receipt_id))
+        except FileNotFoundError:
+            return False
+        except NotADirectoryError:
+            return False
+        return True
+
+    def remove(self, receipt_id: str, origin: str) -> None:
+        """Idempotently retire one capability record and flush its directory.
+
+        Replay after a partial removal is not an error: an already-absent record
+        still re-attempts the directory flush so the unlink becomes durable.
+        """
         path = self.path(receipt_id)
         try:
             record = self.read_record(path)
         except BridgeError:
-            if missing_ok and not path.exists():
-                return
-            raise
-        if record["receipt_id"] != receipt_id or record["origin_thread"] != origin:
-            raise BridgeError(f"{self.label} does not match the receipt binding")
-        os.unlink(path)
-        self.flush_directory()
+            if self.entry_present(receipt_id):
+                raise
+            record = None
+        if record is not None:
+            if record["receipt_id"] != receipt_id or record["origin_thread"] != origin:
+                raise BridgeError(f"{self.label} does not match the receipt binding")
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+        try:
+            self.flush_directory()
+        except (FileNotFoundError, NotADirectoryError):
+            # An absent custody directory holds nothing left to make durable.
+            pass
 
     def flush_directory(self) -> None:
         directory = os.open(self.custody_dir, os.O_RDONLY)
@@ -465,6 +523,23 @@ class Custody:
             os.fsync(directory)
         finally:
             os.close(directory)
+
+
+def cleanup_capability(custody: Custody | None, receipt_id: str, origin: str) -> str:
+    """Normalize one post-commit cleanup attempt into a truthful cleanup status.
+
+    The terminal event is already durable when this runs, so no filesystem
+    failure may turn a committed transition into a rejection. Every unlink,
+    open, directory-open, and fsync failure becomes cleanup ``pending``, which
+    the identical terminal replay retries.
+    """
+    if custody is None:
+        return "pending"
+    try:
+        custody.remove(receipt_id, origin)
+    except Exception:
+        return "pending"
+    return "removed"
 
 
 class Store:
@@ -478,7 +553,28 @@ class Store:
         self.path = state_dir / "receipts.json"
         self.lock_path = state_dir / "experimental.lock"
         self.custody = Custody(custody_dir, "coordinator_token", "coordinator token custody") if custody_dir is not None else None
-        self.abandonment = Custody(abandonment_dir, "abandonment_token", "abandonment capability") if abandonment_dir is not None else None
+        self.abandonment = (
+            Custody(
+                abandonment_dir,
+                "abandonment_token",
+                "abandonment capability",
+                "custody_dir_hash",
+                "coordinator custody directory",
+            )
+            if abandonment_dir is not None
+            else None
+        )
+
+    def custody_identity(self) -> str:
+        """Return the bound identity of this invocation's coordinator custody directory.
+
+        Both create and abandon derive the identity here, after the directory
+        exists, so abandonment can only ever test the one custody directory the
+        receipt was created against.
+        """
+        if self.custody is None:
+            raise BridgeError("coordinator token custody is required")
+        return directory_identity(self.custody.custody_dir)
 
     def prepare(self) -> None:
         self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -600,7 +696,9 @@ class Store:
                     if self.abandonment is None:
                         raise BridgeError("abandonment capability is required")
                     self.custody.persist(binding["receipt_id"], binding["origin_thread"], coordinator_token)
-                    self.abandonment.persist(binding["receipt_id"], binding["origin_thread"], abandonment_token)
+                    self.abandonment.persist(
+                        binding["receipt_id"], binding["origin_thread"], abandonment_token, self.custody_identity()
+                    )
                     return {"outcome": "duplicate", "receipt_id": binding["receipt_id"], "state": "created"}
                 raise BridgeError("receipt identity or event_id conflicts with existing state")
             if len(store["receipts"]) >= MAX_RECEIPTS:
@@ -610,7 +708,9 @@ class Store:
             if self.abandonment is None:
                 raise BridgeError("abandonment capability is required")
             self.custody.persist(binding["receipt_id"], binding["origin_thread"], coordinator_token)
-            self.abandonment.persist(binding["receipt_id"], binding["origin_thread"], abandonment_token)
+            self.abandonment.persist(
+                binding["receipt_id"], binding["origin_thread"], abandonment_token, self.custody_identity()
+            )
             receipt = {
                 "binding": binding,
                 "coordinator_token_hash": hashlib.sha256(coordinator_token.encode()).hexdigest(),
@@ -710,12 +810,9 @@ class Store:
                 receipt["events"].append({**event, "at": timestamp})
                 self.commit(store)
                 outcome = "recorded"
-        assert self.custody is not None
-        try:
-            self.custody.remove(receipt_id, receipt["binding"]["origin_thread"], missing_ok=True)
-            cleanup = "removed"
-        except BridgeError:
-            cleanup = "pending"
+            origin = receipt["binding"]["origin_thread"]
+        # One shared post-commit cleanup phase for both recorded and duplicate.
+        cleanup = cleanup_capability(self.custody, receipt_id, origin)
         return {"outcome": outcome, "receipt_id": receipt_id, "state": "acknowledged", "custody_cleanup": cleanup}
 
     def abandon(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -732,31 +829,34 @@ class Store:
             if origin != receipt["binding"]["origin_thread"]:
                 raise BridgeError("coordinator origin does not match the receipt")
             if replay(receipt, event):
-                return {"outcome": "duplicate", "receipt_id": receipt_id, "state": receipt["state"], "capability_cleanup": "removed"}
-            if self.abandonment is None:
-                raise BridgeError("abandonment capability is required")
-            capability = self.abandonment.load(receipt_id, origin)
-            capability_hash = receipt.get("abandonment_token_hash")
-            if not isinstance(capability_hash, str) or not hmac.compare_digest(
-                hashlib.sha256(capability.encode()).hexdigest(), capability_hash
-            ):
-                raise BridgeError("invalid abandonment capability")
-            if self.custody is not None and self.custody.path(receipt_id).exists():
-                raise BridgeError("recoverable coordinator custody prevents abandonment")
-            if receipt["state"] != "created" or receipt["report_event_id"] is not None:
-                raise BridgeError("only a created-only receipt can be abandoned")
-            timestamp = now()
-            receipt["state"] = "abandoned"
-            receipt["updated_at"] = timestamp
-            receipt["events"].append({**event, "at": timestamp})
-            self.commit(store)
-        assert self.abandonment is not None
-        try:
-            self.abandonment.remove(receipt_id, origin)
-            cleanup = "removed"
-        except BridgeError:
-            cleanup = "pending"
-        return {"outcome": "recorded", "receipt_id": receipt_id, "state": "abandoned", "capability_cleanup": cleanup}
+                outcome = "duplicate"
+            else:
+                if self.abandonment is None:
+                    raise BridgeError("abandonment capability is required")
+                # The capability record carries the identity of the one custody
+                # directory this receipt was created against. Verifying it before
+                # the absence test stops a caller-chosen empty, fake, or alternate
+                # custody directory from faking irrecoverable token loss.
+                capability = self.abandonment.load(receipt_id, origin, self.custody_identity())
+                capability_hash = receipt.get("abandonment_token_hash")
+                if not isinstance(capability_hash, str) or not hmac.compare_digest(
+                    hashlib.sha256(capability.encode()).hexdigest(), capability_hash
+                ):
+                    raise BridgeError("invalid abandonment capability")
+                assert self.custody is not None
+                if self.custody.entry_present(receipt_id):
+                    raise BridgeError("recoverable coordinator custody prevents abandonment")
+                if receipt["state"] != "created" or receipt["report_event_id"] is not None:
+                    raise BridgeError("only a created-only receipt can be abandoned")
+                timestamp = now()
+                receipt["state"] = "abandoned"
+                receipt["updated_at"] = timestamp
+                receipt["events"].append({**event, "at": timestamp})
+                self.commit(store)
+                outcome = "recorded"
+        # One shared post-commit cleanup phase for both recorded and duplicate.
+        cleanup = cleanup_capability(self.abandonment, receipt_id, origin)
+        return {"outcome": outcome, "receipt_id": receipt_id, "state": "abandoned", "capability_cleanup": cleanup}
 
     def show(self, receipt_id: str) -> dict[str, Any]:
         with self.lock():
