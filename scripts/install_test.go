@@ -196,18 +196,19 @@ func TestInstallerRejectsInvalidSkillSourceBeforeDownload(t *testing.T) {
 	}
 }
 
-func TestInstallerPreflightsEverySkillBeforeMutation(t *testing.T) {
+func TestInstallerPreflightsPiBeforeMutation(t *testing.T) {
 	fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
 	source := filepath.Join(fixture.root, "amux-source")
-	for _, skill := range []string{"amux", "amux-claude"} {
+	for _, skill := range []string{"amux", "amux-tycho", "amux-claude"} {
 		writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
 	}
+	writeTychoRuntimePayload(t, source)
 	existing := filepath.Join(fixture.home, ".agents", "skills", "amux", "old")
 	writeFile(t, existing, "preserved\n", 0o600)
 	fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
 
 	output, err := fixture.run()
-	if err == nil || !strings.Contains(output, "missing bundled skill directory") {
+	if err == nil || !strings.Contains(output, "missing bundled skill directory") || !strings.Contains(output, filepath.Join(source, "skills", "amux-pi")) {
 		t.Fatalf("output=%q err=%v", output, err)
 	}
 	if got := readFile(t, existing); got != "preserved\n" {

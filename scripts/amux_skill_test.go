@@ -619,7 +619,7 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 			t.Errorf("core /amux Tycho pointer is missing authority boundary %q", required)
 		}
 	}
-	for _, forbidden := range []string{"tycho-report-bridge.md", "tycho_report_bridge.py", "created → valid_report → delivered → acknowledged"} {
+	for _, forbidden := range []string{"tycho-report-bridge.md", "tycho_report_bridge.py", "created → valid_report → delivered → acknowledged", "one-time Amp schedule"} {
 		if strings.Contains(core, forbidden) {
 			t.Errorf("core /amux duplicates detailed Tycho protocol %q", forbidden)
 		}
@@ -641,6 +641,11 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 		"not bridge attestation of project, harness, provider, or model identity",
 		"Migrating pre-split receipts",
 		"custody possession never transfer coordinator, consume, or acknowledgement authority",
+		"a single one-time Amp schedule",
+		"only re-checks the exact bound local Tycho agent's status/result",
+		"Clear it as soon as the run reaches a terminal or recovered state",
+		"only a wake-up token—never durable truth, delivery, consume, or acknowledgement",
+		"Do not turn it into a recurring watcher",
 	} {
 		if !strings.Contains(skill, required) {
 			t.Errorf("amux-tycho workflow is missing %q", required)

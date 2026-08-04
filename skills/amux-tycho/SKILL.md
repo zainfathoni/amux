@@ -25,6 +25,10 @@ Before any field use, consult the [provider executor readiness matrix](https://g
 10. **Abandon only the narrow lost-custody case.** A created-only receipt with irrecoverably missing bound coordinator custody may be terminally abandoned only with the separately stored matching abandonment capability and exact owner authorization. Never abandon a submitted report, recreate custody, delete/rewrite history, move a capability to fake absence, or retrofit a legacy receipt.
 11. **Finish cleanup truthfully.** Acknowledgement removes coordinator custody only after the terminal event is durable; abandonment similarly removes its capability. Cleanup `pending` means replay the same terminal event against the same original capability directory. Never infer global absence from `removed`, and remove a separately found leftover record only after `show` proves its exact receipt is already terminal.
 
+## Optional long-run wake-up
+
+For a long Tycho run, the Amp coordinator may own a single one-time Amp schedule whose prompt only re-checks the exact bound local Tycho agent's status/result. Clear it as soon as the run reaches a terminal or recovered state. The schedule firing is only a wake-up token—never durable truth, delivery, consume, or acknowledgement—and grants no retry, resend, lifecycle, or authority change. Do not turn it into a recurring watcher.
+
 ## Field-readiness limits
 
 - No live Tycho/provider run is authorized merely by loading this skill. Current readiness is synthetic coverage only.
