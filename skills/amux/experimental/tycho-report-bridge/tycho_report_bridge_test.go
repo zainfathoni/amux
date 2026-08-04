@@ -780,6 +780,14 @@ func TestTerminalCleanupFailuresStayTruthfulAndReplayCompletes(t *testing.T) {
 				t.Fatalf("durable state = %#v", receipt)
 			}
 
+			if !failure.stillExists {
+				// The record is already gone, so only a retried directory
+				// flush can still observe the induced failure.
+				stillPending := requireOutcome(t, stateDir, "duplicate", ack, "acknowledge")
+				if stillPending["custody_cleanup"] != "pending" {
+					t.Fatalf("replay skipped the directory flush retry: %#v", stillPending)
+				}
+			}
 			if err := os.Chmod(custodyDir, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -818,6 +826,12 @@ func TestTerminalCleanupFailuresStayTruthfulAndReplayCompletes(t *testing.T) {
 				t.Fatalf("durable state = %#v", receipt)
 			}
 
+			if !failure.stillExists {
+				stillPending := requireOutcome(t, stateDir, "duplicate", abandonRequest(), "abandon")
+				if stillPending["capability_cleanup"] != "pending" {
+					t.Fatalf("replay skipped the directory flush retry: %#v", stillPending)
+				}
+			}
 			if err := os.Chmod(abandonmentDir, 0o700); err != nil {
 				t.Fatal(err)
 			}

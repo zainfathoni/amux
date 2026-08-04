@@ -463,7 +463,7 @@ class Custody:
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
                 raise BridgeError(f"{self.label} must be an owner-private regular file")
             raw = source.read(MAX_INPUT_BYTES + 1)
-        record = decode_json(raw, "coordinator token custody")
+        record = decode_json(raw, self.label)
         exact_fields(record, self.fields(), self.label)
         text(record, "receipt_id", 128, TOKEN_RE)
         canonical_origin(record)
