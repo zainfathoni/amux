@@ -849,6 +849,49 @@ func TestTerminalCleanupFailuresStayTruthfulAndReplayCompletes(t *testing.T) {
 	}
 }
 
+// Cleanup status is scoped to the caller-supplied directory. A terminal replay
+// against another directory cannot prove global absence or authorize removal
+// of a separately discovered owner-private record.
+func TestTerminalReplayUsesTheSameCapabilityDirectory(t *testing.T) {
+	stateDir := t.TempDir()
+	requireOutcome(t, stateDir, "recorded", createRequest(stateDir), "create")
+	requireOutcome(t, stateDir, "recorded", submitRequest(stateDir), "submit")
+	consume := map[string]any{"receipt_id": "receipt-323", "event_id": "consume-323", "origin_thread": origin}
+	requireOutcome(t, stateDir, "recorded", consume, "consume")
+	ack := map[string]any{
+		"receipt_id": "receipt-323", "event_id": "ack-323",
+		"report_event_id": "report-323", "origin_thread": origin,
+	}
+	realDir := stateDir + "-custody"
+	realRecord := filepath.Join(realDir, "receipt-323.json")
+	chmodDir(t, realDir, 0o500)
+	if result := requireOutcome(t, stateDir, "recorded", ack, "acknowledge"); result["custody_cleanup"] != "pending" {
+		t.Fatalf("initial cleanup = %#v", result)
+	}
+
+	alternateDir := t.TempDir()
+	result, stderr, err := runDirs(t, stateDir, alternateDir, "", ack, "acknowledge")
+	if err != nil || result["outcome"] != "duplicate" || result["custody_cleanup"] != "removed" {
+		t.Fatalf("alternate replay = %#v: %v: %s", result, err, stderr)
+	}
+	if _, err := os.Stat(realRecord); err != nil {
+		t.Fatalf("alternate replay proved false global absence: %v", err)
+	}
+
+	// Manual removal is safe only after the exact receipt is independently
+	// verified terminal; the alternate cleanup result is insufficient.
+	receipt := show(t, stateDir)
+	if receipt["state"] != "acknowledged" {
+		t.Fatalf("leftover record receipt is not terminal: %#v", receipt)
+	}
+	if err := os.Chmod(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(realRecord); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPrivatePathsAreSeparatedAndNeverGivenToProducer(t *testing.T) {
 	stateDir := t.TempDir()
 	request, _ := json.Marshal(createRequest(stateDir))
