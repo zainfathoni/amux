@@ -10,6 +10,16 @@ import (
 	"testing"
 )
 
+var bundledSkillNames = []string{"amux", "amux-tycho", "amux-claude", "amux-pi"}
+
+func writeTychoRuntimePayload(t *testing.T, source string) {
+	t.Helper()
+	root := filepath.Join(source, "skills", "amux-tycho")
+	writeFile(t, filepath.Join(root, "reference", "tycho-report-bridge.md"), "bridge\n", 0o644)
+	writeFile(t, filepath.Join(root, "reference", "trigger-phrases.md"), "triggers\n", 0o644)
+	writeFile(t, filepath.Join(root, "experimental", "tycho-report-bridge", "tycho_report_bridge.py"), "#!/usr/bin/env python3\n", 0o755)
+}
+
 func TestInstallerMapsSupportedPlatformsAndInstalls(t *testing.T) {
 	for _, test := range []struct {
 		name, unameS, unameM, platform string
@@ -71,10 +81,11 @@ func TestInstallerVersionOverrideUsesVersionedAssets(t *testing.T) {
 func TestInstallerLinksBundledSkillsAndPreservesExistingInstalls(t *testing.T) {
 	fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
 	source := filepath.Join(fixture.root, "amux source")
-	for _, skill := range []string{"amux", "amux-claude", "amux-pi"} {
+	for _, skill := range bundledSkillNames {
 		writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
 		writeFile(t, filepath.Join(fixture.home, ".agents", "skills", skill, "old"), "preserved\n", 0o600)
 	}
+	writeTychoRuntimePayload(t, source)
 	writeFile(t, filepath.Join(fixture.home, ".config", "amp", "skills", "amux", "old"), "legacy amp\n", 0o600)
 	writeFile(t, filepath.Join(fixture.home, ".config", "agents", "skills", "amux-pi", "old"), "legacy agents\n", 0o600)
 	fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
@@ -83,7 +94,7 @@ func TestInstallerLinksBundledSkillsAndPreservesExistingInstalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("installer failed: %v\n%s", err, output)
 	}
-	for _, skill := range []string{"amux", "amux-claude", "amux-pi"} {
+	for _, skill := range bundledSkillNames {
 		destination := filepath.Join(fixture.home, ".agents", "skills", skill)
 		info, statErr := os.Lstat(destination)
 		if statErr != nil || info.Mode()&os.ModeSymlink == 0 {
@@ -118,9 +129,10 @@ func TestInstallerLinksBundledSkillsAndPreservesExistingInstalls(t *testing.T) {
 func TestInstallerSkillLinksAreIdempotent(t *testing.T) {
 	fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
 	source := filepath.Join(fixture.root, "amux-source")
-	for _, skill := range []string{"amux", "amux-claude", "amux-pi"} {
+	for _, skill := range bundledSkillNames {
 		writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
 	}
+	writeTychoRuntimePayload(t, source)
 	fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
 	if output, err := fixture.run(); err != nil {
 		t.Fatalf("first installer run failed: %v\n%s", err, output)
@@ -129,7 +141,7 @@ func TestInstallerSkillLinksAreIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second installer run failed: %v\n%s", err, output)
 	}
-	if strings.Count(output, "already links to") != 3 {
+	if strings.Count(output, "already links to") != len(bundledSkillNames) {
 		t.Fatalf("idempotent output:\n%s", output)
 	}
 	backups, globErr := filepath.Glob(filepath.Join(fixture.home, ".agents", "skills", "*.backup-*"))
@@ -141,9 +153,10 @@ func TestInstallerSkillLinksAreIdempotent(t *testing.T) {
 func TestInstallerReplacesWrongAndBrokenSkillSymlinks(t *testing.T) {
 	fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
 	source := filepath.Join(fixture.root, "amux-source")
-	for _, skill := range []string{"amux", "amux-claude", "amux-pi"} {
+	for _, skill := range bundledSkillNames {
 		writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
 	}
+	writeTychoRuntimePayload(t, source)
 	destinationRoot := filepath.Join(fixture.home, ".agents", "skills")
 	if err := os.MkdirAll(destinationRoot, 0o755); err != nil {
 		t.Fatal(err)
@@ -159,7 +172,7 @@ func TestInstallerReplacesWrongAndBrokenSkillSymlinks(t *testing.T) {
 	if output, err := fixture.run(); err != nil {
 		t.Fatalf("installer failed: %v\n%s", err, output)
 	}
-	for _, skill := range []string{"amux", "amux-claude", "amux-pi"} {
+	for _, skill := range bundledSkillNames {
 		target, err := os.Readlink(filepath.Join(destinationRoot, skill))
 		if err != nil || target != filepath.Join(source, "skills", skill) {
 			t.Fatalf("skill %s target=%q err=%v", skill, target, err)
@@ -205,6 +218,31 @@ func TestInstallerPreflightsEverySkillBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestInstallerRejectsMissingTychoRuntimePayloadBeforeMutation(t *testing.T) {
+	fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
+	source := filepath.Join(fixture.root, "amux-source")
+	for _, skill := range bundledSkillNames {
+		writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
+	}
+	tycho := filepath.Join(source, "skills", "amux-tycho")
+	writeFile(t, filepath.Join(tycho, "reference", "tycho-report-bridge.md"), "bridge\n", 0o644)
+	writeFile(t, filepath.Join(tycho, "reference", "trigger-phrases.md"), "triggers\n", 0o644)
+	existing := filepath.Join(fixture.home, ".agents", "skills", "amux", "old")
+	writeFile(t, existing, "preserved\n", 0o600)
+	fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
+
+	output, err := fixture.run()
+	if err == nil || !strings.Contains(output, "missing readable bundled amux-tycho runtime payload") || !strings.Contains(output, "tycho_report_bridge.py") {
+		t.Fatalf("output=%q err=%v", output, err)
+	}
+	if got := readFile(t, existing); got != "preserved\n" {
+		t.Fatalf("runtime payload preflight changed existing skill to %q", got)
+	}
+	if _, statErr := os.Stat(fixture.log); !os.IsNotExist(statErr) {
+		t.Fatalf("missing Tycho runtime payload reached download: %v", statErr)
+	}
+}
+
 func TestInstallerRejectsSkillSourceOverlappingManagedDestinations(t *testing.T) {
 	for _, relativeSource := range []string{
 		filepath.Join(".agents", "skills", "amux"),
@@ -213,9 +251,10 @@ func TestInstallerRejectsSkillSourceOverlappingManagedDestinations(t *testing.T)
 		t.Run(relativeSource, func(t *testing.T) {
 			fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
 			source := filepath.Join(fixture.home, relativeSource)
-			for _, skill := range []string{"amux", "amux-claude", "amux-pi"} {
+			for _, skill := range bundledSkillNames {
 				writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
 			}
+			writeTychoRuntimePayload(t, source)
 			fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
 
 			output, err := fixture.run()
@@ -237,9 +276,10 @@ func TestInstallerRejectsInvalidSkillDestinationParentsBeforeDownload(t *testing
 		t.Run(relativeParent, func(t *testing.T) {
 			fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
 			source := filepath.Join(fixture.root, "amux-source")
-			for _, skill := range []string{"amux", "amux-claude", "amux-pi"} {
+			for _, skill := range bundledSkillNames {
 				writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
 			}
+			writeTychoRuntimePayload(t, source)
 			writeFile(t, filepath.Join(fixture.home, relativeParent), "not a directory\n", 0o600)
 			fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
 
@@ -265,9 +305,10 @@ func TestInstallerWithoutSkillSourceDoesNotInspectAgentSkillPaths(t *testing.T) 
 func TestInstallerReportsSequentialSkillFailureAndPreservesBackup(t *testing.T) {
 	fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
 	source := filepath.Join(fixture.root, "amux-source")
-	for _, skill := range []string{"amux", "amux-claude", "amux-pi"} {
+	for _, skill := range bundledSkillNames {
 		writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
 	}
+	writeTychoRuntimePayload(t, source)
 	destination := filepath.Join(fixture.home, ".agents", "skills", "amux")
 	writeFile(t, filepath.Join(destination, "old"), "recoverable\n", 0o600)
 	writeFile(t, filepath.Join(fixture.bin, "ln"), "#!/bin/sh\nexit 1\n", 0o755)

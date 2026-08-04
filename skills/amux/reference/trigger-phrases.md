@@ -1,6 +1,6 @@
 # amux skill trigger phrase checklist
 
-This table is the complete activation and routing contract for [`../SKILL.md`](../SKILL.md). Skill-only rows must never be represented as CLI commands. Experimental Claude/Pi triggers live in `/amux-claude` and `/amux-pi`, not here.
+This table is the complete activation and routing contract for [`../SKILL.md`](../SKILL.md). Skill-only rows must never be represented as CLI commands. Experimental Tycho/Claude/Pi triggers live in `/amux-tycho`, `/amux-claude`, and `/amux-pi`, not here.
 
 | Trigger phrase | Route | Contract |
 | --- | --- | --- |

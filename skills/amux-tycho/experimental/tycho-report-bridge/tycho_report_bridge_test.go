@@ -1,3 +1,4 @@
+// Package tycho_report_bridge verifies the experimental amux-tycho adapter.
 package tycho_report_bridge
 
 import (

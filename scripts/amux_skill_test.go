@@ -20,6 +20,9 @@ var publicSkillFiles = []string{
 	filepath.Join("skills", "amux", "reference", "amp-invocation-policy.md"),
 	filepath.Join("skills", "amux", "reference", "contract-v1.md"),
 	filepath.Join("skills", "amux", "reference", "deadline-v1.md"),
+	filepath.Join("skills", "amux-tycho", "SKILL.md"),
+	filepath.Join("skills", "amux-tycho", "reference", "tycho-report-bridge.md"),
+	filepath.Join("skills", "amux-tycho", "reference", "trigger-phrases.md"),
 	filepath.Join("skills", "amux-claude", "SKILL.md"),
 	filepath.Join("skills", "amux-claude", "reference", "claude-local-tmux-adoption.md"),
 	filepath.Join("skills", "amux-pi", "SKILL.md"),
@@ -67,6 +70,13 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 				"contract-v1.md",
 				"deadline-v1.md",
 				"amp-invocation-policy.md",
+			},
+		},
+		{
+			skillDir: filepath.Join("skills", "amux-tycho"),
+			refs: []string{
+				"tycho-report-bridge.md",
+				"trigger-phrases.md",
 			},
 		},
 		{
@@ -595,9 +605,52 @@ func TestExperimentalClaudeDelegationReferencesStayNarrowAndConsistent(t *testin
 func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	contract := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "tycho-report-bridge.md"))
-	recovery := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "troubleshooting.md"))
+	core := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "SKILL.md"))
+	triggers := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "reference", "trigger-phrases.md"))
+	contract := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "reference", "tycho-report-bridge.md"))
 	matrix := readSkillFile(t, root, filepath.Join("docs", "provider-executor-readiness.md"))
+	for _, required := range []string{
+		"receipt's immutable real Amp origin remains coordinator and consume/acknowledgement authority",
+		"typed report-only producer",
+		"no group, member, callback, finish, label, provider-identity, or lifecycle authority",
+	} {
+		if !strings.Contains(core, required) {
+			t.Errorf("core /amux Tycho pointer is missing authority boundary %q", required)
+		}
+	}
+	for _, forbidden := range []string{"tycho-report-bridge.md", "tycho_report_bridge.py", "created → valid_report → delivered → acknowledged"} {
+		if strings.Contains(core, forbidden) {
+			t.Errorf("core /amux duplicates detailed Tycho protocol %q", forbidden)
+		}
+	}
+	for _, required := range []string{
+		"existing Tycho agent, project, harness, and model/provider route",
+		"Freeze the task and binding",
+		"restart-safe custody",
+		"Run through Tycho, not as Tycho",
+		"Submit one semantic report",
+		"Recover explicitly",
+		"Consume, assess, then acknowledge",
+		"notification as wake-up only",
+		"created-only receipt",
+		"cleanup `pending`",
+		"Field-readiness limits",
+		"Tycho may route Claude or Pi",
+		"does not grant Tycho Claude/Pi provider identity",
+		"not bridge attestation of project, harness, provider, or model identity",
+		"Migrating pre-split receipts",
+		"custody possession never transfer coordinator, consume, or acknowledgement authority",
+	} {
+		if !strings.Contains(skill, required) {
+			t.Errorf("amux-tycho workflow is missing %q", required)
+		}
+	}
+	for _, required := range []string{"explicit-only", "Incidental mentions", "Recover this /amux-tycho receipt", "report_only"} {
+		if !strings.Contains(triggers, required) {
+			t.Errorf("amux-tycho trigger checklist is missing %q", required)
+		}
+	}
 	for _, required := range []string{
 		"created → valid_report → delivered → acknowledged",
 		"report_only",
@@ -611,15 +664,30 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 			t.Errorf("experimental Tycho contract is missing %q", required)
 		}
 	}
-	for _, required := range []string{"never delivery", "never automatically resent", "no watcher", "finish authority"} {
-		if !strings.Contains(recovery, required) {
-			t.Errorf("experimental Tycho recovery is missing %q", required)
-		}
-	}
-	if !strings.Contains(matrix, "| Tycho semantic-report receipt/inbox | Runtime-unverified |") ||
+	if !strings.Contains(matrix, "| `/amux-tycho` semantic-report receipt/inbox | Runtime-unverified |") ||
 		!strings.Contains(matrix, "Tycho has `report_only` authority") ||
+		!strings.Contains(matrix, "existing Tycho agent/project/harness/model route") ||
 		!strings.Contains(matrix, "no live Tycho cycle") {
 		t.Error("readiness matrix overstates or omits the experimental Tycho route")
+	}
+	for _, path := range []string{
+		filepath.Join("skills", "amux-tycho", "experimental", "tycho-report-bridge", "tycho_report_bridge.py"),
+		filepath.Join("skills", "amux-tycho", "experimental", "tycho-report-bridge", "tycho_report_bridge_test.go"),
+		filepath.Join("skills", "amux-tycho", "reference", "tycho-report-bridge.md"),
+		filepath.Join("skills", "amux-tycho", "reference", "trigger-phrases.md"),
+	} {
+		if _, err := os.Stat(filepath.Join(root, path)); err != nil {
+			t.Errorf("amux-tycho split payload is missing %s: %v", path, err)
+		}
+	}
+	for _, path := range []string{
+		filepath.Join("skills", "amux", "experimental", "tycho-report-bridge", "tycho_report_bridge.py"),
+		filepath.Join("skills", "amux", "experimental", "tycho-report-bridge", "tycho_report_bridge_test.go"),
+		filepath.Join("skills", "amux", "reference", "tycho-report-bridge.md"),
+	} {
+		if _, err := os.Stat(filepath.Join(root, path)); !os.IsNotExist(err) {
+			t.Errorf("core /amux retains a drift-prone Tycho payload at %s: %v", path, err)
+		}
 	}
 }
 
@@ -630,6 +698,7 @@ func TestProviderExecutorReadinessMatrixIsLinkedAndKeepsAuthorityBoundaries(t *t
 	promotion := readSkillFile(t, root, filepath.Join("docs", "proposals", "issue-309-read-only-claude-cli-promotion-gate.md"))
 	matrixURL := "https://github.com/zainfathoni/amux/blob/main/docs/provider-executor-readiness.md"
 	for _, skillPath := range []string{
+		filepath.Join("skills", "amux-tycho", "SKILL.md"),
 		filepath.Join("skills", "amux-claude", "SKILL.md"),
 		filepath.Join("skills", "amux-pi", "SKILL.md"),
 	} {
@@ -1457,6 +1526,9 @@ func TestExperimentalSkillsAreSeparatedFromCoreAmux(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "skills", "amux-pi", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "skills", "amux-tycho", "SKILL.md")); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(core, "reference/claude-") || strings.Contains(core, "reference/pi-spark") {

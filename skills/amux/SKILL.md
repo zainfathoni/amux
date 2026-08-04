@@ -1,6 +1,6 @@
 ---
 name: amux
-description: "Manage local Amp worker, runner, workspace, and work-group orchestration with amux. Use for pin/unpin/park/restart/shelve/unshelve/launch/spawn, doctor, teardown, /amux health, /amux sprawl, /amux finish, and coordinate issue workers. Also 'forget this on restore', 'hide it for now', 'defer this workspace', 'Show shelved work', and 'Restore my workspace'. Experimental Claude or Pi delegation is a separate skill (/amux-claude, /amux-pi), not this skill."
+description: "Manage local Amp worker, runner, workspace, and work-group orchestration with amux. Use for pin/unpin/park/restart/shelve/unshelve/launch/spawn, doctor, teardown, /amux health, /amux sprawl, /amux finish, and coordinate issue workers. Also 'forget this on restore', 'hide it for now', 'defer this workspace', 'Show shelved work', and 'Restore my workspace'. Experimental Tycho, Claude, or Pi routes are separate explicit-only skills (/amux-tycho, /amux-claude, /amux-pi)."
 ---
 
 # amux
@@ -42,7 +42,7 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 
 Deadlines (optional): load [`reference/deadline-v1.md`](reference/deadline-v1.md) only when arming or handling deadline wake-ups—not on every `/amux` load.
 
-Experimental provider delegation: load **`/amux-claude`** or **`/amux-pi`** only after an explicit owner request for those skills. Do not activate them from incidental mentions. The skill-owned Tycho semantic-report receipt/inbox adapter is documented in [`reference/tycho-report-bridge.md`](reference/tycho-report-bridge.md); it grants report submission only and does not make Tycho an Amp worker or coordinator.
+Experimental external execution is explicit-only. Load **`/amux-tycho`** for the Tycho report bridge, or **`/amux-claude`** / **`/amux-pi`** for their provider-specific fallback routes; never activate them from incidental mentions. For `/amux-tycho`, a receipt's immutable real Amp origin remains coordinator and consume/acknowledgement authority. Tycho is a typed report-only producer with no group, member, callback, finish, label, provider-identity, or lifecycle authority.
 
 ## Load only what you need
 
@@ -53,7 +53,6 @@ Experimental provider delegation: load **`/amux-claude`** or **`/amux-pi`** only
 - Stuck clients / recovery: [`reference/troubleshooting.md`](reference/troubleshooting.md)
 - Trigger checklist: [`reference/trigger-phrases.md`](reference/trigger-phrases.md)
 - Amp invocation preflight: [`reference/amp-invocation-policy.md`](reference/amp-invocation-policy.md)
-- Experimental Tycho report-only inbox and recovery: [`reference/tycho-report-bridge.md`](reference/tycho-report-bridge.md)
 
 ## Safety
 
