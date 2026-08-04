@@ -30,17 +30,19 @@ This decision depends on [ADR 0005](0005-maintain-amux-as-a-local-worker-lifecyc
 
 ## Adoption surface
 
-This ADR selects policy, not a carrier or enforcement mechanism. Consistent with ADR 0004's retained constraints, operating guidance reaches agents only through a separately reviewed documentation or skill change, and enforced behavior requires its own accepted design and implementation. [Issue #320](https://github.com/zainfathoni/amux/issues/320) plans symmetric creation and retirement with explicit per-resource dispositions; this acceptance does not preselect that design.
+This ADR selects policy, not a carrier or enforcement mechanism. Consistent with ADR 0004's retained constraints, operating guidance reaches agents only through a separately reviewed documentation or skill change, and enforced behavior requires its own accepted design and implementation. [Issue #320](https://github.com/zainfathoni/amux/issues/320) owns the symmetric creation/retirement proposal and explicit per-resource disposition design. Its later operating-guidance adoption site is the paired-lifecycle and worktree-removal sequence under **Finish a merged worker** in `skills/amux/reference/workflows.md`; that workflow remains current until the proposal is reviewed, approved, and adopted separately.
 
 ## Consequences
 
 Fewer threads are created, execution locality is auditable, descendant ownership is explicit, and useful work must be preserved before retirement. Delegation and cleanup become more deliberate, with fail-closed outcomes when placement or preservation cannot be established.
 
-The cost is more owner decisions for delegation and parallelism, more stop-and-report outcomes when placement cannot be verified, and retirement that can block on indeterminate preservation. Leaving a worker and its descendants alive is the accepted trade-off when safe preservation or exact finalization cannot be established.
+The cost is more owner decisions for delegation and parallelism, more stop-and-report outcomes when placement cannot be verified, and retirement that can block on indeterminate preservation. Leaving a worker and its descendants alive is the accepted trade-off when safe preservation or exact finalization cannot be established, except that an owner may separately dispose an independently safe physical worktree under the exact preservation and revalidation boundary above without claiming full retirement.
 
 ## Non-goals
 
 This ADR does not define a scheduler, task graph, permanent Lead, provider routing, package schema or transport, provider promotion or deletion, or any runtime behavior change.
+
+This ADR authorizes no automatic dirty-work discard. Any discard requires exact owner authorization bound to one specific validated state.
 
 ## Follow-ups
 
@@ -48,7 +50,7 @@ The following work still requires separate design and implementation. In particu
 
 - delegation defaults;
 - runner attestation;
-- descendant ownership and cleanup;
-- prepare/finalize retirement;
+- descendant ownership and cleanup through #320;
+- prepare/finalize retirement through #320;
 - a provider-neutral Amp↔Tycho package; and
 - explicit status for experimental fallback paths.
