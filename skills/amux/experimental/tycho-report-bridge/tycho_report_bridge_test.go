@@ -18,6 +18,7 @@ const (
 	origin           = "T-01234567-89ab-cdef-0123-456789abcdef"
 	producerNonce    = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	coordinatorToken = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	abandonmentToken = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 )
 
 func helperPath(t *testing.T) string {
@@ -42,7 +43,10 @@ func binding(stateDir string) map[string]any {
 }
 
 func createRequest(stateDir string) map[string]any {
-	return map[string]any{"binding": binding(stateDir), "event_id": "create-323", "coordinator_token": coordinatorToken}
+	return map[string]any{
+		"binding": binding(stateDir), "event_id": "create-323",
+		"coordinator_token": coordinatorToken, "abandonment_token": abandonmentToken,
+	}
 }
 
 func createRequestWithTarget(stateDir string) map[string]any {
@@ -69,7 +73,14 @@ func runBridgeEnv(t *testing.T, stateDir string, request any, env []string, args
 	if err != nil {
 		t.Fatal(err)
 	}
-	commandArgs := append([]string{helperPath(t), "--state-dir", stateDir}, args...)
+	commandArgs := []string{helperPath(t), "--state-dir", stateDir}
+	switch args[0] {
+	case "create", "abandon":
+		commandArgs = append(commandArgs, "--custody-dir", stateDir+"-custody", "--abandonment-dir", stateDir+"-abandonment")
+	case "consume", "acknowledge":
+		commandArgs = append(commandArgs, "--custody-dir", stateDir+"-custody")
+	}
+	commandArgs = append(commandArgs, args...)
 	command := exec.Command("python3", commandArgs...)
 	command.Stdin = bytes.NewReader(input)
 	command.Env = os.Environ()
@@ -172,12 +183,12 @@ func TestReportReplayConflictAndTransitions(t *testing.T) {
 		t.Fatalf("conflict: %v: %s", err, stderr)
 	}
 
-	ack := map[string]any{"receipt_id": "receipt-323", "event_id": "ack-323", "report_event_id": "report-323", "origin_thread": origin, "coordinator_token": coordinatorToken}
+	ack := map[string]any{"receipt_id": "receipt-323", "event_id": "ack-323", "report_event_id": "report-323", "origin_thread": origin}
 	_, stderr, err = runBridge(t, stateDir, ack, "acknowledge")
 	if err == nil || !strings.Contains(stderr, "requires delivery") {
 		t.Fatalf("early acknowledgement: %v: %s", err, stderr)
 	}
-	consume := map[string]any{"receipt_id": "receipt-323", "event_id": "consume-323", "origin_thread": origin, "coordinator_token": coordinatorToken}
+	consume := map[string]any{"receipt_id": "receipt-323", "event_id": "consume-323", "origin_thread": origin}
 	result := requireOutcome(t, stateDir, "recorded", consume, "consume")
 	if result["state"] != "delivered" || result["report"] == nil {
 		t.Fatalf("consume result = %#v", result)
@@ -194,16 +205,21 @@ func TestCoordinatorAuthorityIsSeparate(t *testing.T) {
 	stateDir := t.TempDir()
 	requireOutcome(t, stateDir, "recorded", createRequest(stateDir), "create")
 	requireOutcome(t, stateDir, "recorded", submitRequest(stateDir), "submit")
-	consume := map[string]any{"receipt_id": "receipt-323", "event_id": "consume-323", "origin_thread": origin, "coordinator_token": producerNonce}
+	consume := map[string]any{"receipt_id": "receipt-323", "event_id": "consume-323", "origin_thread": "T-11111111-1111-1111-1111-111111111111"}
 	_, stderr, err := runBridge(t, stateDir, consume, "consume")
-	if err == nil || !strings.Contains(stderr, "coordinator token") {
-		t.Fatalf("producer token consumed report: %v: %s", err, stderr)
-	}
-	consume["coordinator_token"] = coordinatorToken
-	consume["origin_thread"] = "T-11111111-1111-1111-1111-111111111111"
-	_, stderr, err = runBridge(t, stateDir, consume, "consume")
 	if err == nil || !strings.Contains(stderr, "origin") {
 		t.Fatalf("wrong origin consumed report: %v: %s", err, stderr)
+	}
+	consume["origin_thread"] = origin
+	custodyPath := filepath.Join(stateDir+"-custody", "receipt-323.json")
+	custody := map[string]any{"receipt_id": "receipt-323", "origin_thread": origin, "coordinator_token": producerNonce}
+	raw, _ := json.Marshal(custody)
+	if err := os.WriteFile(custodyPath, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err = runBridge(t, stateDir, consume, "consume")
+	if err == nil || !strings.Contains(stderr, "coordinator token") {
+		t.Fatalf("wrong custody token consumed report: %v: %s", err, stderr)
 	}
 }
 
@@ -283,7 +299,7 @@ func TestMalformedOversizedAndLockContentionReject(t *testing.T) {
 		t.Fatalf("unknown field: %v: %s", err, stderr)
 	}
 
-	command := exec.Command("python3", helperPath(t), "--state-dir", stateDir, "create")
+	command := exec.Command("python3", helperPath(t), "--state-dir", stateDir, "--custody-dir", stateDir+"-custody", "--abandonment-dir", stateDir+"-abandonment", "create")
 	command.Stdin = strings.NewReader(`{"padding":"` + strings.Repeat("x", 70*1024) + `"}`)
 	var oversizedErr bytes.Buffer
 	command.Stderr = &oversizedErr
@@ -393,6 +409,113 @@ func TestOwnerPrivateCrashDurableStore(t *testing.T) {
 	}
 }
 
+func TestCreateReportsStateAndRestartRecoversCustody(t *testing.T) {
+	stateDir := t.TempDir()
+	result := requireOutcome(t, stateDir, "recorded", createRequest(stateDir), "create")
+	if result["state"] != "created" {
+		t.Fatalf("create state = %#v", result)
+	}
+	custodyPath := filepath.Join(stateDir+"-custody", "receipt-323.json")
+	info, err := os.Stat(custodyPath)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("custody file = %#v, err = %v", info, err)
+	}
+	receipts, err := os.ReadFile(filepath.Join(stateDir, "receipts.json"))
+	if err != nil || bytes.Contains(receipts, []byte(coordinatorToken)) ||
+		bytes.Contains(receipts, []byte(abandonmentToken)) || bytes.Contains(receipts, []byte(producerNonce)) {
+		t.Fatalf("receipt store exposed a plaintext capability: err = %v", err)
+	}
+	requireOutcome(t, stateDir, "recorded", submitRequest(stateDir), "submit")
+
+	// Every helper call is a fresh process, proving restart-safe token recovery.
+	consume := map[string]any{"receipt_id": "receipt-323", "event_id": "consume-restart", "origin_thread": origin}
+	requireOutcome(t, stateDir, "recorded", consume, "consume")
+	if _, err := os.Stat(custodyPath); err != nil {
+		t.Fatalf("custody removed before acknowledgement: %v", err)
+	}
+	ack := map[string]any{"receipt_id": "receipt-323", "event_id": "ack-restart", "report_event_id": "report-323", "origin_thread": origin}
+	requireOutcome(t, stateDir, "recorded", ack, "acknowledge")
+	if _, err := os.Stat(custodyPath); !os.IsNotExist(err) {
+		t.Fatalf("custody retained after acknowledgement: %v", err)
+	}
+	requireOutcome(t, stateDir, "duplicate", ack, "acknowledge")
+}
+
+func TestLostTokenCreatedReceiptIsAppendOnlyAbandoned(t *testing.T) {
+	stateDir := t.TempDir()
+	requireOutcome(t, stateDir, "recorded", createRequest(stateDir), "create")
+	abandon := map[string]any{
+		"receipt_id": "receipt-323", "event_id": "abandon-323", "origin_thread": origin,
+		"reason": "coordinator_token_lost",
+	}
+	_, stderr, err := runBridge(t, stateDir, abandon, "abandon")
+	if err == nil || !strings.Contains(stderr, "recoverable coordinator custody") {
+		t.Fatalf("recoverable receipt was abandoned: %v: %s", err, stderr)
+	}
+	custodyPath := filepath.Join(stateDir+"-custody", "receipt-323.json")
+	if err := os.Remove(custodyPath); err != nil {
+		t.Fatal(err)
+	}
+	abandonmentPath := filepath.Join(stateDir+"-abandonment", "receipt-323.json")
+	wrong := map[string]any{"receipt_id": "receipt-323", "origin_thread": origin, "abandonment_token": producerNonce}
+	raw, _ := json.Marshal(wrong)
+	if err := os.WriteFile(abandonmentPath, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err = runBridge(t, stateDir, abandon, "abandon")
+	if err == nil || !strings.Contains(stderr, "invalid abandonment capability") {
+		t.Fatalf("wrong capability abandoned receipt: %v: %s", err, stderr)
+	}
+	correct := map[string]any{"receipt_id": "receipt-323", "origin_thread": origin, "abandonment_token": abandonmentToken}
+	raw, _ = json.Marshal(correct)
+	if err := os.WriteFile(abandonmentPath, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := requireOutcome(t, stateDir, "recorded", abandon, "abandon")
+	if result["state"] != "abandoned" {
+		t.Fatalf("abandon result = %#v", result)
+	}
+	receipt := show(t, stateDir)
+	events := receipt["events"].([]any)
+	if receipt["state"] != "abandoned" || len(events) != 2 || events[1].(map[string]any)["kind"] != "abandoned" {
+		t.Fatalf("abandoned receipt = %#v", receipt)
+	}
+	requireOutcome(t, stateDir, "duplicate", abandon, "abandon")
+	_, stderr, err = runBridge(t, stateDir, submitRequest(stateDir), "submit")
+	if err == nil || !strings.Contains(stderr, "different valid report") {
+		t.Fatalf("abandoned receipt accepted report: %v: %s", err, stderr)
+	}
+	_, stderr, err = runBridge(t, stateDir, createRequest(stateDir), "create")
+	if err == nil || !strings.Contains(stderr, "conflicts") {
+		t.Fatalf("abandoned identity rebound: %v: %s", err, stderr)
+	}
+}
+
+func TestPrivatePathsAreSeparatedAndNeverGivenToProducer(t *testing.T) {
+	stateDir := t.TempDir()
+	request, _ := json.Marshal(createRequest(stateDir))
+	nested := filepath.Join(stateDir, "private")
+	command := exec.Command("python3", helperPath(t), "--state-dir", stateDir, "--custody-dir", nested, "--abandonment-dir", stateDir+"-abandonment", "create")
+	command.Stdin = bytes.NewReader(request)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	if err := command.Run(); err == nil || !strings.Contains(stderr.String(), "non-nested") {
+		t.Fatalf("nested custody accepted: %v: %s", err, stderr.String())
+	}
+	if _, err := os.Stat(nested); !os.IsNotExist(err) {
+		t.Fatalf("nested preflight mutated custody: %v", err)
+	}
+
+	command = exec.Command("python3", helperPath(t), "--state-dir", stateDir, "--custody-dir", stateDir+"-custody", "submit")
+	submit, _ := json.Marshal(submitRequest(stateDir))
+	command.Stdin = bytes.NewReader(submit)
+	stderr.Reset()
+	command.Stderr = &stderr
+	if err := command.Run(); err == nil || !strings.Contains(stderr.String(), "must not receive private capability paths") {
+		t.Fatalf("producer received custody path: %v: %s", err, stderr.String())
+	}
+}
+
 func TestNotificationTimeoutIsBounded(t *testing.T) {
 	if testing.Short() {
 		t.Skip("exercises the notification timeout")
@@ -421,9 +544,9 @@ func TestMaximumEventIDAndReservedNamespaceRemainReadable(t *testing.T) {
 	if err != nil || result["notification"] != "succeeded" {
 		t.Fatalf("maximum event ID: %#v: %v: %s", result, err, stderr)
 	}
-	consume := map[string]any{"receipt_id": "receipt-323", "event_id": "consume-max", "origin_thread": origin, "coordinator_token": coordinatorToken}
+	consume := map[string]any{"receipt_id": "receipt-323", "event_id": "consume-max", "origin_thread": origin}
 	requireOutcome(t, stateDir, "recorded", consume, "consume")
-	ack := map[string]any{"receipt_id": "receipt-323", "event_id": "ack-max", "report_event_id": strings.Repeat("r", 128), "origin_thread": origin, "coordinator_token": coordinatorToken}
+	ack := map[string]any{"receipt_id": "receipt-323", "event_id": "ack-max", "report_event_id": strings.Repeat("r", 128), "origin_thread": origin}
 	requireOutcome(t, stateDir, "recorded", ack, "acknowledge")
 	if show(t, stateDir)["state"] != "acknowledged" {
 		t.Fatal("maximum event ID made store unreadable")

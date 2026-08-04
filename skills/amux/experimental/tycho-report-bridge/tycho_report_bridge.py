@@ -251,9 +251,14 @@ def validate_store(raw: bytes) -> dict[str, Any]:
         raise BridgeError("invalid receipt store")
     seen_receipts: set[str] = set()
     for receipt in receipts:
-        if not isinstance(receipt, dict) or set(receipt) != {
+        receipt_fields = set(receipt) if isinstance(receipt, dict) else set()
+        required_receipt_fields = {
             "binding", "coordinator_token_hash", "state", "report_event_id",
             "events", "created_at", "updated_at",
+        }
+        if not isinstance(receipt, dict) or receipt_fields not in {
+            frozenset(required_receipt_fields),
+            frozenset(required_receipt_fields | {"abandonment_token_hash"}),
         }:
             raise BridgeError("invalid receipt record")
         binding = receipt.get("binding")
@@ -272,6 +277,13 @@ def validate_store(raw: bytes) -> dict[str, Any]:
             or receipt_id in seen_receipts
             or not isinstance(receipt.get("coordinator_token_hash"), str)
             or SHA256_RE.fullmatch(receipt["coordinator_token_hash"]) is None
+            or (
+                "abandonment_token_hash" in receipt
+                and (
+                    not isinstance(receipt["abandonment_token_hash"], str)
+                    or SHA256_RE.fullmatch(receipt["abandonment_token_hash"]) is None
+                )
+            )
             or not isinstance(binding.get("producer_nonce_hash"), str)
             or SHA256_RE.fullmatch(binding["producer_nonce_hash"]) is None
         ):
@@ -303,6 +315,7 @@ def validate_store(raw: bytes) -> dict[str, Any]:
             kind = event.get("kind")
             allowed = {
                 "created": {"event_id", "kind", "binding", "at"},
+                "abandoned": {"event_id", "kind", "reason", "at"},
                 "valid_report": {"event_id", "kind", "report", "at"},
                 "notification_intent": {"event_id", "kind", "report_event_id", "target", "detail", "at"},
                 "notification_succeeded": {"event_id", "kind", "report_event_id", "target", "detail", "at"},
@@ -327,6 +340,10 @@ def validate_store(raw: bytes) -> dict[str, Any]:
                 validate_report(event.get("report"))
                 report_ids.append(event.get("event_id"))
                 history_state = "valid_report"
+            if kind == "abandoned":
+                if history_state != "created" or event.get("reason") != "coordinator_token_lost":
+                    raise BridgeError("invalid abandoned event order")
+                history_state = "abandoned"
             if "report_event_id" in event and event.get("report_event_id") != receipt.get("report_event_id"):
                 raise BridgeError("receipt event references the wrong report")
             if kind.startswith("notification_"):
@@ -358,11 +375,110 @@ def validate_store(raw: bytes) -> dict[str, Any]:
     return value
 
 
+class Custody:
+    def __init__(self, custody_dir: pathlib.Path, token_field: str, label: str):
+        self.custody_dir = custody_dir
+        self.token_field = token_field
+        self.label = label
+
+    def prepare(self) -> None:
+        self.custody_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = self.custody_dir.stat(follow_symlinks=False)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+            raise BridgeError(f"{self.label} directory must be an owner-controlled directory")
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            os.chmod(self.custody_dir, 0o700)
+
+    def path(self, receipt_id: str) -> pathlib.Path:
+        if TOKEN_RE.fullmatch(receipt_id) is None:
+            raise BridgeError("receipt_id has an invalid format")
+        return self.custody_dir / f"{receipt_id}.json"
+
+    def persist(self, receipt_id: str, origin: str, token: str) -> None:
+        self.prepare()
+        path = self.path(receipt_id)
+        record = {"receipt_id": receipt_id, "origin_thread": origin, self.token_field: token}
+        if path.exists():
+            if self.read_record(path) != record:
+                raise BridgeError("coordinator token custody conflicts with the receipt binding")
+            return
+        payload = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        descriptor, temporary = tempfile.mkstemp(prefix=f"{receipt_id}.json.tmp.", dir=self.custody_dir)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                if self.read_record(path) != record:
+                    raise BridgeError(f"{self.label} conflicts with the receipt binding")
+            self.flush_directory()
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+    def read_record(self, path: pathlib.Path) -> dict[str, Any]:
+        try:
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError as error:
+            raise BridgeError(f"{self.label} is unavailable") from error
+        with os.fdopen(descriptor, "rb") as source:
+            info = os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
+                raise BridgeError(f"{self.label} must be an owner-private regular file")
+            raw = source.read(MAX_INPUT_BYTES + 1)
+        record = decode_json(raw, "coordinator token custody")
+        exact_fields(record, {"receipt_id", "origin_thread", self.token_field}, self.label)
+        text(record, "receipt_id", 128, TOKEN_RE)
+        canonical_origin(record)
+        text(record, self.token_field, 128, NONCE_RE)
+        return record
+
+    def load(self, receipt_id: str, origin: str) -> str:
+        record = self.read_record(self.path(receipt_id))
+        if record["receipt_id"] != receipt_id or record["origin_thread"] != origin:
+            raise BridgeError(f"{self.label} does not match the receipt binding")
+        return record[self.token_field]
+
+    def remove(self, receipt_id: str, origin: str, missing_ok: bool = False) -> None:
+        self.prepare()
+        path = self.path(receipt_id)
+        try:
+            record = self.read_record(path)
+        except BridgeError:
+            if missing_ok and not path.exists():
+                return
+            raise
+        if record["receipt_id"] != receipt_id or record["origin_thread"] != origin:
+            raise BridgeError(f"{self.label} does not match the receipt binding")
+        os.unlink(path)
+        self.flush_directory()
+
+    def flush_directory(self) -> None:
+        directory = os.open(self.custody_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+
 class Store:
-    def __init__(self, state_dir: pathlib.Path):
+    def __init__(
+        self,
+        state_dir: pathlib.Path,
+        custody_dir: pathlib.Path | None = None,
+        abandonment_dir: pathlib.Path | None = None,
+    ):
         self.state_dir = state_dir
         self.path = state_dir / "receipts.json"
         self.lock_path = state_dir / "experimental.lock"
+        self.custody = Custody(custody_dir, "coordinator_token", "coordinator token custody") if custody_dir is not None else None
+        self.abandonment = Custody(abandonment_dir, "abandonment_token", "abandonment capability") if abandonment_dir is not None else None
 
     def prepare(self) -> None:
         self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -440,20 +556,28 @@ class Store:
         raise BridgeError("receipt was not found")
 
     @staticmethod
-    def authorize_coordinator(receipt: dict[str, Any], request: dict[str, Any]) -> None:
+    def authorize_coordinator(receipt: dict[str, Any], request: dict[str, Any], token: str) -> None:
         origin = canonical_origin(request)
-        token = text(request, "coordinator_token", 128, NONCE_RE)
         if origin != receipt["binding"]["origin_thread"]:
             raise BridgeError("coordinator origin does not match the receipt")
         digest = hashlib.sha256(token.encode()).hexdigest()
         if not hmac.compare_digest(digest, receipt["coordinator_token_hash"]):
             raise BridgeError("invalid coordinator token")
 
+    def coordinator_token(self, receipt: dict[str, Any]) -> str:
+        if self.custody is None:
+            raise BridgeError("coordinator token custody is required")
+        return self.custody.load(
+            receipt["binding"]["receipt_id"],
+            receipt["binding"]["origin_thread"],
+        )
+
     def create(self, request: dict[str, Any]) -> dict[str, Any]:
-        exact_fields(request, {"binding", "event_id", "coordinator_token"}, "receipt creation")
+        exact_fields(request, {"binding", "event_id", "coordinator_token", "abandonment_token"}, "receipt creation")
         binding = validate_binding(request.get("binding"))
         event_id = user_event_id(request)
         coordinator_token = text(request, "coordinator_token", 128, NONCE_RE)
+        abandonment_token = text(request, "abandonment_token", 128, NONCE_RE)
         timestamp = now()
         event = {"event_id": event_id, "kind": "created", "binding": binding}
         with self.lock():
@@ -469,14 +593,28 @@ class Store:
                     existing is not None
                     and event_body(existing) == event
                     and hmac.compare_digest(token_hash, receipt["coordinator_token_hash"])
+                    and receipt["state"] == "created"
                 ):
-                    return {"outcome": "duplicate", "receipt_id": binding["receipt_id"]}
+                    if self.custody is None:
+                        raise BridgeError("coordinator token custody is required")
+                    if self.abandonment is None:
+                        raise BridgeError("abandonment capability is required")
+                    self.custody.persist(binding["receipt_id"], binding["origin_thread"], coordinator_token)
+                    self.abandonment.persist(binding["receipt_id"], binding["origin_thread"], abandonment_token)
+                    return {"outcome": "duplicate", "receipt_id": binding["receipt_id"], "state": "created"}
                 raise BridgeError("receipt identity or event_id conflicts with existing state")
             if len(store["receipts"]) >= MAX_RECEIPTS:
                 raise BridgeError("receipt store reached its experimental receipt limit")
+            if self.custody is None:
+                raise BridgeError("coordinator token custody is required")
+            if self.abandonment is None:
+                raise BridgeError("abandonment capability is required")
+            self.custody.persist(binding["receipt_id"], binding["origin_thread"], coordinator_token)
+            self.abandonment.persist(binding["receipt_id"], binding["origin_thread"], abandonment_token)
             receipt = {
                 "binding": binding,
                 "coordinator_token_hash": hashlib.sha256(coordinator_token.encode()).hexdigest(),
+                "abandonment_token_hash": hashlib.sha256(abandonment_token.encode()).hexdigest(),
                 "state": "created",
                 "report_event_id": None,
                 "events": [{**event, "at": timestamp}],
@@ -485,7 +623,7 @@ class Store:
             }
             store["receipts"].append(receipt)
             self.commit(store)
-        return {"outcome": "recorded", "receipt_id": binding["receipt_id"]}
+        return {"outcome": "recorded", "receipt_id": binding["receipt_id"], "state": "created"}
 
     def submit(self, request: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str] | None]:
         receipt_id = text(request, "receipt_id", 128, TOKEN_RE)
@@ -525,13 +663,14 @@ class Store:
             self.commit(store)
 
     def consume(self, request: dict[str, Any]) -> dict[str, Any]:
-        exact_fields(request, {"receipt_id", "event_id", "origin_thread", "coordinator_token"}, "inbox consumption")
+        exact_fields(request, {"receipt_id", "event_id", "origin_thread"}, "inbox consumption")
         receipt_id = text(request, "receipt_id", 128, TOKEN_RE)
         event_id = user_event_id(request)
         with self.lock():
             store = self.load()
             receipt = self.find(store, receipt_id)
-            self.authorize_coordinator(receipt, request)
+            token = self.coordinator_token(receipt)
+            self.authorize_coordinator(receipt, request, token)
             report_id = receipt["report_event_id"]
             event = {"event_id": event_id, "kind": "delivered", "report_event_id": report_id}
             if replay(receipt, event):
@@ -548,31 +687,83 @@ class Store:
         return {"outcome": "recorded", "receipt_id": receipt_id, "state": "delivered", "report": source["report"]}
 
     def acknowledge(self, request: dict[str, Any]) -> dict[str, Any]:
-        exact_fields(request, {"receipt_id", "event_id", "report_event_id", "origin_thread", "coordinator_token"}, "acknowledgement")
+        exact_fields(request, {"receipt_id", "event_id", "report_event_id", "origin_thread"}, "acknowledgement")
         receipt_id = text(request, "receipt_id", 128, TOKEN_RE)
         event_id = user_event_id(request)
         report_id = text(request, "report_event_id", 128, TOKEN_RE)
         with self.lock():
             store = self.load()
             receipt = self.find(store, receipt_id)
-            self.authorize_coordinator(receipt, request)
+            if canonical_origin(request) != receipt["binding"]["origin_thread"]:
+                raise BridgeError("coordinator origin does not match the receipt")
             event = {"event_id": event_id, "kind": "acknowledged", "report_event_id": report_id}
             if replay(receipt, event):
-                return {"outcome": "duplicate", "receipt_id": receipt_id, "state": receipt["state"]}
-            if receipt["state"] != "delivered" or receipt["report_event_id"] != report_id:
-                raise BridgeError("acknowledgement requires delivery of the same valid_report")
+                outcome = "duplicate"
+            else:
+                token = self.coordinator_token(receipt)
+                self.authorize_coordinator(receipt, request, token)
+                if receipt["state"] != "delivered" or receipt["report_event_id"] != report_id:
+                    raise BridgeError("acknowledgement requires delivery of the same valid_report")
+                timestamp = now()
+                receipt["state"] = "acknowledged"
+                receipt["updated_at"] = timestamp
+                receipt["events"].append({**event, "at": timestamp})
+                self.commit(store)
+                outcome = "recorded"
+        assert self.custody is not None
+        try:
+            self.custody.remove(receipt_id, receipt["binding"]["origin_thread"], missing_ok=True)
+            cleanup = "removed"
+        except BridgeError:
+            cleanup = "pending"
+        return {"outcome": outcome, "receipt_id": receipt_id, "state": "acknowledged", "custody_cleanup": cleanup}
+
+    def abandon(self, request: dict[str, Any]) -> dict[str, Any]:
+        exact_fields(request, {"receipt_id", "event_id", "origin_thread", "reason"}, "receipt abandonment")
+        receipt_id = text(request, "receipt_id", 128, TOKEN_RE)
+        event_id = user_event_id(request)
+        origin = canonical_origin(request)
+        if request.get("reason") != "coordinator_token_lost":
+            raise BridgeError("abandonment reason must be exactly coordinator_token_lost")
+        event = {"event_id": event_id, "kind": "abandoned", "reason": "coordinator_token_lost"}
+        with self.lock():
+            store = self.load()
+            receipt = self.find(store, receipt_id)
+            if origin != receipt["binding"]["origin_thread"]:
+                raise BridgeError("coordinator origin does not match the receipt")
+            if replay(receipt, event):
+                return {"outcome": "duplicate", "receipt_id": receipt_id, "state": receipt["state"], "capability_cleanup": "removed"}
+            if self.abandonment is None:
+                raise BridgeError("abandonment capability is required")
+            capability = self.abandonment.load(receipt_id, origin)
+            capability_hash = receipt.get("abandonment_token_hash")
+            if not isinstance(capability_hash, str) or not hmac.compare_digest(
+                hashlib.sha256(capability.encode()).hexdigest(), capability_hash
+            ):
+                raise BridgeError("invalid abandonment capability")
+            if self.custody is not None and self.custody.path(receipt_id).exists():
+                raise BridgeError("recoverable coordinator custody prevents abandonment")
+            if receipt["state"] != "created" or receipt["report_event_id"] is not None:
+                raise BridgeError("only a created-only receipt can be abandoned")
             timestamp = now()
-            receipt["state"] = "acknowledged"
+            receipt["state"] = "abandoned"
             receipt["updated_at"] = timestamp
             receipt["events"].append({**event, "at": timestamp})
             self.commit(store)
-        return {"outcome": "recorded", "receipt_id": receipt_id, "state": "acknowledged"}
+        assert self.abandonment is not None
+        try:
+            self.abandonment.remove(receipt_id, origin)
+            cleanup = "removed"
+        except BridgeError:
+            cleanup = "pending"
+        return {"outcome": "recorded", "receipt_id": receipt_id, "state": "abandoned", "capability_cleanup": cleanup}
 
     def show(self, receipt_id: str) -> dict[str, Any]:
         with self.lock():
             receipt = self.find(self.load(), receipt_id)
             public = json.loads(json.dumps(receipt))
         public.pop("coordinator_token_hash")
+        public.pop("abandonment_token_hash", None)
         public["binding"].pop("producer_nonce_hash")
         for event in public["events"]:
             if event.get("kind") == "created":
@@ -639,20 +830,52 @@ def notify(store: Store, receipt_id: str, report_id: str, target: dict[str, str]
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--state-dir", required=True)
+    result.add_argument("--custody-dir")
+    result.add_argument("--abandonment-dir")
     sub = result.add_subparsers(dest="command", required=True)
     sub.add_parser("create")
     sub.add_parser("submit")
     sub.add_parser("consume")
     sub.add_parser("acknowledge")
+    sub.add_parser("abandon")
     show = sub.add_parser("show")
     show.add_argument("--receipt-id", required=True)
     return result
 
 
+def validate_private_paths(command: str, state_dir: pathlib.Path, custody_dir: pathlib.Path | None, abandonment_dir: pathlib.Path | None) -> None:
+    if command in {"submit", "show"} and (custody_dir is not None or abandonment_dir is not None):
+        raise BridgeError("producer and metadata commands must not receive private capability paths")
+    if command == "create" and (custody_dir is None or abandonment_dir is None):
+        raise BridgeError("create requires separate coordinator custody and abandonment capability directories")
+    if command in {"consume", "acknowledge"} and (custody_dir is None or abandonment_dir is not None):
+        raise BridgeError("consume and acknowledge require only the coordinator custody directory")
+    if command == "abandon" and (custody_dir is None or abandonment_dir is None):
+        raise BridgeError("abandon requires separate custody and abandonment capability directories")
+    paths = [path.resolve(strict=False) for path in (state_dir, custody_dir, abandonment_dir) if path is not None]
+    for index, left in enumerate(paths):
+        for right in paths[index + 1:]:
+            try:
+                left.relative_to(right)
+                nested = True
+            except ValueError:
+                try:
+                    right.relative_to(left)
+                    nested = True
+                except ValueError:
+                    nested = False
+            if nested:
+                raise BridgeError("state, custody, and abandonment directories must be separate and non-nested")
+
+
 def main() -> int:
     args = parser().parse_args()
-    store = Store(pathlib.Path(args.state_dir))
     try:
+        state_dir = pathlib.Path(args.state_dir)
+        custody_dir = pathlib.Path(args.custody_dir) if args.custody_dir else None
+        abandonment_dir = pathlib.Path(args.abandonment_dir) if args.abandonment_dir else None
+        validate_private_paths(args.command, state_dir, custody_dir, abandonment_dir)
+        store = Store(state_dir, custody_dir, abandonment_dir)
         if args.command == "create":
             result = store.create(read_request())
         elif args.command == "submit":
@@ -664,6 +887,8 @@ def main() -> int:
             result = store.consume(read_request())
         elif args.command == "acknowledge":
             result = store.acknowledge(read_request())
+        elif args.command == "abandon":
+            result = store.abandon(read_request())
         else:
             result = store.show(args.receipt_id)
     except LockBusy as error:
