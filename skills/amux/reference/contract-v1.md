@@ -51,4 +51,4 @@ Before automatic spawn, native child creation, Read Thread, or native child mess
 - On partial failure, inspect JSON outcomes and external state before retrying. Do not duplicate threads, windows, worktrees, or operation keys.
 - Never guess a missing/recycled callback pane. Callback failure leaves the report pending and the worker alive.
 - Runner commands never own remote agent threads. Teardown never applies to runners.
-- Experimental Claude or Pi delegation is **not** this contract. Use `/amux-claude` or `/amux-pi` only after an explicit owner request for those skills.
+- Experimental Tycho, Claude, or Pi execution is **not** this contract. Use `/amux-tycho`, `/amux-claude`, or `/amux-pi` only after an explicit owner request for that exact skill.

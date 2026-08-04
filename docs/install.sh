@@ -91,10 +91,19 @@ if [ -n "$skills_source" ]; then
 	[ -d "$skills_source" ] || fail "AMUX_SKILLS_SOURCE is not a directory: $skills_source"
 	canonical_skills_source=$(CDPATH= cd -- "$skills_source" 2>/dev/null && pwd -P) || fail "could not canonicalize AMUX_SKILLS_SOURCE: $skills_source"
 	[ "$skills_source" = "$canonical_skills_source" ] || fail "AMUX_SKILLS_SOURCE must be the canonical path $canonical_skills_source"
-	for skill_name in amux amux-claude amux-pi; do
+	for skill_name in amux amux-tycho amux-claude amux-pi; do
 		skill_source="$skills_source/skills/$skill_name"
 		[ -d "$skill_source" ] || fail "missing bundled skill directory: $skill_source"
 		[ -f "$skill_source/SKILL.md" ] && [ -r "$skill_source/SKILL.md" ] || fail "missing readable bundled skill entrypoint: $skill_source/SKILL.md"
+		if [ "$skill_name" = amux-tycho ]; then
+			for required_path in \
+				reference/tycho-report-bridge.md \
+				reference/trigger-phrases.md \
+				experimental/tycho-report-bridge/tycho_report_bridge.py
+			do
+				[ -f "$skill_source/$required_path" ] && [ -r "$skill_source/$required_path" ] || fail "missing readable bundled amux-tycho runtime payload: $skill_source/$required_path"
+			done
+		fi
 	done
 	for managed_physical_root in "$canonical_home/.local/bin" "$canonical_home/.agents/skills"; do
 		if paths_overlap "$canonical_skills_source" "$managed_physical_root"; then
@@ -102,7 +111,7 @@ if [ -n "$skills_source" ]; then
 		fi
 	done
 	skills_backup_suffix=$(date -u '+%Y%m%dT%H%M%SZ') || fail 'could not create a skill backup timestamp'
-	for skill_name in amux amux-claude amux-pi; do
+	for skill_name in amux amux-tycho amux-claude amux-pi; do
 		skill_destination="$skills_root/$skill_name"
 		if [ -e "$skill_destination" ] && [ ! -L "$skill_destination" ]; then
 			skill_backup="$skill_destination.backup-$skills_backup_suffix"
@@ -216,7 +225,7 @@ if [ -n "$skills_source" ]; then
 		preflight_mutation_directory "$managed_directory"
 	done
 	mkdir -p "$skills_root" || fail "could not create $skills_root"
-	for skill_name in amux amux-claude amux-pi; do
+	for skill_name in amux amux-tycho amux-claude amux-pi; do
 		skill_source="$skills_source/skills/$skill_name"
 		skill_destination="$skills_root/$skill_name"
 		if [ -L "$skill_destination" ] && [ "$(readlink "$skill_destination" 2>/dev/null || true)" = "$skill_source" ]; then

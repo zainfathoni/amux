@@ -14,6 +14,7 @@ AGENTS.md or any machine-local copy.
 - Do not Read Thread/history unless I explicitly approve that exact thread; a URL alone is not approval. For Oracle, supply diff/context only.
 - Keep child prompts concise: task, acceptance criteria, and the absolute path to the loaded `/amux` skill's `reference/contract-v1.md`; never paste protocols or send a bare relative path.
 - Provider execution is outside Amux's maintained core. Tycho may own machine/provider routing for Claude Code and Pi/Codex Spark.
+- `/amux-tycho` is the experimental explicit-only report bridge; the real Amp thread remains coordinator and consume/ack authority, while Tycho receives report-only authority.
 - Forgex is experimental and requires my explicit request.
 - `/amux-claude` and `/amux-pi` remain experimental fallback/reference paths and require my explicit request.
 - Wake-ups are tokens only; durable state comes from the `amux group` / `amux report` CLI, not a skill reload.

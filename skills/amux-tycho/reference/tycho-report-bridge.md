@@ -1,6 +1,6 @@
 # Experimental Tycho semantic-report bridge
 
-This skill-owned adapter is an unstable machine-local receipt/inbox experiment for [#323](https://github.com/zainfathoni/amux/issues/323). It is not a stable `amux` command or schema and has no compatibility guarantee. It does not launch, stop, watch, poll, or otherwise own Tycho or a provider process.
+This `/amux-tycho`-owned adapter is an unstable machine-local receipt/inbox experiment for [#323](https://github.com/zainfathoni/amux/issues/323). It is not a stable `amux` command or schema and has no compatibility guarantee. It does not launch, stop, watch, poll, or otherwise own Tycho or a provider process.
 
 ## Authority boundary
 
@@ -17,7 +17,7 @@ The successful state sequence is `created → valid_report → delivered → ack
 The coordinator creates a receipt by piping one bounded JSON object to:
 
 ```sh
-python3 skills/amux/experimental/tycho-report-bridge/tycho_report_bridge.py \
+python3 skills/amux-tycho/experimental/tycho-report-bridge/tycho_report_bridge.py \
   --state-dir "$PRIVATE_STATE_DIR" \
   --custody-dir "$PRIVATE_COORDINATOR_CUSTODY_DIR" \
   --abandonment-dir "$PRIVATE_ABANDONMENT_CAPABILITY_DIR" create
@@ -39,17 +39,17 @@ The state, custody, and abandonment directories are pairwise separate, non-neste
 `submit` requires all immutable producer proof fields again, one unique `event_id`, and exactly one bounded semantic report (`complete` or `blocked`, summary, findings, blockers, and verification). The producer cannot add, remove, or change notification routing. The adapter atomically commits `valid_report` plus any coordinator-bound notification intent before attempting notification.
 
 ```sh
-python3 skills/amux/experimental/tycho-report-bridge/tycho_report_bridge.py \
+python3 skills/amux-tycho/experimental/tycho-report-bridge/tycho_report_bridge.py \
   --state-dir "$PRIVATE_STATE_DIR" submit < report.json
 ```
 
 The bound Amp coordinator recovers and explicitly consumes the inbox item with its exact origin and coordinator token. Consumption both commits `delivered` and returns the report. Replaying the same consume event is duplicate-safe and rematerializes the same report.
 
 ```sh
-python3 skills/amux/experimental/tycho-report-bridge/tycho_report_bridge.py \
+python3 skills/amux-tycho/experimental/tycho-report-bridge/tycho_report_bridge.py \
   --state-dir "$PRIVATE_STATE_DIR" \
   --custody-dir "$PRIVATE_COORDINATOR_CUSTODY_DIR" consume < consume.json
-python3 skills/amux/experimental/tycho-report-bridge/tycho_report_bridge.py \
+python3 skills/amux-tycho/experimental/tycho-report-bridge/tycho_report_bridge.py \
   --state-dir "$PRIVATE_STATE_DIR" \
   --custody-dir "$PRIVATE_COORDINATOR_CUSTODY_DIR" acknowledge < acknowledge.json
 ```
@@ -61,7 +61,7 @@ Acknowledgement requires a later distinct event bound to the same report event. 
 If a legacy or crashed create has no recoverable coordinator token, do not submit a report, recreate custody, rebind the identity, or delete/rewrite the receipt. With exact owner authority, append one terminal event using the bound Amp origin and exact reason:
 
 ```sh
-python3 skills/amux/experimental/tycho-report-bridge/tycho_report_bridge.py \
+python3 skills/amux-tycho/experimental/tycho-report-bridge/tycho_report_bridge.py \
   --state-dir "$PRIVATE_STATE_DIR" \
   --custody-dir "$PRIVATE_COORDINATOR_CUSTODY_DIR" \
   --abandonment-dir "$PRIVATE_ABANDONMENT_CAPABILITY_DIR" abandon <<'JSON'
@@ -90,5 +90,7 @@ Recovery always starts with the private store:
 3. Independently assess the returned report, then issue a separate `acknowledge` operation if appropriate.
 4. If state is created-only and custody is missing, do not invoke Tycho; preserve it or use explicit owner-authorized `abandon` once only when the independently bound abandonment capability exists.
 5. On lock contention, retry the identical event. On malformed store, custody conflict, binding conflict, wrong target, invalid transition, or unknown notification outcome, preserve state and stop; do not invent a new ID, resend, infer delivery, or mutate stable group/report/callback registries.
+
+For a receipt created before the `/amux-tycho` skill split, first install `/amux-tycho` explicitly and continue with its helper at the new installed path. Preserve the original state, custody, and abandonment directories byte-for-byte at their original canonical paths, together with every receipt ID, immutable binding, event ID, and capability. Do not recreate, copy, move, rebind, or upgrade the receipt or directories. The current canonical Amp thread must exactly equal the receipt's immutable bound origin; owner authorization and custody possession do not transfer coordinator, consume, or acknowledgement authority. If terminal cleanup is `pending`, replay the identical terminal event against the same original capability directory.
 
 The adapter and its tests require Python 3.10 or newer. The adapter currently has synthetic coverage only. Do not perform a live Tycho/provider run merely to promote it. Promotion requires two useful real cycles, one natural receipt-preserving failure recovery, supported versioned Tycho ingress, authorization/privacy review, a stable scope/ADR decision, and separate owner approval.

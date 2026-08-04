@@ -51,7 +51,7 @@ Task-scoped coordination may use existing group and report contracts when their 
 
 Use native Amp thread creation when available, then use exact Amux adoption when local lifecycle ownership or recovery is needed. Use Amux's local creation path only where native creation is unavailable and preserve its fail-closed, retained-indeterminate contract.
 
-Provider execution is outside Amux's maintained lifecycle and recovery core. Tycho may own machine and provider routing for Claude Code and Pi/Codex Spark. `/amux-claude` and `/amux-pi` remain experimental, explicit-request-only fallback and reference paths; they do not widen core Amux into provider-policy machinery. Forgex remains experimental and orthogonal, not an Amux replacement.
+Provider execution is outside Amux's maintained lifecycle and recovery core. Tycho may own machine and provider routing for Claude Code and Pi/Codex Spark. `/amux-tycho` is an experimental, runtime-unverified, explicit-request-only semantic-report bridge: the immutable real Amp origin retains coordinator, consume, and acknowledgement authority, while Tycho has report-only authority. `/amux-claude` and `/amux-pi` remain experimental, explicit-request-only fallback and reference paths. None of these routes widens core Amux into provider-policy machinery. Forgex remains experimental and orthogonal, not an Amux replacement.
 
 A later ADR may define delegation admission and a provider-neutral Amp↔Tycho task/result package. This ADR neither selects that design nor specifies its routing, package schema, authority, transport, or promotion criteria.
 
@@ -75,4 +75,4 @@ The following still require explicit owner decisions:
 - delegation admission and any provider-neutral Amp↔Tycho task/result package;
 - any proposed stable Forgex integration or change in its relationship to Amux;
 - any expansion that introduces new orchestration authority rather than lifecycle/recovery safety; and
-- promotion of `/amux-claude` or `/amux-pi` from experimental status.
+- promotion of `/amux-tycho`, `/amux-claude`, or `/amux-pi` from experimental status.

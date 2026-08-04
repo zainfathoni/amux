@@ -2,7 +2,7 @@
 
 `amux` is the local tmux lifecycle layer for [Amp](https://ampcode.com/). It manages interactive **workers**, non-interactive **runners**, and named **workspaces** with explicit, agent-safe side effects.
 
-> **Maintenance direction:** amux is maintained as a local Amp worker lifecycle and recovery tool. Prefer native Amp thread creation when available, then use exact adoption where local ownership or recovery is needed. Amux remains appropriate for exact adoption/recovery, shelve/unshelve, teardown, doctor/preflight, local tmux/worktree lifecycle, and the local-creation exception when native creation is unavailable. Permanent Lead hierarchies, universal delegation, broad orchestration, and expanding provider-policy machinery remain non-goals. Provider execution is outside this maintained core: Tycho may own machine/provider routing for Claude Code and Pi/Codex Spark, while `/amux-claude` and `/amux-pi` remain experimental fallback/reference paths. Forgex is experimental and orthogonal, not a replacement for core amux. See [ADR 0005](docs/adr/0005-maintain-amux-as-a-local-worker-lifecycle-and-recovery-tool.md).
+> **Maintenance direction:** amux is maintained as a local Amp worker lifecycle and recovery tool. Prefer native Amp thread creation when available, then use exact adoption where local ownership or recovery is needed. Amux remains appropriate for exact adoption/recovery, shelve/unshelve, teardown, doctor/preflight, local tmux/worktree lifecycle, and the local-creation exception when native creation is unavailable. Permanent Lead hierarchies, universal delegation, broad orchestration, and expanding provider-policy machinery remain non-goals. Provider execution is outside this maintained core: Tycho may own separately selected machine/provider routing for Claude Code and Pi/Codex Spark, while the experimental `/amux-tycho` bridge transports only its typed report; `/amux-claude` and `/amux-pi` remain experimental fallback/reference paths. Forgex is experimental and orthogonal, not a replacement for core amux. See [ADR 0005](docs/adr/0005-maintain-amux-as-a-local-worker-lifecycle-and-recovery-tool.md).
 
 - A **worker** is an interactive Amp client identified machine-wide by its canonical thread ID.
 - A **runner** is an `amp --no-tui` client identified machine-wide by its canonical workdir. It enables Amp Agents Anywhere but does not own remote agent threads.
@@ -81,9 +81,10 @@ Optional experimental skills (explicit owner request only):
 ```sh
 npx skills add zainfathoni/amux --skill amux-claude --global
 npx skills add zainfathoni/amux --skill amux-pi --global
+npx skills add zainfathoni/amux --skill amux-tycho --global
 ```
 
-For a machine that maintains a clean local `main` checkout, the shell installer can instead link all three bundled skills directly to that checkout. Update the checkout explicitly first; the installer never pulls or changes it:
+For a machine that maintains a clean local `main` checkout, the shell installer can instead link all four bundled skills directly to that checkout. Update the checkout explicitly first; the installer never pulls or changes it:
 
 ```sh
 AMUX_REPO="$HOME/Code/GitHub/zainfathoni/amux"
@@ -95,7 +96,9 @@ This opt-in mode creates absolute links under `~/.agents/skills`. Existing real 
 
 `/amux` teaches canonical selectors, side-effect boundaries, skill-only health/sprawl/finish workflows, and progressive disclosure via `reference/contract-v1.md` (workers read once) and `reference/deadline-v1.md` (deadlines only). Do not paste full protocol into spawn messages or reload the full skill on wake-ups. See the [dedicated skill guide](https://amux.zainf.dev/skill/).
 
-`/amux-claude` is a separate unstable skill for explicit Amp-to-Claude delegation (local thinker/writer and fresh-Orb Opus). It is not an `amux` lifecycle command, worker, runner, group member, or compatibility promise. `/amux-pi` is a separate disposable Pi/Spark Orb recipe. Neither installs with core `/amux` unless requested. Consult the [provider executor readiness matrix](docs/provider-executor-readiness.md) before selecting either route; CLI support alone does not prove model, runtime, or mutation readiness.
+`/amux-tycho` is the separate unstable external-executor bridge for explicitly owner-selected existing Tycho agent/project/harness/model routes. Tycho may route Claude or Pi, but it is a report-only producer; the current real Amp thread retains coordination, consumption, and acknowledgement authority. `/amux-claude` and `/amux-pi` remain separate provider-specific fallback/reference skills. None installs with core `/amux` unless requested through skills.sh; the opt-in local-checkout installer links all bundled skills. Consult the [provider executor readiness matrix](docs/provider-executor-readiness.md) before selecting a route; helper or CLI support alone does not prove model, runtime, or mutation readiness.
+
+To resume a Tycho receipt created before this skill split, install `/amux-tycho` explicitly and use its new helper path while preserving the original state, custody, and abandonment directories byte-for-byte at their original canonical paths. Preserve all receipt IDs, immutable bindings, event IDs, and capabilities; do not recreate, copy, move, rebind, or upgrade them. Cleanup `pending` must be replayed as the identical terminal event against the same original capability directory.
 
 ## Quick start
 

@@ -19,9 +19,10 @@ reason = "Write checksum-tool output only inside the installer-owned temporary d
 exact_command = 'mv -f "$install_tmp" "$install_path" || fail "could not atomically replace $install_path; the existing installation was not changed"'
 reason = "Atomically replace the canonical binary with its verified same-directory staged file"
 
-# Skill-source and destination preflight validates all three source entrypoints,
-# rejects managed-path overlap, checks destination parent shape/access, and
-# reserves every timestamped backup name before any installation mutation.
+# Skill-source and destination preflight validates all four bundled skill
+# entrypoints plus the Tycho runtime payload, rejects managed-path overlap,
+# checks destination parent shape/access, and reserves every timestamped backup
+# name before any installation mutation.
 [[allow]]
 exact_command = 'mv "$skill_destination" "$skill_backup" || fail "could not preserve existing skill at $skill_backup"'
 reason = "Preserve a validated existing canonical skill as its preflighted timestamped sibling backup"

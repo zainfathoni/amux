@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unstable, skill-owned Tycho semantic-report receipt/inbox adapter."""
+"""Unstable amux-tycho semantic-report receipt/inbox adapter."""
 
 from __future__ import annotations
 
