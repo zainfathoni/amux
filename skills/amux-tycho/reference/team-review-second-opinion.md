@@ -206,7 +206,7 @@ Perform steps in order. Stop on any failed check.
 
 ### C. Freeze task and create one immutable receipt
 
-1. Write one bounded task containing at least the literal fields required by decision 4 item 6, plus second-opinion scope, acceptance criteria, report schema pointer (this document + bridge protocol), explicit `report_only` ban on GitHub mutation, producer-only submit instructions, and the requirement to submit one application-valid `complete` or `blocked` report before stop.
+1. Write one bounded task containing at least the literal fields required by decision 4 item 7, plus second-opinion scope, acceptance criteria, report schema pointer (this document + bridge protocol), explicit `report_only` ban on GitHub mutation, producer-only submit instructions, and the requirement to submit one application-valid `complete` or `blocked` report before stop.
 2. Compute `task_digest` as SHA-256 of the exact task bytes.
 3. Create the receipt **before** Tycho execution using the canonical helper, binding:
    - canonical Amp `origin_thread`;
