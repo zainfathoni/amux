@@ -980,7 +980,7 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 		"id": "1", "path": "pkg/a.ts", "line": 10, "original_line": nil,
 		"side": "RIGHT", "start_side": nil,
 		"commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		"body": "comment body", "updated_at": "2026-08-04T12:00:00Z",
+		"body":      "comment body", "updated_at": "2026-08-04T12:00:00Z",
 	}
 	baseSnap := pendingSnapshot{
 		"review_id": "111",
