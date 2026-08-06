@@ -58,16 +58,24 @@ Exact replay of an already-submitted report is duplicate-safe. Conflicting repla
 
 ### 4. Same-head proof across Amp and Tycho worktrees
 
-Path or directory-name equality is not identity. Before Tycho execution, the Amp coordinator must prove all of:
+Path or directory-name equality is not identity. The bridge helper does **not** attest Git state; Amp (or the owner-operated coordinator) must prove attachment with ordinary `git`/`gh` reads outside the helper.
 
-1. **Reviewed repository identity** — both worktrees resolve to the same remote repository the PR belongs to (normalize `git remote get-url origin` to `owner/repo`; reject mismatch).
-2. **Pinned head object** — both worktrees report the same full 40-character commit SHA for the exact reviewed PR head via `git rev-parse HEAD` (or the owner-pinned review SHA). Short SHAs are insufficient for the binding record.
-3. **Committed tree object identity** — both worktrees report the same `git rev-parse HEAD^{tree}` (full tree SHA). This binds the committed tree under `HEAD`; it does **not** detect dirty index or worktree content by itself.
-4. **Clean attachment on both worktrees** — default policy: both Amp and Tycho review worktrees must be clean for tracked content (`git status --porcelain` empty for staged and unstaged tracked changes). This cleanliness check is what detects local dirt; untracked files block unless the owner explicitly records a bounded allowlist of untracked paths that cannot affect the reviewed tree. Any non-allowlisted dirt blocks.
-5. **Distinct worktree paths are allowed** — Amp review worktree and Tycho worktree may differ as paths. Bind the Tycho canonical absolute `workdir` into the receipt; never rebind to the Amp path or treat basename equality as proof.
-6. **Route and head are frozen in the task digest** — the bounded task bytes MUST include, as exact literal fields: repository `owner/repo`, PR number, full head SHA, full tree SHA, Amp worktree path, Tycho worktree path, Tycho agent key, project, harness, model (normally exact `claude-opus-5`), `producer_role`, and `report_only`. `task_digest` is SHA-256 of those exact task bytes. Changing head, model, project, harness, agent, or either worktree path requires a newly authorized receipt, never mutation of the old one.
+**When to prove (all mandatory):**
 
-If any check fails, do not create a receipt and do not start Tycho.
+- **Pre-create / pre-Tycho** — before receipt `create` and before Tycho starts.
+- **Post-Tycho / pre-consume** — after Tycho finishes (or fails to submit) and **before** `consume`, candidate acceptance, PENDING mutation, or any claim of #323 cycle credit.
+
+Each proof requires all of:
+
+1. **Reviewed repository identity** — both Amp and Tycho worktrees resolve to the same remote repository the PR belongs to (normalize `git remote get-url origin` to `owner/repo`; reject mismatch).
+2. **Canonical workdir identity** — Amp worktree path and Tycho worktree path still equal the paths frozen in the task/receipt (Tycho path equals bound `workdir`). Path rename or substitute worktree fails closed.
+3. **Pinned head object** — both worktrees report the same full 40-character commit SHA, equal to the owner-pinned reviewed PR head, via `git rev-parse HEAD`. Short SHAs are insufficient.
+4. **Committed tree object identity** — both worktrees report the same `git rev-parse HEAD^{tree}` (full tree SHA), equal to the frozen tree. This binds the committed tree under `HEAD`; it does **not** detect dirty index or worktree content by itself.
+5. **Clean attachment on both worktrees** — default policy: both Amp and Tycho review worktrees must be clean for tracked content (`git status --porcelain` empty for staged and unstaged tracked changes). This cleanliness check is what detects local dirt; untracked files block unless the owner explicitly records a bounded allowlist of untracked paths that cannot affect the reviewed tree. Any non-allowlisted dirt blocks.
+6. **Distinct worktree paths are allowed** — Amp and Tycho paths may differ from each other. Bind the Tycho canonical absolute `workdir` into the receipt; never rebind to the Amp path or treat basename equality as proof.
+7. **Route and head are frozen in the task digest** — the bounded task bytes MUST include, as exact literal fields: repository `owner/repo`, PR number, full head SHA, full tree SHA, Amp worktree path, Tycho worktree path, Tycho agent key, project, harness, model (normally exact `claude-opus-5`), `producer_role`, and `report_only`. `task_digest` is SHA-256 of those exact task bytes. Changing head, model, project, harness, agent, or either worktree path requires a newly authorized receipt, never mutation of the old one.
+
+If any pre-create check fails, do not create a receipt and do not start Tycho. If any post-Tycho/pre-consume check fails (including read failure), **reject the application payload**: do not treat candidates as usable review input, do not mutate GitHub, and do not claim #323 cycle credit—even if a durable `valid_report` exists. The receipt may still be consumed/acknowledged for bridge hygiene with an explicit “application-rejected: attachment drift” handling record.
 
 ### 5. Stale / concurrent PENDING-review generation protection
 
@@ -89,7 +97,7 @@ Use these REST reads (or equivalent GraphQL fields carrying the same identities)
 - GET the single candidate review by ID;
 - list all review comments for that review with pagination complete.
 
-Build one canonical snapshot digest as SHA-256 over a single UTF-8 JSON object with **exactly** these keys, no extras, comments sorted by `id` ascending, and JSON `null` for absent optional fields:
+Build one canonical snapshot digest as SHA-256 over a single UTF-8 JSON object with **exactly** these keys, no extras, and JSON `null` for absent optional fields:
 
 ```json
 {
@@ -113,44 +121,59 @@ Build one canonical snapshot digest as SHA-256 over a single UTF-8 JSON object w
 }
 ```
 
-Serialize with sorted object keys at every level, no insignificant whitespace beyond a single ASCII LF after the closing `}` if desired for logs—but the digest input must be the compact form produced by a deterministic encoder (no key reordering, no HTML entity decoding). Integer IDs are decimal strings. Do **not** use review `submitted_at` as a freshness signal for PENDING edits; PENDING reviews are not submitted. Comment `updated_at` values are part of the digest instead. An ambiguous, partial, or failed read is a deny (no mutation).
+**Comment canonicalization:** before encoding, sort the `comments` array by comment `id` ascending as a decimal integer string comparison that yields the same order as numeric ID order for GitHub IDs (zero-pad-free decimal strings compared by integer value, with equal IDs forbidden). Digest equality must not depend on API return order: reversed or shuffled comment pages that contain the same comment set must yield the **same** digest after sort. Serialize with sorted object keys at every level; the digest input is the compact form from a deterministic encoder (no key reordering, no HTML entity decoding). Integer IDs are decimal strings. Do **not** use review `submitted_at` as a freshness signal for PENDING edits; PENDING reviews are not submitted. Comment `updated_at` values are part of the digest instead. An ambiguous, partial, or failed read is a deny (no mutation).
+
+#### Pinned PR head revalidation (every write)
+
+Immediately before **every** GitHub review or comment write—including the first create when baseline is “none—will create” and every subsequent edit of an owned PENDING review—re-read the PR’s current full head SHA from GitHub (for example REST `GET /repos/{owner}/{repo}/pulls/{pull_number}` → `head.sha`, full 40-character form).
+
+- Require exact equality with the owner-pinned reviewed SHA frozen in the task/receipt.
+- Mismatch (PR head advanced, force-pushed, or retargeted) or any read failure is **conflict**: do not write.
+- This check is independent of the PENDING snapshot digest and applies on both the baseline-none/create path and the existing-owned-review reconciliation path.
+- Record the pre-write PR head read (SHA or failure) in the evidence package.
 
 #### Mutation procedure
 
-1. Record baseline snapshot digest and owned review ID (or “none—will create”).
-2. Immediately before each write, re-read and recompute the snapshot.
+1. Record baseline snapshot digest and owned review ID (or “none—will create”), plus the pinned reviewed SHA.
+2. Immediately before each write:
+   - re-read the PR current full head SHA and require exact equality with the pinned reviewed SHA (or fail closed on read failure);
+   - re-read and recompute the PENDING snapshot when an owned review exists (create path: confirm still no owned/unowned conflicting PENDING that would violate ownership rules).
 3. **Stop rather than overwrite** when any of these hold:
+   - PR head SHA ≠ pinned reviewed SHA, or PR head read failed;
    - owned review ID missing, 404, or no longer PENDING;
    - snapshot digest drifted from baseline;
    - a different current-user PENDING review ID appeared;
    - more than one current-user PENDING review exists and ownership is not uniquely satisfied;
    - an unowned PENDING review is the only candidate;
+   - on create path, an unexpected current-user PENDING appeared before create;
    - mutation returns 404, 422, or indeterminate error.
 4. On conflict: leave GitHub untouched, preserve the bridge receipt state, and report the conflict. Do not dismiss foreign reviews, force-publish, or guess.
-5. After each successful write, re-read and record the new snapshot as the next baseline before any further edit.
+5. After each successful write, re-read and record the new snapshot as the next baseline before any further edit; re-check PR head before the next write again.
 6. Publication (`COMMENT` / `APPROVE` / `REQUEST_CHANGES`), worker finish, and bridge acknowledgement remain separately authorized transitions. Wake-ups and schedules never imply them.
 
 ### 6. Exact evidence required for #323 to count a cycle
 
 A useful provider opinion is not a bridge cycle. The owner may count one #328 field run toward #323 only when **all** of the following are recorded against the same receipt:
 
-1. **#327 gate** — the authoritative Amp `/team-review` worker's initial assignment was proven through the accepted authenticated local delivery semantics installed for that host. If #327 is not yet merged/installed, do not run the field cycle and do not claim #323 credit.
-2. Owner authorization naming exact Tycho agent, project, harness, model, and worktree; adjacent revalidation that the route still matches.
-3. Both-worktree repository, full head SHA, full tree SHA, and cleanliness proofs from decision 4, plus frozen task bytes and recomputed `task_digest`.
-4. Immutable `create` before Tycho execution with every required binding and `report_only`.
-5. Separate-process recovery of the same receipt and owner capabilities from the original canonical directories is either performed in the cycle or already proven for that install and re-validated by `show` before consume.
-6. Exactly one producer/session/run/task-bound durable `valid_report` (`complete` or `blocked`) through the canonical helper—not logs or exit codes.
-7. Explicit Amp-origin `consume` establishing `delivered`.
-8. Amp independent verification of every candidate against the pinned head, with unsupported and application-invalid claims rejected.
-9. Amp-only reconciliation of at most one **owned** current-user PENDING review without publication unless separately authorized, including pre/post PENDING snapshots.
-10. Pre-Tycho and post-Tycho GitHub snapshots (or equivalent audit) showing no Tycho-phase review/comment mutation.
-11. Separate bridge `acknowledge` after handling.
-12. **Cleanup evidence from acknowledge output, not `show`:** record the `acknowledge` result JSON (and any identical same-directory replay results) for `custody_cleanup` (`removed` or truthful `pending`). The helper does not persist cleanup status into the receipt store; `show` cannot supply it.
-13. After acknowledge (and any cleanup replay), final `show` only to inspect terminal `acknowledged` state and append-only event order.
-14. Explicit mapping that all six PR #11886 compliance gaps are closed for this cycle.
-15. Readiness remains Runtime-unverified unless the owner separately promotes under #323's full gates.
+1. **#327 categorical gate (current blocker)** — no field run and no #323 credit until [#327](https://github.com/zainfathoni/amux/issues/327) has an **accepted and merged** solution **and** that exact accepted version is installed and verified on the host. Local, unmerged, draft, or merely “available” routes do **not** satisfy the gate. As of this writing, #327 remains open and is externally blocked by a missing Amp receipt-bearing physical-runner assignment API; treat the entire #328 field cycle as **blocked** until that changes under owner acceptance.
+2. After the #327 gate clears: prove the authoritative Amp `/team-review` worker's initial assignment through that exact accepted merged delivery semantics (version/commit recorded).
+3. Owner authorization naming exact Tycho agent, project, harness, model, and worktree; adjacent revalidation that the route still matches.
+4. **Pre-Tycho** both-worktree repository, canonical workdir, full head SHA, full tree SHA, and cleanliness proofs from decision 4, plus frozen task bytes and recomputed `task_digest`.
+5. Immutable `create` before Tycho execution with every required binding and `report_only`.
+6. Separate-process recovery of the same receipt and owner capabilities from the original canonical directories is either performed in the cycle or already proven for that install and re-validated by `show` before consume.
+7. Exactly one producer/session/run/task-bound durable `valid_report` (`complete` or `blocked`) through the canonical helper—not logs or exit codes.
+8. **Post-Tycho / pre-consume** same-head proof (decision 4) on both Amp and Tycho attachments; failure rejects application payload and denies #323 credit.
+9. Explicit Amp-origin `consume` establishing `delivered` (bridge delivery only; application rejection may still follow).
+10. Amp independent verification of every candidate against the pinned head, with unsupported and application-invalid claims rejected.
+11. Amp-only reconciliation of at most one **owned** current-user PENDING review without publication unless separately authorized, including pre/post PENDING snapshots **and** per-write PR head equality checks (decision 5).
+12. Pre-Tycho and post-Tycho GitHub snapshots (or equivalent audit) showing no Tycho-phase review/comment mutation.
+13. Separate bridge `acknowledge` after handling.
+14. **Cleanup evidence from acknowledge output, not `show`:** record the `acknowledge` result JSON (and any identical same-directory replay results) for `custody_cleanup` (`removed` or truthful `pending`). The helper does not persist cleanup status into the receipt store; `show` cannot supply it.
+15. After acknowledge (and any cleanup replay), final `show` only to inspect terminal `acknowledged` state and append-only event order.
+16. Explicit mapping that all six PR #11886 compliance gaps are closed for this cycle.
+17. Readiness remains Runtime-unverified unless the owner separately promotes under #323's full gates.
 
-Natural-failure recovery without report loss remains a distinct #323 gate. One clean #328 cycle does not satisfy it by itself.
+Natural-failure recovery without report loss remains a distinct #323 gate. One clean #328 cycle does not satisfy it by itself. The bridge helper never attests Git or GitHub head state.
 
 ## Authority boundaries
 
@@ -167,11 +190,12 @@ Perform steps in order. Stop on any failed check.
 
 ### A. Authoritative Amp first pass
 
-1. Create or adopt the authoritative Amp `/team-review` worker on the exact review worktree.
-2. **#327 gate:** prove initial assignment through the accepted authenticated local delivery semantics for that install. If that gate is not available, stop—do not proceed to Tycho or claim #323 credit.
-3. Pin the PR repository, full head SHA, and full tree SHA; prove Amp worktree cleanliness per decision 4.
-4. Complete an independent Amp first-pass review of that head **before** any Tycho input. Record that the first pass finished with no Tycho candidates consumed.
-5. If a PENDING review will be reused, obtain an explicit owner-designated review ID now; otherwise plan to create one only after verification.
+1. **#327 categorical gate first:** stop unless #327 is accepted, merged, and that exact accepted version is installed and verified. Local/unmerged routes are insufficient. While #327 remains open (including its external Amp physical-runner assignment API gap), do not run this field cycle.
+2. Create or adopt the authoritative Amp `/team-review` worker on the exact review worktree.
+3. Prove initial assignment through the exact accepted merged #327 delivery semantics; record the installed version/commit.
+4. Pin the PR repository, full head SHA, and full tree SHA; prove Amp worktree cleanliness per decision 4.
+5. Complete an independent Amp first-pass review of that head **before** any Tycho input. Record that the first pass finished with no Tycho candidates consumed.
+6. If a PENDING review will be reused, obtain an explicit owner-designated review ID now; otherwise plan to create one only after verification.
 
 ### B. Owner-select exact Tycho route
 
@@ -202,12 +226,13 @@ Perform steps in order. Stop on any failed check.
 3. Require exactly one durable `submit` of a typed `complete` or `blocked` report through the canonical bridge.
 4. If no valid submit arrives, retain the receipt, record “no Tycho finding,” and skip candidate consumption. Do not mine logs or state (decision 3).
 5. Capture a post-Tycho GitHub snapshot; any review/comment mutation during the Tycho phase is a compliance failure even if a report exists.
+6. **Post-Tycho / pre-consume same-head proof** (decision 4) on both Amp and Tycho attachments. On failure, reject the application payload and deny #323 credit.
 
 ### E. Explicit consume, independent verify, PENDING reconcile
 
-1. From the immutable Amp origin, `consume` the `valid_report` and verify `delivered`.
+1. Only after post-Tycho attachment proof succeeds: from the immutable Amp origin, `consume` the `valid_report` and verify `delivered`. (If attachment proof failed, optional bridge hygiene consume/ack may still run with an explicit application-rejection record and no GitHub mutation.)
 2. Enforce application report invariants (decision 1). Independently reproduce or reject **every** candidate against the pinned head. Unsupported, latent, out-of-scope, or application-invalid claims are dropped.
-3. Reconcile at most one **owned** current-user PENDING GitHub review using only Amp-verified findings, with snapshot protection (decision 5). Leave it unpublished unless the owner separately authorizes publication.
+3. Reconcile at most one **owned** current-user PENDING GitHub review using only Amp-verified findings, with snapshot protection **and** per-write PR head equality (decision 5)—including the baseline-none/create path. Leave it unpublished unless the owner separately authorizes publication.
 4. Bridge acknowledgement is a **later** distinct coordinator action after verification/handling. It is not consumption, publication, finish, or acceptance of every candidate.
 5. Optional notification and one-time schedules are wake-up only.
 
@@ -231,11 +256,12 @@ Perform steps in order. Stop on any failed check.
 
 ## Troubleshooting
 
-- **#327 not installed** — stop before Tycho; no field cycle and no #323 credit.
+- **#327 not accepted/merged/installed** — categorical stop; no field cycle and no #323 credit. Local/unmerged routes do not count. #327 is currently externally blocked by a missing Amp receipt-bearing physical-runner assignment API.
 - **Tycho stopped / exit 143 / no submit** — `show` should remain without a new report. Do not reconstruct findings. Owner may authorize a **new** receipt and run only after re-validating head and route.
 - **`blocked` report consumed** — verify any partial findings independently; treat blockers as incomplete scope; do not publish solely because Tycho blocked.
 - **`complete` with blockers or empty verification** — application-invalid; consume, reject as finished second opinion, record handling, optionally acknowledge; do not treat blockers as accepted defects.
-- **Wrong head, tree mismatch, or dirty Amp/Tycho tree** — fail before `create`; never rebind.
+- **Wrong head, tree mismatch, dirty Amp/Tycho tree, or post-Tycho attachment drift** — fail before `create`, or reject application payload before consume/GitHub mutation; never rebind; no #323 credit.
+- **PR head advanced before write** — conflict; leave GitHub untouched (create and reconcile paths alike).
 - **Producer asks for custody/ack/GitHub write credentials** — refuse; resupply only producer proof + state dir.
 - **Unowned or concurrent PENDING drift** — stop GitHub mutation; preserve receipt; report conflict.
 - **Notification succeeded but nobody consumed** — notification is not delivery; `consume` explicitly.

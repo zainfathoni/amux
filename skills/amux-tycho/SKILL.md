@@ -39,7 +39,7 @@ For a long Tycho run, the Amp coordinator may own a single one-time Amp schedule
 ## Field-readiness limits
 
 - No live Tycho/provider run is authorized merely by loading this skill. Current readiness is synthetic coverage only.
-- The `/team-review` second-opinion recipe may contribute evidence toward #323 only when a complete bridge cycle is owner-proven; it does not promote the bridge, close the real-cycle gate, or change the Runtime-unverified row by itself.
+- The `/team-review` second-opinion recipe may contribute evidence toward #323 only when a complete bridge cycle is owner-proven **and** [#327](https://github.com/zainfathoni/amux/issues/327) is accepted, merged, and that exact accepted version is installed/verified; local/unmerged routes do not count. It does not promote the bridge, close the real-cycle gate, or change the Runtime-unverified row by itself. #327 is currently a categorical field-cycle blocker (missing Amp receipt-bearing physical-runner assignment API).
 - Promotion still requires two useful real cycles, one natural receipt-preserving recovery, supported versioned Tycho ingress, authorization/privacy review, a stable scope/ADR decision, and separate owner approval.
 - Owner-only filesystem permissions protect against other OS users, not another process with the same UID. The helper does not confine Tycho.
 - There is no resident watcher, arbitrary Amp Web-thread return route, model/entitlement attestation, provider fallback, automatic retry, or stable Go command/schema.
