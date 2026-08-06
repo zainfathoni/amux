@@ -36,7 +36,7 @@ The state, custody, and abandonment directories are pairwise separate, non-neste
 
 ## Submit, recover, consume, and acknowledge
 
-`submit` requires all immutable producer proof fields again, one unique `event_id`, and exactly one bounded semantic report (`complete` or `blocked`, summary, findings, blockers, and verification). The producer cannot add, remove, or change notification routing. The adapter atomically commits `valid_report` plus any coordinator-bound notification intent before attempting notification.
+`submit` requires all immutable producer proof fields again, one unique `event_id`, and exactly one bounded semantic report (`complete` or `blocked`, summary, findings, blockers, and verification). Findings, blockers, and verification are each ≤ 32 non-empty strings of ≤ 2048 UTF-8 bytes; summary is ≤ 8192 bytes; unknown fields and raw transcript fields reject. A `blocked` report requires at least one blocker and is the only durable way to retain partial work when the producer cannot finish—process exit, logs, and prose never substitute. The producer cannot add, remove, or change notification routing. The adapter atomically commits `valid_report` plus any coordinator-bound notification intent before attempting notification. Application workflows such as the authoritative Amp `/team-review` second opinion bind additional head/role constraints in [`team-review-second-opinion.md`](team-review-second-opinion.md) without changing this schema.
 
 ```sh
 python3 skills/amux-tycho/experimental/tycho-report-bridge/tycho_report_bridge.py \

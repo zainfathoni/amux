@@ -2,6 +2,9 @@ package scripts_test
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +25,7 @@ var publicSkillFiles = []string{
 	filepath.Join("skills", "amux", "reference", "deadline-v1.md"),
 	filepath.Join("skills", "amux-tycho", "SKILL.md"),
 	filepath.Join("skills", "amux-tycho", "reference", "tycho-report-bridge.md"),
+	filepath.Join("skills", "amux-tycho", "reference", "team-review-second-opinion.md"),
 	filepath.Join("skills", "amux-tycho", "reference", "trigger-phrases.md"),
 	filepath.Join("skills", "amux-claude", "SKILL.md"),
 	filepath.Join("skills", "amux-claude", "reference", "claude-local-tmux-adoption.md"),
@@ -76,6 +80,7 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 			skillDir: filepath.Join("skills", "amux-tycho"),
 			refs: []string{
 				"tycho-report-bridge.md",
+				"team-review-second-opinion.md",
 				"trigger-phrases.md",
 			},
 		},
@@ -614,12 +619,22 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 		"receipt's immutable real Amp origin remains coordinator and consume/acknowledgement authority",
 		"typed report-only producer",
 		"no group, member, callback, finish, label, provider-identity, or lifecycle authority",
+		"owner-authorized external Tycho second opinion",
+		"never grant Tycho GitHub review mutation or readiness promotion",
 	} {
 		if !strings.Contains(core, required) {
 			t.Errorf("core /amux Tycho pointer is missing authority boundary %q", required)
 		}
 	}
-	for _, forbidden := range []string{"tycho-report-bridge.md", "tycho_report_bridge.py", "created → valid_report → delivered → acknowledged", "one-time Amp schedule"} {
+	for _, forbidden := range []string{
+		"tycho-report-bridge.md",
+		"team-review-second-opinion.md",
+		"tycho_report_bridge.py",
+		"created → valid_report → delivered → acknowledged",
+		"one-time Amp schedule",
+		"claude-opus-5",
+		"PENDING GitHub review",
+	} {
 		if strings.Contains(core, forbidden) {
 			t.Errorf("core /amux duplicates detailed Tycho protocol %q", forbidden)
 		}
@@ -646,12 +661,25 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 		"Clear it as soon as the run reaches a terminal or recovered state",
 		"only a wake-up token—never durable truth, delivery, consume, or acknowledgement",
 		"Do not turn it into a recurring watcher",
+		"Authoritative Amp `/team-review` with one Opus second opinion",
+		"reference/team-review-second-opinion.md",
+		"never marks `/amux-tycho` field-proven or closes #323",
+		"Provider stop or exit without `submit`",
+		"Only Amp mutates the PENDING GitHub review",
 	} {
 		if !strings.Contains(skill, required) {
 			t.Errorf("amux-tycho workflow is missing %q", required)
 		}
 	}
-	for _, required := range []string{"explicit-only", "Incidental mentions", "Recover this /amux-tycho receipt", "report_only"} {
+	for _, required := range []string{
+		"explicit-only",
+		"Incidental mentions",
+		"Recover this /amux-tycho receipt",
+		"report_only",
+		"Authoritative Amp /team-review with one Opus second opinion",
+		"team-review-second-opinion.md",
+		"does not promote readiness",
+	} {
 		if !strings.Contains(triggers, required) {
 			t.Errorf("amux-tycho trigger checklist is missing %q", required)
 		}
@@ -664,6 +692,8 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 		"There is no resident watcher",
 		"no compatibility guarantee",
 		"two useful real cycles",
+		"process exit, logs, and prose never substitute",
+		"team-review-second-opinion.md",
 	} {
 		if !strings.Contains(contract, required) {
 			t.Errorf("experimental Tycho contract is missing %q", required)
@@ -672,13 +702,17 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 	if !strings.Contains(matrix, "| `/amux-tycho` semantic-report receipt/inbox | Runtime-unverified |") ||
 		!strings.Contains(matrix, "Tycho has `report_only` authority") ||
 		!strings.Contains(matrix, "existing Tycho agent/project/harness/model route") ||
-		!strings.Contains(matrix, "no live Tycho cycle") {
+		!strings.Contains(matrix, "no live Tycho cycle") ||
+		!strings.Contains(matrix, "Tycho never mutates GitHub reviews") ||
+		!strings.Contains(matrix, "#328") ||
+		!strings.Contains(matrix, "does not change this row") {
 		t.Error("readiness matrix overstates or omits the experimental Tycho route")
 	}
 	for _, path := range []string{
 		filepath.Join("skills", "amux-tycho", "experimental", "tycho-report-bridge", "tycho_report_bridge.py"),
 		filepath.Join("skills", "amux-tycho", "experimental", "tycho-report-bridge", "tycho_report_bridge_test.go"),
 		filepath.Join("skills", "amux-tycho", "reference", "tycho-report-bridge.md"),
+		filepath.Join("skills", "amux-tycho", "reference", "team-review-second-opinion.md"),
 		filepath.Join("skills", "amux-tycho", "reference", "trigger-phrases.md"),
 	} {
 		if _, err := os.Stat(filepath.Join(root, path)); err != nil {
@@ -692,6 +726,356 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 	} {
 		if _, err := os.Stat(filepath.Join(root, path)); !os.IsNotExist(err) {
 			t.Errorf("core /amux retains a drift-prone Tycho payload at %s: %v", path, err)
+		}
+	}
+}
+
+func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	core := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "SKILL.md"))
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "reference", "team-review-second-opinion.md"))
+	contract := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "reference", "tycho-report-bridge.md"))
+	triggers := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "reference", "trigger-phrases.md"))
+	matrix := readSkillFile(t, root, filepath.Join("docs", "provider-executor-readiness.md"))
+	helper, err := os.ReadFile(filepath.Join(root, "skills", "amux-tycho", "experimental", "tycho-report-bridge", "tycho_report_bridge.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	helperText := string(helper)
+
+	for _, required := range []string{
+		"Settled design decisions",
+		"Bounded `complete` / `blocked` finding schema",
+		"Producer-only submit capability delivery",
+		"Truthful blocked-report behavior near provider stop",
+		"Same-head proof across Amp and Tycho worktrees",
+		"Stale / concurrent PENDING-review generation protection",
+		"Exact evidence required for #323 to count a cycle",
+		"Authoritative Amp first pass",
+		"Create the receipt **before** Tycho execution",
+		"exactly one durable `submit`",
+		"Independently reproduce or reject **every** candidate",
+		"Tycho must never call GitHub review or comment mutation APIs",
+		"Path or directory-name equality is not identity",
+		"full 40-character commit SHA",
+		"HEAD^{tree}",
+		"both Amp and Tycho review worktrees must be clean",
+		"Stop rather than overwrite",
+		"Exit codes (including `143`)",
+		"no Tycho finding",
+		"normally exact `claude-opus-5`",
+		"Six PR #11886 gaps",
+		"promote `/amux-tycho`",
+		"close [#323](https://github.com/zainfathoni/amux/issues/323)",
+		"does not widen stable Amux core",
+		"tycho-report-bridge.md",
+		"authority: \"report_only\"",
+		"Publication",
+		"Wake-ups and schedules never imply them",
+		"Desire to mark field-proven",
+		"refused here",
+		// Application report invariants beyond generic bridge schema.
+		"`complete` must use `blockers: []`",
+		"non-empty for both statuses",
+		"application-invalid",
+		// Producer-only GitHub boundary.
+		"GitHub credentials intended for review mutation",
+		"no new GitHub write credentials",
+		// Same-head task freeze includes route identity.
+		"Tycho agent key, project, harness, model",
+		"task_digest` is SHA-256 of those exact task bytes",
+		// PENDING ownership + snapshot contract.
+		"owns for this assignment",
+		"unowned pre-existing current-user PENDING review is always a conflict",
+		"Canonical PENDING snapshot",
+		"Comment `updated_at`",
+		"Do **not** use review `submitted_at` as a freshness signal",
+		"does not provide atomic compare-and-swap",
+		"Residual TOCTOU",
+		// #323 evidence completeness.
+		"#327 gate",
+		"Both-worktree repository, full head SHA, full tree SHA",
+		"Pre-Tycho and post-Tycho GitHub snapshots",
+		"Cleanup evidence from acknowledge output, not `show`",
+		"show` cannot supply it",
+		"final `show` only to inspect terminal `acknowledged`",
+		"no Tycho-phase review/comment mutation",
+		"Committed tree object identity",
+		"does **not** detect dirty index or worktree content by itself",
+		"An ambiguous, partial, or failed read is a deny",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("team-review second-opinion workflow is missing %q", required)
+		}
+	}
+	if !strings.Contains(workflow, "Out of scope") || !strings.Contains(workflow, "Stable `cmd/` or `internal/` changes") {
+		t.Error("team-review workflow must keep stable cmd/internal changes out of scope")
+	}
+	if strings.Contains(workflow, "| `/amux-tycho` semantic-report receipt/inbox | Proven") ||
+		strings.Contains(workflow, "marks `/amux-tycho` field-proven") {
+		t.Error("team-review workflow must not promote readiness")
+	}
+	if strings.Contains(core, "team-review-second-opinion.md") || strings.Contains(core, "Six PR #11886") {
+		t.Error("core /amux must not embed the detailed team-review second-opinion protocol")
+	}
+	if !strings.Contains(skill, "reference/team-review-second-opinion.md") {
+		t.Error("amux-tycho SKILL.md must progressively disclose the team-review workflow")
+	}
+	if !strings.Contains(triggers, "Authoritative Amp /team-review with one Opus second opinion") {
+		t.Error("amux-tycho triggers must route the team-review second-opinion phrase")
+	}
+	if !strings.Contains(contract, "team-review-second-opinion.md") {
+		t.Error("canonical bridge protocol must point at the application workflow without duplicating a second helper")
+	}
+	if !strings.Contains(matrix, "Runtime-unverified") || strings.Contains(matrix, "| `/amux-tycho` semantic-report receipt/inbox | Proven") {
+		t.Error("#328 must not promote the /amux-tycho readiness row")
+	}
+	// Reuse one canonical helper/schema rather than a duplicate implementation.
+	if strings.Contains(workflow, "tycho_report_bridge_v2") || strings.Contains(workflow, "second_opinion_bridge.py") {
+		t.Error("team-review workflow must not introduce a second bridge helper")
+	}
+	for _, required := range []string{
+		`"complete"`,
+		`"blocked"`,
+		"findings",
+		"blockers",
+		"verification",
+		"report_only",
+		"MAX_LIST_ITEMS = 32",
+		"MAX_INPUT_BYTES = 64 * 1024",
+	} {
+		if !strings.Contains(helperText, required) {
+			t.Errorf("canonical helper is missing settled report contract piece %q", required)
+		}
+	}
+
+	// Table-driven application fixtures: real SHA-256 task digest changes when route/head fields change.
+	type taskFields struct {
+		repo, pr, head, tree, ampWT, tychoWT, agent, project, harness, model string
+	}
+	base := taskFields{
+		repo: "acme/widgets", pr: "11886",
+		head:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		tree:  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		ampWT: "/tmp/amp-review", tychoWT: "/tmp/tycho-review",
+		agent: "reviewer-1", project: "bta", harness: "claude", model: "claude-opus-5",
+	}
+	taskDigest := func(f taskFields) string {
+		payload := strings.Join([]string{
+			"repo=" + f.repo, "pr=" + f.pr, "head=" + f.head, "tree=" + f.tree,
+			"amp_workdir=" + f.ampWT, "tycho_workdir=" + f.tychoWT,
+			"agent=" + f.agent, "project=" + f.project, "harness=" + f.harness, "model=" + f.model,
+			"producer_role=team_review_second_opinion", "authority=report_only",
+		}, "\n")
+		sum := sha256.Sum256([]byte(payload))
+		return hex.EncodeToString(sum[:])
+	}
+	baseDigest := taskDigest(base)
+	if len(baseDigest) != 64 {
+		t.Fatalf("task digest length = %d", len(baseDigest))
+	}
+	variants := []struct {
+		name string
+		mut  func(*taskFields)
+	}{
+		{"model", func(f *taskFields) { f.model = "claude-opus-4-8" }},
+		{"head", func(f *taskFields) { f.head = "cccccccccccccccccccccccccccccccccccccccc" }},
+		{"tree", func(f *taskFields) { f.tree = "dddddddddddddddddddddddddddddddddddddddd" }},
+		{"tycho workdir", func(f *taskFields) { f.tychoWT = "/tmp/other-tycho" }},
+		{"amp workdir", func(f *taskFields) { f.ampWT = "/tmp/other-amp" }},
+		{"project", func(f *taskFields) { f.project = "other-project" }},
+		{"harness", func(f *taskFields) { f.harness = "other-harness" }},
+		{"agent", func(f *taskFields) { f.agent = "other-agent" }},
+	}
+	for _, variant := range variants {
+		changed := base
+		variant.mut(&changed)
+		if taskDigest(changed) == baseDigest {
+			t.Errorf("task freeze fixture %s did not change SHA-256 digest", variant.name)
+		}
+	}
+
+	// Application report fixtures documented as valid/invalid independent of bridge envelope.
+	type appReport struct {
+		name                             string
+		status                           string
+		findings, blockers, verification []string
+		valid                            bool
+	}
+	reports := []appReport{
+		{name: "clean complete", status: "complete", findings: nil, blockers: nil, verification: []string{"git rev-parse HEAD"}, valid: true},
+		{name: "blocked partial", status: "blocked", findings: []string{"candidate"}, blockers: []string{"provider_stop"}, verification: []string{"checked head"}, valid: true},
+		{name: "complete with blockers", status: "complete", findings: []string{"x"}, blockers: []string{"leftover"}, verification: []string{"ok"}, valid: false},
+		{name: "empty verification", status: "complete", findings: nil, blockers: nil, verification: nil, valid: false},
+	}
+	for _, report := range reports {
+		appValid := report.status == "complete" && len(report.blockers) == 0 && len(report.verification) > 0 ||
+			report.status == "blocked" && len(report.blockers) > 0 && len(report.verification) > 0
+		if appValid != report.valid {
+			t.Fatalf("application fixture %s: valid=%v want %v", report.name, appValid, report.valid)
+		}
+	}
+
+	// Canonical PENDING snapshot digest: real SHA-256 over sorted-key compact JSON.
+	type pendingComment map[string]any
+	type pendingSnapshot map[string]any
+	var marshalSorted func(any) []byte
+	marshalSorted = func(v any) []byte {
+		t.Helper()
+		switch typed := v.(type) {
+		case map[string]any:
+			keys := make([]string, 0, len(typed))
+			for key := range typed {
+				keys = append(keys, key)
+			}
+			for i := 1; i < len(keys); i++ {
+				j := i
+				for j > 0 && keys[j-1] > keys[j] {
+					keys[j-1], keys[j] = keys[j], keys[j-1]
+					j--
+				}
+			}
+			var b strings.Builder
+			b.WriteByte('{')
+			for i, key := range keys {
+				if i > 0 {
+					b.WriteByte(',')
+				}
+				keyJSON, err := json.Marshal(key)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b.Write(keyJSON)
+				b.WriteByte(':')
+				b.Write(marshalSorted(typed[key]))
+			}
+			b.WriteByte('}')
+			return []byte(b.String())
+		case []any:
+			var b strings.Builder
+			b.WriteByte('[')
+			for i, item := range typed {
+				if i > 0 {
+					b.WriteByte(',')
+				}
+				b.Write(marshalSorted(item))
+			}
+			b.WriteByte(']')
+			return []byte(b.String())
+		default:
+			raw, err := json.Marshal(typed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return raw
+		}
+	}
+	snapshotDigest := func(s pendingSnapshot) string {
+		sum := sha256.Sum256(marshalSorted(map[string]any(s)))
+		return hex.EncodeToString(sum[:])
+	}
+	baseComment := pendingComment{
+		"id": "1", "path": "pkg/a.ts", "line": 10, "original_line": nil,
+		"side": "RIGHT", "start_side": nil,
+		"commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"body": "comment body", "updated_at": "2026-08-04T12:00:00Z",
+	}
+	baseSnap := pendingSnapshot{
+		"review_id": "111",
+		"commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"body":      "baseline body",
+		"state":     "PENDING",
+		"comments":  []any{map[string]any(baseComment)},
+	}
+	baseSnapDigest := snapshotDigest(baseSnap)
+	cloneSnap := func(s pendingSnapshot) pendingSnapshot {
+		raw, err := json.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out pendingSnapshot
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	snapVariants := []struct {
+		name string
+		mut  func(pendingSnapshot)
+	}{
+		{"review body", func(s pendingSnapshot) { s["body"] = "edited body" }},
+		{"review id", func(s pendingSnapshot) { s["review_id"] = "222" }},
+		{"review state", func(s pendingSnapshot) { s["state"] = "COMMENTED" }},
+		{"comment body", func(s pendingSnapshot) {
+			s["comments"].([]any)[0].(map[string]any)["body"] = "edited comment"
+		}},
+		{"comment updated_at", func(s pendingSnapshot) {
+			s["comments"].([]any)[0].(map[string]any)["updated_at"] = "2026-08-04T13:00:00Z"
+		}},
+		{"comment path", func(s pendingSnapshot) {
+			s["comments"].([]any)[0].(map[string]any)["path"] = "pkg/b.ts"
+		}},
+		{"comment line", func(s pendingSnapshot) {
+			s["comments"].([]any)[0].(map[string]any)["line"] = 11
+		}},
+		{"add comment", func(s pendingSnapshot) {
+			s["comments"] = append(s["comments"].([]any), map[string]any{
+				"id": "2", "path": "pkg/c.ts", "line": 1, "original_line": nil,
+				"side": "RIGHT", "start_side": nil, "commit_id": s["commit_id"],
+				"body": "new", "updated_at": "2026-08-04T12:01:00Z",
+			})
+		}},
+		{"delete comment", func(s pendingSnapshot) { s["comments"] = []any{} }},
+	}
+	for _, variant := range snapVariants {
+		changed := cloneSnap(baseSnap)
+		variant.mut(changed)
+		if snapshotDigest(changed) == baseSnapDigest {
+			t.Errorf("pending snapshot fixture %s did not change SHA-256 digest", variant.name)
+		}
+	}
+
+	// PENDING ownership + snapshot + read-health gate.
+	type pendingCase struct {
+		name           string
+		ownedID        string
+		pendingIDs     []string
+		baselineDigest string
+		current        pendingSnapshot
+		readOK         bool
+		allowMutation  bool
+	}
+	for _, pc := range []pendingCase{
+		{name: "create when none", ownedID: "", pendingIDs: nil, readOK: true, allowMutation: true},
+		{name: "owned stable", ownedID: "111", pendingIDs: []string{"111"}, baselineDigest: baseSnapDigest, current: baseSnap, readOK: true, allowMutation: true},
+		{name: "unowned sole", ownedID: "", pendingIDs: []string{"999"}, readOK: true, allowMutation: false},
+		{name: "body drift", ownedID: "111", pendingIDs: []string{"111"}, baselineDigest: baseSnapDigest, current: func() pendingSnapshot {
+			s := cloneSnap(baseSnap)
+			s["body"] = "drift"
+			return s
+		}(), readOK: true, allowMutation: false},
+		{name: "id changed", ownedID: "111", pendingIDs: []string{"222"}, baselineDigest: baseSnapDigest, current: func() pendingSnapshot {
+			s := cloneSnap(baseSnap)
+			s["review_id"] = "222"
+			return s
+		}(), readOK: true, allowMutation: false},
+		{name: "ambiguous two", ownedID: "111", pendingIDs: []string{"111", "222"}, baselineDigest: baseSnapDigest, current: baseSnap, readOK: true, allowMutation: false},
+		{name: "failed read", ownedID: "111", pendingIDs: []string{"111"}, baselineDigest: baseSnapDigest, current: baseSnap, readOK: false, allowMutation: false},
+	} {
+		allow := false
+		if pc.readOK {
+			switch {
+			case len(pc.pendingIDs) == 0 && pc.ownedID == "":
+				allow = true
+			case len(pc.pendingIDs) == 1 && pc.pendingIDs[0] == pc.ownedID && pc.ownedID != "" && pc.current != nil &&
+				snapshotDigest(pc.current) == pc.baselineDigest:
+				allow = true
+			}
+		}
+		if allow != pc.allowMutation {
+			t.Fatalf("pending fixture %s: allow=%v want %v", pc.name, allow, pc.allowMutation)
 		}
 	}
 }

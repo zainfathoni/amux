@@ -918,6 +918,188 @@ func TestPrivatePathsAreSeparatedAndNeverGivenToProducer(t *testing.T) {
 	}
 }
 
+func TestBlockedReportAndProviderStopWithoutSubmit(t *testing.T) {
+	stateDir := t.TempDir()
+	requireOutcome(t, stateDir, "recorded", createRequest(stateDir), "create")
+
+	// A provider stop or exit without submit leaves created-only state: no finding.
+	if show(t, stateDir)["state"] != "created" {
+		t.Fatal("pre-submit receipt is not created-only")
+	}
+	metadata, _ := json.Marshal(show(t, stateDir))
+	if bytes.Contains(metadata, []byte(`"report_present":true`)) {
+		t.Fatalf("created-only show leaked a report: %s", metadata)
+	}
+
+	emptyBlocked := submitRequest(stateDir)
+	emptyBlocked["event_id"] = "report-blocked-empty"
+	emptyBlocked["report"] = map[string]any{
+		"status": "blocked", "summary": "Stopped before finishing.",
+		"findings": []any{}, "blockers": []any{}, "verification": []any{"checked pinned head only"},
+	}
+	_, stderr, err := runBridge(t, stateDir, emptyBlocked, "submit")
+	if err == nil || !strings.Contains(stderr, "blocker") {
+		t.Fatalf("blocked without blockers: %v: %s", err, stderr)
+	}
+	if show(t, stateDir)["state"] != "created" {
+		t.Fatal("invalid blocked report mutated receipt")
+	}
+
+	blocked := submitRequest(stateDir)
+	blocked["event_id"] = "report-blocked-323"
+	blocked["report"] = map[string]any{
+		"status":  "blocked",
+		"summary": "Provider nearing stop; partial second opinion only.",
+		"findings": []any{
+			"[medium] pkg/date.ts:selectSlot — initial partial month; missing fetchDates; evidence at deadbeef; test gap; eager-complete boundary month",
+		},
+		"blockers":     []any{"provider_stop_requested: remaining files unscanned"},
+		"verification": []any{"git rev-parse HEAD matched binding task text"},
+	}
+	requireOutcome(t, stateDir, "recorded", blocked, "submit")
+	requireOutcome(t, stateDir, "duplicate", blocked, "submit")
+
+	conflict := submitRequest(stateDir)
+	conflict["event_id"] = "report-blocked-323"
+	conflict["report"] = map[string]any{
+		"status": "complete", "summary": "Conflicting completion after blocked.",
+		"findings": []any{"should not replace blocked"}, "blockers": []any{}, "verification": []any{"x"},
+	}
+	_, stderr, err = runBridge(t, stateDir, conflict, "submit")
+	if err == nil || !strings.Contains(stderr, "conflicting event") {
+		t.Fatalf("blocked conflict: %v: %s", err, stderr)
+	}
+
+	consume := map[string]any{"receipt_id": "receipt-323", "event_id": "consume-blocked", "origin_thread": origin}
+	result := requireOutcome(t, stateDir, "recorded", consume, "consume")
+	report, _ := result["report"].(map[string]any)
+	if result["state"] != "delivered" || report == nil || report["status"] != "blocked" {
+		t.Fatalf("blocked consume = %#v", result)
+	}
+	findings, _ := report["findings"].([]any)
+	blockers, _ := report["blockers"].([]any)
+	if len(findings) != 1 || len(blockers) != 1 {
+		t.Fatalf("blocked payload = %#v", report)
+	}
+	ack := map[string]any{"receipt_id": "receipt-323", "event_id": "ack-blocked", "report_event_id": "report-blocked-323", "origin_thread": origin}
+	requireOutcome(t, stateDir, "recorded", ack, "acknowledge")
+}
+
+func TestSemanticReportRejectsTranscriptAndOversizedFindings(t *testing.T) {
+	stateDir := t.TempDir()
+	requireOutcome(t, stateDir, "recorded", createRequest(stateDir), "create")
+
+	withTranscript := submitRequest(stateDir)
+	withTranscript["event_id"] = "report-transcript"
+	withTranscript["report"] = map[string]any{
+		"status": "complete", "summary": "ok", "findings": []any{"one"}, "blockers": []any{},
+		"verification": []any{"ok"}, "transcript": "raw provider dump",
+	}
+	_, stderr, err := runBridge(t, stateDir, withTranscript, "submit")
+	if err == nil || !strings.Contains(stderr, "unknown fields") {
+		t.Fatalf("transcript field: %v: %s", err, stderr)
+	}
+
+	oversizedItem := submitRequest(stateDir)
+	oversizedItem["event_id"] = "report-oversized-item"
+	oversizedItem["report"] = map[string]any{
+		"status": "complete", "summary": "ok",
+		"findings": []any{strings.Repeat("f", 2049)}, "blockers": []any{}, "verification": []any{"ok"},
+	}
+	_, stderr, err = runBridge(t, stateDir, oversizedItem, "submit")
+	if err == nil || !strings.Contains(stderr, "invalid item") {
+		t.Fatalf("oversized finding item: %v: %s", err, stderr)
+	}
+
+	tooMany := make([]any, 33)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("finding-%d", i)
+	}
+	oversizedList := submitRequest(stateDir)
+	oversizedList["event_id"] = "report-oversized-list"
+	oversizedList["report"] = map[string]any{
+		"status": "complete", "summary": "ok", "findings": tooMany, "blockers": []any{}, "verification": []any{"ok"},
+	}
+	_, stderr, err = runBridge(t, stateDir, oversizedList, "submit")
+	if err == nil || !strings.Contains(stderr, "bounded array") {
+		t.Fatalf("oversized findings list: %v: %s", err, stderr)
+	}
+
+	oversizedSummary := submitRequest(stateDir)
+	oversizedSummary["event_id"] = "report-oversized-summary"
+	oversizedSummary["report"] = map[string]any{
+		"status": "complete", "summary": strings.Repeat("s", 8193),
+		"findings": []any{}, "blockers": []any{}, "verification": []any{"ok"},
+	}
+	_, stderr, err = runBridge(t, stateDir, oversizedSummary, "submit")
+	if err == nil || !strings.Contains(stderr, "summary") {
+		t.Fatalf("oversized summary: %v: %s", err, stderr)
+	}
+
+	oversizedBlocker := submitRequest(stateDir)
+	oversizedBlocker["event_id"] = "report-oversized-blocker"
+	oversizedBlocker["report"] = map[string]any{
+		"status": "blocked", "summary": "partial",
+		"findings": []any{}, "blockers": []any{strings.Repeat("b", 2049)}, "verification": []any{"ok"},
+	}
+	_, stderr, err = runBridge(t, stateDir, oversizedBlocker, "submit")
+	if err == nil || !strings.Contains(stderr, "invalid item") {
+		t.Fatalf("oversized blocker item: %v: %s", err, stderr)
+	}
+
+	oversizedVerification := submitRequest(stateDir)
+	oversizedVerification["event_id"] = "report-oversized-verification"
+	oversizedVerification["report"] = map[string]any{
+		"status": "complete", "summary": "ok",
+		"findings": []any{}, "blockers": []any{}, "verification": []any{strings.Repeat("v", 2049)},
+	}
+	_, stderr, err = runBridge(t, stateDir, oversizedVerification, "submit")
+	if err == nil || !strings.Contains(stderr, "invalid item") {
+		t.Fatalf("oversized verification item: %v: %s", err, stderr)
+	}
+
+	if show(t, stateDir)["state"] != "created" {
+		t.Fatal("invalid semantic report mutated receipt")
+	}
+}
+
+func TestProducerCannotEscalateBeyondReportOnlyAuthority(t *testing.T) {
+	stateDir := t.TempDir()
+	requireOutcome(t, stateDir, "recorded", createRequest(stateDir), "create")
+	// Producer-only surface already rejects custody/abandonment args in
+	// TestPrivatePathsAreSeparatedAndNeverGivenToProducer. Escalate authority must fail closed.
+	coord := submitRequest(stateDir)
+	coord["authority"] = "coordinator"
+	_, stderr, err := runBridge(t, stateDir, coord, "submit")
+	if err == nil || (!strings.Contains(stderr, "immutable") && !strings.Contains(stderr, "authority") && !strings.Contains(stderr, "report_only")) {
+		t.Fatalf("coordinator authority submit: %v: %s", err, stderr)
+	}
+	if show(t, stateDir)["state"] != "created" {
+		t.Fatal("authority escalation mutated receipt")
+	}
+}
+
+func TestWrongWorkdirBindingFailsClosedForSameHeadWorkflow(t *testing.T) {
+	stateDir := t.TempDir()
+	requireOutcome(t, stateDir, "recorded", createRequest(stateDir), "create")
+	// Distinct path is not identity: submit must repeat the exact bound Tycho workdir.
+	request := submitRequest(stateDir)
+	request["workdir"] = stateDir + "-other-worktree"
+	_, stderr, err := runBridge(t, stateDir, request, "submit")
+	if err == nil || !strings.Contains(stderr, "immutable workdir") {
+		t.Fatalf("wrong workdir: %v: %s", err, stderr)
+	}
+	digest := submitRequest(stateDir)
+	digest["task_digest"] = strings.Repeat("e", 64)
+	_, stderr, err = runBridge(t, stateDir, digest, "submit")
+	if err == nil || !strings.Contains(stderr, "immutable task_digest") {
+		t.Fatalf("wrong task digest: %v: %s", err, stderr)
+	}
+	if show(t, stateDir)["state"] != "created" {
+		t.Fatal("wrong head/workdir binding mutated receipt")
+	}
+}
+
 func TestNotificationTimeoutIsBounded(t *testing.T) {
 	if testing.Short() {
 		t.Skip("exercises the notification timeout")

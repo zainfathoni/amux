@@ -1,15 +1,22 @@
 ---
 name: amux-tycho
-description: "Experimental Tycho external-executor report bridge for amux. Use only after an explicit owner request to route a bounded task through an existing Tycho agent/project/harness/model and return one structured semantic report to the current Amp coordinator. Tycho may route Claude or Pi but receives report-only authority, never Amp or provider identity."
+description: "Experimental Tycho external-executor report bridge for amux. Use only after an explicit owner request to route a bounded task through an existing Tycho agent/project/harness/model and return one structured semantic report to the current Amp coordinator, including the authoritative Amp /team-review Opus second-opinion workflow. Tycho may route Claude or Pi but receives report-only authority, never Amp or provider identity."
 ---
 
 # amux-tycho (experimental)
 
 Explicit-only external-executor bridge. Tycho may route Claude or Pi, but Tycho is only a typed `report_only` producer: it is not an Amp coordinator, worker, runner, group member, callback target, provider identity, or lifecycle principal.
 
-The current real Amp `T-...` thread remains coordinator, consumer, delivery authority, and acknowledgement authority. Tycho receives no group/member/callback/finish/label/merge/release/cleanup authority. An optional group reference is correlation metadata only. Do not activate this skill from an incidental Tycho, Claude, Pi, model, harness, or capacity mention.
+The current real Amp `T-...` thread remains coordinator, consumer, delivery authority, and acknowledgement authority. Tycho receives no group/member/callback/finish/label/merge/release/cleanup authority. An optional group reference is correlation metadata only. Do not activate this skill from an incidental Tycho, Claude, Pi, model, harness, capacity, or generic review mention.
 
-Before any field use, consult the [provider executor readiness matrix](https://github.com/zainfathoni/amux/blob/main/docs/provider-executor-readiness.md). This route is runtime-unverified. Do not interpret helper availability or synthetic tests as field readiness.
+Before any field use, consult the [provider executor readiness matrix](https://github.com/zainfathoni/amux/blob/main/docs/provider-executor-readiness.md). This route is runtime-unverified. Do not interpret helper availability, synthetic tests, or a useful provider opinion without a complete bridge cycle as field readiness. This skill never marks `/amux-tycho` field-proven or closes #323's real-cycle gate by itself.
+
+## Route triggers
+
+- **Route a bounded task through an existing Tycho agent**: follow [Explicit-only workflow](#explicit-only-workflow) and the canonical [bridge protocol](reference/tycho-report-bridge.md).
+- **Authoritative Amp `/team-review` with one Opus second opinion**: load [`reference/team-review-second-opinion.md`](reference/team-review-second-opinion.md). Amp finishes an independent first pass; owner approves one exact existing Tycho route (normally exact `claude-opus-5`); create one immutable receipt before Tycho; accept only one typed `complete`/`blocked` report; Amp alone verifies candidates and mutates the single current-user PENDING GitHub review.
+- **Recover this `/amux-tycho` receipt**: [`reference/tycho-report-bridge.md`](reference/tycho-report-bridge.md#optional-notification-and-recovery).
+- **Abandon a created-only receipt with lost custody**: [`reference/tycho-report-bridge.md`](reference/tycho-report-bridge.md#created-only-lost-token-abandonment).
 
 ## Explicit-only workflow
 
@@ -32,6 +39,7 @@ For a long Tycho run, the Amp coordinator may own a single one-time Amp schedule
 ## Field-readiness limits
 
 - No live Tycho/provider run is authorized merely by loading this skill. Current readiness is synthetic coverage only.
+- The `/team-review` second-opinion recipe may contribute evidence toward #323 only when a complete bridge cycle is owner-proven; it does not promote the bridge, close the real-cycle gate, or change the Runtime-unverified row by itself.
 - Promotion still requires two useful real cycles, one natural receipt-preserving recovery, supported versioned Tycho ingress, authorization/privacy review, a stable scope/ADR decision, and separate owner approval.
 - Owner-only filesystem permissions protect against other OS users, not another process with the same UID. The helper does not confine Tycho.
 - There is no resident watcher, arbitrary Amp Web-thread return route, model/entitlement attestation, provider fallback, automatic retry, or stable Go command/schema.
@@ -44,6 +52,7 @@ Receipts created by the former core `/amux` helper remain compatible; they are n
 ## Load only what you need
 
 - Canonical receipt, storage, submission, recovery, consumption, acknowledgement, abandonment, notification, and cleanup protocol: [`reference/tycho-report-bridge.md`](reference/tycho-report-bridge.md)
+- Authoritative Amp `/team-review` Opus second-opinion workflow and #328 design decisions: [`reference/team-review-second-opinion.md`](reference/team-review-second-opinion.md)
 - Explicit activation checklist: [`reference/trigger-phrases.md`](reference/trigger-phrases.md)
 - Canonical helper: `experimental/tycho-report-bridge/tycho_report_bridge.py` within this installed skill
 
@@ -51,9 +60,10 @@ Receipts created by the former core `/amux` helper remain compatible; they are n
 
 - `created`: preserve custody and producer proof; no report exists. If custody is genuinely irrecoverable, use only the documented abandonment path.
 - Existing pre-split receipt: preserve every original path and identity, require this thread to equal the bound Amp origin, and continue through the new helper path without migration mutation.
+- Provider stop or exit without `submit`: no Tycho finding; do not recover candidates from logs, state, or prose.
 - `valid_report`: explicitly consume from the private store regardless of notification outcome.
-- `delivered`: assess the returned report, then separately acknowledge if appropriate.
+- `delivered`: independently verify every candidate, then separately acknowledge if appropriate. Only Amp mutates the PENDING GitHub review.
 - `acknowledged` or `abandoned` with cleanup `pending`: replay the identical terminal event with the same capability directory; do not append another event.
 - Lock contention: retry the identical operation. Malformed store, proof/custody conflict, wrong origin/target, invalid transition, or unknown notification outcome: preserve evidence and stop.
 
-Never repair this route by fabricating Amp identity, changing immutable binding, granting provider/coordinator authority, editing stable registries, or treating notification/polling as delivery.
+Never repair this route by fabricating Amp identity, changing immutable binding, granting provider/coordinator authority, editing stable registries, treating notification/polling as delivery, or promoting readiness from an incomplete cycle.
