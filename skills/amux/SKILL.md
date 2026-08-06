@@ -42,7 +42,7 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 
 Deadlines (optional): load [`reference/deadline-v1.md`](reference/deadline-v1.md) only when arming or handling deadline wake-ups—not on every `/amux` load.
 
-Experimental external execution is explicit-only. Load **`/amux-tycho`** for the Tycho report bridge, or **`/amux-claude`** / **`/amux-pi`** for their provider-specific fallback routes; never activate them from incidental mentions. For `/amux-tycho`, a receipt's immutable real Amp origin remains coordinator and consume/acknowledgement authority. Tycho is a typed report-only producer with no group, member, callback, finish, label, provider-identity, or lifecycle authority.
+Experimental external execution is explicit-only. Load **`/amux-tycho`** for the Tycho report bridge and any owner-authorized external Tycho second opinion on an authoritative Amp `/team-review`, or **`/amux-claude`** / **`/amux-pi`** for their provider-specific fallback routes; never activate them from incidental mentions. For `/amux-tycho`, a receipt's immutable real Amp origin remains coordinator and consume/acknowledgement authority. Tycho is a typed report-only producer with no group, member, callback, finish, label, provider-identity, or lifecycle authority. Owner-selected Tycho second opinions stay under that separate skill and never grant Tycho GitHub review mutation or readiness promotion.
 
 ## Load only what you need
 

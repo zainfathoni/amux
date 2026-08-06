@@ -2,6 +2,10 @@ package scripts_test
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +26,7 @@ var publicSkillFiles = []string{
 	filepath.Join("skills", "amux", "reference", "deadline-v1.md"),
 	filepath.Join("skills", "amux-tycho", "SKILL.md"),
 	filepath.Join("skills", "amux-tycho", "reference", "tycho-report-bridge.md"),
+	filepath.Join("skills", "amux-tycho", "reference", "team-review-second-opinion.md"),
 	filepath.Join("skills", "amux-tycho", "reference", "trigger-phrases.md"),
 	filepath.Join("skills", "amux-claude", "SKILL.md"),
 	filepath.Join("skills", "amux-claude", "reference", "claude-local-tmux-adoption.md"),
@@ -76,6 +81,7 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 			skillDir: filepath.Join("skills", "amux-tycho"),
 			refs: []string{
 				"tycho-report-bridge.md",
+				"team-review-second-opinion.md",
 				"trigger-phrases.md",
 			},
 		},
@@ -614,12 +620,22 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 		"receipt's immutable real Amp origin remains coordinator and consume/acknowledgement authority",
 		"typed report-only producer",
 		"no group, member, callback, finish, label, provider-identity, or lifecycle authority",
+		"owner-authorized external Tycho second opinion",
+		"never grant Tycho GitHub review mutation or readiness promotion",
 	} {
 		if !strings.Contains(core, required) {
 			t.Errorf("core /amux Tycho pointer is missing authority boundary %q", required)
 		}
 	}
-	for _, forbidden := range []string{"tycho-report-bridge.md", "tycho_report_bridge.py", "created → valid_report → delivered → acknowledged", "one-time Amp schedule"} {
+	for _, forbidden := range []string{
+		"tycho-report-bridge.md",
+		"team-review-second-opinion.md",
+		"tycho_report_bridge.py",
+		"created → valid_report → delivered → acknowledged",
+		"one-time Amp schedule",
+		"claude-opus-5",
+		"PENDING GitHub review",
+	} {
 		if strings.Contains(core, forbidden) {
 			t.Errorf("core /amux duplicates detailed Tycho protocol %q", forbidden)
 		}
@@ -646,12 +662,25 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 		"Clear it as soon as the run reaches a terminal or recovered state",
 		"only a wake-up token—never durable truth, delivery, consume, or acknowledgement",
 		"Do not turn it into a recurring watcher",
+		"Authoritative Amp `/team-review` with one Opus second opinion",
+		"reference/team-review-second-opinion.md",
+		"never marks `/amux-tycho` field-proven or closes #323",
+		"Provider stop or exit without `submit`",
+		"Only Amp mutates the PENDING GitHub review",
 	} {
 		if !strings.Contains(skill, required) {
 			t.Errorf("amux-tycho workflow is missing %q", required)
 		}
 	}
-	for _, required := range []string{"explicit-only", "Incidental mentions", "Recover this /amux-tycho receipt", "report_only"} {
+	for _, required := range []string{
+		"explicit-only",
+		"Incidental mentions",
+		"Recover this /amux-tycho receipt",
+		"report_only",
+		"Authoritative Amp /team-review with one Opus second opinion",
+		"team-review-second-opinion.md",
+		"does not promote readiness",
+	} {
 		if !strings.Contains(triggers, required) {
 			t.Errorf("amux-tycho trigger checklist is missing %q", required)
 		}
@@ -664,6 +693,8 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 		"There is no resident watcher",
 		"no compatibility guarantee",
 		"two useful real cycles",
+		"process exit, logs, and prose never substitute",
+		"team-review-second-opinion.md",
 	} {
 		if !strings.Contains(contract, required) {
 			t.Errorf("experimental Tycho contract is missing %q", required)
@@ -672,13 +703,17 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 	if !strings.Contains(matrix, "| `/amux-tycho` semantic-report receipt/inbox | Runtime-unverified |") ||
 		!strings.Contains(matrix, "Tycho has `report_only` authority") ||
 		!strings.Contains(matrix, "existing Tycho agent/project/harness/model route") ||
-		!strings.Contains(matrix, "no live Tycho cycle") {
+		!strings.Contains(matrix, "no live Tycho cycle") ||
+		!strings.Contains(matrix, "Tycho never mutates GitHub reviews") ||
+		!strings.Contains(matrix, "#328") ||
+		!strings.Contains(matrix, "does not change this row") {
 		t.Error("readiness matrix overstates or omits the experimental Tycho route")
 	}
 	for _, path := range []string{
 		filepath.Join("skills", "amux-tycho", "experimental", "tycho-report-bridge", "tycho_report_bridge.py"),
 		filepath.Join("skills", "amux-tycho", "experimental", "tycho-report-bridge", "tycho_report_bridge_test.go"),
 		filepath.Join("skills", "amux-tycho", "reference", "tycho-report-bridge.md"),
+		filepath.Join("skills", "amux-tycho", "reference", "team-review-second-opinion.md"),
 		filepath.Join("skills", "amux-tycho", "reference", "trigger-phrases.md"),
 	} {
 		if _, err := os.Stat(filepath.Join(root, path)); err != nil {
@@ -694,6 +729,530 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 			t.Errorf("core /amux retains a drift-prone Tycho payload at %s: %v", path, err)
 		}
 	}
+}
+
+func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	core := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "SKILL.md"))
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "reference", "team-review-second-opinion.md"))
+	contract := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "reference", "tycho-report-bridge.md"))
+	triggers := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "reference", "trigger-phrases.md"))
+	matrix := readSkillFile(t, root, filepath.Join("docs", "provider-executor-readiness.md"))
+	helper, err := os.ReadFile(filepath.Join(root, "skills", "amux-tycho", "experimental", "tycho-report-bridge", "tycho_report_bridge.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	helperText := string(helper)
+
+	for _, required := range []string{
+		"Settled design decisions",
+		"Bounded `complete` / `blocked` finding schema",
+		"Producer-only submit capability delivery",
+		"Truthful blocked-report behavior near provider stop",
+		"Same-head proof across Amp and Tycho worktrees",
+		"Stale / concurrent PENDING-review generation protection",
+		"Exact evidence required for #323 to count a cycle",
+		"Authoritative Amp first pass",
+		"Create the receipt **before** Tycho execution",
+		"exactly one durable `submit`",
+		"Independently reproduce or reject **every** candidate",
+		"Tycho must never call GitHub review or comment mutation APIs",
+		"Path or directory-name equality is not identity",
+		"full 40-character commit SHA",
+		"HEAD^{tree}",
+		"both Amp and Tycho review worktrees must be clean",
+		"Stop rather than overwrite",
+		"Exit codes (including `143`)",
+		"no Tycho finding",
+		"normally exact `claude-opus-5`",
+		"Six PR #11886 gaps",
+		"promote `/amux-tycho`",
+		"close [#323](https://github.com/zainfathoni/amux/issues/323)",
+		"does not widen stable Amux core",
+		"tycho-report-bridge.md",
+		"authority: \"report_only\"",
+		"Publication",
+		"Wake-ups and schedules never imply them",
+		"Desire to mark field-proven",
+		"refused here",
+		// Application report invariants beyond generic bridge schema.
+		"`complete` must use `blockers: []`",
+		"non-empty for both statuses",
+		"application-invalid",
+		// Producer-only GitHub boundary.
+		"GitHub credentials intended for review mutation",
+		"no new GitHub write credentials",
+		// Same-head task freeze includes route identity.
+		"Tycho agent key, project, harness, model",
+		"task_digest` is SHA-256 of those exact task bytes",
+		// PENDING ownership + snapshot contract.
+		"owns for this assignment",
+		"unowned pre-existing current-user PENDING review is always a conflict",
+		"Canonical PENDING snapshot",
+		"Comment canonicalization",
+		"Comment `updated_at`",
+		"Do **not** use review `submitted_at` as a freshness signal",
+		"does not provide atomic compare-and-swap",
+		"Residual TOCTOU",
+		"Pinned PR head revalidation (every write)",
+		"baseline-none/create path and the existing-owned-review reconciliation path",
+		"PR head SHA ≠ pinned reviewed SHA, or PR head read failed",
+		// Same-head timing + helper non-attestation.
+		"Post-Tycho / pre-consume",
+		"bridge helper does **not** attest Git state",
+		"reject the application payload",
+		// #323 evidence completeness.
+		"#327 categorical gate (current blocker)",
+		"accepted and merged",
+		"Local, unmerged, draft, or merely “available” routes do **not** satisfy the gate",
+		"missing Amp receipt-bearing physical-runner assignment API",
+		"Pre-Tycho",
+		"Post-Tycho / pre-consume** same-head proof",
+		"per-write PR head equality checks",
+		"Pre-Tycho and post-Tycho GitHub snapshots",
+		"Cleanup evidence from acknowledge output, not `show`",
+		"show` cannot supply it",
+		"final `show` only to inspect terminal `acknowledged`",
+		"no Tycho-phase review/comment mutation",
+		"Committed tree object identity",
+		"does **not** detect dirty index or worktree content by itself",
+		"An ambiguous, partial, or failed read is a deny",
+		"bridge helper never attests Git or GitHub head state",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("team-review second-opinion workflow is missing %q", required)
+		}
+	}
+	if !strings.Contains(workflow, "Out of scope") || !strings.Contains(workflow, "Stable `cmd/` or `internal/` changes") {
+		t.Error("team-review workflow must keep stable cmd/internal changes out of scope")
+	}
+	if strings.Contains(workflow, "| `/amux-tycho` semantic-report receipt/inbox | Proven") ||
+		strings.Contains(workflow, "marks `/amux-tycho` field-proven") {
+		t.Error("team-review workflow must not promote readiness")
+	}
+	if strings.Contains(core, "team-review-second-opinion.md") || strings.Contains(core, "Six PR #11886") {
+		t.Error("core /amux must not embed the detailed team-review second-opinion protocol")
+	}
+	if !strings.Contains(skill, "reference/team-review-second-opinion.md") {
+		t.Error("amux-tycho SKILL.md must progressively disclose the team-review workflow")
+	}
+	if !strings.Contains(skill, "#327 is currently a categorical field-cycle blocker") {
+		t.Error("amux-tycho SKILL.md must surface the #327 categorical field-cycle blocker")
+	}
+	if !strings.Contains(triggers, "Authoritative Amp /team-review with one Opus second opinion") {
+		t.Error("amux-tycho triggers must route the team-review second-opinion phrase")
+	}
+	if !strings.Contains(contract, "team-review-second-opinion.md") {
+		t.Error("canonical bridge protocol must point at the application workflow without duplicating a second helper")
+	}
+	if !strings.Contains(matrix, "Runtime-unverified") || strings.Contains(matrix, "| `/amux-tycho` semantic-report receipt/inbox | Proven") {
+		t.Error("#328 must not promote the /amux-tycho readiness row")
+	}
+	if !strings.Contains(matrix, "Current field-cycle blocker") ||
+		!strings.Contains(matrix, "#327") ||
+		!strings.Contains(matrix, "missing Amp receipt-bearing physical-runner assignment API") ||
+		!strings.Contains(matrix, "local/unmerged routes do not count") {
+		t.Error("readiness matrix must surface #327 as the current categorical field-cycle blocker")
+	}
+	// Reuse one canonical helper/schema rather than a duplicate implementation.
+	if strings.Contains(workflow, "tycho_report_bridge_v2") || strings.Contains(workflow, "second_opinion_bridge.py") {
+		t.Error("team-review workflow must not introduce a second bridge helper")
+	}
+	for _, required := range []string{
+		`"complete"`,
+		`"blocked"`,
+		"findings",
+		"blockers",
+		"verification",
+		"report_only",
+		"MAX_LIST_ITEMS = 32",
+		"MAX_INPUT_BYTES = 64 * 1024",
+	} {
+		if !strings.Contains(helperText, required) {
+			t.Errorf("canonical helper is missing settled report contract piece %q", required)
+		}
+	}
+
+	// Documentation-consistency fixtures only: encode the settled workflow rules as
+	// pure examples. They are not runtime enforcement and do not call the bridge helper
+	// for Git/GitHub attestation (the helper does not attest Git state).
+
+	// Task digest changes when route/head/workdir fields change.
+	type taskFields struct {
+		repo, pr, head, tree, ampWT, tychoWT, agent, project, harness, model string
+	}
+	base := taskFields{
+		repo: "acme/widgets", pr: "11886",
+		head:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		tree:  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		ampWT: "/tmp/amp-review", tychoWT: "/tmp/tycho-review",
+		agent: "reviewer-1", project: "bta", harness: "claude", model: "claude-opus-5",
+	}
+	taskDigest := func(f taskFields) string {
+		payload := strings.Join([]string{
+			"repo=" + f.repo, "pr=" + f.pr, "head=" + f.head, "tree=" + f.tree,
+			"amp_workdir=" + f.ampWT, "tycho_workdir=" + f.tychoWT,
+			"agent=" + f.agent, "project=" + f.project, "harness=" + f.harness, "model=" + f.model,
+			"producer_role=team_review_second_opinion", "authority=report_only",
+		}, "\n")
+		sum := sha256.Sum256([]byte(payload))
+		return hex.EncodeToString(sum[:])
+	}
+	baseDigest := taskDigest(base)
+	if len(baseDigest) != 64 {
+		t.Fatalf("task digest length = %d", len(baseDigest))
+	}
+	for _, variant := range []struct {
+		name string
+		mut  func(*taskFields)
+	}{
+		{"model", func(f *taskFields) { f.model = "claude-opus-4-8" }},
+		{"head", func(f *taskFields) { f.head = "cccccccccccccccccccccccccccccccccccccccc" }},
+		{"tree", func(f *taskFields) { f.tree = "dddddddddddddddddddddddddddddddddddddddd" }},
+		{"tycho workdir", func(f *taskFields) { f.tychoWT = "/tmp/other-tycho" }},
+		{"amp workdir", func(f *taskFields) { f.ampWT = "/tmp/other-amp" }},
+		{"project", func(f *taskFields) { f.project = "other-project" }},
+		{"harness", func(f *taskFields) { f.harness = "other-harness" }},
+		{"agent", func(f *taskFields) { f.agent = "other-agent" }},
+	} {
+		changed := base
+		variant.mut(&changed)
+		if taskDigest(changed) == baseDigest {
+			t.Errorf("doc fixture task freeze %s did not change SHA-256 digest", variant.name)
+		}
+	}
+
+	// Application report validity examples (independent of bridge envelope).
+	type appReport struct {
+		name                             string
+		status                           string
+		findings, blockers, verification []string
+		valid                            bool
+	}
+	for _, report := range []appReport{
+		{name: "clean complete", status: "complete", findings: nil, blockers: nil, verification: []string{"git rev-parse HEAD"}, valid: true},
+		{name: "blocked partial", status: "blocked", findings: []string{"candidate"}, blockers: []string{"provider_stop"}, verification: []string{"checked head"}, valid: true},
+		{name: "complete with blockers", status: "complete", findings: []string{"x"}, blockers: []string{"leftover"}, verification: []string{"ok"}, valid: false},
+		{name: "empty verification", status: "complete", findings: nil, blockers: nil, verification: nil, valid: false},
+	} {
+		appValid := report.status == "complete" && len(report.blockers) == 0 && len(report.verification) > 0 ||
+			report.status == "blocked" && len(report.blockers) > 0 && len(report.verification) > 0
+		if appValid != report.valid {
+			t.Fatalf("doc fixture application report %s: valid=%v want %v", report.name, appValid, report.valid)
+		}
+	}
+
+	// Canonical PENDING snapshot: sorted-key JSON + comments canonicalized by numeric id.
+	type pendingSnapshot map[string]any
+	var marshalSorted func(any) []byte
+	marshalSorted = func(v any) []byte {
+		t.Helper()
+		switch typed := v.(type) {
+		case map[string]any:
+			keys := make([]string, 0, len(typed))
+			for key := range typed {
+				keys = append(keys, key)
+			}
+			for i := 1; i < len(keys); i++ {
+				j := i
+				for j > 0 && keys[j-1] > keys[j] {
+					keys[j-1], keys[j] = keys[j], keys[j-1]
+					j--
+				}
+			}
+			var b strings.Builder
+			b.WriteByte('{')
+			for i, key := range keys {
+				if i > 0 {
+					b.WriteByte(',')
+				}
+				keyJSON, err := json.Marshal(key)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b.Write(keyJSON)
+				b.WriteByte(':')
+				b.Write(marshalSorted(typed[key]))
+			}
+			b.WriteByte('}')
+			return []byte(b.String())
+		case []any:
+			var b strings.Builder
+			b.WriteByte('[')
+			for i, item := range typed {
+				if i > 0 {
+					b.WriteByte(',')
+				}
+				b.Write(marshalSorted(item))
+			}
+			b.WriteByte(']')
+			return []byte(b.String())
+		default:
+			raw, err := json.Marshal(typed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return raw
+		}
+	}
+	commentIDLess := func(a, b string) bool {
+		ai, okA := new(big.Int).SetString(a, 10)
+		bi, okB := new(big.Int).SetString(b, 10)
+		if okA && okB {
+			return ai.Cmp(bi) < 0
+		}
+		return a < b
+	}
+	canonicalizeComments := func(comments []any) []any {
+		out := append([]any(nil), comments...)
+		for i := 1; i < len(out); i++ {
+			j := i
+			for j > 0 {
+				prevID, _ := out[j-1].(map[string]any)["id"].(string)
+				curID, _ := out[j].(map[string]any)["id"].(string)
+				if !commentIDLess(curID, prevID) {
+					break
+				}
+				out[j-1], out[j] = out[j], out[j-1]
+				j--
+			}
+		}
+		return out
+	}
+	snapshotDigest := func(s pendingSnapshot) string {
+		cloned := map[string]any{}
+		for k, v := range s {
+			cloned[k] = v
+		}
+		if comments, ok := cloned["comments"].([]any); ok {
+			cloned["comments"] = canonicalizeComments(comments)
+		}
+		sum := sha256.Sum256(marshalSorted(cloned))
+		return hex.EncodeToString(sum[:])
+	}
+	cloneSnap := func(s pendingSnapshot) pendingSnapshot {
+		raw, err := json.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out pendingSnapshot
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	commentA := map[string]any{
+		"id": "10", "path": "pkg/a.ts", "line": 10, "original_line": nil,
+		"side": "RIGHT", "start_side": nil,
+		"commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"body":      "comment A", "updated_at": "2026-08-04T12:00:00Z",
+	}
+	commentB := map[string]any{
+		"id": "2", "path": "pkg/b.ts", "line": 2, "original_line": nil,
+		"side": "RIGHT", "start_side": nil,
+		"commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"body":      "comment B", "updated_at": "2026-08-04T12:01:00Z",
+	}
+	baseSnap := pendingSnapshot{
+		"review_id": "111",
+		"commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"body":      "baseline body",
+		"state":     "PENDING",
+		"comments":  []any{commentA, commentB}, // API order: 10 then 2
+	}
+	// Reversed API order must yield the same digest after id canonicalization.
+	reversedSnap := cloneSnap(baseSnap)
+	reversedSnap["comments"] = []any{cloneMap(t, commentB), cloneMap(t, commentA)}
+	baseSnapDigest := snapshotDigest(baseSnap)
+	if got := snapshotDigest(reversedSnap); got != baseSnapDigest {
+		t.Fatalf("doc fixture comment order invariance: got %s want %s", got, baseSnapDigest)
+	}
+	// Ensure canonical order is numeric (2 before 10), not lexicographic string order.
+	sorted := canonicalizeComments([]any{cloneMap(t, commentA), cloneMap(t, commentB)})
+	if sorted[0].(map[string]any)["id"] != "2" || sorted[1].(map[string]any)["id"] != "10" {
+		t.Fatalf("doc fixture comment id sort order = %#v", sorted)
+	}
+	for _, variant := range []struct {
+		name string
+		mut  func(pendingSnapshot)
+	}{
+		{"review body", func(s pendingSnapshot) { s["body"] = "edited body" }},
+		{"review id", func(s pendingSnapshot) { s["review_id"] = "222" }},
+		{"review state", func(s pendingSnapshot) { s["state"] = "COMMENTED" }},
+		{"comment body", func(s pendingSnapshot) {
+			s["comments"].([]any)[0].(map[string]any)["body"] = "edited comment"
+		}},
+		{"comment updated_at", func(s pendingSnapshot) {
+			s["comments"].([]any)[0].(map[string]any)["updated_at"] = "2026-08-04T13:00:00Z"
+		}},
+		{"comment path", func(s pendingSnapshot) {
+			s["comments"].([]any)[0].(map[string]any)["path"] = "pkg/z.ts"
+		}},
+		{"comment line", func(s pendingSnapshot) {
+			s["comments"].([]any)[0].(map[string]any)["line"] = 99
+		}},
+		{"add comment", func(s pendingSnapshot) {
+			s["comments"] = append(s["comments"].([]any), map[string]any{
+				"id": "3", "path": "pkg/c.ts", "line": 1, "original_line": nil,
+				"side": "RIGHT", "start_side": nil, "commit_id": s["commit_id"],
+				"body": "new", "updated_at": "2026-08-04T12:02:00Z",
+			})
+		}},
+		{"delete comment", func(s pendingSnapshot) { s["comments"] = []any{} }},
+	} {
+		changed := cloneSnap(baseSnap)
+		variant.mut(changed)
+		if snapshotDigest(changed) == baseSnapDigest {
+			t.Errorf("doc fixture pending snapshot %s did not change SHA-256 digest", variant.name)
+		}
+	}
+
+	// Mutation gate examples: ownership + snapshot + PR head equality + read health.
+	// Covers baseline-none/create and existing-owned-review paths.
+	pinnedHead := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	type mutationCase struct {
+		name           string
+		ownedID        string
+		pendingIDs     []string
+		baselineDigest string
+		current        pendingSnapshot
+		prHead         string
+		prHeadReadOK   bool
+		snapshotReadOK bool
+		allowMutation  bool
+	}
+	for _, pc := range []mutationCase{
+		{name: "create when none head stable", ownedID: "", pendingIDs: nil, prHead: pinnedHead, prHeadReadOK: true, snapshotReadOK: true, allowMutation: true},
+		{name: "create when none head advanced", ownedID: "", pendingIDs: nil, prHead: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", prHeadReadOK: true, snapshotReadOK: true, allowMutation: false},
+		{name: "create when none head read failed", ownedID: "", pendingIDs: nil, prHead: "", prHeadReadOK: false, snapshotReadOK: true, allowMutation: false},
+		{name: "create blocked by unexpected pending", ownedID: "", pendingIDs: []string{"999"}, prHead: pinnedHead, prHeadReadOK: true, snapshotReadOK: true, allowMutation: false},
+		{name: "owned stable head stable", ownedID: "111", pendingIDs: []string{"111"}, baselineDigest: baseSnapDigest, current: baseSnap, prHead: pinnedHead, prHeadReadOK: true, snapshotReadOK: true, allowMutation: true},
+		{name: "owned stable head advanced", ownedID: "111", pendingIDs: []string{"111"}, baselineDigest: baseSnapDigest, current: baseSnap, prHead: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", prHeadReadOK: true, snapshotReadOK: true, allowMutation: false},
+		{name: "owned stable head read failed", ownedID: "111", pendingIDs: []string{"111"}, baselineDigest: baseSnapDigest, current: baseSnap, prHead: "", prHeadReadOK: false, snapshotReadOK: true, allowMutation: false},
+		{name: "unowned sole", ownedID: "", pendingIDs: []string{"999"}, prHead: pinnedHead, prHeadReadOK: true, snapshotReadOK: true, allowMutation: false},
+		{name: "body drift", ownedID: "111", pendingIDs: []string{"111"}, baselineDigest: baseSnapDigest, current: func() pendingSnapshot {
+			s := cloneSnap(baseSnap)
+			s["body"] = "drift"
+			return s
+		}(), prHead: pinnedHead, prHeadReadOK: true, snapshotReadOK: true, allowMutation: false},
+		{name: "id changed", ownedID: "111", pendingIDs: []string{"222"}, baselineDigest: baseSnapDigest, current: func() pendingSnapshot {
+			s := cloneSnap(baseSnap)
+			s["review_id"] = "222"
+			return s
+		}(), prHead: pinnedHead, prHeadReadOK: true, snapshotReadOK: true, allowMutation: false},
+		{name: "ambiguous two", ownedID: "111", pendingIDs: []string{"111", "222"}, baselineDigest: baseSnapDigest, current: baseSnap, prHead: pinnedHead, prHeadReadOK: true, snapshotReadOK: true, allowMutation: false},
+		{name: "snapshot read failed", ownedID: "111", pendingIDs: []string{"111"}, baselineDigest: baseSnapDigest, current: baseSnap, prHead: pinnedHead, prHeadReadOK: true, snapshotReadOK: false, allowMutation: false},
+	} {
+		allow := false
+		if pc.prHeadReadOK && pc.prHead == pinnedHead && pc.snapshotReadOK {
+			switch {
+			case len(pc.pendingIDs) == 0 && pc.ownedID == "":
+				allow = true
+			case len(pc.pendingIDs) == 1 && pc.pendingIDs[0] == pc.ownedID && pc.ownedID != "" && pc.current != nil &&
+				snapshotDigest(pc.current) == pc.baselineDigest:
+				allow = true
+			}
+		}
+		if allow != pc.allowMutation {
+			t.Fatalf("doc fixture mutation gate %s: allow=%v want %v", pc.name, allow, pc.allowMutation)
+		}
+	}
+
+	// Post-Tycho / pre-consume attachment proof examples (helper does not attest these).
+	type attachment struct {
+		repo, workdir, head, tree string
+		clean, readOK             bool
+	}
+	type attachCase struct {
+		name                                                           string
+		pinnedRepo, pinnedAmpWT, pinnedTychoWT, pinnedHead, pinnedTree string
+		amp, tycho                                                     attachment
+		acceptApplication                                              bool
+	}
+	for _, ac := range []attachCase{
+		{
+			name:       "both stable",
+			pinnedRepo: "acme/widgets", pinnedAmpWT: "/tmp/amp-review", pinnedTychoWT: "/tmp/tycho-review",
+			pinnedHead: pinnedHead, pinnedTree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			amp:               attachment{repo: "acme/widgets", workdir: "/tmp/amp-review", head: pinnedHead, tree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", clean: true, readOK: true},
+			tycho:             attachment{repo: "acme/widgets", workdir: "/tmp/tycho-review", head: pinnedHead, tree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", clean: true, readOK: true},
+			acceptApplication: true,
+		},
+		{
+			name:       "tycho head drifted",
+			pinnedRepo: "acme/widgets", pinnedAmpWT: "/tmp/amp-review", pinnedTychoWT: "/tmp/tycho-review",
+			pinnedHead: pinnedHead, pinnedTree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			amp:               attachment{repo: "acme/widgets", workdir: "/tmp/amp-review", head: pinnedHead, tree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", clean: true, readOK: true},
+			tycho:             attachment{repo: "acme/widgets", workdir: "/tmp/tycho-review", head: "ffffffffffffffffffffffffffffffffffffffff", tree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", clean: true, readOK: true},
+			acceptApplication: false,
+		},
+		{
+			name:       "amp tree drifted",
+			pinnedRepo: "acme/widgets", pinnedAmpWT: "/tmp/amp-review", pinnedTychoWT: "/tmp/tycho-review",
+			pinnedHead: pinnedHead, pinnedTree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			amp:               attachment{repo: "acme/widgets", workdir: "/tmp/amp-review", head: pinnedHead, tree: "cccccccccccccccccccccccccccccccccccccccc", clean: true, readOK: true},
+			tycho:             attachment{repo: "acme/widgets", workdir: "/tmp/tycho-review", head: pinnedHead, tree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", clean: true, readOK: true},
+			acceptApplication: false,
+		},
+		{
+			name:       "tycho dirty",
+			pinnedRepo: "acme/widgets", pinnedAmpWT: "/tmp/amp-review", pinnedTychoWT: "/tmp/tycho-review",
+			pinnedHead: pinnedHead, pinnedTree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			amp:               attachment{repo: "acme/widgets", workdir: "/tmp/amp-review", head: pinnedHead, tree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", clean: true, readOK: true},
+			tycho:             attachment{repo: "acme/widgets", workdir: "/tmp/tycho-review", head: pinnedHead, tree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", clean: false, readOK: true},
+			acceptApplication: false,
+		},
+		{
+			name:       "workdir substituted",
+			pinnedRepo: "acme/widgets", pinnedAmpWT: "/tmp/amp-review", pinnedTychoWT: "/tmp/tycho-review",
+			pinnedHead: pinnedHead, pinnedTree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			amp:               attachment{repo: "acme/widgets", workdir: "/tmp/amp-review", head: pinnedHead, tree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", clean: true, readOK: true},
+			tycho:             attachment{repo: "acme/widgets", workdir: "/tmp/other-tycho", head: pinnedHead, tree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", clean: true, readOK: true},
+			acceptApplication: false,
+		},
+		{
+			name:       "repo mismatch",
+			pinnedRepo: "acme/widgets", pinnedAmpWT: "/tmp/amp-review", pinnedTychoWT: "/tmp/tycho-review",
+			pinnedHead: pinnedHead, pinnedTree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			amp:               attachment{repo: "acme/widgets", workdir: "/tmp/amp-review", head: pinnedHead, tree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", clean: true, readOK: true},
+			tycho:             attachment{repo: "acme/other", workdir: "/tmp/tycho-review", head: pinnedHead, tree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", clean: true, readOK: true},
+			acceptApplication: false,
+		},
+		{
+			name:       "read failure",
+			pinnedRepo: "acme/widgets", pinnedAmpWT: "/tmp/amp-review", pinnedTychoWT: "/tmp/tycho-review",
+			pinnedHead: pinnedHead, pinnedTree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			amp:               attachment{repo: "acme/widgets", workdir: "/tmp/amp-review", head: pinnedHead, tree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", clean: true, readOK: true},
+			tycho:             attachment{repo: "acme/widgets", workdir: "/tmp/tycho-review", head: pinnedHead, tree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", clean: true, readOK: false},
+			acceptApplication: false,
+		},
+	} {
+		match := func(a attachment, wantRepo, wantWT string) bool {
+			return a.readOK && a.clean &&
+				a.repo == wantRepo && a.workdir == wantWT &&
+				a.head == ac.pinnedHead && a.tree == ac.pinnedTree
+		}
+		accept := match(ac.amp, ac.pinnedRepo, ac.pinnedAmpWT) && match(ac.tycho, ac.pinnedRepo, ac.pinnedTychoWT)
+		if accept != ac.acceptApplication {
+			t.Fatalf("doc fixture post-tycho attachment %s: accept=%v want %v", ac.name, accept, ac.acceptApplication)
+		}
+	}
+}
+
+// cloneMap is a tiny test helper for documentation-consistency fixtures.
+func cloneMap(t *testing.T, in map[string]any) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 func TestProviderExecutorReadinessMatrixIsLinkedAndKeepsAuthorityBoundaries(t *testing.T) {
