@@ -1,8 +1,9 @@
 ---
-status: proposed-awaiting-owner-approval
+status: accepted-for-implementation
 issue: 320
 base: 9bea1aede3b4945f207d158c90c127a81bccb240
-implementation: stopped
+implementation: roadmap-tracked
+roadmap: 331
 ---
 
 # Symmetric creation and per-resource retirement dispositions
@@ -24,9 +25,9 @@ These constraints come from #320 and are not reopened here:
 5. Dirty disposable work is never discarded automatically or through a prompt. A dry run generates a privacy-safe manifest and stable digest; a later noninteractive invocation carries that digest. Adjacent mismatch requires a new digest and owner authorization.
 6. After exact attachment, runner, and process checks; useful-work preservation or exact dirty-discard authorization; and adjacent revalidation, the owner controls physical-worktree disposition despite an unrelated provider hold. That authority does not extend to provider evidence, provider processes, other processes, archive authority, or full-retirement claims.
 
-### Recommended decisions
+### Approved decisions
 
-This proposal recommends the smallest safe answers to #320's remaining choices:
+The owner accepted the following smallest safe answers by merging [PR #330](https://github.com/zainfathoni/amux/pull/330). Implementation is tracked in [issue #331](https://github.com/zainfathoni/amux/issues/331):
 
 1. **Plan lifetime and drift:** persist immutable identity/intent bindings and append outcomes; regenerate observations and proposed actions on every prepare. Bind finalize to a canonical manifest digest. Identity, scope, authority, attachment generation, evidence commitment, or dirty-state drift requires a new prepare; authority-bearing drift also requires new owner authorization. Exact no-drift retry does not.
 2. **Provider contract:** consume one provider-owned, versioned, bounded disposition assertion containing evidence identity/commitment/location class, disposition, blocker, recovery dependence, prohibited actions, owner decision where applicable, and review data. Core verifies shape and commitments but does not parse provider receipts or infer provider state.
@@ -35,18 +36,14 @@ This proposal recommends the smallest safe answers to #320's remaining choices:
 5. **Final-departure recovery:** serialize attachment departure under a bounded worktree-identity lock and generation. The winning final departure appends responsibility before releasing the attachment; any verified independent executor may later finalize that exact operation. The departing thread need not remain alive as transport. A concurrent loser re-reads the appended result and exits as an idempotent no-op.
 6. **Record mechanics:** use a versioned, line-oriented append-only encoding in Amux's existing private configuration/state boundary and existing bounded machine mutation lock, with a distinct lock key for exact worktree attachment generation. Do not create a second database. Exact location, filenames, lock composition, and command spelling remain owner-approved implementation details.
 
-### Still reserved for owner approval
+### Slice-reserved implementation mechanics
 
-Implementation remains stopped until the owner approves:
+The approved roadmap may proceed only through separately reviewed slices under #331. The architecture and ordered rollout are accepted; the following exact mechanics remain reserved for code-level owner review in the slices that introduce them:
 
-- the recommended encoding/location and lock domain;
-- the normative fields and digest canonicalization boundary;
-- the provider assertion trust boundary;
-- the dependency and blocker rules;
-- legacy admission behavior;
-- final-departure concurrency behavior;
-- the command and JSON surface; and
-- the implementation slices and rollout order.
+- exact command names and stable JSON fields/envelopes;
+- exact Go and on-disk schema representations, filenames, and locations;
+- canonical byte-encoding details within the approved normative model and digest boundary; and
+- exact composition and ordering of the existing machine mutation lock and distinct worktree attachment-generation lock.
 
 Provider-specific semantics, provider transport, provider routing, provider process mutation, retention duration policy, automatic review scheduling, and whether a particular retained resource should later be disposed remain with their existing owners. This proposal does not choose them.
 
@@ -634,7 +631,7 @@ All six classes MUST appear even when this abbreviated example shows two.
 
 ## Focused implementation slices
 
-These are review boundaries, not authorization to implement. Each slice should be independently reviewable; command/runtime work remains stopped pending explicit owner approval.
+These are the owner-approved roadmap boundaries, not implementation in this document. Each slice remains independently reviewable under #331, including any slice-reserved public or mechanical details.
 
 1. **Record and canonical commitments:** approve encoding/location; implement append-only header/events, stable operation ID, canonical digest, privacy-safe rendering, integrity and crash tests. No mutations.
 2. **Creation/admission references:** have spawn/adopt reference records; add explicit legacy dry-run/admission with unknown-safe behavior. No retirement mutations.
@@ -670,13 +667,13 @@ Documentation-only review of this proposal should check internal links, Markdown
 
 ## Release and version impact
 
-This proposal has no runtime, schema, command, skill, or durable-state effect. It should not trigger a release or version change. If approved, implementation should not be rushed into an unrelated release: the record/read-only prepare slices should land first, and the first mutating slice should receive its own compatibility and release decision. Any stable JSON/schema or command addition is at least a user-visible feature change; destructive disposition enablement merits explicit release notes and staged rollout, but no major version is implied while backward-compatible and opt-in.
+This proposal has no runtime, schema, command, skill, or durable-state effect. It should not trigger a release or version change. Implementation should not be rushed into an unrelated release: the record/read-only prepare slices should land first, and the first mutating slice should receive its own compatibility and release decision. Any stable JSON/schema or command addition is at least a user-visible feature change; destructive disposition enablement merits explicit release notes and staged rollout, but no major version is implied while backward-compatible and opt-in.
 
-## Approval gate
+## Approval and implementation gate
 
-The planning deliverable is complete when independently reviewed and accepted by the owner. Until then:
+The owner accepted this planning deliverable through merged PR #330. Issue #331 records the ordered implementation and release roadmap. Approval permits separately reviewed implementation slices; it does not itself select slice-reserved command/schema/filename/lock mechanics, implement behavior, or authorize a release.
 
-- no command, runtime skill, schema, durable state, or lifecycle behavior changes;
-- no inferred legacy authority;
-- no provider parser or generic workflow machinery; and
-- no release or merge represented as implementation of this proposal.
+- no implementation slice may infer legacy authority;
+- no implementation slice may add a provider parser or generic workflow machinery;
+- each slice must preserve its predecessor and release gates from #331; and
+- no documentation, design, incomplete foundation, merge, or issue completion authorizes a release.
