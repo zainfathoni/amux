@@ -395,7 +395,7 @@ func TestInvocationPolicyIsProgressivelyDisclosedWithoutChangingClaudeRoutes(t *
 			t.Errorf("invocation policy is missing %q", required)
 		}
 	}
-	for _, required := range []string{"explicit executor", "Select `medium`", "Amp-native `runner(id)`", "does not return a prompt digest", "do not claim exactly-once delivery"} {
+	for _, required := range []string{"explicit executor", "known linked ChatGPT subscription", "small mechanical work", "ordinary implementation", "hard architecture", "Amp-native `runner(id)`", "does not return a prompt digest", "do not claim exactly-once delivery"} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("native creation workflow is missing %q", required)
 		}
@@ -1760,7 +1760,7 @@ func TestCoordinatorSafetyAppearsInPublicReferences(t *testing.T) {
 	}
 }
 
-func TestSkillDrivenSpawnCommandsUseExplicitMedium(t *testing.T) {
+func TestSkillDrivenSpawnCommandsUseExplicitMode(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	for _, relativePath := range publicSkillFiles {
@@ -1772,14 +1772,14 @@ func TestSkillDrivenSpawnCommandsUseExplicitMedium(t *testing.T) {
 			if strings.Contains(command, "[selectors]") || strings.Contains(command, "|") {
 				return
 			}
-			if !strings.Contains(command, "--mode medium") && !(relativePath == filepath.Join("skills", "amux", "reference", "workflows.md") && strings.Contains(command, `--mode "$MODE"`)) {
-				t.Errorf("%s:%d spawn example omits explicit --mode medium: %s", relativePath, lineNumber, strings.TrimSpace(line))
+			if !strings.Contains(command, "--mode ") && !strings.Contains(command, "--mode=") {
+				t.Errorf("%s:%d spawn example omits explicit --mode: %s", relativePath, lineNumber, strings.TrimSpace(line))
 			}
 		})
 	}
 
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
-	for _, required := range []string{"MUST pass `--mode medium`", "An explicitly requested mode always wins", "Do not infer `low`, `high`, or `ultra`"} {
+	for _, required := range []string{"MUST pass an explicit mode", "linked ChatGPT subscription", "target-mode availability", "small mechanical work", "ordinary implementation", "hard architecture", "An explicitly requested mode always wins", "special modes remain explicit-only"} {
 		if !strings.Contains(skill, required) {
 			t.Errorf("SKILL.md is missing spawn policy %q", required)
 		}
@@ -1992,7 +1992,9 @@ func TestContractV1IsProgressivelyDisclosedForWorkers(t *testing.T) {
 		"merged",
 		"never authorize finish",
 		"/amux-claude",
-		"Do not use `low` mode",
+		"known linked ChatGPT subscription",
+		"small mechanical tasks",
+		"premium or special modes require an exact owner request",
 		"Do not Read Thread",
 		"Oracle must not Read Thread",
 	} {
@@ -2000,7 +2002,7 @@ func TestContractV1IsProgressivelyDisclosedForWorkers(t *testing.T) {
 			t.Errorf("contract-v1 missing %q", required)
 		}
 	}
-	for _, required := range []string{"Credit defaults", "no Read Thread for task context", "Oracle reviews get supplied diff/context only"} {
+	for _, required := range []string{"Invocation defaults", "do not Read Thread for task context", "give Oracle supplied diff/context only"} {
 		if !strings.Contains(skill, required) {
 			t.Errorf("SKILL.md must surface credit default %q", required)
 		}

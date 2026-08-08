@@ -1,8 +1,10 @@
 ---
-status: experimental-proposal
+status: partially-superseded
 ---
 
 # Amp internal invocation policy
+
+> **Mode-policy update (August 8, 2026):** Issue [#342](https://github.com/zainfathoni/amux/issues/342) supersedes this proposal's blanket Medium-only automatic-mode rule after Amp introduced ChatGPT-subscription routing for Low, Medium, and High. `medium` remains the omitted-mode compatibility default. Known linked ChatGPT routing plus known target-mode availability permits task-shaped Low/Medium/High selection; absent or unknown routing/availability remains Medium-only, and Ultra/plugin/special modes remain owner-explicit. The historical proposal below is retained unchanged. Read Thread, executor, fan-out, capacity, privacy, and provider-specific boundaries are not superseded.
 
 ## Decision boundary
 
