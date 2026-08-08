@@ -27,6 +27,10 @@ ACTION_KEYS = {
     "librarian": BASE_KEYS | {"capacity"},
     "task": BASE_KEYS | {"capacity"},
 }
+ACTION_KEYS_V2 = {
+    "amux_spawn": ACTION_KEYS["amux_spawn"] | {"chatgpt_subscription", "target_mode_available"},
+    "native_create": ACTION_KEYS["native_create"] | {"chatgpt_subscription", "target_mode_available"},
+}
 CAPACITY_KEYS = {
     "schema_version",
     "provider",
@@ -67,8 +71,8 @@ def public_result(document):
     }
 
 
-def invalid(action="invalid", enforcement="deterministic"):
-    return result(action, "reject", enforcement, "invalid_input", "resolver_schema_v1")
+def invalid(action="invalid", enforcement="deterministic", capability="resolver_schema_v1"):
+    return result(action, "reject", enforcement, "invalid_input", capability)
 
 
 def exact_integer(value, expected):
@@ -78,28 +82,56 @@ def exact_integer(value, expected):
 def resolve(request):
     if not isinstance(request, dict):
         return invalid()
+    version = request.get("version")
+    if not exact_integer(version, 1) and not exact_integer(version, 2):
+        return invalid()
+    schema_capability = "resolver_schema_v2" if version == 2 else "resolver_schema_v1"
     action = request.get("action")
     if not isinstance(action, str) or action not in ACTION_KEYS:
-        return invalid()
+        return invalid(capability=schema_capability)
     action_enforcement = "deterministic" if action == "amux_spawn" else "observed"
-    if not exact_integer(request.get("version"), 1):
-        return invalid(action, action_enforcement)
-    allowed = ACTION_KEYS[action]
+    if version == 2 and action not in ACTION_KEYS_V2:
+        return invalid(action, action_enforcement, schema_capability)
+    allowed = ACTION_KEYS_V2[action] if version == 2 else ACTION_KEYS[action]
     if set(request) - allowed:
-        return invalid(action, action_enforcement)
+        return invalid(action, action_enforcement, schema_capability)
 
     if action == "amux_spawn":
-        if set(request) != ACTION_KEYS[action] or request.get("automatic") is not True:
-            return invalid()
-        if request["mode"] == "medium":
-            return result(action, "allow", "deterministic", "automatic_medium", "skill_preflight_v1")
+        if set(request) != allowed and version == 1:
+            return invalid(capability=schema_capability)
+        if not (BASE_KEYS | {"mode", "automatic"}) <= set(request) or request.get("automatic") is not True:
+            return invalid(capability=schema_capability)
         if not isinstance(request["mode"], str) or not request["mode"]:
-            return invalid()
-        return result(action, "reject", "deterministic", "automatic_mode_not_medium", "skill_preflight_v1")
+            return invalid(capability=schema_capability)
+        if version == 1:
+            if request["mode"] == "medium":
+                return result(action, "allow", "deterministic", "automatic_medium", "skill_preflight_v1")
+            return result(action, "reject", "deterministic", "automatic_mode_not_medium", "skill_preflight_v1")
+        linked = request.get("chatgpt_subscription", False)
+        available = request.get("target_mode_available", False)
+        if not isinstance(linked, bool) or not isinstance(available, bool):
+            return invalid(capability=schema_capability)
+        if request["mode"] == "medium":
+            return result(action, "allow", "deterministic", "automatic_medium_default", "skill_preflight_v2")
+        if linked and available and request["mode"] in ("low", "high"):
+            return result(action, "allow", "deterministic", "automatic_chatgpt_task_mode", "skill_preflight_v2")
+        if request["mode"] in ("low", "high"):
+            reason = (
+                "automatic_mode_availability_unknown"
+                if linked
+                else "automatic_mode_requires_known_chatgpt_route"
+            )
+        else:
+            reason = "automatic_mode_requires_owner"
+        return result(action, "reject", "deterministic", reason, "skill_preflight_v2")
 
     if action == "native_create":
         if not isinstance(request.get("mode"), str) or not request["mode"]:
-            return invalid(action, "observed")
+            return invalid(action, "observed", schema_capability)
+        linked = request.get("chatgpt_subscription", False) if version == 2 else False
+        available = request.get("target_mode_available", False) if version == 2 else False
+        if not isinstance(linked, bool) or not isinstance(available, bool):
+            return invalid(action, "observed", schema_capability)
         if "executor" not in request:
             return result(action, "reject", "observed", "explicit_executor_required", "native_create_unproven")
         executor = request["executor"]
@@ -110,9 +142,13 @@ def resolve(request):
             and isinstance(executor.get("id"), str)
             and executor["id"]
         ):
-            return invalid(action, "observed")
-        decision = "allow" if request["mode"] == "medium" else "ask"
-        reason = "explicit_medium_executor" if decision == "allow" else "mode_approval_required"
+            return invalid(action, "observed", schema_capability)
+        if request["mode"] == "medium":
+            decision, reason = "allow", "explicit_medium_executor"
+        elif linked and available and request["mode"] in ("low", "high"):
+            decision, reason = "allow", "explicit_chatgpt_task_mode_executor"
+        else:
+            decision, reason = "ask", "mode_approval_required"
         return result(action, decision, "observed", reason, "native_create_unproven")
 
     if action == "read_thread":

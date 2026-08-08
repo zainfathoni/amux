@@ -77,15 +77,15 @@ curl -fsSL https://amux.zainf.dev/install.sh | AMUX_SKILLS_SOURCE="$AMUX_REPO" s
 
           <h2 id="sprawl">Skill-only sprawl</h2>
           <p><code>/amux sprawl</code> remains worker-only. Before side effects, the agent reads every issue and native dependency relationship, checks likely file/API overlap, and sequences anything dependent or conflicting.</p>
-          <pre><code># Native-create a medium Amp thread and deliver &lt;assignment&gt;; capture &lt;thread&gt;.
+          <pre><code># Native-create an explicit task-appropriate Amp thread and deliver &lt;assignment&gt;; capture &lt;thread&gt;.
 amux worker adopt --thread &lt;thread&gt; --workspace &lt;workspace&gt; \
   --window install-diagnostics --workdir &lt;dedicated-worktree&gt; --group amux-110</code></pre>
-          <p>Every accepted issue gets the <code>amux-agent-first</code> label, one narrow assignment, dedicated branch/worktree, semantic issue-unprefixed window, focused Oracle diff review, and explicit callback/finish protocol. For Amux issue work, use the explicit durable group/Amp label <code>amux-&lt;issue-number&gt;</code> and report ID <code>amux-&lt;issue-number&gt;-worker-&lt;ordinal&gt;</code>. Medium is mandatory unless the user explicitly requests another mode; complexity never raises it automatically.</p>
+          <p>Every accepted issue gets the <code>amux-agent-first</code> label, one narrow assignment, dedicated branch/worktree, semantic issue-unprefixed window, focused Oracle diff review, and explicit callback/finish protocol. For Amux issue work, use the explicit durable group/Amp label <code>amux-&lt;issue-number&gt;</code> and report ID <code>amux-&lt;issue-number&gt;-worker-&lt;ordinal&gt;</code>. With known linked ChatGPT routing and target-mode availability, use Low for small mechanical work, Medium for ordinary implementation, or High for difficult architecture, debugging, or review; otherwise use Medium. Ultra and special modes remain owner-explicit.</p>
 
           <h2 id="coordination">Durable issue-worker coordination</h2>
           <p>The coordinator first inspects native issue dependencies and active overlap, fixes explicit durable identity, then creates worktrees from fresh <code>origin/main</code>. It declares a durable group without projecting the long-lived coordinator to an Amp label, registers the exact verified coordinator pane, creates the thread natively, and adopts the exact returned identity with explicit <code>--group</code>.</p>
           <pre><code>amux callback register --group amux-135 --thread &lt;coordinator&gt; --pane &lt;pane&gt;
-# Native-create a medium thread with &lt;assignment&gt;, then capture &lt;worker&gt;.
+# Native-create an explicit task-appropriate thread with &lt;assignment&gt;, then capture &lt;worker&gt;.
 amux worker adopt --thread &lt;worker&gt; --workspace &lt;workspace&gt; \
   --window &lt;semantic-window&gt; --workdir &lt;fresh-worktree&gt; --group amux-135
 amux report submit --report-id amux-135-worker-1 --group amux-135 \

@@ -385,7 +385,7 @@ func TestSpawnTmuxCreateFailureReportsIndeterminateIdentityWithoutRetry(t *testi
 	}
 }
 
-func TestCreateLocalAmpThreadUsesExactModeAndCwdOnce(t *testing.T) {
+func TestCreateLocalAmpThreadPassesThroughCustomModeAndUsesCwdOnce(t *testing.T) {
 	workdir := t.TempDir()
 	bin := t.TempDir()
 	log := filepath.Join(bin, "amp.log")
@@ -394,11 +394,11 @@ printf '%s\n%s\n' "$(pwd)" "$*" >> `+shellSingleQuote(log)+`
 printf 'T-exact\n'
 `)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	thread, err := createLocalAmpThread(workdir, "high")
+	thread, err := createLocalAmpThread(workdir, "team-architect")
 	if err != nil || thread != "T-exact" {
 		t.Fatalf("thread=%q err=%v", thread, err)
 	}
-	if got, want := readSpawnTestFile(t, log), workdir+"\nthreads new --mode high\n"; got != want {
+	if got, want := readSpawnTestFile(t, log), workdir+"\nthreads new --mode team-architect\n"; got != want {
 		t.Fatalf("amp invocation=%q, want %q", got, want)
 	}
 }

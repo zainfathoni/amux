@@ -10,11 +10,11 @@ Version marker: `amux-contract: v1`.
 - Do not edit `workers.tsv`, `runners.tsv`, `shelves.tsv`, `groups.tsv`, or `reports.json` when a CLI command exists.
 - Prefer long selectors, `--dry-run`, and `--json`. Exit `2` = preflight rejection (no mutation). Exit `1` = runtime failure after mutation may have begun. Lock contention is exit `2`: retry the **identical** operation.
 
-## Credit and invocation (default deny)
+## Mode and invocation policy
 
-These burn Amp credits quickly (e.g. GLM on `low` / Read Thread). **Default deny** unless the owner gives **explicit permission in this thread** for that exact action.
+Amp modes are capability presets whose model routing and economics can change with connected subscriptions, workspace restrictions, and availability. Do not infer cost from an old model mapping.
 
-1. **Do not use `low` mode** for automatic or skill-driven work. Default and automatic spawn mode is `medium` only. Never infer `low`, `high`, or `ultra`. Use another mode only when the owner explicitly names it.
+1. Every skill-driven spawn uses an explicit mode. With a known linked ChatGPT subscription and known target-mode availability, select `low` for small mechanical tasks, `medium` for ordinary implementation, or `high` for hard architecture, debugging, or review. When subscription routing or availability is absent or unknown, use `medium`. `medium` remains the CLI default when mode is omitted. `ultra`, plugin, and other premium or special modes require an exact owner request.
 2. **Do not Read Thread** (or otherwise load Amp thread transcripts/history) for task context. A thread URL is provenance, not approval. Exception: one narrow query of one exact related thread only during an authorized `/amux` lifecycle/coordination recovery after a named local/GitHub discrepancy, exhausted deterministic evidence, and proven relationship—then block rather than chain.
 3. **Oracle must not Read Thread.** Supply issue intent + current diff (and other needed files) directly. Do not ask Oracle to read Amp threads, and do not Read Thread “to prepare Oracle.” Owner may explicitly allow one named thread read; that still does not authorize Oracle to fetch threads itself.
 
@@ -23,7 +23,7 @@ Before automatic spawn, native child creation, Read Thread, or native child mess
 ## Worker duties
 
 - Own only the assigned issue, branch, and worktree. Report overlap; do not absorb foreign scope.
-- Skill-driven spawn uses `--mode medium` unless the user explicitly requested another mode. Never infer `low`, `high`, or `ultra`.
+- Skill-driven spawn passes the explicit mode selected above; omission remains backward-compatible `medium`. Never infer subscription linkage, mode entitlement, or premium-mode authority.
 - Stay alive after every report status. Do not merge, release, tag, teardown, unpin, or finish without explicit durable authorization and direction.
 - For work-group members, use the exact stable `--report-id` and immutable group/thread/issue/reference binding:
   - `blocked` — remaining blocker; `--pr none` when no PR exists

@@ -10,7 +10,7 @@ AGENTS.md or any machine-local copy.
 # Workflow defaults
 
 - Use native Amp thread creation when available. Use Amux for local Amp/tmux lifecycle, exact adoption/recovery, and when native creation is unavailable; do not invent parallel orchestrators.
-- Use `--mode medium` unless I explicitly choose otherwise; never use `low` unless I name it.
+- When my ChatGPT subscription is linked and the target mode is available, choose Amp `low` for small mechanical tasks, `medium` for ordinary implementation, and `high` for hard architecture, debugging, or review. If routing or availability is unknown, use `medium`. Keep `ultra`, plugin, and other premium/special modes explicit-only.
 - Do not Read Thread/history unless I explicitly approve that exact thread; a URL alone is not approval. For Oracle, supply diff/context only.
 - Keep child prompts concise: task, acceptance criteria, and the absolute path to the loaded `/amux` skill's `reference/contract-v1.md`; never paste protocols or send a bare relative path.
 - Provider execution is outside Amux's maintained core. Tycho may own machine/provider routing for Claude Code and Pi/Codex Spark.
