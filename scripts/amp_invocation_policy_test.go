@@ -29,13 +29,20 @@ func TestInvocationPolicyResolver(t *testing.T) {
 		result string
 		reason string
 	}{
-		{name: "automatic medium spawn", input: `{"version":1,"action":"amux_spawn","mode":"medium","automatic":true}`, result: "allow", reason: "automatic_medium"},
-		{name: "automatic low spawn is blocked without rewrite", input: `{"version":1,"action":"amux_spawn","mode":"low","automatic":true}`, exit: 2, result: "reject", reason: "automatic_mode_not_medium"},
+		{name: "version one medium preserves compatibility", input: `{"version":1,"action":"amux_spawn","mode":"medium","automatic":true}`, result: "allow", reason: "automatic_medium"},
+		{name: "version one low preserves compatibility", input: `{"version":1,"action":"amux_spawn","mode":"low","automatic":true}`, exit: 2, result: "reject", reason: "automatic_mode_not_medium"},
+		{name: "version two medium keeps compatibility default", input: `{"version":2,"action":"amux_spawn","mode":"medium","automatic":true}`, result: "allow", reason: "automatic_medium_default"},
+		{name: "automatic low spawn uses known available ChatGPT route", input: `{"version":2,"action":"amux_spawn","mode":"low","automatic":true,"chatgpt_subscription":true,"target_mode_available":true}`, result: "allow", reason: "automatic_chatgpt_task_mode"},
+		{name: "automatic high spawn uses known available ChatGPT route", input: `{"version":2,"action":"amux_spawn","mode":"high","automatic":true,"chatgpt_subscription":true,"target_mode_available":true}`, result: "allow", reason: "automatic_chatgpt_task_mode"},
+		{name: "automatic low spawn is blocked when route is unknown", input: `{"version":2,"action":"amux_spawn","mode":"low","automatic":true}`, exit: 2, result: "reject", reason: "automatic_mode_requires_known_chatgpt_route"},
+		{name: "automatic high spawn is blocked when availability is unknown", input: `{"version":2,"action":"amux_spawn","mode":"high","automatic":true,"chatgpt_subscription":true}`, exit: 2, result: "reject", reason: "automatic_mode_availability_unknown"},
+		{name: "automatic ultra remains owner explicit", input: `{"version":2,"action":"amux_spawn","mode":"ultra","automatic":true,"chatgpt_subscription":true,"target_mode_available":true}`, exit: 2, result: "reject", reason: "automatic_mode_requires_owner"},
 		{name: "exact approved task read remains advisory", input: `{"version":1,"action":"read_thread","purpose":"task_context","exact_approval":true,"target_count":1}`, result: "would_allow", reason: "exact_task_read_approved"},
 		{name: "thread URL is not approval", input: `{"version":1,"action":"read_thread","purpose":"task_context","exact_approval":false,"target_count":1,"url_provenance":true}`, result: "would_ask", reason: "exact_approval_required"},
 		{name: "first local GitHub discrepancy recovery query", input: `{"version":1,"action":"read_thread","purpose":"discrepancy_recovery","target_count":1,"concrete_local_github_discrepancy":true,"deterministic_evidence_exhausted":true,"relationship_evidenced":true,"prior_queries":0}`, result: "would_allow", reason: "bounded_discrepancy_query"},
 		{name: "discrepancy recovery cannot chain", input: `{"version":1,"action":"read_thread","purpose":"discrepancy_recovery","target_count":1,"concrete_local_github_discrepancy":true,"deterministic_evidence_exhausted":true,"relationship_evidenced":true,"prior_queries":1}`, result: "would_reject", reason: "discrepancy_query_exhausted"},
 		{name: "native creation requires executor but remains advisory", input: `{"version":1,"action":"native_create","mode":"medium"}`, result: "would_reject", reason: "explicit_executor_required"},
+		{name: "native high creation with known available ChatGPT route remains advisory", input: `{"version":2,"action":"native_create","mode":"high","executor":"orb","chatgpt_subscription":true,"target_mode_available":true}`, result: "would_allow", reason: "explicit_chatgpt_task_mode_executor"},
 		{name: "capacity schema drift asks in observation", input: `{"version":1,"action":"oracle","capacity":{"schema_version":2}}`, result: "would_ask", reason: "capacity_schema_unsupported"},
 		{name: "unknown charge route asks despite known pool", input: `{"version":1,"action":"oracle","capacity":{"schema_version":1,"provider":"codexbar","provider_version":"documented-v1","pool":"primary","window_minutes":300,"unit":"percent_used","observed_amount":43,"freshness":"fresh","confidence":"reported","charge_route":"unknown","reservation":"none","reserve_status":"above"}}`, result: "would_ask", reason: "capacity_charge_route_unknown"},
 		{name: "unknown reserve status asks with otherwise complete capacity", input: `{"version":1,"action":"oracle","capacity":{"schema_version":1,"provider":"codexbar","provider_version":"documented-v1","pool":"primary","window_minutes":300,"unit":"percent_used","observed_amount":43,"freshness":"fresh","confidence":"reported","charge_route":"primary","reservation":"held","reserve_status":"unknown"}}`, result: "would_ask", reason: "capacity_reserve_unknown"},
@@ -88,13 +95,23 @@ func TestInvocationPolicyRejectsUnknownFieldsAndMalformedInput(t *testing.T) {
 	t.Parallel()
 	for _, input := range []string{
 		`{"version":1,"action":"amux_spawn","mode":"medium","automatic":true,"raw_target":"secret"}`,
+		`{"version":1,"action":"amux_spawn","mode":"low","automatic":true,"chatgpt_subscription":true}`,
 		`{"version":1,"action":"amux_spawn"}`,
 		`{"version":true,"action":"amux_spawn","mode":"medium","automatic":true}`,
+		`{"version":2,"action":"amux_spawn","mode":"low","automatic":true,"chatgpt_subscription":"yes","target_mode_available":true}`,
+		`{"version":2,"action":"amux_spawn","mode":"high","automatic":true,"chatgpt_subscription":true,"target_mode_available":"yes"}`,
 		`not-json`,
 	} {
 		got, exit, stderr := runPolicy(t, nil, input)
 		if exit != 2 || got.Reason != "invalid_input" {
 			t.Fatalf("input=%q exit=%d result=%+v stderr=%q", input, exit, got, stderr)
+		}
+		wantCapability := "resolver_schema_v1"
+		if strings.Contains(input, `"version":2`) {
+			wantCapability = "resolver_schema_v2"
+		}
+		if got.Capability != wantCapability {
+			t.Fatalf("input=%q capability=%q, want %q", input, got.Capability, wantCapability)
 		}
 		if strings.Contains(stderr, input) || strings.Contains(stderr, "secret") {
 			t.Fatalf("invalid-input diagnostic leaked input: %q", stderr)

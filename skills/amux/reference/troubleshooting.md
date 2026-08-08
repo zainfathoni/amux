@@ -25,7 +25,7 @@ Exit `1` means mutation may have started. Inspect `successful`, `skipped`, and `
 Health first; `no-response` alone does not authorize replacement. After explicit approval:
 
 1. Preserve the old remote thread unless archival was requested.
-2. Preflight a new semantic window and stable key with explicit medium mode:
+2. Preflight a new semantic window and stable key with the explicit mode selected under the spawn policy:
 
    ```sh
    amux --dry-run worker adopt --thread <native-created-thread> --workspace <workspace> --window <replacement-slug> --workdir <path>
@@ -35,7 +35,7 @@ Health first; `no-response` alone does not authorize replacement. After explicit
 4. Use `amux worker remove --thread <old-id>` to stop/delete old local configuration without archiving. Use teardown only when archival is explicitly intended.
 5. On interruption, report exact old/new thread, config, pane, and worktree state before any retry.
 
-Substitute another mode only when the user explicitly requested it. Never infer a higher mode from replacement complexity or urgency.
+Reuse the task-appropriate mode selection rule; replacement urgency alone does not justify `high`, and replacement work never authorizes `ultra` or a special mode.
 
 ## Runner safety
 

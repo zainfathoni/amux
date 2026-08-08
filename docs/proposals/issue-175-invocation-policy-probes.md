@@ -4,6 +4,8 @@ status: experimental-evidence
 
 # Issue 175 Amp invocation-policy probes
 
+> **Historical mode result:** The July 2026 deterministic Medium-only resolver result below records the client and policy then tested. Issue [#342](https://github.com/zainfathoni/amux/issues/342) supersedes that mode decision after Amp's August 7 ChatGPT-subscription routing change. The current version-2 resolver preserves Medium when routing or availability is absent or unknown, permits task-shaped Low/Medium/High when a linked ChatGPT route and target-mode availability are known, and keeps Ultra/special modes owner-explicit. Version 1 preserves the historical request and reason-code behavior. Other probe outcomes remain unchanged.
+
 ## Scope and method
 
 These public-safe probes cover Amp CLI `0.0.1784477831-g57f050` on macOS and the skill-owned automatic spawn seam. They used public Amp documentation, `amp tools list/show`, `amp permissions test`, and a temporary delegated helper. The helper probe ran no tool and changed no user settings. No model-backed Amp probe, thread/history access, private policy, account evidence, receipt, or runtime dossier was used.
