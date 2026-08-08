@@ -14,8 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -593,9 +591,6 @@ cleanup:
 		_ = guardian.Process.Kill()
 		groupCovered = signalProcessGroup(guardianPID) == nil
 	}
-	if timedOut {
-		cleanProcessTree(cmd.Process.Pid, 2*time.Second)
-	}
 	// All group operations are complete. Closing this also lets the inert
 	// guardian exit if its exact kill failed; do not touch the PGID afterward.
 	guardianHold.Close()
@@ -734,81 +729,6 @@ func terminateGuardian(guardian *exec.Cmd, hold *os.File) error {
 		return errors.New("Pi process-group termination could not be verified")
 	}
 	return nil
-}
-
-func cleanProcessTree(root int, timeout time.Duration) {
-	if runtime.GOOS != "linux" || root <= 1 {
-		return
-	}
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		pids := collectDescendantPIDs(root)
-		if len(pids) == 0 {
-			return
-		}
-		for _, pid := range pids {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-		}
-		allDone := true
-		for _, pid := range pids {
-			if err := syscall.Kill(pid, 0); err == nil {
-				allDone = false
-				break
-			}
-		}
-		if allDone {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-}
-
-func collectDescendantPIDs(root int) []int {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return nil
-	}
-	parentOf := map[int]int{}
-	for _, entry := range entries {
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil {
-			continue
-		}
-		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-		if err != nil {
-			continue
-		}
-		closingParen := bytes.LastIndexByte(stat, ')')
-		if closingParen < 0 || len(stat) < closingParen+3 {
-			continue
-		}
-		fields := bytes.Fields(stat[closingParen+2:])
-		if len(fields) < 4 {
-			continue
-		}
-		ppid, err := strconv.Atoi(string(fields[1]))
-		if err != nil {
-			continue
-		}
-		parentOf[pid] = ppid
-	}
-	found := map[int]struct{}{root: {}}
-	var descendants []int
-	changed := true
-	for changed {
-		changed = false
-		for pid, ppid := range parentOf {
-			if _, seen := found[pid]; seen {
-				continue
-			}
-			if _, parentSeen := found[ppid]; parentSeen {
-				found[pid] = struct{}{}
-				descendants = append(descendants, pid)
-				changed = true
-			}
-		}
-	}
-	return descendants
 }
 
 func parseReplacement(data []byte) (replacement, error) {
