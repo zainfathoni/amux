@@ -1869,6 +1869,25 @@ func TestFinishRemovalGateDocumentsEveryFailClosedInvariant(t *testing.T) {
 			t.Errorf("finish removal gate is missing %q", required)
 		}
 	}
+	for _, required := range []string{
+		"`git fetch --prune origin`",
+		"Plain `git fetch origin` is insufficient",
+		"A deleted upstream ref must not satisfy rule 2a",
+		"workflows.md#removal-preflight-for-finish-remove-on-missing-and-prune",
+		"refs/remotes/origin/<name>",
+	} {
+		if !strings.Contains(reference, required) {
+			t.Errorf("direct classifier entry path is missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		"freshly re-derive rules 2a–5 for every authorized row",
+		"never compare or reuse a stale verdict",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("repository-wide prune revalidation is missing %q", required)
+		}
+	}
 	mutation := strings.Index(workflow, "[Remove the worker worktree without force")
 	link := strings.Index(workflow, "](removal-safety.md#removal-ordering-context)")
 	if mutation < 0 || link < mutation {
