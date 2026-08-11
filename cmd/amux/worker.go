@@ -267,6 +267,9 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 	}
 	for _, row := range rows {
 		out := workerOutcome(row, in.Command.Name, "")
+		if in.Command.Name == "teardown" {
+			out.Teardown = newTeardownDetails()
+		}
 		if (in.Command.Name == "launch" || in.Command.Name == "restart") && shelved[row.Thread] {
 			out.Message = "worker is locally shelved"
 			env.Skipped = append(env.Skipped, out)
@@ -372,17 +375,47 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			changed = err == nil
 		case "teardown":
 			err = archiveAmpThread(row.Thread)
-			if err == nil {
-				_, err = config.RemoveShelf(dir.ShelvesPath(), row.Thread)
+			if err != nil {
+				setTeardownArtifact(out.Teardown, "remote_thread_archive", "failed", err.Error())
+			} else {
+				setTeardownArtifact(out.Teardown, "remote_thread_archive", "completed", "")
+				var shelfRemoved bool
+				shelfRemoved, err = config.RemoveShelf(dir.ShelvesPath(), row.Thread)
+				if err != nil {
+					setTeardownArtifact(out.Teardown, "shelf_intent", "failed", err.Error())
+				} else {
+					if shelfRemoved {
+						setTeardownArtifact(out.Teardown, "shelf_intent", "removed", "")
+					} else {
+						setTeardownArtifact(out.Teardown, "shelf_intent", "already_absent", "shelf intent was already absent")
+					}
+				}
 			}
 			if err == nil && inspections[row.Thread].state == workerPaneExact {
 				err = revalidateWorkerBeforeMutation(row, inspections[row.Thread])
-				if err == nil {
+				if err != nil {
+					setTeardownArtifact(out.Teardown, "local_client", "failed", err.Error())
+				} else {
 					err = tmux.Runner{}.KillWindow(inspections[row.Thread].pane.WindowID)
+					if err != nil {
+						setTeardownArtifact(out.Teardown, "local_client", "failed", err.Error())
+					} else {
+						setTeardownArtifact(out.Teardown, "local_client", "stopped", "")
+					}
 				}
+			} else if err == nil {
+				setTeardownArtifact(out.Teardown, "local_client", "already_stopped", "verified local client was already absent")
 			}
 			if err == nil {
-				_, err = config.Remove(dir.WorkersPath(), row.Workspace, row.Window)
+				var workerRemoved bool
+				workerRemoved, err = config.Remove(dir.WorkersPath(), row.Workspace, row.Window)
+				if err != nil {
+					setTeardownArtifact(out.Teardown, "worker_configuration", "failed", err.Error())
+				} else if workerRemoved {
+					setTeardownArtifact(out.Teardown, "worker_configuration", "removed", "")
+				} else {
+					setTeardownArtifact(out.Teardown, "worker_configuration", "already_absent", "worker configuration was already absent")
+				}
 			}
 			changed = err == nil
 		case "doctor":
@@ -407,15 +440,31 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 		}
 		if err != nil {
 			out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: err.Error()}
+			if in.Command.Name == "teardown" {
+				markTeardownDownstreamUnattempted(out.Teardown)
+				out.Message = teardownMessage(out.Teardown)
+				if !in.Options.JSON {
+					fmt.Fprintf(a.stdout, "%s\t%s; error=%s\n", row.Thread, out.Message, err)
+				}
+			}
 			env.Failed = append(env.Failed, out)
 			continue
 		}
 		if in.Command.Name == "teardown" && inspections[row.Thread].state == workerPaneAbsent {
-			out.Message = "already_stopped"
+			out.Message = teardownMessage(out.Teardown)
 			env.Skipped = append(env.Skipped, out)
+			if !in.Options.JSON {
+				fmt.Fprintf(a.stdout, "%s\t%s\n", row.Thread, out.Message)
+			}
 			continue
 		}
 		if changed {
+			if in.Command.Name == "teardown" {
+				out.Message = teardownMessage(out.Teardown)
+				if !in.Options.JSON {
+					fmt.Fprintf(a.stdout, "%s\t%s\n", row.Thread, out.Message)
+				}
+			}
 			env.Successful = append(env.Successful, out)
 		} else {
 			out.Message = "already in desired state"
@@ -760,6 +809,65 @@ func selectWorkerRows(rows []config.Row, s selectors) []config.Row {
 func workerOutcome(r config.Row, action, message string) result.Outcome {
 	id, _ := result.WorkerResource(r.Thread)
 	return result.Outcome{Resource: id, Action: action, Message: message}
+}
+
+func newTeardownDetails() *result.TeardownDetails {
+	details := &result.TeardownDetails{Artifacts: make([]result.TeardownArtifactDetails, 0, 8)}
+	for _, artifact := range []string{"remote_thread_archive", "shelf_intent", "local_client", "worker_configuration"} {
+		details.Artifacts = append(details.Artifacts, result.TeardownArtifactDetails{
+			Artifact: artifact,
+			Outcome:  "unattempted",
+			Reason:   "teardown artifact has not run",
+		})
+	}
+	for _, artifact := range []struct {
+		name   string
+		reason string
+	}{
+		{"worktree_directory", "amux teardown does not own worktree directory cleanup"},
+		{"branch_refs", "amux teardown does not own Git branch refs"},
+		{"stashes", "amux teardown does not own Git stashes"},
+		{"external_project_records", "amux teardown does not own external project registries"},
+	} {
+		details.Artifacts = append(details.Artifacts, result.TeardownArtifactDetails{Artifact: artifact.name, Outcome: "not_owned", Reason: artifact.reason})
+	}
+	return details
+}
+
+func setTeardownArtifact(details *result.TeardownDetails, artifact, outcome, reason string) {
+	for i := range details.Artifacts {
+		if details.Artifacts[i].Artifact == artifact {
+			details.Artifacts[i].Outcome = outcome
+			details.Artifacts[i].Reason = reason
+			return
+		}
+	}
+}
+
+func markTeardownDownstreamUnattempted(details *result.TeardownDetails) {
+	failedArtifact := ""
+	for i := range details.Artifacts {
+		artifact := &details.Artifacts[i]
+		if artifact.Outcome == "failed" {
+			failedArtifact = artifact.Artifact
+			continue
+		}
+		if failedArtifact != "" && artifact.Outcome == "unattempted" {
+			artifact.Reason = "not attempted because " + failedArtifact + " failed"
+		}
+	}
+}
+
+func teardownMessage(details *result.TeardownDetails) string {
+	parts := make([]string, 0, len(details.Artifacts))
+	for _, artifact := range details.Artifacts {
+		part := artifact.Artifact + "=" + artifact.Outcome
+		if artifact.Reason != "" {
+			part += " (" + artifact.Reason + ")"
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func workerRowsEquivalent(left, right config.Row) bool {

@@ -197,6 +197,16 @@ type GroupNamingDetails struct {
 	ConfigSource  string `json:"config_source"`
 }
 
+type TeardownArtifactDetails struct {
+	Artifact string `json:"artifact"`
+	Outcome  string `json:"outcome"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+type TeardownDetails struct {
+	Artifacts []TeardownArtifactDetails `json:"artifacts"`
+}
+
 type Outcome struct {
 	Resource    ResourceID          `json:"resource"`
 	Action      string              `json:"action"`
@@ -209,6 +219,7 @@ type Outcome struct {
 	Report      *ReportDetails      `json:"report,omitempty"`
 	Callback    *CallbackDetails    `json:"callback,omitempty"`
 	GroupNaming *GroupNamingDetails `json:"group_naming,omitempty"`
+	Teardown    *TeardownDetails    `json:"teardown,omitempty"`
 	Error       *Failure            `json:"error,omitempty"`
 }
 
