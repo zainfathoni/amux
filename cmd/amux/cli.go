@@ -152,7 +152,7 @@ func workerCommand() *commandSpec {
 		workerLeaf("unshelve", "Unshelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("teardown", "Teardown workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("doctor", "Diagnose workers", false, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
-		workerLeaf("reconcile", "Reconcile workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
+		workerLeaf("reconcile", "Reconcile workers", true, "--workspace, -w <name>", "--workdir, -d <path>", "--thread, -t <id>", "--current", "--all"),
 	}
 	return worker
 }

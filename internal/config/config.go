@@ -461,6 +461,9 @@ func RemoveRows(path string, shouldRemove func(Row) bool) (int, error) {
 		}
 		kept = append(kept, line)
 	}
+	if removed == 0 {
+		return 0, nil
+	}
 	return removed, writeLinesAtomic(path, kept)
 }
 

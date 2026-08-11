@@ -1390,6 +1390,194 @@ func TestWorkerDoctorExpandsTildeWorkdir(t *testing.T) {
 	}
 }
 
+func TestWorkerReconcileRemovesOnlyProvenMissingCanonicalRegistrationAndConverges(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	missing := filepath.Join(home, "missing-worker")
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: "~/missing-worker", Thread: "T-missing"}
+	writeWorkerRegistry(t, dir, row.String()+"\n")
+	installAbsentWorkerTmux(t)
+	registryPath := filepath.Join(dir, config.WorkersFile)
+	before, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dry := executeWorkerJSON(t, "--json", "--dry-run", "--config-dir", dir, "worker", "reconcile", "--thread", row.Thread)
+	if len(dry.Planned) != 1 || dry.Planned[0].Reconcile == nil || dry.Planned[0].Reconcile.Authority != config.WorkersFile || !dry.Planned[0].Reconcile.RegistryBinding || dry.Planned[0].Reconcile.Workdir != missing || dry.Planned[0].Reconcile.WorkdirState != result.WorkdirMissing || dry.Planned[0].Reconcile.Decision != "remove_stale_registration" {
+		t.Fatalf("worker reconcile dry-run evidence = %+v", dry)
+	}
+	if after, readErr := os.ReadFile(registryPath); readErr != nil || !bytes.Equal(before, after) {
+		t.Fatalf("worker reconcile dry-run mutated registry: before=%q after=%q err=%v", before, after, readErr)
+	}
+
+	done := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "reconcile", "--thread", row.Thread)
+	if len(done.Successful) != 1 || done.Successful[0].Reconcile == nil || done.Successful[0].Reconcile.Decision != "remove_stale_registration" {
+		t.Fatalf("worker reconcile result = %+v", done)
+	}
+	rows, err := config.LoadReadOnly(registryPath)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("worker reconcile retained stale binding: rows=%+v err=%v", rows, err)
+	}
+	repeated := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "reconcile", "--thread", row.Thread)
+	if len(repeated.Skipped) != 1 || !strings.Contains(repeated.Skipped[0].Message, "no workers.tsv binding") {
+		t.Fatalf("repeated worker reconcile = %+v", repeated)
+	}
+}
+
+func TestWorkerReconcilePreservesDirectoryWithoutRegistryAuthority(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, config.GroupsFile), []byte("# unrelated group evidence\nteam\tmember\tT-unregistered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, config.ReportsFile), []byte(`{"malformed":"ignored without a workers.tsv binding"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "reconcile", "--workdir", workdir)
+	if len(got.Skipped) != 1 || got.Skipped[0].Resource.Kind != "worker_workdir" || got.Skipped[0].Reconcile == nil || got.Skipped[0].Reconcile.Authority != config.WorkersFile || got.Skipped[0].Reconcile.RegistryBinding || got.Skipped[0].Reconcile.WorkdirState != result.WorkdirPresent || got.Skipped[0].Reconcile.Decision != "preserve_unregistered_directory" {
+		t.Fatalf("unregistered directory reconcile = %+v", got)
+	}
+	if stat, err := os.Stat(workdir); err != nil || !stat.IsDir() {
+		t.Fatalf("unregistered directory was mutated: %v, %v", stat, err)
+	}
+}
+
+func TestWorkerReconcileRefusesBlockedNeverAuthorizedReportsWithZeroAndAbsentKeys(t *testing.T) {
+	for _, absentKey := range []bool{false, true} {
+		name := "literal-go-zero"
+		if absentKey {
+			name = "absent-key"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			missing := filepath.Join(t.TempDir(), "missing")
+			row := config.Row{Workspace: "alpha", Window: "worker", Workdir: missing, Thread: "T-blocked"}
+			writeWorkerRegistry(t, dir, row.String()+"\n")
+			writeBlockedWorkerReport(t, dir, row.Thread, "free-text-report-id", absentKey)
+			registryPath := filepath.Join(dir, config.WorkersFile)
+			before, err := os.ReadFile(registryPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got, reconcileErr := executeWorkerJSONResult(t, "--json", "--config-dir", dir, "worker", "reconcile", "--thread", row.Thread)
+			if reconcileErr == nil || result.ExitCode(reconcileErr) != result.ExitRejected || len(got.Failed) != 1 || got.Failed[0].Reconcile == nil || got.Failed[0].Reconcile.Decision != "refuse_open_obligation" || strings.Join(got.Failed[0].Reconcile.OpenObligations, ",") != "free-text-report-id" {
+				t.Fatalf("blocked worker reconcile = %+v err=%v", got, reconcileErr)
+			}
+			after, readErr := os.ReadFile(registryPath)
+			if readErr != nil || !bytes.Equal(before, after) {
+				t.Fatalf("blocked worker reconcile mutated registry: before=%q after=%q err=%v", before, after, readErr)
+			}
+		})
+	}
+}
+
+func TestWorkerReconcileFailsClosedOnUnprovenStatesAndReportReadErrors(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		workdir   func(*testing.T) string
+		wantState result.WorkdirState
+		decision  string
+	}{
+		{name: "not-a-directory", workdir: func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "file")
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}, wantState: result.WorkdirNotDirectory, decision: "refuse_not_a_directory"},
+		{name: "unreadable", workdir: func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "loop")
+			if err := os.Symlink(filepath.Base(path), path); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}, wantState: result.WorkdirUnreadable, decision: "refuse_unreadable"},
+		{name: "dangling-symlink", workdir: func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "dangling")
+			if err := os.Symlink("missing-target", path); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}, wantState: result.WorkdirUnreadable, decision: "refuse_unreadable"},
+		{name: "relative-ambiguity", workdir: func(*testing.T) string { return "relative/missing" }, wantState: result.WorkdirAmbiguous, decision: "refuse_relative_ambiguity"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			row := config.Row{Workspace: "alpha", Window: "worker", Workdir: test.workdir(t), Thread: "T-worker"}
+			writeWorkerRegistry(t, dir, row.String()+"\n")
+			registryPath := filepath.Join(dir, config.WorkersFile)
+			before, err := os.ReadFile(registryPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, reconcileErr := executeWorkerJSONResult(t, "--json", "--config-dir", dir, "worker", "reconcile", "--all")
+			if reconcileErr == nil || result.ExitCode(reconcileErr) != result.ExitRejected || len(got.Failed) != 1 || got.Failed[0].Reconcile == nil || got.Failed[0].Reconcile.WorkdirState != test.wantState || got.Failed[0].Reconcile.Decision != test.decision {
+				t.Fatalf("%s reconcile = %+v err=%v", test.name, got, reconcileErr)
+			}
+			after, readErr := os.ReadFile(registryPath)
+			if readErr != nil || !bytes.Equal(before, after) {
+				t.Fatalf("%s reconcile mutated registry: before=%q after=%q err=%v", test.name, before, after, readErr)
+			}
+		})
+	}
+
+	t.Run("reports-read-error", func(t *testing.T) {
+		dir := t.TempDir()
+		row := config.Row{Workspace: "alpha", Window: "worker", Workdir: filepath.Join(t.TempDir(), "missing"), Thread: "T-worker"}
+		writeWorkerRegistry(t, dir, row.String()+"\n")
+		if err := os.WriteFile(filepath.Join(dir, config.ReportsFile), []byte("not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+		got, reconcileErr := executeWorkerJSONResult(t, "--json", "--config-dir", dir, "worker", "reconcile", "--thread", row.Thread)
+		if reconcileErr == nil || len(got.Failed) != 1 || got.Failed[0].Reconcile == nil || got.Failed[0].Reconcile.Decision != "refuse_unknown_obligations" {
+			t.Fatalf("reports read error reconcile = %+v err=%v", got, reconcileErr)
+		}
+		after, _ := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+		if !bytes.Equal(before, after) {
+			t.Fatalf("reports read error mutated registry: before=%q after=%q", before, after)
+		}
+	})
+}
+
+func TestWorkerReconcileRefusesMissingWorkdirWithLiveWorkerRuntime(t *testing.T) {
+	dir := t.TempDir()
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: filepath.Join(t.TempDir(), "missing"), Thread: "T-live"}
+	writeWorkerRegistry(t, dir, row.String()+"\n")
+	installWorkerDoctorTmux(t, []config.Row{row})
+	before, _ := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+
+	got, reconcileErr := executeWorkerJSONResult(t, "--json", "--config-dir", dir, "worker", "reconcile", "--thread", row.Thread)
+	if reconcileErr == nil || len(got.Failed) != 1 || got.Failed[0].Reconcile == nil || got.Failed[0].Reconcile.Decision != "refuse_live_runtime" {
+		t.Fatalf("live worker reconcile = %+v err=%v", got, reconcileErr)
+	}
+	if got.Failed[0].Worker == nil || got.Failed[0].Worker.LocalState != "exact" {
+		t.Fatalf("live worker reconcile lost runtime evidence: %+v", got.Failed[0])
+	}
+	after, _ := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+	if !bytes.Equal(before, after) {
+		t.Fatalf("live worker reconcile mutated registry: before=%q after=%q", before, after)
+	}
+}
+
+func TestWorkerReconcileDoesNotTreatReportIDAsWorkerIdentity(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "missing")
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: missing, Thread: "T-worker"}
+	writeWorkerRegistry(t, dir, row.String()+"\n")
+	writeBlockedWorkerReport(t, dir, "T-unregistered", row.Thread+"-"+filepath.Base(missing), false)
+	installAbsentWorkerTmux(t)
+
+	got := executeWorkerJSON(t, "--json", "--dry-run", "--config-dir", dir, "worker", "reconcile", "--thread", row.Thread)
+	if len(got.Planned) != 1 || got.Planned[0].Reconcile == nil || got.Planned[0].Reconcile.Decision != "remove_stale_registration" || len(got.Planned[0].Reconcile.OpenObligations) != 0 {
+		t.Fatalf("free-text report ID affected worker identity = %+v", got)
+	}
+}
+
 func TestScopedWorkerDoctorIgnoresOversizedUnrelatedArchivedInventory(t *testing.T) {
 	dir := t.TempDir()
 	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: "/tmp/worker", Thread: "T-active"}
@@ -1723,6 +1911,58 @@ func installWorkerDoctorTmux(t *testing.T, rows []config.Row) {
 	bin := t.TempDir()
 	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ncase \"$1\" in\n  has-session) exit 0 ;;\n  list-panes) printf %b "+shellSingleQuote(panes.String())+" ;;\n  *) exit 99 ;;\nesac\n")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func installAbsentWorkerTmux(t *testing.T) {
+	t.Helper()
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 99\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func writeBlockedWorkerReport(t *testing.T, dir, thread, reportID string, omitAuthorizedAt bool) {
+	t.Helper()
+	at := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)
+	record := config.ReportRecord{
+		ReportID:     reportID,
+		RequestHash:  config.ReportRequestHash("team", thread, "350", "worker-reconcile"),
+		GroupID:      "team",
+		MemberThread: thread,
+		Issue:        "350",
+		Reference:    "worker-reconcile",
+		Summary:      "blocked obligation",
+		Status:       config.ReportBlocked,
+		CreatedAt:    at,
+		UpdatedAt:    at,
+	}
+	path := filepath.Join(dir, config.ReportsFile)
+	if _, err := config.SubmitReport(path, record); err != nil {
+		t.Fatalf("write blocked report: %v", err)
+	}
+	if !omitAuthorizedAt {
+		data, err := os.ReadFile(path)
+		if err != nil || !bytes.Contains(data, []byte(`"authorized_at":"0001-01-01T00:00:00Z"`)) {
+			t.Fatalf("blocked report lacks literal Go-zero authorized_at: %s, %v", data, err)
+		}
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	reports := document["reports"].([]any)
+	delete(reports[0].(map[string]any), "authorized_at")
+	data, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func slicesContain(values []string, target string) bool {

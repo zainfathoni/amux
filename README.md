@@ -151,7 +151,7 @@ Agents should use long flags:
 | Selector | Meaning |
 | --- | --- |
 | `--thread`, `-t` | canonical worker identity |
-| `--workdir`, `-d` | canonical runner identity |
+| `--workdir`, `-d` | canonical runner identity; explicit worker-reconcile drift scope |
 | `--workspace`, `-w` | worker/runner lifecycle group and same-named tmux session |
 | `--window`, `-W` | worker pin/adoption placement metadata |
 | `--mode`, `-m` | workspace-list filter |
@@ -286,7 +286,7 @@ Coordinator soft budgets to `ready` are Small 30m, Medium 1h (default), Large 2h
 | `shelve` / `unshelve` | preserve worker; mutate intent | none | shelve parks only | archive/unarchive |
 | `spawn` | persist and report exact retained ownership; optional group intent then additive label ensure; delivery/execution remain unproven | reject overlapping amux Runner workdir | create one exact worker pane; attempt one paste, then Enter only after paste success; delivery is indeterminate and acknowledgement unavailable | create one empty local thread in the canonical local cwd; return retained-indeterminate |
 | `teardown` | remove worker/shelf | none | stop verified worker | archive |
-| `reconcile` | synchronize drift | repair stale ownership | verified repairs only | worker sync only |
+| `reconcile` | synchronize shelf/archive drift; remove only proven-missing safe worker bindings | repair stale ownership | verified repairs only | worker sync only for present bindings |
 | `callback register` / `clear` | none; mutate machine runtime lease only | none | inspect exact pane/process | none |
 | `report submit` | persist report, then best-effort verified wake-up | none | optionally send short token | none |
 | `group list` / `group show` | inspect durable group intent | none | none | none |

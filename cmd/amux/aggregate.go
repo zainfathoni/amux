@@ -95,6 +95,7 @@ func (a app) executeAggregate(in invocation, dir config.Directory) (*result.Enve
 				plan, preflightErr = preflightApp.executeRunner(planned, dir)
 			}
 			if preflightErr != nil {
+				mergeEnvelope(&env, plan)
 				return &env, result.Preflight(errors.New(preflightErr.Error()))
 			}
 		}
@@ -193,6 +194,9 @@ func aggregateInvocations(in invocation, dir config.Directory) (invocation, invo
 		return workerIn, runnerIn, true, false, nil
 	}
 	if in.Selectors.Workdir != "" {
+		if in.Command.Name == "reconcile" {
+			return workerIn, runnerIn, true, true, nil
+		}
 		return workerIn, runnerIn, false, true, nil
 	}
 	workers, err := config.LoadReadOnly(dir.WorkersPath())

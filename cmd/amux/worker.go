@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -161,6 +162,17 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 	if in.Command.Name == "pin" {
 		return a.workerPin(in, dir, rows, &env)
 	}
+	if len(rows) == 0 && in.Command.Name == "reconcile" && in.Selectors.Workdir != "" {
+		return workerReconcileUnregisteredWorkdir(in, &env)
+	}
+	if len(rows) == 0 && in.Command.Name == "reconcile" && (in.Selectors.Thread != "" || in.Selectors.All) {
+		resource := result.CommandResource()
+		if in.Selectors.Thread != "" {
+			resource, _ = result.WorkerResource(in.Selectors.Thread)
+		}
+		env.Skipped = append(env.Skipped, result.Outcome{Resource: resource, Action: "reconcile", Message: "already in desired state; no workers.tsv binding exists"})
+		return &env, nil
+	}
 	if len(rows) == 0 && in.Command.Name == "remove" && in.Selectors.All && len(shelfOnly) == 0 {
 		out := result.Outcome{Resource: result.CommandResource(), Action: "remove", Message: "already in desired state"}
 		env.Skipped = append(env.Skipped, out)
@@ -197,6 +209,13 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 		return &env, result.Preflight(fmt.Errorf("teardown requires exactly one configured worker; selector matched %d", len(rows)))
 	}
 	inspections := make(map[string]workerInspection, len(rows))
+	var reconcilePlans map[string]workerReconcilePlan
+	if in.Command.Name == "reconcile" {
+		reconcilePlans, err = planWorkerReconcile(dir, rows, &env)
+		if err != nil {
+			return &env, result.Preflight(err)
+		}
+	}
 	if in.Command.Name == "launch" || in.Command.Name == "restart" {
 		for _, row := range rows {
 			if (in.Command.Name == "launch" || in.Command.Name == "restart") && shelved[row.Thread] {
@@ -219,12 +238,51 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			}
 			inspection, inspectErr := inspectWorker(row)
 			if inspectErr != nil {
+				if in.Command.Name == "reconcile" {
+					plan := reconcilePlans[row.Thread]
+					plan.localState = "unknown"
+					reconcilePlans[row.Thread] = plan
+					out := workerReconcileOutcome(row, plan, "refuse_unknown_runtime")
+					out.Message = "refused: local runtime ownership could not be inspected"
+					out.Error = &result.Failure{Kind: result.ErrorPreflight, Message: inspectErr.Error()}
+					env.Failed = append(env.Failed, out)
+					return &env, result.Preflight(errors.New("worker reconcile refused one or more unsafe repairs"))
+				}
 				return &env, result.Preflight(inspectErr)
 			}
 			if inspection.state == workerPaneConflict || inspection.state == workerPaneAmbiguous {
+				if in.Command.Name == "reconcile" {
+					plan := reconcilePlans[row.Thread]
+					plan.localState = string(inspection.state)
+					reconcilePlans[row.Thread] = plan
+					out := workerReconcileOutcome(row, plan, "refuse_ambiguous_runtime")
+					out.Message = "refused: local runtime ownership is " + string(inspection.state)
+					out.Error = &result.Failure{Kind: result.ErrorPreflight, Message: out.Message}
+					env.Failed = append(env.Failed, out)
+					return &env, result.Preflight(errors.New("worker reconcile refused one or more unsafe repairs"))
+				}
 				return &env, result.Preflight(fmt.Errorf("worker %s/%s has %s tmux identity", row.Workspace, row.Window, inspection.state))
 			}
 			inspections[row.Thread] = inspection
+			if in.Command.Name == "reconcile" {
+				plan := reconcilePlans[row.Thread]
+				plan.localState = string(inspection.state)
+				reconcilePlans[row.Thread] = plan
+			}
+		}
+	}
+	if in.Command.Name == "reconcile" {
+		for _, row := range rows {
+			plan := reconcilePlans[row.Thread]
+			if plan.state != result.WorkdirMissing || inspections[row.Thread].state == workerPaneAbsent {
+				continue
+			}
+			out := workerReconcileOutcome(row, plan, "refuse_live_runtime")
+			out.Error = &result.Failure{Kind: result.ErrorPreflight, Message: "missing worker workdir still has local runtime ownership"}
+			env.Failed = append(env.Failed, out)
+		}
+		if len(env.Failed) > 0 {
+			return &env, result.Preflight(errors.New("worker reconcile refused one or more unsafe repairs"))
 		}
 	}
 	if lifecycleCommandStopsWorker(in.Command.Name) {
@@ -269,6 +327,34 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 		out := workerOutcome(row, in.Command.Name, "")
 		if in.Command.Name == "teardown" {
 			out.Teardown = newTeardownDetails()
+		}
+		if in.Command.Name == "reconcile" {
+			plan := reconcilePlans[row.Thread]
+			if plan.state == result.WorkdirMissing {
+				out = workerReconcileOutcome(row, plan, "remove_stale_registration")
+				out.Message = "remove stale workers.tsv registration for proven missing canonical workdir"
+				if in.Options.DryRun {
+					env.Planned = append(env.Planned, out)
+					continue
+				}
+				reconcileChanged, reconcileErr := revalidateAndRemoveWorkerBinding(dir, row, plan)
+				if reconcileErr != nil {
+					out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: reconcileErr.Error()}
+					env.Failed = append(env.Failed, out)
+					continue
+				}
+				if reconcileChanged {
+					env.Successful = append(env.Successful, out)
+				} else {
+					out.Message = "already in desired state; workers.tsv binding is absent"
+					env.Skipped = append(env.Skipped, out)
+				}
+				continue
+			}
+			out.Reconcile = workerReconcileDetails(plan, "synchronize_shelf_intent")
+			out.Worker = workerPlacementDetails(row, string(inspections[row.Thread].state))
+			out.Worker.Workdir = plan.workdir
+			out.Worker.WorkdirState = plan.state
 		}
 		if (in.Command.Name == "launch" || in.Command.Name == "restart") && shelved[row.Thread] {
 			out.Message = "worker is locally shelved"
@@ -423,8 +509,13 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			if doctorStatusErr == nil {
 				remote = string(doctorStatuses[canonicalThreadID(row.Thread)])
 			}
+			canonicalWorkdir, workdirState := workerWorkdirState(row.Workdir)
 			out.Worker = workerPlacementDetails(row, string(inspections[row.Thread].state))
-			out.Message = fmt.Sprintf("local=%s remote=%s workdir=%s intent=%t assignment=%s native_executor=%s native_runner_id=%s execution_affinity=%s", inspections[row.Thread].state, remote, workerWorkdirState(row.Workdir), shelved[row.Thread], workerAssignmentState(row), unknownNativePlacement, unknownNativePlacement, unknownNativePlacement)
+			if canonicalWorkdir != "" {
+				out.Worker.Workdir = canonicalWorkdir
+			}
+			out.Worker.WorkdirState = workdirState
+			out.Message = fmt.Sprintf("local=%s remote=%s workdir=%s intent=%t assignment=%s native_executor=%s native_runner_id=%s execution_affinity=%s", inspections[row.Thread].state, remote, workdirState, shelved[row.Thread], workerAssignmentState(row), unknownNativePlacement, unknownNativePlacement, unknownNativePlacement)
 			env.Successful = append(env.Successful, out)
 			if !in.Options.JSON {
 				fmt.Fprintf(a.stdout, "%s\t%s\n", row.Thread, out.Message)
@@ -745,18 +836,175 @@ func workerAssignmentState(row config.Row) string {
 	return "unknown"
 }
 
-func workerWorkdirState(workdir string) string {
-	stat, err := os.Stat(config.ExpandHome(workdir))
+func workerWorkdirState(workdir string) (string, result.WorkdirState) {
+	expanded := config.ExpandHome(workdir)
+	if !filepath.IsAbs(expanded) {
+		return "", result.WorkdirAmbiguous
+	}
+	canonical, err := config.CanonicalWorkdir(workdir)
+	if err != nil {
+		return "", result.WorkdirUnknown
+	}
+	_, lstatErr := os.Lstat(canonical)
+	if os.IsNotExist(lstatErr) {
+		return canonical, result.WorkdirMissing
+	}
+	if lstatErr != nil {
+		return canonical, result.WorkdirUnreadable
+	}
+	stat, err := os.Stat(canonical)
 	if os.IsNotExist(err) {
-		return "missing"
+		return canonical, result.WorkdirUnreadable
 	}
 	if err != nil {
-		return "unreadable"
+		return canonical, result.WorkdirUnreadable
 	}
 	if !stat.IsDir() {
-		return "not_a_directory"
+		return canonical, result.WorkdirNotDirectory
 	}
-	return "present"
+	return canonical, result.WorkdirPresent
+}
+
+type workerReconcilePlan struct {
+	workdir         string
+	state           result.WorkdirState
+	localState      string
+	openObligations []string
+}
+
+func planWorkerReconcile(dir config.Directory, rows []config.Row, env *result.Envelope) (map[string]workerReconcilePlan, error) {
+	reports, err := config.LoadReports(dir.ReportsPath())
+	if err != nil {
+		env.Failed = append(env.Failed, result.Outcome{
+			Resource:  result.ConfigResource(dir.ReportsPath()),
+			Action:    "reconcile",
+			Message:   "refused: reports.json could not be read; open obligations are unknown",
+			Reconcile: &result.ReconcileDetails{Authority: config.WorkersFile, WorkdirState: result.WorkdirUnknown, Decision: "refuse_unknown_obligations"},
+			Error:     &result.Failure{Kind: result.ErrorPreflight, Message: err.Error()},
+		})
+		return nil, err
+	}
+	reportsByThread := make(map[string][]config.ReportRecord)
+	for _, report := range reports {
+		reportsByThread[report.MemberThread] = append(reportsByThread[report.MemberThread], report)
+	}
+	plans := make(map[string]workerReconcilePlan, len(rows))
+	for _, row := range rows {
+		workdir, state := workerWorkdirState(row.Workdir)
+		plan := workerReconcilePlan{workdir: workdir, state: state, localState: "unknown"}
+		for _, report := range reportsByThread[row.Thread] {
+			if report.Status == config.ReportBlocked && report.AuthorizedAt.IsZero() {
+				plan.openObligations = append(plan.openObligations, report.ReportID)
+			}
+		}
+		sort.Strings(plan.openObligations)
+		plans[row.Thread] = plan
+		decision, refusal := "", ""
+		switch state {
+		case result.WorkdirPresent:
+			continue
+		case result.WorkdirMissing:
+			if len(plan.openObligations) == 0 {
+				continue
+			}
+			decision = "refuse_open_obligation"
+			refusal = "blocked report without finish authorization"
+		case result.WorkdirNotDirectory:
+			decision = "refuse_not_a_directory"
+			refusal = "registry workdir is not a directory"
+		case result.WorkdirUnreadable:
+			decision = "refuse_unreadable"
+			refusal = "registry workdir is unreadable"
+		case result.WorkdirAmbiguous:
+			decision = "refuse_relative_ambiguity"
+			refusal = "registry workdir is relative and has no stable machine identity"
+		default:
+			decision = "refuse_unknown_state"
+			refusal = "registry workdir state is unknown"
+		}
+		out := workerReconcileOutcome(row, plan, decision)
+		out.Message = "refused: " + refusal
+		out.Error = &result.Failure{Kind: result.ErrorPreflight, Message: refusal}
+		env.Failed = append(env.Failed, out)
+	}
+	if len(env.Failed) > 0 {
+		return plans, errors.New("worker reconcile refused one or more unsafe repairs")
+	}
+	return plans, nil
+}
+
+func workerReconcileUnregisteredWorkdir(in invocation, env *result.Envelope) (*result.Envelope, error) {
+	workdir, state := workerWorkdirState(in.Selectors.Workdir)
+	resource := result.ResourceID{Kind: "worker_workdir", Workdir: workdir}
+	details := &result.ReconcileDetails{Authority: config.WorkersFile, RegistryBinding: false, Workdir: workdir, WorkdirState: state}
+	out := result.Outcome{Resource: resource, Action: "reconcile", Reconcile: details}
+	if state == result.WorkdirPresent || state == result.WorkdirMissing {
+		details.Decision = "preserve_unregistered_directory"
+		out.Message = "refused filesystem cleanup: no workers.tsv row binds a thread to this canonical workdir"
+		env.Skipped = append(env.Skipped, out)
+		return env, nil
+	}
+	details.Decision = "refuse_unproven_workdir_state"
+	out.Message = "refused: unregistered workdir state is not safely actionable"
+	out.Error = &result.Failure{Kind: result.ErrorPreflight, Message: out.Message}
+	env.Failed = append(env.Failed, out)
+	return env, result.Preflight(errors.New(out.Message))
+}
+
+func workerReconcileOutcome(row config.Row, plan workerReconcilePlan, decision string) result.Outcome {
+	out := workerOutcome(row, "reconcile", "")
+	out.Worker = workerPlacementDetails(row, plan.localState)
+	if plan.workdir != "" {
+		out.Worker.Workdir = plan.workdir
+	}
+	out.Worker.WorkdirState = plan.state
+	out.Reconcile = workerReconcileDetails(plan, decision)
+	return out
+}
+
+func revalidateAndRemoveWorkerBinding(dir config.Directory, row config.Row, plan workerReconcilePlan) (bool, error) {
+	workdir, state := workerWorkdirState(row.Workdir)
+	if state != result.WorkdirMissing || workdir != plan.workdir {
+		return false, fmt.Errorf("worker reconcile precondition changed: canonical workdir %s is %s", plan.workdir, state)
+	}
+	inspection, err := inspectWorker(row)
+	if err != nil {
+		return false, fmt.Errorf("worker reconcile precondition changed: inspect local runtime: %w", err)
+	}
+	if inspection.state != workerPaneAbsent {
+		return false, fmt.Errorf("worker reconcile precondition changed: local runtime ownership is %s", inspection.state)
+	}
+	reports, err := config.LoadReports(dir.ReportsPath())
+	if err != nil {
+		return false, fmt.Errorf("worker reconcile precondition changed: read reports: %w", err)
+	}
+	for _, report := range reports {
+		if report.MemberThread == row.Thread && report.Status == config.ReportBlocked && report.AuthorizedAt.IsZero() {
+			return false, fmt.Errorf("worker reconcile precondition changed: blocked report %q is never authorized", report.ReportID)
+		}
+	}
+	removed, err := config.RemoveRows(dir.WorkersPath(), func(candidate config.Row) bool {
+		candidateWorkdir, candidateErr := config.CanonicalWorkdir(candidate.Workdir)
+		return candidateErr == nil && candidate.Workspace == row.Workspace && candidate.Window == row.Window && candidate.Thread == row.Thread && candidateWorkdir == plan.workdir
+	})
+	if err != nil {
+		return false, err
+	}
+	if removed != 1 {
+		return false, errors.New("worker reconcile precondition changed: exact workers.tsv binding no longer exists")
+	}
+	return true, nil
+}
+
+func workerReconcileDetails(plan workerReconcilePlan, decision string) *result.ReconcileDetails {
+	return &result.ReconcileDetails{
+		Authority:       config.WorkersFile,
+		RegistryBinding: true,
+		Workdir:         plan.workdir,
+		WorkdirState:    plan.state,
+		Decision:        decision,
+		OpenObligations: append([]string(nil), plan.openObligations...),
+	}
 }
 
 func verifyAdoptionThreadAndTmux(row config.Row) (workerInspection, error) {
@@ -921,7 +1169,7 @@ type workerInspection struct {
 
 func workerCommandNeedsTmux(name string) bool {
 	switch name {
-	case "launch", "park", "restart", "remove", "shelve", "teardown", "doctor":
+	case "launch", "park", "restart", "remove", "shelve", "teardown", "doctor", "reconcile":
 		return true
 	}
 	return false

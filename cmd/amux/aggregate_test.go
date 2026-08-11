@@ -423,6 +423,49 @@ func TestAggregateReconcilePlansWorkerAndMissingRunnerWithoutMutation(t *testing
 	}
 }
 
+func TestAggregateReconcileWorkdirScopeChecksBothAuthorities(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "missing")
+	writeWorkerRegistry(t, dir, "alpha\tworker\t"+missing+"\tT-worker\n")
+	installAbsentWorkerTmux(t)
+
+	got := executeAggregateJSON(t, "--json", "--dry-run", "--config-dir", dir, "reconcile", "--workdir", missing)
+	if len(got.Planned) != 1 || got.Planned[0].Resource.Thread != "T-worker" || got.Planned[0].Reconcile == nil || got.Planned[0].Reconcile.Authority != config.WorkersFile || got.Planned[0].Reconcile.Decision != "remove_stale_registration" {
+		t.Fatalf("aggregate workdir reconcile worker plan = %+v", got)
+	}
+	if len(got.Skipped) != 1 || got.Skipped[0].Resource.Kind != "runner" {
+		t.Fatalf("aggregate workdir reconcile runner evidence = %+v", got)
+	}
+}
+
+func TestAggregateReconcilePreservesTypedWorkerRefusalAndPreventsRunnerMutation(t *testing.T) {
+	dir := t.TempDir()
+	workerMissing := filepath.Join(t.TempDir(), "worker-missing")
+	runnerMissing := filepath.Join(t.TempDir(), "runner-missing")
+	worker := config.Row{Workspace: "alpha", Window: "worker", Workdir: workerMissing, Thread: "T-blocked"}
+	writeWorkerRegistry(t, dir, worker.String()+"\n")
+	writeRunnerRegistry(t, dir, "alpha\t"+runnerMissing+"\n")
+	writeBlockedWorkerReport(t, dir, worker.Thread, "blocked-report", true)
+	installAbsentWorkerTmux(t)
+	workerBefore, _ := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+	runnerBefore, _ := os.ReadFile(filepath.Join(dir, config.RunnersFile))
+
+	var stdout bytes.Buffer
+	reconcileErr := (app{stdout: &stdout}).execute([]string{"--json", "--config-dir", dir, "reconcile", "--workspace", "alpha"})
+	var got result.Envelope
+	if err := json.NewDecoder(&stdout).Decode(&got); err != nil {
+		t.Fatalf("decode aggregate refusal: %v\n%s", err, stdout.String())
+	}
+	if reconcileErr == nil || result.ExitCode(reconcileErr) != result.ExitRejected || len(got.Failed) != 1 || got.Failed[0].Reconcile == nil || got.Failed[0].Reconcile.Decision != "refuse_open_obligation" || strings.Join(got.Failed[0].Reconcile.OpenObligations, ",") != "blocked-report" {
+		t.Fatalf("aggregate worker refusal = %+v err=%v", got, reconcileErr)
+	}
+	workerAfter, _ := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+	runnerAfter, _ := os.ReadFile(filepath.Join(dir, config.RunnersFile))
+	if !bytes.Equal(workerBefore, workerAfter) || !bytes.Equal(runnerBefore, runnerAfter) {
+		t.Fatalf("aggregate preflight mutated registries: worker=%t runner=%t", bytes.Equal(workerBefore, workerAfter), bytes.Equal(runnerBefore, runnerAfter))
+	}
+}
+
 func TestAggregateDoctorDiagnosesBothModes(t *testing.T) {
 	dir := t.TempDir()
 	runnerDir := t.TempDir()
