@@ -267,6 +267,9 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 	}
 	for _, row := range rows {
 		out := workerOutcome(row, in.Command.Name, "")
+		if in.Command.Name == "teardown" {
+			out.Teardown = newTeardownDetails()
+		}
 		if (in.Command.Name == "launch" || in.Command.Name == "restart") && shelved[row.Thread] {
 			out.Message = "worker is locally shelved"
 			env.Skipped = append(env.Skipped, out)
@@ -373,16 +376,34 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 		case "teardown":
 			err = archiveAmpThread(row.Thread)
 			if err == nil {
-				_, err = config.RemoveShelf(dir.ShelvesPath(), row.Thread)
+				appendTeardownArtifact(out.Teardown, "remote_thread_archive", "completed", "")
+				var shelfRemoved bool
+				shelfRemoved, err = config.RemoveShelf(dir.ShelvesPath(), row.Thread)
+				if err == nil {
+					if shelfRemoved {
+						appendTeardownArtifact(out.Teardown, "shelf_intent", "removed", "")
+					} else {
+						appendTeardownArtifact(out.Teardown, "shelf_intent", "already_absent", "shelf intent was already absent")
+					}
+				}
 			}
 			if err == nil && inspections[row.Thread].state == workerPaneExact {
 				err = revalidateWorkerBeforeMutation(row, inspections[row.Thread])
 				if err == nil {
 					err = tmux.Runner{}.KillWindow(inspections[row.Thread].pane.WindowID)
+					if err == nil {
+						appendTeardownArtifact(out.Teardown, "local_client", "stopped", "")
+					}
 				}
+			} else if err == nil {
+				appendTeardownArtifact(out.Teardown, "local_client", "already_stopped", "verified local client was already absent")
 			}
 			if err == nil {
-				_, err = config.Remove(dir.WorkersPath(), row.Workspace, row.Window)
+				var workerRemoved bool
+				workerRemoved, err = config.Remove(dir.WorkersPath(), row.Workspace, row.Window)
+				if err == nil && workerRemoved {
+					appendTeardownArtifact(out.Teardown, "worker_configuration", "removed", "")
+				}
 			}
 			changed = err == nil
 		case "doctor":
@@ -407,15 +428,30 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 		}
 		if err != nil {
 			out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: err.Error()}
+			if in.Command.Name == "teardown" {
+				out.Message = teardownMessage(out.Teardown)
+				if !in.Options.JSON {
+					fmt.Fprintf(a.stdout, "%s\t%s; error=%s\n", row.Thread, out.Message, err)
+				}
+			}
 			env.Failed = append(env.Failed, out)
 			continue
 		}
 		if in.Command.Name == "teardown" && inspections[row.Thread].state == workerPaneAbsent {
-			out.Message = "already_stopped"
+			out.Message = teardownMessage(out.Teardown)
 			env.Skipped = append(env.Skipped, out)
+			if !in.Options.JSON {
+				fmt.Fprintf(a.stdout, "%s\t%s\n", row.Thread, out.Message)
+			}
 			continue
 		}
 		if changed {
+			if in.Command.Name == "teardown" {
+				out.Message = teardownMessage(out.Teardown)
+				if !in.Options.JSON {
+					fmt.Fprintf(a.stdout, "%s\t%s\n", row.Thread, out.Message)
+				}
+			}
 			env.Successful = append(env.Successful, out)
 		} else {
 			out.Message = "already in desired state"
@@ -760,6 +796,38 @@ func selectWorkerRows(rows []config.Row, s selectors) []config.Row {
 func workerOutcome(r config.Row, action, message string) result.Outcome {
 	id, _ := result.WorkerResource(r.Thread)
 	return result.Outcome{Resource: id, Action: action, Message: message}
+}
+
+func newTeardownDetails() *result.TeardownDetails {
+	details := &result.TeardownDetails{Artifacts: make([]result.TeardownArtifactDetails, 0, 8)}
+	for _, artifact := range []struct {
+		name   string
+		reason string
+	}{
+		{"worktree_directory", "amux teardown does not own worktree directory cleanup"},
+		{"branch_refs", "amux teardown does not own Git branch refs"},
+		{"stashes", "amux teardown does not own Git stashes"},
+		{"external_project_records", "amux teardown does not own external project registries"},
+	} {
+		appendTeardownArtifact(details, artifact.name, "not_owned", artifact.reason)
+	}
+	return details
+}
+
+func appendTeardownArtifact(details *result.TeardownDetails, artifact, outcome, reason string) {
+	details.Artifacts = append(details.Artifacts, result.TeardownArtifactDetails{Artifact: artifact, Outcome: outcome, Reason: reason})
+}
+
+func teardownMessage(details *result.TeardownDetails) string {
+	parts := make([]string, 0, len(details.Artifacts))
+	for _, artifact := range details.Artifacts {
+		part := artifact.Artifact + "=" + artifact.Outcome
+		if artifact.Reason != "" {
+			part += " (" + artifact.Reason + ")"
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func workerRowsEquivalent(left, right config.Row) bool {

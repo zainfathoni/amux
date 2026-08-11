@@ -95,6 +95,66 @@ func TestWorkerPlacementFieldsRemainExplicitInSchemaV1(t *testing.T) {
 	}
 }
 
+func TestTeardownDetailsAreOptionalAndAdditiveInSchemaV1(t *testing.T) {
+	worker, err := WorkerResource("T-worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := NewEnvelope("worker teardown", false)
+	envelope.Skipped = append(envelope.Skipped, Outcome{
+		Resource: worker,
+		Action:   "teardown",
+		Teardown: &TeardownDetails{Artifacts: []TeardownArtifactDetails{
+			{Artifact: "remote_thread_archive", Outcome: "completed"},
+			{Artifact: "worktree_directory", Outcome: "not_owned", Reason: "amux teardown does not own worktree directory cleanup"},
+		}},
+	})
+
+	var stdout bytes.Buffer
+	if err := envelope.Write(&stdout); err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	if got := int(document["schema_version"].(float64)); got != 1 {
+		t.Fatalf("schema_version = %d, want unchanged schema v1", got)
+	}
+	teardown := document["skipped"].([]any)[0].(map[string]any)["teardown"].(map[string]any)
+	artifacts := teardown["artifacts"].([]any)
+	if len(artifacts) != 2 || artifacts[1].(map[string]any)["reason"] == "" {
+		t.Fatalf("teardown artifacts = %#v", artifacts)
+	}
+	var legacyConsumer struct {
+		SchemaVersion int `json:"schema_version"`
+		Skipped       []struct {
+			Resource ResourceID `json:"resource"`
+			Action   string     `json:"action"`
+		} `json:"skipped"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &legacyConsumer); err != nil {
+		t.Fatal(err)
+	}
+	if legacyConsumer.SchemaVersion != SchemaVersion || len(legacyConsumer.Skipped) != 1 || legacyConsumer.Skipped[0].Resource.Thread != "T-worker" || legacyConsumer.Skipped[0].Action != "teardown" {
+		t.Fatalf("schema-v1 consumer rejected additive teardown details: %+v", legacyConsumer)
+	}
+
+	legacyEnvelope := NewEnvelope("worker launch", false)
+	legacyEnvelope.Successful = append(legacyEnvelope.Successful, Outcome{Resource: worker, Action: "launch"})
+	stdout.Reset()
+	if err := legacyEnvelope.Write(&stdout); err != nil {
+		t.Fatal(err)
+	}
+	var legacyDocument map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &legacyDocument); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := legacyDocument["successful"].([]any)[0].(map[string]any)["teardown"]; found {
+		t.Fatal("optional teardown details were serialized for an unrelated outcome")
+	}
+}
+
 func TestExitCodeDistinguishesRejectedAndRuntimeFailures(t *testing.T) {
 	if got := ExitCode(nil); got != ExitSuccess {
 		t.Fatalf("ExitCode(nil) = %d, want %d", got, ExitSuccess)

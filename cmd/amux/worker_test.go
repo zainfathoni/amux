@@ -595,8 +595,31 @@ func TestWorkerTeardownCompletesWhenLocalWorkerIsAlreadyStopped(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
 	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "teardown", "--thread", "T-a")
-	if len(got.Successful) != 0 || len(got.Skipped) != 1 || got.Skipped[0].Message != "already_stopped" {
+	if len(got.Successful) != 0 || len(got.Skipped) != 1 {
 		t.Fatalf("missing-window teardown result = %+v", got)
+	}
+	artifacts := teardownArtifactsByName(t, got.Skipped[0])
+	for artifact, outcome := range map[string]string{
+		"remote_thread_archive":    "completed",
+		"shelf_intent":             "removed",
+		"local_client":             "already_stopped",
+		"worker_configuration":     "removed",
+		"worktree_directory":       "not_owned",
+		"branch_refs":              "not_owned",
+		"stashes":                  "not_owned",
+		"external_project_records": "not_owned",
+	} {
+		if actual := artifacts[artifact].Outcome; actual != outcome {
+			t.Fatalf("teardown artifact %s outcome = %q, want %q; outcome=%+v", artifact, actual, outcome, got.Skipped[0])
+		}
+	}
+	for _, artifact := range []string{"worktree_directory", "branch_refs", "stashes", "external_project_records"} {
+		if artifacts[artifact].Reason == "" {
+			t.Fatalf("not-owned teardown artifact %s has no reason: %+v", artifact, got.Skipped[0])
+		}
+	}
+	if !strings.Contains(got.Skipped[0].Message, "remote_thread_archive=completed") || !strings.Contains(got.Skipped[0].Message, "worktree_directory=not_owned") {
+		t.Fatalf("missing-window teardown message is not honest: %q", got.Skipped[0].Message)
 	}
 	rows, err := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
 	if err != nil || len(rows) != 0 {
@@ -612,6 +635,115 @@ func TestWorkerTeardownCompletesWhenLocalWorkerIsAlreadyStopped(t *testing.T) {
 	}
 	if !strings.Contains(string(log), "amp threads archive T-a") || strings.Contains(string(log), "tmux kill-window") {
 		t.Fatalf("missing-window teardown calls:\n%s", log)
+	}
+}
+
+func TestWorkerTeardownAlreadyStoppedReportsIdempotentAbsentShelf(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkerRegistry(t, dir, "alpha\ta\t/tmp/a\tT-a\n")
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "teardown", "--thread", "T-a")
+	if len(got.Skipped) != 1 || len(got.Successful) != 0 {
+		t.Fatalf("idempotent missing-window teardown result = %+v", got)
+	}
+	artifacts := teardownArtifactsByName(t, got.Skipped[0])
+	if artifacts["shelf_intent"].Outcome != "already_absent" || artifacts["local_client"].Outcome != "already_stopped" {
+		t.Fatalf("idempotent teardown artifacts = %+v", artifacts)
+	}
+}
+
+func TestWorkerTeardownAlreadyStoppedPrintsHonestHumanResult(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkerRegistry(t, dir, "alpha\ta\t/tmp/a\tT-a\n")
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).execute([]string{"--config-dir", dir, "worker", "teardown", "--thread", "T-a"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"T-a\t",
+		"remote_thread_archive=completed",
+		"local_client=already_stopped",
+		"worker_configuration=removed",
+		"worktree_directory=not_owned (amux teardown does not own worktree directory cleanup)",
+		"external_project_records=not_owned",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("human teardown output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestWorkerTeardownPartialFailureReportsCompletedArtifacts(t *testing.T) {
+	for _, jsonOutput := range []bool{true, false} {
+		name := map[bool]string{true: "json", false: "human"}[jsonOutput]
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			row := config.Row{Workspace: "alpha", Window: "a", Workdir: "/tmp/a", Thread: "T-a"}
+			writeWorkerRegistry(t, dir, row.String()+"\n")
+			if err := os.WriteFile(filepath.Join(dir, config.ShelvesFile), []byte("# amux-schema: shelves/v1\nT-a\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			start := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "a", Thread: "T-a"}, row)
+			bin := t.TempDir()
+			writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\nexit 0\n")
+			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 0; fi\nif [ \"$1\" = list-panes ]; then printf '%s\\n' "+shellSingleQuote("a\t@1\t"+start)+"; exit 0; fi\nif [ \"$1\" = kill-window ]; then echo kill-failed >&2; exit 7; fi\nexit 2\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+			args := []string{"--config-dir", dir, "worker", "teardown", "--thread", "T-a"}
+			if jsonOutput {
+				args = append([]string{"--json"}, args...)
+			}
+			var stdout bytes.Buffer
+			err := (app{stdout: &stdout}).execute(args)
+			if err == nil || result.ExitCode(err) != result.ExitRuntimeFailure {
+				t.Fatalf("partial teardown error = %v, want runtime failure", err)
+			}
+			if jsonOutput {
+				var envelope result.Envelope
+				if decodeErr := json.NewDecoder(&stdout).Decode(&envelope); decodeErr != nil {
+					t.Fatalf("decode partial teardown: %v\n%s", decodeErr, stdout.String())
+				}
+				if len(envelope.Failed) != 1 || envelope.Failed[0].Error == nil {
+					t.Fatalf("partial teardown envelope = %+v", envelope)
+				}
+				artifacts := teardownArtifactsByName(t, envelope.Failed[0])
+				if artifacts["remote_thread_archive"].Outcome != "completed" || artifacts["shelf_intent"].Outcome != "removed" {
+					t.Fatalf("partial teardown completed artifacts = %+v", artifacts)
+				}
+				if _, found := artifacts["local_client"]; found {
+					t.Fatalf("failed local client was reported completed: %+v", artifacts)
+				}
+				if _, found := artifacts["worker_configuration"]; found {
+					t.Fatalf("unreached worker configuration was reported completed: %+v", artifacts)
+				}
+			} else {
+				for _, want := range []string{"remote_thread_archive=completed", "shelf_intent=removed", "error="} {
+					if !strings.Contains(stdout.String(), want) {
+						t.Fatalf("human partial teardown output missing %q:\n%s", want, stdout.String())
+					}
+				}
+			}
+			rows, loadErr := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
+			if loadErr != nil || len(rows) != 1 {
+				t.Fatalf("partial teardown removed retry configuration: rows=%+v err=%v", rows, loadErr)
+			}
+			shelves, loadErr := config.LoadShelvesReadOnly(filepath.Join(dir, config.ShelvesFile))
+			if loadErr != nil || len(shelves) != 0 {
+				t.Fatalf("partial teardown did not preserve completed shelf removal: shelves=%+v err=%v", shelves, loadErr)
+			}
+		})
 	}
 }
 
@@ -677,6 +809,17 @@ func TestWorkerTeardownArchivesRemovesAndStopsLiveWorker(t *testing.T) {
 	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "teardown", "--thread", "T-a")
 	if len(got.Successful) != 1 || len(got.Skipped) != 0 {
 		t.Fatalf("live-window teardown result = %+v", got)
+	}
+	artifacts := teardownArtifactsByName(t, got.Successful[0])
+	for artifact, outcome := range map[string]string{
+		"remote_thread_archive": "completed",
+		"local_client":          "stopped",
+		"shelf_intent":          "removed",
+		"worker_configuration":  "removed",
+	} {
+		if actual := artifacts[artifact].Outcome; actual != outcome {
+			t.Fatalf("live teardown artifact %s outcome = %q, want %q; outcome=%+v", artifact, actual, outcome, got.Successful[0])
+		}
 	}
 	rows, err := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
 	if err != nil || len(rows) != 0 {
@@ -1647,6 +1790,21 @@ func executeWorkerJSONError(t *testing.T, args ...string) error {
 		t.Fatalf("decode failed execute(%q): %v\nstdout: %s", args, decodeErr, stdout.String())
 	}
 	return err
+}
+
+func teardownArtifactsByName(t *testing.T, outcome result.Outcome) map[string]result.TeardownArtifactDetails {
+	t.Helper()
+	if outcome.Teardown == nil {
+		t.Fatalf("teardown details are absent: %+v", outcome)
+	}
+	artifacts := make(map[string]result.TeardownArtifactDetails, len(outcome.Teardown.Artifacts))
+	for _, artifact := range outcome.Teardown.Artifacts {
+		if _, duplicate := artifacts[artifact.Artifact]; duplicate {
+			t.Fatalf("duplicate teardown artifact %q: %+v", artifact.Artifact, outcome.Teardown.Artifacts)
+		}
+		artifacts[artifact.Artifact] = artifact
+	}
+	return artifacts
 }
 
 func writeWorkerRegistry(t *testing.T, dir, rows string) {
