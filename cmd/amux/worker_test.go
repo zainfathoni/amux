@@ -1105,12 +1105,119 @@ func TestWorkerDoctorHumanPrintsRetainedAndLegacyAssignmentStates(t *testing.T) 
 		t.Fatalf("amp threads search calls=%d, want 2", *calls)
 	}
 	for _, want := range []string{
-		"T-retained\tlocal=exact remote=active intent=false assignment=retained_indeterminate",
-		"T-legacy\tlocal=exact remote=active intent=false assignment=unknown",
+		"T-retained\tlocal=exact remote=active workdir=missing intent=false assignment=retained_indeterminate",
+		"T-legacy\tlocal=exact remote=active workdir=missing intent=false assignment=unknown",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("human doctor lacks %q: %q", want, stdout.String())
 		}
+	}
+}
+
+func TestWorkerDoctorReportsWorkdirState(t *testing.T) {
+	dir := t.TempDir()
+	present := t.TempDir()
+	removed := filepath.Join(t.TempDir(), "removed")
+	if err := os.Mkdir(removed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(removed); err != nil {
+		t.Fatal(err)
+	}
+	notDirectory := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(notDirectory, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rows := []config.Row{
+		{Workspace: "alpha", Window: "present", Workdir: present, Thread: "T-present"},
+		{Workspace: "alpha", Window: "missing", Workdir: removed, Thread: "T-missing"},
+		{Workspace: "alpha", Window: "file", Workdir: notDirectory, Thread: "T-file"},
+	}
+	writeWorkerRegistry(t, dir, rows[0].String()+"\n"+rows[1].String()+"\n"+rows[2].String()+"\n")
+	installWorkerDoctorTmux(t, rows)
+	injectAmpThreadsListProcess(t, func(args []string) (string, string) {
+		for _, row := range rows {
+			if slicesContain(args, "id:"+row.Thread+" archived:false") {
+				return "output", `[{"id":"` + row.Thread + `"}]`
+			}
+		}
+		return "nonzero", ""
+	})
+
+	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "doctor", "--workspace", "alpha")
+	if len(got.Successful) != len(rows) || len(got.Failed) != 0 {
+		t.Fatalf("worker doctor = %+v", got)
+	}
+	wantStates := map[string]string{
+		"T-present": "present",
+		"T-missing": "missing",
+		"T-file":    "not_a_directory",
+	}
+	for _, out := range got.Successful {
+		want := wantStates[out.Resource.Thread]
+		if !strings.Contains(out.Message, "workdir="+want) {
+			t.Fatalf("worker doctor workdir state = %q, want workdir=%s", out.Message, want)
+		}
+	}
+}
+
+func TestWorkerDoctorReportsUnreadableWorkdir(t *testing.T) {
+	dir := t.TempDir()
+	parent := filepath.Join(t.TempDir(), "unreadable")
+	workdir := filepath.Join(parent, "worker")
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o000); err != nil {
+		t.Skipf("cannot make parent unreadable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(parent, 0o755); err != nil {
+			t.Errorf("restore parent permissions: %v", err)
+		}
+	})
+	if _, err := os.Stat(workdir); err == nil {
+		t.Skip("process can stat a workdir below a chmod 000 parent")
+	} else if !os.IsPermission(err) {
+		t.Fatalf("stat unreadable workdir: %v", err)
+	}
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: workdir, Thread: "T-unreadable"}
+	writeWorkerRegistry(t, dir, row.String()+"\n")
+	installWorkerDoctorTmux(t, []config.Row{row})
+	injectAmpThreadsListProcess(t, func(args []string) (string, string) {
+		if slicesContain(args, "id:T-unreadable archived:false") {
+			return "output", `[{"id":"T-unreadable"}]`
+		}
+		return "nonzero", ""
+	})
+
+	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "doctor", "--thread", row.Thread)
+	if len(got.Successful) != 1 || len(got.Failed) != 0 || !strings.Contains(got.Successful[0].Message, "workdir=unreadable") {
+		t.Fatalf("worker doctor unreadable workdir = %+v", got)
+	}
+}
+
+func TestWorkerDoctorExpandsTildeWorkdir(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workdir := filepath.Join(home, "worker")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: "~/worker", Thread: "T-tilde"}
+	writeWorkerRegistry(t, dir, row.String()+"\n")
+	installWorkerDoctorTmux(t, []config.Row{row})
+	injectAmpThreadsListProcess(t, func(args []string) (string, string) {
+		if slicesContain(args, "id:T-tilde archived:false") {
+			return "output", `[{"id":"T-tilde"}]`
+		}
+		return "nonzero", ""
+	})
+
+	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "doctor", "--thread", row.Thread)
+	if len(got.Successful) != 1 || len(got.Failed) != 0 || !strings.Contains(got.Successful[0].Message, "workdir=present") {
+		t.Fatalf("worker doctor tilde workdir = %+v", got)
 	}
 }
 
