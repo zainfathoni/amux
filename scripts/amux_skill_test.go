@@ -1849,7 +1849,7 @@ func TestFinishRemovalGateDocumentsEveryFailClosedInvariant(t *testing.T) {
 		"Rule 5 is always `NEEDS_BACKUP`",
 		"create refs/heads/backup/<worktree-name>-before-remove-<date> at <C>",
 		"classify → backup → unlock → prune",
-		"without force only after the removal-safety preflight",
+		"without force only when that immediately preceding revalidation",
 		"Keep branch deletion separate from worktree removal",
 		"gh pr view <pr> --json state,mergedAt,headRefName,headRefOid",
 		"unfiltered count and paths of `??` untracked entries",
@@ -1858,6 +1858,11 @@ func TestFinishRemovalGateDocumentsEveryFailClosedInvariant(t *testing.T) {
 		"Generated-artifact exclusions are configurable presentation filters",
 		"never count `refs/stash` as commit coverage",
 		"Any scan or resolution error blocks ordinary removal",
+		"no earlier verdict survives this step",
+		"Revalidate adjacent to targeted removal",
+		"Never reuse rule-2a evidence",
+		"A single-target verdict never authorizes `git worktree prune`",
+		"exact set of prunable paths",
 	} {
 		if !strings.Contains(combined, required) {
 			t.Errorf("finish removal gate is missing %q", required)
@@ -1867,6 +1872,12 @@ func TestFinishRemovalGateDocumentsEveryFailClosedInvariant(t *testing.T) {
 	link := strings.Index(workflow, "](removal-safety.md#removal-ordering-context)")
 	if mutation < 0 || link < mutation {
 		t.Error("actual finish mutation sentence lacks inline progressive-disclosure link")
+	}
+	pull := strings.Index(workflow, "git pull --ff-only` before classification")
+	preflight := strings.Index(workflow, "Run the removal preflight below against the exact worker worktree")
+	adjacent := strings.Index(workflow, "Then perform the adjacent revalidation below")
+	if pull < 0 || preflight <= pull || adjacent <= preflight || mutation <= adjacent {
+		t.Errorf("finish ordering must be pull → classify → adjacent revalidation → remove: pull=%d preflight=%d adjacent=%d remove=%d", pull, preflight, adjacent, mutation)
 	}
 }
 
@@ -1893,6 +1904,27 @@ func TestRemovalSafetySyntheticRefCoverageAndPatchEquivalence(t *testing.T) {
 		verdict, evidence, err := syntheticRemovalVerdict(repo, baseline, tip)
 		if err != nil || verdict != "SAFE" || !strings.Contains(evidence, "refs/remotes/origin/feature") {
 			t.Fatalf("remote verdict=(%q, %q, %v), want remote coverage", verdict, evidence, err)
+		}
+	})
+
+	t.Run("stale remote coverage disappears after fetch", func(t *testing.T) {
+		repo, remote, baseline := newRemovalSafetyRepo(t)
+		worktree := filepath.Join(t.TempDir(), "remote-pruned")
+		gitTest(t, repo, "worktree", "add", "--detach", worktree, baseline)
+		commitFile(t, worktree, "remote-only.txt", "remote only\n", "remote only")
+		tip := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "HEAD"))
+		gitTest(t, worktree, "push", "origin", "HEAD:refs/heads/transient")
+		gitTest(t, repo, "fetch", "origin", "refs/heads/transient:refs/remotes/origin/transient")
+		if verdict, evidence, err := syntheticRemovalVerdict(repo, baseline, tip); err != nil || verdict != "SAFE" || evidence != "refs/remotes/origin/transient" {
+			t.Fatalf("pre-fetch verdict=(%q, %q, %v), want remote SAFE", verdict, evidence, err)
+		}
+		cmd := exec.Command("git", "--git-dir", remote, "update-ref", "-d", "refs/heads/transient")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("delete synthetic remote ref: %v\n%s", err, out)
+		}
+		gitTest(t, repo, "fetch", "--prune", "origin")
+		if verdict, _, err := syntheticRemovalVerdict(repo, baseline, tip); err != nil || verdict != "NEEDS_BACKUP" {
+			t.Fatalf("post-fetch verdict=(%q, %v), want NEEDS_BACKUP", verdict, err)
 		}
 	})
 
