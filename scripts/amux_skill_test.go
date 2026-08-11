@@ -2000,6 +2000,8 @@ func TestRemovalSafetySyntheticMissingDirtyAndPreciousFiles(t *testing.T) {
 		gitTest(t, repo, "worktree", "add", "--detach", locked, baseline)
 		gitTest(t, repo, "worktree", "lock", locked)
 		gitTest(t, repo, "worktree", "add", "--detach", plain, baseline)
+		lockedRegistered := strings.TrimSpace(gitTest(t, locked, "rev-parse", "--show-toplevel"))
+		plainRegistered := strings.TrimSpace(gitTest(t, plain, "rev-parse", "--show-toplevel"))
 		if err := os.RemoveAll(locked); err != nil {
 			t.Fatal(err)
 		}
@@ -2007,8 +2009,8 @@ func TestRemovalSafetySyntheticMissingDirtyAndPreciousFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 		porcelain := gitTest(t, repo, "worktree", "list", "--porcelain")
-		lockedBlock := syntheticWorktreeBlock(porcelain, locked)
-		plainBlock := syntheticWorktreeBlock(porcelain, plain)
+		lockedBlock := syntheticWorktreeBlock(porcelain, lockedRegistered)
+		plainBlock := syntheticWorktreeBlock(porcelain, plainRegistered)
 		if !strings.Contains(lockedBlock, "locked") || strings.Contains(lockedBlock, "prunable") {
 			t.Fatalf("locked absent block = %q", lockedBlock)
 		}
