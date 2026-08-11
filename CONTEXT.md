@@ -86,3 +86,14 @@ _Avoid_: Session when referring to the configured lifecycle group
 **Exact model binding** — The guarantee that one explicitly selected provider model remains unchanged across admission, execution, evidence, and lifecycle handling. Aliases, defaults, normalization, fallback, and substitution do not satisfy exact binding.
 
 **Frozen handoff** — A delegation result whose writer authority has ended and whose declared artifact state is preserved for independent review. A frozen handoff is neither acceptance nor integration authorization.
+
+## Removal safety
+
+**Removal safety verdict** — A classification of whether a worktree's tip commit remains reachable after removing that worktree. The verdict is based on ref coverage and the accepted ladder; it is not authorization to remove a worktree, delete a branch, or finish lifecycle work.
+_Avoid_: Merge status, removal authorization
+
+**Ref coverage** — The local branch, remote-tracking branch, and tag refs that contain a commit, determined only from `refs/heads`, `refs/remotes`, and `refs/tags`. Coverage asks whether another ref holds the commit after a worktree `HEAD` is removed.
+_Avoid_: Stash coverage, merge status
+
+**Vanished worktree** — A Git worktree registration whose directory is absent. It remains a classification target: its recorded tip is assessed for coverage before any unlock or prune, and its dirty state is unknowable rather than clean.
+_Avoid_: Prunable-only worktree, clean worktree
