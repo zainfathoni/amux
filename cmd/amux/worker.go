@@ -441,6 +441,7 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 		if err != nil {
 			out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: err.Error()}
 			if in.Command.Name == "teardown" {
+				markTeardownDownstreamUnattempted(out.Teardown)
 				out.Message = teardownMessage(out.Teardown)
 				if !in.Options.JSON {
 					fmt.Fprintf(a.stdout, "%s\t%s; error=%s\n", row.Thread, out.Message, err)
@@ -816,7 +817,7 @@ func newTeardownDetails() *result.TeardownDetails {
 		details.Artifacts = append(details.Artifacts, result.TeardownArtifactDetails{
 			Artifact: artifact,
 			Outcome:  "unattempted",
-			Reason:   "not attempted because a prior teardown artifact failed",
+			Reason:   "teardown artifact has not run",
 		})
 	}
 	for _, artifact := range []struct {
@@ -839,6 +840,20 @@ func setTeardownArtifact(details *result.TeardownDetails, artifact, outcome, rea
 			details.Artifacts[i].Outcome = outcome
 			details.Artifacts[i].Reason = reason
 			return
+		}
+	}
+}
+
+func markTeardownDownstreamUnattempted(details *result.TeardownDetails) {
+	failedArtifact := ""
+	for i := range details.Artifacts {
+		artifact := &details.Artifacts[i]
+		if artifact.Outcome == "failed" {
+			failedArtifact = artifact.Artifact
+			continue
+		}
+		if failedArtifact != "" && artifact.Outcome == "unattempted" {
+			artifact.Reason = "not attempted because " + failedArtifact + " failed"
 		}
 	}
 }

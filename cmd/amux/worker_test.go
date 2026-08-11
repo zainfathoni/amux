@@ -684,6 +684,32 @@ func TestWorkerTeardownAlreadyStoppedPrintsHonestHumanResult(t *testing.T) {
 	}
 }
 
+func TestWorkerTeardownDryRunUsesNeutralUnattemptedReasons(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkerRegistry(t, dir, "alpha\ta\t/tmp/a\tT-a\n")
+	bin := t.TempDir()
+	ampCalled := filepath.Join(bin, "amp-called")
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+ampCalled+"'\nexit 99\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	got := executeWorkerJSON(t, "--json", "--dry-run", "--config-dir", dir, "worker", "teardown", "--thread", "T-a")
+	if len(got.Planned) != 1 || len(got.Successful) != 0 || len(got.Skipped) != 0 || len(got.Failed) != 0 {
+		t.Fatalf("dry-run teardown result = %+v", got)
+	}
+	artifacts := teardownArtifactsByName(t, got.Planned[0])
+	for _, artifact := range []string{"remote_thread_archive", "shelf_intent", "local_client", "worker_configuration"} {
+		details := artifacts[artifact]
+		if details.Outcome != "unattempted" || details.Reason != "teardown artifact has not run" || strings.Contains(details.Reason, "failed") {
+			t.Fatalf("dry-run teardown artifact %s = %+v", artifact, details)
+		}
+	}
+	if _, err := os.Stat(ampCalled); !os.IsNotExist(err) {
+		t.Fatalf("dry-run teardown called amp: %v", err)
+	}
+}
+
 func TestWorkerTeardownPartialFailureReportsCompletedArtifacts(t *testing.T) {
 	for _, jsonOutput := range []bool{true, false} {
 		name := map[bool]string{true: "json", false: "human"}[jsonOutput]
@@ -725,7 +751,7 @@ func TestWorkerTeardownPartialFailureReportsCompletedArtifacts(t *testing.T) {
 				if artifacts["local_client"].Outcome != "failed" || !strings.Contains(artifacts["local_client"].Reason, "exit status 7") {
 					t.Fatalf("failed local client artifact = %+v", artifacts["local_client"])
 				}
-				if artifacts["worker_configuration"].Outcome != "unattempted" || artifacts["worker_configuration"].Reason == "" {
+				if artifacts["worker_configuration"].Outcome != "unattempted" || artifacts["worker_configuration"].Reason != "not attempted because local_client failed" {
 					t.Fatalf("unattempted worker configuration artifact = %+v", artifacts["worker_configuration"])
 				}
 			} else {
