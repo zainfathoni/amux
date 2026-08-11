@@ -2,7 +2,7 @@
 
 This `/amux-tycho` application workflow is the progressive-disclosure home for [#328](https://github.com/zainfathoni/amux/issues/328). It reuses the one canonical receipt helper and protocol in [`tycho-report-bridge.md`](tycho-report-bridge.md). It does not widen stable Amux core, promote `/amux-tycho`, close [#323](https://github.com/zainfathoni/amux/issues/323), launch Tycho, or authorize a live field cycle from documentation alone.
 
-Readiness remains **Runtime-unverified**. Keep a real Amp thread as coordinator and consume/acknowledgement authority. Do not interpret this recipe, synthetic tests, or a useful provider run without a complete bridge cycle as field proof.
+The generic `/amux-tycho` route is practically usable under its explicit owner-authorized contract. This narrower #328 workflow remains blocked on #327's newly spawned local-Amp-worker assignment requirement. Keep a real Amp thread as coordinator and consume/acknowledgement authority.
 
 ## Settled design decisions
 
@@ -155,7 +155,7 @@ Immediately before **every** GitHub review or comment write—including the firs
 
 A useful provider opinion is not a bridge cycle. The owner may count one #328 field run toward #323 only when **all** of the following are recorded against the same receipt:
 
-1. **#327 categorical gate (current blocker)** — no field run and no #323 credit until [#327](https://github.com/zainfathoni/amux/issues/327) has an **accepted and merged** solution **and** that exact accepted version is installed and verified on the host. Local, unmerged, draft, or merely “available” routes do **not** satisfy the gate. As of this writing, #327 remains open and is externally blocked by a missing Amp receipt-bearing physical-runner assignment API; treat the entire #328 field cycle as **blocked** until that changes under owner acceptance.
+1. **#328-specific #327 prerequisite** — do not run this newly spawned local-Amp-worker workflow until [#327](https://github.com/zainfathoni/amux/issues/327) has an **accepted and merged** solution and that exact accepted version is installed and verified on the host. Local, unmerged, draft, or merely “available” routes do not satisfy this #328 prerequisite. This does not block generic `/amux-tycho` use or #323 credit from a complete genuine bridge lifecycle with an existing coordinator.
 2. After the #327 gate clears: prove the authoritative Amp `/team-review` worker's initial assignment through that exact accepted merged delivery semantics (version/commit recorded).
 3. Owner authorization naming exact Tycho agent, project, harness, model, and worktree; adjacent revalidation that the route still matches.
 4. **Pre-Tycho** both-worktree repository, canonical workdir, full head SHA, full tree SHA, and cleanliness proofs from decision 4, plus frozen task bytes and recomputed `task_digest`.
@@ -171,9 +171,9 @@ A useful provider opinion is not a bridge cycle. The owner may count one #328 fi
 14. **Cleanup evidence from acknowledge output, not `show`:** record the `acknowledge` result JSON (and any identical same-directory replay results) for `custody_cleanup` (`removed` or truthful `pending`). The helper does not persist cleanup status into the receipt store; `show` cannot supply it.
 15. After acknowledge (and any cleanup replay), final `show` only to inspect terminal `acknowledged` state and append-only event order.
 16. Explicit mapping that all six PR #11886 compliance gaps are closed for this cycle.
-17. Readiness remains Runtime-unverified unless the owner separately promotes under #323's full gates.
+17. Record the cycle for owner assessment; it does not by itself change formal promotion status.
 
-Natural-failure recovery without report loss remains a distinct #323 gate. One clean #328 cycle does not satisfy it by itself. The bridge helper never attests Git or GitHub head state.
+Natural-failure recovery without report loss may inform optional formal promotion, but it is not a normal-use or #323 closure gate. The bridge helper never attests Git or GitHub head state.
 
 ## Authority boundaries
 
@@ -256,7 +256,7 @@ Perform steps in order. Stop on any failed check.
 
 ## Troubleshooting
 
-- **#327 not accepted/merged/installed** — categorical stop; no field cycle and no #323 credit. Local/unmerged routes do not count. #327 is currently externally blocked by a missing Amp receipt-bearing physical-runner assignment API.
+- **#327 not accepted/merged/installed** — stop this #328 newly spawned local-worker workflow. This does not block generic `/amux-tycho` use or #323 credit from another genuine complete lifecycle with an existing coordinator.
 - **Tycho stopped / exit 143 / no submit** — `show` should remain without a new report. Do not reconstruct findings. Owner may authorize a **new** receipt and run only after re-validating head and route.
 - **`blocked` report consumed** — verify any partial findings independently; treat blockers as incomplete scope; do not publish solely because Tycho blocked.
 - **`complete` with blockers or empty verification** — application-invalid; consume, reject as finished second opinion, record handling, optionally acknowledge; do not treat blockers as accepted defects.
