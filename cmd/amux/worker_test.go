@@ -722,14 +722,14 @@ func TestWorkerTeardownPartialFailureReportsCompletedArtifacts(t *testing.T) {
 				if artifacts["remote_thread_archive"].Outcome != "completed" || artifacts["shelf_intent"].Outcome != "removed" {
 					t.Fatalf("partial teardown completed artifacts = %+v", artifacts)
 				}
-				if _, found := artifacts["local_client"]; found {
-					t.Fatalf("failed local client was reported completed: %+v", artifacts)
+				if artifacts["local_client"].Outcome != "failed" || !strings.Contains(artifacts["local_client"].Reason, "exit status 7") {
+					t.Fatalf("failed local client artifact = %+v", artifacts["local_client"])
 				}
-				if _, found := artifacts["worker_configuration"]; found {
-					t.Fatalf("unreached worker configuration was reported completed: %+v", artifacts)
+				if artifacts["worker_configuration"].Outcome != "unattempted" || artifacts["worker_configuration"].Reason == "" {
+					t.Fatalf("unattempted worker configuration artifact = %+v", artifacts["worker_configuration"])
 				}
 			} else {
-				for _, want := range []string{"remote_thread_archive=completed", "shelf_intent=removed", "error="} {
+				for _, want := range []string{"remote_thread_archive=completed", "shelf_intent=removed", "local_client=failed", "worker_configuration=unattempted", "error="} {
 					if !strings.Contains(stdout.String(), want) {
 						t.Fatalf("human partial teardown output missing %q:\n%s", want, stdout.String())
 					}

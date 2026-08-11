@@ -375,34 +375,46 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			changed = err == nil
 		case "teardown":
 			err = archiveAmpThread(row.Thread)
-			if err == nil {
-				appendTeardownArtifact(out.Teardown, "remote_thread_archive", "completed", "")
+			if err != nil {
+				setTeardownArtifact(out.Teardown, "remote_thread_archive", "failed", err.Error())
+			} else {
+				setTeardownArtifact(out.Teardown, "remote_thread_archive", "completed", "")
 				var shelfRemoved bool
 				shelfRemoved, err = config.RemoveShelf(dir.ShelvesPath(), row.Thread)
-				if err == nil {
+				if err != nil {
+					setTeardownArtifact(out.Teardown, "shelf_intent", "failed", err.Error())
+				} else {
 					if shelfRemoved {
-						appendTeardownArtifact(out.Teardown, "shelf_intent", "removed", "")
+						setTeardownArtifact(out.Teardown, "shelf_intent", "removed", "")
 					} else {
-						appendTeardownArtifact(out.Teardown, "shelf_intent", "already_absent", "shelf intent was already absent")
+						setTeardownArtifact(out.Teardown, "shelf_intent", "already_absent", "shelf intent was already absent")
 					}
 				}
 			}
 			if err == nil && inspections[row.Thread].state == workerPaneExact {
 				err = revalidateWorkerBeforeMutation(row, inspections[row.Thread])
-				if err == nil {
+				if err != nil {
+					setTeardownArtifact(out.Teardown, "local_client", "failed", err.Error())
+				} else {
 					err = tmux.Runner{}.KillWindow(inspections[row.Thread].pane.WindowID)
-					if err == nil {
-						appendTeardownArtifact(out.Teardown, "local_client", "stopped", "")
+					if err != nil {
+						setTeardownArtifact(out.Teardown, "local_client", "failed", err.Error())
+					} else {
+						setTeardownArtifact(out.Teardown, "local_client", "stopped", "")
 					}
 				}
 			} else if err == nil {
-				appendTeardownArtifact(out.Teardown, "local_client", "already_stopped", "verified local client was already absent")
+				setTeardownArtifact(out.Teardown, "local_client", "already_stopped", "verified local client was already absent")
 			}
 			if err == nil {
 				var workerRemoved bool
 				workerRemoved, err = config.Remove(dir.WorkersPath(), row.Workspace, row.Window)
-				if err == nil && workerRemoved {
-					appendTeardownArtifact(out.Teardown, "worker_configuration", "removed", "")
+				if err != nil {
+					setTeardownArtifact(out.Teardown, "worker_configuration", "failed", err.Error())
+				} else if workerRemoved {
+					setTeardownArtifact(out.Teardown, "worker_configuration", "removed", "")
+				} else {
+					setTeardownArtifact(out.Teardown, "worker_configuration", "already_absent", "worker configuration was already absent")
 				}
 			}
 			changed = err == nil
@@ -800,6 +812,13 @@ func workerOutcome(r config.Row, action, message string) result.Outcome {
 
 func newTeardownDetails() *result.TeardownDetails {
 	details := &result.TeardownDetails{Artifacts: make([]result.TeardownArtifactDetails, 0, 8)}
+	for _, artifact := range []string{"remote_thread_archive", "shelf_intent", "local_client", "worker_configuration"} {
+		details.Artifacts = append(details.Artifacts, result.TeardownArtifactDetails{
+			Artifact: artifact,
+			Outcome:  "unattempted",
+			Reason:   "not attempted because a prior teardown artifact failed",
+		})
+	}
 	for _, artifact := range []struct {
 		name   string
 		reason string
@@ -809,13 +828,19 @@ func newTeardownDetails() *result.TeardownDetails {
 		{"stashes", "amux teardown does not own Git stashes"},
 		{"external_project_records", "amux teardown does not own external project registries"},
 	} {
-		appendTeardownArtifact(details, artifact.name, "not_owned", artifact.reason)
+		details.Artifacts = append(details.Artifacts, result.TeardownArtifactDetails{Artifact: artifact.name, Outcome: "not_owned", Reason: artifact.reason})
 	}
 	return details
 }
 
-func appendTeardownArtifact(details *result.TeardownDetails, artifact, outcome, reason string) {
-	details.Artifacts = append(details.Artifacts, result.TeardownArtifactDetails{Artifact: artifact, Outcome: outcome, Reason: reason})
+func setTeardownArtifact(details *result.TeardownDetails, artifact, outcome, reason string) {
+	for i := range details.Artifacts {
+		if details.Artifacts[i].Artifact == artifact {
+			details.Artifacts[i].Outcome = outcome
+			details.Artifacts[i].Reason = reason
+			return
+		}
+	}
 }
 
 func teardownMessage(details *result.TeardownDetails) string {
