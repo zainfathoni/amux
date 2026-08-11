@@ -651,7 +651,7 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 		"notification as wake-up only",
 		"created-only receipt",
 		"cleanup `pending`",
-		"Field-readiness limits",
+		"Evidence and promotion limits",
 		"Tycho may route Claude or Pi",
 		"does not grant Tycho Claude/Pi provider identity",
 		"not bridge attestation of project, harness, provider, or model identity",
@@ -664,7 +664,7 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 		"Do not turn it into a recurring watcher",
 		"Authoritative Amp `/team-review` with one Opus second opinion",
 		"reference/team-review-second-opinion.md",
-		"never marks `/amux-tycho` field-proven or closes #323",
+		"Practical usability and #323 closure are separate claims",
 		"Provider stop or exit without `submit`",
 		"Only Amp mutates the PENDING GitHub review",
 	} {
@@ -700,13 +700,13 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 			t.Errorf("experimental Tycho contract is missing %q", required)
 		}
 	}
-	if !strings.Contains(matrix, "| `/amux-tycho` semantic-report receipt/inbox | Runtime-unverified |") ||
+	if !strings.Contains(matrix, "| `/amux-tycho` semantic-report receipt/inbox | Conditional |") ||
 		!strings.Contains(matrix, "Tycho has `report_only` authority") ||
 		!strings.Contains(matrix, "existing Tycho agent/project/harness/model route") ||
-		!strings.Contains(matrix, "no live Tycho cycle") ||
+		!strings.Contains(matrix, "practically established") ||
 		!strings.Contains(matrix, "Tycho never mutates GitHub reviews") ||
 		!strings.Contains(matrix, "#328") ||
-		!strings.Contains(matrix, "does not change this row") {
+		!strings.Contains(matrix, "optional promotion policy") {
 		t.Error("readiness matrix overstates or omits the experimental Tycho route")
 	}
 	for _, path := range []string{
@@ -804,10 +804,9 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 		"bridge helper does **not** attest Git state",
 		"reject the application payload",
 		// #323 evidence completeness.
-		"#327 categorical gate (current blocker)",
+		"#328-specific #327 prerequisite",
 		"accepted and merged",
-		"Local, unmerged, draft, or merely “available” routes do **not** satisfy the gate",
-		"missing Amp receipt-bearing physical-runner assignment API",
+		"does not block generic `/amux-tycho` use or #323 credit",
 		"Pre-Tycho",
 		"Post-Tycho / pre-consume** same-head proof",
 		"per-write PR head equality checks",
@@ -838,8 +837,8 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 	if !strings.Contains(skill, "reference/team-review-second-opinion.md") {
 		t.Error("amux-tycho SKILL.md must progressively disclose the team-review workflow")
 	}
-	if !strings.Contains(skill, "#327 is currently a categorical field-cycle blocker") {
-		t.Error("amux-tycho SKILL.md must surface the #327 categorical field-cycle blocker")
+	if !strings.Contains(skill, "#327") || !strings.Contains(skill, "does not block generic `/amux-tycho` use or #323 field credit") {
+		t.Error("amux-tycho SKILL.md must scope #327 to the #328 local-worker workflow")
 	}
 	if !strings.Contains(triggers, "Authoritative Amp /team-review with one Opus second opinion") {
 		t.Error("amux-tycho triggers must route the team-review second-opinion phrase")
@@ -847,14 +846,14 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 	if !strings.Contains(contract, "team-review-second-opinion.md") {
 		t.Error("canonical bridge protocol must point at the application workflow without duplicating a second helper")
 	}
-	if !strings.Contains(matrix, "Runtime-unverified") || strings.Contains(matrix, "| `/amux-tycho` semantic-report receipt/inbox | Proven") {
-		t.Error("#328 must not promote the /amux-tycho readiness row")
+	if !strings.Contains(matrix, "| `/amux-tycho` semantic-report receipt/inbox | Conditional |") || strings.Contains(matrix, "| `/amux-tycho` semantic-report receipt/inbox | Proven") {
+		t.Error("#328 must not formally promote the conditional /amux-tycho readiness row")
 	}
-	if !strings.Contains(matrix, "Current field-cycle blocker") ||
+	if !strings.Contains(matrix, "blocks only") ||
 		!strings.Contains(matrix, "#327") ||
-		!strings.Contains(matrix, "missing Amp receipt-bearing physical-runner assignment API") ||
-		!strings.Contains(matrix, "local/unmerged routes do not count") {
-		t.Error("readiness matrix must surface #327 as the current categorical field-cycle blocker")
+		!strings.Contains(matrix, "#328") ||
+		!strings.Contains(matrix, "not generic `/amux-tycho` use or") {
+		t.Error("readiness matrix must scope #327 to #328 rather than generic use or #323 credit")
 	}
 	// Reuse one canonical helper/schema rather than a duplicate implementation.
 	if strings.Contains(workflow, "tycho_report_bridge_v2") || strings.Contains(workflow, "second_opinion_bridge.py") {
