@@ -1839,7 +1839,8 @@ func TestFinishRemovalGateDocumentsEveryFailClosedInvariant(t *testing.T) {
 	for _, required := range []string{
 		"override`, `origin/HEAD`, or `GitHub default branch`",
 		"refs/remotes/origin/<name>",
-		"Run `git fetch origin` before classification",
+		"Run `git fetch --prune origin` before classification",
+		"Plain `git fetch origin` is insufficient",
 		"refs/heads refs/remotes refs/tags",
 		"locked` with `stat` proving the path absent",
 		"dirty: unknowable",
@@ -1921,6 +1922,10 @@ func TestRemovalSafetySyntheticRefCoverageAndPatchEquivalence(t *testing.T) {
 		cmd := exec.Command("git", "--git-dir", remote, "update-ref", "-d", "refs/heads/transient")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("delete synthetic remote ref: %v\n%s", err, out)
+		}
+		gitTest(t, repo, "fetch", "origin")
+		if verdict, evidence, err := syntheticRemovalVerdict(repo, baseline, tip); err != nil || verdict != "SAFE" || evidence != "refs/remotes/origin/transient" {
+			t.Fatalf("plain-fetch verdict=(%q, %q, %v), want phantom remote SAFE evidence", verdict, evidence, err)
 		}
 		gitTest(t, repo, "fetch", "--prune", "origin")
 		if verdict, _, err := syntheticRemovalVerdict(repo, baseline, tip); err != nil || verdict != "NEEDS_BACKUP" {
