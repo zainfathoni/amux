@@ -391,7 +391,7 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 				remote = string(doctorStatuses[canonicalThreadID(row.Thread)])
 			}
 			out.Worker = workerPlacementDetails(row, string(inspections[row.Thread].state))
-			out.Message = fmt.Sprintf("local=%s remote=%s intent=%t assignment=%s native_executor=%s native_runner_id=%s execution_affinity=%s", inspections[row.Thread].state, remote, shelved[row.Thread], workerAssignmentState(row), unknownNativePlacement, unknownNativePlacement, unknownNativePlacement)
+			out.Message = fmt.Sprintf("local=%s remote=%s workdir=%s intent=%t assignment=%s native_executor=%s native_runner_id=%s execution_affinity=%s", inspections[row.Thread].state, remote, workerWorkdirState(row.Workdir), shelved[row.Thread], workerAssignmentState(row), unknownNativePlacement, unknownNativePlacement, unknownNativePlacement)
 			env.Successful = append(env.Successful, out)
 			if !in.Options.JSON {
 				fmt.Fprintf(a.stdout, "%s\t%s\n", row.Thread, out.Message)
@@ -694,6 +694,20 @@ func workerAssignmentState(row config.Row) string {
 		return string(row.AssignmentState)
 	}
 	return "unknown"
+}
+
+func workerWorkdirState(workdir string) string {
+	stat, err := os.Stat(config.ExpandHome(workdir))
+	if os.IsNotExist(err) {
+		return "missing"
+	}
+	if err != nil {
+		return "unreadable"
+	}
+	if !stat.IsDir() {
+		return "not_a_directory"
+	}
+	return "present"
 }
 
 func verifyAdoptionThreadAndTmux(row config.Row) (workerInspection, error) {
