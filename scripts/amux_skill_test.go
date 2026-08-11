@@ -2,9 +2,11 @@ package scripts_test
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"os"
 	"os/exec"
@@ -24,6 +26,7 @@ var publicSkillFiles = []string{
 	filepath.Join("skills", "amux", "reference", "amp-invocation-policy.md"),
 	filepath.Join("skills", "amux", "reference", "contract-v1.md"),
 	filepath.Join("skills", "amux", "reference", "deadline-v1.md"),
+	filepath.Join("skills", "amux", "reference", "removal-safety.md"),
 	filepath.Join("skills", "amux-tycho", "SKILL.md"),
 	filepath.Join("skills", "amux-tycho", "reference", "tycho-report-bridge.md"),
 	filepath.Join("skills", "amux-tycho", "reference", "team-review-second-opinion.md"),
@@ -75,6 +78,7 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 				"contract-v1.md",
 				"deadline-v1.md",
 				"amp-invocation-policy.md",
+				"removal-safety.md",
 			},
 		},
 		{
@@ -1826,6 +1830,287 @@ func TestHealthAndFinishPreserveModeSafety(t *testing.T) {
 	}
 }
 
+func TestFinishRemovalGateDocumentsEveryFailClosedInvariant(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	reference := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "removal-safety.md"))
+	combined := workflow + reference
+	for _, required := range []string{
+		"override`, `origin/HEAD`, or `GitHub default branch`",
+		"refs/remotes/origin/<name>",
+		"Run `git fetch origin` before classification",
+		"refs/heads refs/remotes refs/tags",
+		"locked` with `stat` proving the path absent",
+		"dirty: unknowable",
+		"status --porcelain --untracked-files=no",
+		"SAFE_KEEP_BRANCH",
+		"git cherry <resolved-remote-baseline> <C>",
+		"Rule 5 is always `NEEDS_BACKUP`",
+		"create refs/heads/backup/<worktree-name>-before-remove-<date> at <C>",
+		"classify → backup → unlock → prune",
+		"without force only after the removal-safety preflight",
+		"Keep branch deletion separate from worktree removal",
+		"gh pr view <pr> --json state,mergedAt,headRefName,headRefOid",
+		"unfiltered count and paths of `??` untracked entries",
+		"symlink-to-external",
+		"duplicate-of-canonical",
+		"Generated-artifact exclusions are configurable presentation filters",
+		"never count `refs/stash` as commit coverage",
+		"Any scan or resolution error blocks ordinary removal",
+	} {
+		if !strings.Contains(combined, required) {
+			t.Errorf("finish removal gate is missing %q", required)
+		}
+	}
+	mutation := strings.Index(workflow, "[Remove the worker worktree without force")
+	link := strings.Index(workflow, "](removal-safety.md#removal-ordering-context)")
+	if mutation < 0 || link < mutation {
+		t.Error("actual finish mutation sentence lacks inline progressive-disclosure link")
+	}
+}
+
+func TestRemovalSafetySyntheticRefCoverageAndPatchEquivalence(t *testing.T) {
+	t.Run("attached local branch", func(t *testing.T) {
+		repo, _, baseline := newRemovalSafetyRepo(t)
+		worktree := filepath.Join(t.TempDir(), "attached")
+		gitTest(t, repo, "worktree", "add", "-b", "feature", worktree, baseline)
+		commitFile(t, worktree, "feature.txt", "attached\n", "attached")
+		tip := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "HEAD"))
+		verdict, evidence, err := syntheticRemovalVerdict(repo, baseline, tip)
+		if err != nil || verdict != "SAFE_KEEP_BRANCH" || !strings.Contains(evidence, "refs/heads/feature") {
+			t.Fatalf("attached verdict=(%q, %q, %v), want local branch coverage", verdict, evidence, err)
+		}
+	})
+
+	t.Run("remote branch", func(t *testing.T) {
+		repo, _, baseline := newRemovalSafetyRepo(t)
+		worktree := filepath.Join(t.TempDir(), "remote")
+		gitTest(t, repo, "worktree", "add", "-b", "feature", worktree, baseline)
+		commitFile(t, worktree, "remote.txt", "remote\n", "remote")
+		tip := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "HEAD"))
+		gitTest(t, worktree, "push", "-u", "origin", "feature")
+		verdict, evidence, err := syntheticRemovalVerdict(repo, baseline, tip)
+		if err != nil || verdict != "SAFE" || !strings.Contains(evidence, "refs/remotes/origin/feature") {
+			t.Fatalf("remote verdict=(%q, %q, %v), want remote coverage", verdict, evidence, err)
+		}
+	})
+
+	t.Run("tag and detached unique", func(t *testing.T) {
+		repo, _, baseline := newRemovalSafetyRepo(t)
+		worktree := filepath.Join(t.TempDir(), "detached")
+		gitTest(t, repo, "worktree", "add", "--detach", worktree, baseline)
+		commitFile(t, worktree, "detached.txt", "unique\n", "detached")
+		tip := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "HEAD"))
+		verdict, _, err := syntheticRemovalVerdict(repo, baseline, tip)
+		if err != nil || verdict != "NEEDS_BACKUP" {
+			t.Fatalf("detached verdict=(%q, %v), want NEEDS_BACKUP", verdict, err)
+		}
+		gitTest(t, repo, "tag", "rescue-detached", tip)
+		verdict, evidence, err := syntheticRemovalVerdict(repo, baseline, tip)
+		if err != nil || verdict != "SAFE_KEEP_BRANCH" || !strings.Contains(evidence, "refs/tags/rescue-detached") {
+			t.Fatalf("tag verdict=(%q, %q, %v), want local tag coverage", verdict, evidence, err)
+		}
+	})
+
+	t.Run("stash is not coverage", func(t *testing.T) {
+		repo, _, baseline := newRemovalSafetyRepo(t)
+		worktree := filepath.Join(t.TempDir(), "stash")
+		gitTest(t, repo, "worktree", "add", "--detach", worktree, baseline)
+		commitFile(t, worktree, "detached.txt", "unique\n", "detached")
+		tip := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "HEAD"))
+		if err := os.WriteFile(filepath.Join(worktree, "detached.txt"), []byte("stashed\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, worktree, "stash", "push", "-m", "detached-wip")
+		allRefs := gitTest(t, repo, "for-each-ref", "--contains", tip, "--format=%(refname)")
+		allowedRefs := gitTest(t, repo, "for-each-ref", "--contains", tip, "--format=%(refname)", "refs/heads", "refs/remotes", "refs/tags")
+		if !strings.Contains(allRefs, "refs/stash") || strings.Contains(allowedRefs, "refs/stash") {
+			t.Fatalf("stash include-list evidence all=%q allowed=%q", allRefs, allowedRefs)
+		}
+		verdict, _, err := syntheticRemovalVerdict(repo, baseline, tip)
+		if err != nil || verdict != "NEEDS_BACKUP" {
+			t.Fatalf("stash verdict=(%q, %v), want NEEDS_BACKUP", verdict, err)
+		}
+	})
+
+	t.Run("attached stash attribution", func(t *testing.T) {
+		repo, _, baseline := newRemovalSafetyRepo(t)
+		worktree := filepath.Join(t.TempDir(), "stash-attribution")
+		gitTest(t, repo, "worktree", "add", "-b", "stash-feature", worktree, baseline)
+		tip := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "HEAD"))
+		if err := os.WriteFile(filepath.Join(worktree, "tracked.txt"), []byte("stash me\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, worktree, "stash", "push", "-m", "attributed-wip")
+		stash := gitTest(t, repo, "stash", "list", "--format=%gd%x09%H%x09%P%x09%gs")
+		for _, evidence := range []string{"stash@{0}", tip, "stash-feature", "attributed-wip"} {
+			if !strings.Contains(stash, evidence) {
+				t.Errorf("stash row lacks %q: %q", evidence, stash)
+			}
+		}
+	})
+
+	t.Run("one directional patch equivalence", func(t *testing.T) {
+		repo, _, baseline := newRemovalSafetyRepo(t)
+		worktree := filepath.Join(t.TempDir(), "patch")
+		gitTest(t, repo, "worktree", "add", "-b", "patch-source", worktree, baseline)
+		commitFile(t, worktree, "dist/generated.js", "same generated patch\n", "source change")
+		tip := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "HEAD"))
+		patch := gitTestBytes(t, worktree, "show", "--format=", "--binary", tip)
+		gitTestInput(t, repo, patch, "apply")
+		gitTest(t, repo, "add", "dist/generated.js")
+		gitTest(t, repo, "commit", "-m", "squash destination")
+		baseline = "HEAD"
+		gitTest(t, repo, "update-ref", "-d", "refs/heads/patch-source")
+		cherry := gitTest(t, repo, "cherry", baseline, tip)
+		if !strings.HasPrefix(strings.TrimSpace(cherry), "-") {
+			t.Fatalf("git cherry = %q, want one-directional '-' evidence", cherry)
+		}
+		verdict, evidence, err := syntheticRemovalVerdict(repo, baseline, tip)
+		if err != nil || verdict != "SAFE" || evidence != "patch-equivalent" {
+			t.Fatalf("patch verdict=(%q, %q, %v), want SAFE", verdict, evidence, err)
+		}
+	})
+}
+
+func TestRemovalSafetySyntheticMissingDirtyAndPreciousFiles(t *testing.T) {
+	t.Run("tracked only blocks", func(t *testing.T) {
+		repo, _, baseline := newRemovalSafetyRepo(t)
+		worktree := filepath.Join(t.TempDir(), "dirty")
+		gitTest(t, repo, "worktree", "add", "-b", "dirty", worktree, baseline)
+		if err := os.WriteFile(filepath.Join(worktree, "untracked.txt"), []byte("untracked\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := syntheticTrackedState(worktree); err != nil || got != "clean" {
+			t.Fatalf("untracked-only tracked state=(%q, %v), want clean", got, err)
+		}
+		if err := os.WriteFile(filepath.Join(worktree, "tracked.txt"), []byte("changed\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := syntheticTrackedState(worktree); err != nil || got != "BLOCKED" {
+			t.Fatalf("tracked state=(%q, %v), want BLOCKED", got, err)
+		}
+	})
+
+	t.Run("locked and unlocked absent", func(t *testing.T) {
+		repo, _, baseline := newRemovalSafetyRepo(t)
+		locked := filepath.Join(t.TempDir(), "locked")
+		plain := filepath.Join(t.TempDir(), "plain")
+		gitTest(t, repo, "worktree", "add", "--detach", locked, baseline)
+		gitTest(t, repo, "worktree", "lock", locked)
+		gitTest(t, repo, "worktree", "add", "--detach", plain, baseline)
+		if err := os.RemoveAll(locked); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(plain); err != nil {
+			t.Fatal(err)
+		}
+		porcelain := gitTest(t, repo, "worktree", "list", "--porcelain")
+		lockedBlock := syntheticWorktreeBlock(porcelain, locked)
+		plainBlock := syntheticWorktreeBlock(porcelain, plain)
+		if !strings.Contains(lockedBlock, "locked") || strings.Contains(lockedBlock, "prunable") {
+			t.Fatalf("locked absent block = %q", lockedBlock)
+		}
+		if !strings.Contains(plainBlock, "prunable") {
+			t.Fatalf("unlocked absent block = %q", plainBlock)
+		}
+		if _, err := os.Stat(locked); !os.IsNotExist(err) {
+			t.Fatalf("locked path stat = %v, want absent", err)
+		}
+	})
+
+	t.Run("ignored precious resolution and untracked prediction", func(t *testing.T) {
+		repo, _, baseline := newRemovalSafetyRepo(t)
+		canonical := repo
+		worktree := filepath.Join(t.TempDir(), "precious")
+		gitTest(t, repo, "worktree", "add", "-b", "precious", worktree, baseline)
+		ignore := ".env.local\n*.local.json\n.envrc\n"
+		if err := os.WriteFile(filepath.Join(canonical, ".gitignore"), []byte(ignore), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, canonical, "add", ".gitignore")
+		gitTest(t, canonical, "commit", "-m", "ignore precious fixtures")
+		gitTest(t, worktree, "merge", "main")
+		for _, root := range []string{canonical, worktree} {
+			if err := os.WriteFile(filepath.Join(root, ".env.local"), []byte("duplicate\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(worktree, "auth.local.json"), []byte("unique\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		external := filepath.Join(t.TempDir(), "external-envrc")
+		if err := os.WriteFile(external, []byte("external\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(external, filepath.Join(worktree, ".envrc")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(worktree, "notes.md"), []byte("untracked\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		status := gitTest(t, worktree, "status", "--porcelain", "--untracked-files=all", "--ignored")
+		for _, expected := range []string{"?? notes.md", "!! .env.local", "!! .envrc", "!! auth.local.json"} {
+			if !strings.Contains(status, expected) {
+				t.Errorf("status missing %q: %q", expected, status)
+			}
+		}
+		if got, err := syntheticPreciousResolution(worktree, canonical, ".env.local"); err != nil || got != "duplicate-of-canonical" {
+			t.Errorf("duplicate resolution = (%q, %v)", got, err)
+		}
+		if got, err := syntheticPreciousResolution(worktree, canonical, "auth.local.json"); err != nil || got != "unique" {
+			t.Errorf("unique resolution = (%q, %v)", got, err)
+		}
+		if got, err := syntheticPreciousResolution(worktree, canonical, ".envrc"); err != nil || got != "symlink-to-external" {
+			t.Errorf("symlink resolution = (%q, %v)", got, err)
+		}
+		containedTarget := filepath.Join(worktree, "contained-target")
+		if err := os.WriteFile(containedTarget, []byte("contained\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("contained-target", filepath.Join(worktree, "contained-auth")); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := syntheticPreciousResolution(worktree, canonical, "contained-auth"); err != nil || got != "unique" {
+			t.Errorf("contained symlink resolution = (%q, %v)", got, err)
+		}
+		if err := os.Symlink("missing-target", filepath.Join(worktree, "broken-auth")); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := syntheticPreciousResolution(worktree, canonical, "broken-auth"); err == nil || got != "unique" {
+			t.Errorf("broken symlink resolution = (%q, %v), want blocked unique", got, err)
+		}
+	})
+}
+
+func TestRemovalSafetySyntheticFailuresStayErrors(t *testing.T) {
+	repo, _, _ := newRemovalSafetyRepo(t)
+	if _, _, err := syntheticRemovalVerdict(repo, "refs/remotes/origin/missing", "HEAD"); err == nil {
+		t.Fatal("missing baseline was converted into a verdict")
+	}
+	missing := filepath.Join(t.TempDir(), "absent")
+	cmd := exec.Command("git", "-C", missing, "status", "--porcelain", "--untracked-files=no")
+	if err := cmd.Run(); err == nil {
+		t.Fatal("missing-worktree status unexpectedly succeeded; errors must not mean clean")
+	}
+	if state, err := syntheticTrackedState(missing); err == nil || state != "" {
+		t.Fatalf("missing-worktree tracked state=(%q, %v), want error", state, err)
+	}
+	blobPath := filepath.Join(repo, "blob")
+	if err := os.WriteFile(blobPath, []byte("not a commit\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	blob := strings.TrimSpace(gitTest(t, repo, "hash-object", "-w", blobPath))
+	if _, _, err := syntheticRemovalVerdict(repo, blob, "HEAD"); err == nil {
+		t.Fatal("non-commit baseline was converted into a verdict")
+	}
+	gitTest(t, repo, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "missing.git"))
+	if out, err := exec.Command("git", "-C", repo, "fetch", "origin").CombinedOutput(); err == nil {
+		t.Fatalf("synthetic fetch failure unexpectedly succeeded: %s", out)
+	}
+}
+
 func TestClaudePairTeardownIsFailClosedAndRunsBeforeWorkerTeardown(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
@@ -1895,7 +2180,7 @@ func TestClaudePairTeardownIsFailClosedAndRunsBeforeWorkerTeardown(t *testing.T)
 		t.Error("core /amux skill must not own Claude recovery triggers")
 	}
 	pairAdmission := strings.Index(workflow, "If `/amux-claude` pairs may exist, run the paired Claude lifecycle dry-run")
-	worktreeRemoval := strings.Index(workflow, "Remove the clean worker worktree")
+	worktreeRemoval := strings.Index(workflow, "[Remove the worker worktree without force")
 	finalRevalidation := strings.Index(workflow, "rerun paired Claude lifecycle revalidation")
 	finalTeardown := strings.LastIndex(workflow, "amux teardown --thread <thread-id>")
 	if pairAdmission < 0 || worktreeRemoval < 0 || pairAdmission > worktreeRemoval {
@@ -2109,6 +2394,193 @@ func readSkillFile(t *testing.T, root, relativePath string) string {
 		t.Fatal(err)
 	}
 	return string(contents)
+}
+
+func newRemovalSafetyRepo(t *testing.T) (repo, remote, baseline string) {
+	t.Helper()
+	root := t.TempDir()
+	remote = filepath.Join(root, "remote.git")
+	repo = filepath.Join(root, "repo")
+	gitTest(t, root, "init", "--bare", remote)
+	gitTest(t, root, "init", "-b", "main", repo)
+	gitTest(t, repo, "config", "user.name", "Synthetic Removal Safety")
+	gitTest(t, repo, "config", "user.email", "synthetic@example.invalid")
+	gitTest(t, repo, "config", "commit.gpgSign", "false")
+	gitTest(t, repo, "config", "tag.gpgSign", "false")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, repo, "add", "tracked.txt")
+	gitTest(t, repo, "commit", "-m", "base")
+	gitTest(t, repo, "remote", "add", "origin", remote)
+	gitTest(t, repo, "push", "-u", "origin", "main")
+	gitTest(t, repo, "remote", "set-head", "origin", "main")
+	return repo, remote, "refs/remotes/origin/main"
+}
+
+func commitFile(t *testing.T, repo, name, contents, message string) {
+	t.Helper()
+	path := filepath.Join(repo, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, repo, "add", name)
+	gitTest(t, repo, "commit", "-m", message)
+}
+
+func gitTest(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	return string(gitTestBytes(t, dir, args...))
+}
+
+func gitTestBytes(t *testing.T, dir string, args ...string) []byte {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git -C %s %s: %v\n%s", dir, strings.Join(args, " "), err, out)
+	}
+	return out
+}
+
+func gitTestInput(t *testing.T, dir string, input []byte, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Stdin = bytes.NewReader(input)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git -C %s %s: %v\n%s", dir, strings.Join(args, " "), err, out)
+	}
+}
+
+func syntheticRemovalVerdict(repo, baseline, tip string) (string, string, error) {
+	for label, rev := range map[string]string{"baseline": baseline, "tip": tip} {
+		cmd := exec.Command("git", "-C", repo, "rev-parse", "--verify", rev+"^{commit}")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return "", "", fmt.Errorf("resolve %s: %w: %s", label, err, out)
+		}
+	}
+	cmd := exec.Command("git", "-C", repo, "for-each-ref", "--contains", tip, "--format=%(refname)", "refs/heads", "refs/remotes", "refs/tags")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", "", fmt.Errorf("ref coverage: %w: %s", err, out)
+	}
+	refs := strings.Fields(string(out))
+	for _, ref := range refs {
+		if strings.HasPrefix(ref, "refs/remotes/") {
+			return "SAFE", ref, nil
+		}
+	}
+	for _, ref := range refs {
+		if strings.HasPrefix(ref, "refs/heads/") || strings.HasPrefix(ref, "refs/tags/") {
+			return "SAFE_KEEP_BRANCH", strings.Join(refs, ","), nil
+		}
+	}
+	ancestor := exec.Command("git", "-C", repo, "merge-base", "--is-ancestor", tip, baseline)
+	if out, err := ancestor.CombinedOutput(); err == nil {
+		return "SAFE", baseline, nil
+	} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+		return "", "", fmt.Errorf("ancestry: %w: %s", err, out)
+	}
+	cherry := exec.Command("git", "-C", repo, "cherry", baseline, tip)
+	out, err = cherry.CombinedOutput()
+	if err != nil {
+		return "", "", fmt.Errorf("patch equivalence: %w: %s", err, out)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	allEquivalent := len(lines) > 0 && lines[0] != ""
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "- ") {
+			allEquivalent = false
+		}
+	}
+	if allEquivalent {
+		return "SAFE", "patch-equivalent", nil
+	}
+	return "NEEDS_BACKUP", "create backup ref at " + tip, nil
+}
+
+func syntheticWorktreeBlock(porcelain, path string) string {
+	for _, block := range strings.Split(strings.TrimSpace(porcelain), "\n\n") {
+		if strings.HasPrefix(block, "worktree "+path+"\n") {
+			return block
+		}
+	}
+	return ""
+}
+
+func syntheticTrackedState(worktree string) (string, error) {
+	cmd := exec.Command("git", "-C", worktree, "status", "--porcelain", "--untracked-files=no")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("tracked status: %w: %s", err, out)
+	}
+	if len(out) != 0 {
+		return "BLOCKED", nil
+	}
+	return "clean", nil
+}
+
+func syntheticPreciousResolution(worktree, canonical, relative string) (string, error) {
+	worktreeRoot, err := filepath.EvalSymlinks(worktree)
+	if err != nil {
+		return "", fmt.Errorf("resolve worktree: %w", err)
+	}
+	path := filepath.Join(worktreeRoot, relative)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", fmt.Errorf("lstat precious path: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return "unique", fmt.Errorf("resolve precious symlink: %w", err)
+		}
+		rel, err := filepath.Rel(worktreeRoot, resolved)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "unique", nil
+		}
+		return "symlink-to-external", nil
+	}
+	if !info.Mode().IsRegular() {
+		return "unique", nil
+	}
+	resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		return "unique", fmt.Errorf("resolve precious parent: %w", err)
+	}
+	if rel, err := filepath.Rel(worktreeRoot, resolvedParent); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "unique", nil
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(canonical)
+	if err != nil {
+		return "unique", fmt.Errorf("resolve canonical worktree: %w", err)
+	}
+	canonicalPath := filepath.Join(canonicalRoot, relative)
+	canonicalInfo, err := os.Lstat(canonicalPath)
+	if os.IsNotExist(err) {
+		return "unique", nil
+	}
+	if err != nil {
+		return "unique", fmt.Errorf("lstat canonical copy: %w", err)
+	}
+	if !canonicalInfo.Mode().IsRegular() {
+		return "unique", nil
+	}
+	want, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		return "unique", fmt.Errorf("read canonical copy: %w", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		return "unique", fmt.Errorf("read precious path: %w", err)
+	}
+	if bytes.Equal(got, want) {
+		return "duplicate-of-canonical", nil
+	}
+	return "unique", nil
 }
 
 func TestPublicDocsDescribeNarrowProjectlessSpawnException(t *testing.T) {
