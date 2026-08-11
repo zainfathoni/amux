@@ -98,9 +98,12 @@ func (a app) executeAggregate(in invocation, dir config.Directory) (*result.Enve
 				runnerPlan = plan
 			}
 			if preflightErr != nil {
-				if in.Command.Name == "reconcile" && mode.worker && hasPlannedWorkerShelfReconcile(plan) {
+				if in.Command.Name == "reconcile" && mode.worker && plan != nil && len(plan.Failed) > 0 {
 					workerRemovalBlocked = true
-					continue
+					if hasPlannedWorkerShelfReconcile(plan) {
+						continue
+					}
+					mergeBlockedReconcileRemovalPlan(&env, runnerPlan)
 				}
 				mergeEnvelope(&env, plan)
 				return &env, result.Preflight(errors.New(preflightErr.Error()))
@@ -112,7 +115,7 @@ func (a app) executeAggregate(in invocation, dir config.Directory) (*result.Enve
 		if workerRemovalBlocked {
 			mergeBlockedReconcileRemovalPlan(&env, runnerPlan)
 			mergeEnvelope(&env, workerPlan)
-			return &env, result.Runtime(errors.New("worker reconcile refused one or more stale-registration removals"))
+			return &env, result.Preflight(errors.New("worker reconcile refused one or more stale-registration removals"))
 		}
 		if useRunner {
 			modeEnv, modeErr := a.executeRunner(runnerIn, dir)

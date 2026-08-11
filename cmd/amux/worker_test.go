@@ -1569,6 +1569,15 @@ func TestWorkerReconcileRefusesBlockedNeverAuthorizedReportsWithZeroAndAbsentKey
 				t.Fatal(err)
 			}
 
+			dry, dryErr := executeWorkerJSONResult(t, "--json", "--dry-run", "--config-dir", dir, "worker", "reconcile", "--thread", row.Thread)
+			if dryErr == nil || result.ExitCode(dryErr) != result.ExitRejected || len(dry.Successful) != 0 || len(dry.Planned) != 0 || len(dry.Failed) != 1 || dry.Failed[0].Reconcile == nil || dry.Failed[0].Reconcile.Decision != "refuse_open_obligation" || strings.Join(dry.Failed[0].Reconcile.OpenObligations, ",") != "free-text-report-id" {
+				t.Fatalf("blocked worker reconcile dry-run = %+v err=%v", dry, dryErr)
+			}
+			afterDryRun, readErr := os.ReadFile(registryPath)
+			if readErr != nil || !bytes.Equal(before, afterDryRun) {
+				t.Fatalf("blocked worker reconcile dry-run mutated registry: before=%q after=%q err=%v", before, afterDryRun, readErr)
+			}
+
 			got, reconcileErr := executeWorkerJSONResult(t, "--json", "--config-dir", dir, "worker", "reconcile", "--thread", row.Thread)
 			if reconcileErr == nil || result.ExitCode(reconcileErr) != result.ExitRejected || len(got.Failed) != 1 || got.Failed[0].Reconcile == nil || got.Failed[0].Reconcile.Decision != "refuse_open_obligation" || strings.Join(got.Failed[0].Reconcile.OpenObligations, ",") != "free-text-report-id" {
 				t.Fatalf("blocked worker reconcile = %+v err=%v", got, reconcileErr)
