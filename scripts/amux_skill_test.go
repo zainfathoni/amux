@@ -664,7 +664,7 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 		"Do not turn it into a recurring watcher",
 		"Authoritative Amp `/team-review` with one Opus second opinion",
 		"reference/team-review-second-opinion.md",
-		"Practical use does not by itself close #323",
+		"Practical usability and #323 closure are separate claims",
 		"Provider stop or exit without `submit`",
 		"Only Amp mutates the PENDING GitHub review",
 	} {

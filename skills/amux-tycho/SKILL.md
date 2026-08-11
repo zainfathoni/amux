@@ -9,7 +9,7 @@ Explicit-only external-executor bridge. Tycho may route Claude or Pi, but Tycho 
 
 The current real Amp `T-...` thread remains coordinator, consumer, delivery authority, and acknowledgement authority. Tycho receives no group/member/callback/finish/label/merge/release/cleanup authority. An optional group reference is correlation metadata only. Do not activate this skill from an incidental Tycho, Claude, Pi, model, harness, capacity, or generic review mention.
 
-Before use, consult the [provider executor readiness matrix](https://github.com/zainfathoni/amux/blob/main/docs/provider-executor-readiness.md). Repeated real owner use establishes this experimental route as practically usable for normal explicit owner-authorized work with an existing Amp coordinator. Practical use does not by itself close #323: that requires one genuine complete bridge lifecycle under its remaining acceptance criterion.
+Before use, consult the [provider executor readiness matrix](https://github.com/zainfathoni/amux/blob/main/docs/provider-executor-readiness.md). Repeated real owner use establishes this experimental route as practically usable for normal explicit owner-authorized work with an existing Amp coordinator. Practical usability and #323 closure are separate claims; the genuine Karsa/nix-home lifecycle satisfied #323's one complete bridge-lifecycle criterion.
 
 ## Route triggers
 
@@ -40,7 +40,7 @@ For a long Tycho run, the Amp coordinator may own a single one-time Amp schedule
 
 - No live Tycho/provider run is authorized merely by loading this skill; each run still requires explicit owner authorization and exact route selection.
 - [#327](https://github.com/zainfathoni/amux/issues/327) blocks only [#328](https://github.com/zainfathoni/amux/issues/328)'s newly spawned local-Amp-worker assignment workflow. It does not block generic `/amux-tycho` use or #323 field credit with an existing coordinator. Do not start #327 or #328 merely to close #323.
-- #323 closes after one genuine complete create → separate-process recover → `valid_report` → consume/`delivered` → separate acknowledge → terminal-cleanup lifecycle. Audit recent genuine runs first; if none used the receipt bridge, capture this lifecycle during the next ordinary owner-authorized task rather than creating an artificial canary.
+- #323's closure criterion was one genuine complete create → separate-process recover → `valid_report` → consume/`delivered` → separate acknowledge → terminal-cleanup lifecycle. The [Karsa/nix-home Opus 5 architecture review](https://github.com/zainfathoni/nix-home/issues/13#issuecomment-5248690973) satisfied it; no artificial canary was required.
 - Multiple cycles, natural-failure recovery, versioned ingress, privacy review, ADR work, and formal readiness promotion are optional promotion policy. They do not gate normal use or #323 closure.
 - Owner-only filesystem permissions protect against other OS users, not another process with the same UID. The helper does not confine Tycho.
 - There is no resident watcher, arbitrary Amp Web-thread return route, model/entitlement attestation, provider fallback, automatic retry, or stable Go command/schema.
