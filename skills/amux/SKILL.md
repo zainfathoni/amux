@@ -39,6 +39,7 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 - **/amux health**: [`workflows.md`](reference/workflows.md#health-workers-and-runners).
 - **/amux sprawl**: [`workflows.md`](reference/workflows.md#sprawl-independent-issue-workers).
 - **/amux finish**: [`workflows.md`](reference/workflows.md#finish-a-merged-worker).
+- **Before any worktree remove or prune path**: load [`reference/removal-safety.md`](reference/removal-safety.md).
 
 Deadlines (optional): load [`reference/deadline-v1.md`](reference/deadline-v1.md) only when arming or handling deadline wake-ups—not on every `/amux` load.
 
@@ -53,6 +54,7 @@ Experimental external execution is explicit-only. Load **`/amux-tycho`** for the
 - Stuck clients / recovery: [`reference/troubleshooting.md`](reference/troubleshooting.md)
 - Trigger checklist: [`reference/trigger-phrases.md`](reference/trigger-phrases.md)
 - Amp invocation preflight: [`reference/amp-invocation-policy.md`](reference/amp-invocation-policy.md)
+- Worktree removal and prune safety: [`reference/removal-safety.md`](reference/removal-safety.md)
 
 ## Safety
 
