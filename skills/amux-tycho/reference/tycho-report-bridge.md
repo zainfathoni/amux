@@ -1,6 +1,6 @@
 # Experimental Tycho semantic-report bridge
 
-This `/amux-tycho`-owned adapter is temporary compatibility transport for the semantic receipt accepted in [#323](https://github.com/zainfathoni/amux/issues/323). It is not a stable `amux` command or schema and has no compatibility guarantee. Remove it when Amp supports native authenticated structured report delivery and separate acknowledgement. It does not launch, stop, watch, poll, or otherwise own Tycho or a provider process.
+This `/amux-tycho`-owned adapter is temporary compatibility transport for the semantic receipt accepted in [#323](https://github.com/zainfathoni/amux/issues/323). It is not a stable `amux` command or schema and has no compatibility guarantee. Earlier removal wording paired “native authenticated structured report delivery and separate acknowledgement”; ADR 0007 supersedes that pairing because separate acknowledgement belongs only to existing receipts, not the future direct route. Stop creating receipts after one ordinary field run returns exactly one schema-valid bounded `complete|blocked` result, authenticated and correlated to the invoking Amp request/thread, directly to that caller through the exact selected route without transcript/log mining or an Amux receipt. That future direct return establishes delivery and has no separate Amux consume/acknowledge step. Existing receipts continue through this document's exact lifecycle until terminal or explicitly retained. The adapter does not launch, stop, watch, poll, or otherwise own Tycho or a provider process.
 
 ## Minimal semantic contract
 
@@ -14,7 +14,7 @@ Ordinary explicit owner-authorized use with an existing Amp coordinator has four
 - The adapter makes no arbitrary Amp Web-thread delivery claim. A `T-...` origin without a separately verified exact live local Amp pane has only a recoverable owner-private machine-local inbox.
 - Tycho process exit, blocked process state, logs, pane text, prose, and hook execution are not reports. Only a valid structured `submit` operation can commit `valid_report`.
 
-The successful state sequence is `created → valid_report → delivered → acknowledged`. A created-only receipt whose coordinator token is irrecoverably lost may instead transition once to terminal `abandoned`. Explicit `consume` is delivery. `acknowledge` is a separate action and requires the same delivered report plus restart-safe coordinator custody. Notification is never delivery or acknowledgement.
+The successful state sequence is `created → valid_report → delivered → acknowledged`; the only alternate terminal transition is from `created` to `abandoned` when coordinator custody is irrecoverably lost and the abandonment contract is satisfied. Equivalently, the exact lifecycle is `created → valid_report → delivered → acknowledged|abandoned`, with `abandoned` reachable only through that created-only exception. `acknowledged` and `abandoned` are terminal receipt states. Explicit `consume` establishes `delivered`; `acknowledge` is a separate action and requires the same delivered report plus restart-safe coordinator custody. Notification is never delivery or acknowledgement. Notification uncertainty and terminal capability-cleanup status are separate metadata, never receipt states. Existing receipts drain only through these transitions.
 
 ## Binding and storage
 

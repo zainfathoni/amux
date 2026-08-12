@@ -1,14 +1,17 @@
 ---
-status: accepted-for-implementation
+status: superseded
 issue: 320
 base: 9bea1aede3b4945f207d158c90c127a81bccb240
-implementation: roadmap-tracked
+implementation: do-not-implement
 roadmap: 331
+superseded-by: adr-0007
 ---
 
 # Symmetric creation and per-resource retirement dispositions
 
-This proposal resolves the remaining planning choices in [issue #320](https://github.com/zainfathoni/amux/issues/320) under accepted [ADR 0001](../adr/0001-agent-first-client-lifecycle-cli.md), [ADR 0005](../adr/0005-maintain-amux-as-a-local-worker-lifecycle-and-recovery-tool.md), and [ADR 0006](../adr/0006-bound-thread-delegation-and-require-preservation-before-retirement.md). It defines a contract for later implementation; it changes no command, schema, skill, durable state, or runtime behavior.
+> **Historical proposal:** [ADR 0007](../adr/0007-retire-amux-through-native-cutover-and-staged-drain.md) supersedes this implementation architecture. The proposal remains design history, but its retirement stream, attachment generations, six-class planner, provider assertion framework, and finalizer must not be implemented. Existing state drains in place without a second retirement state machine.
+
+This proposal resolved the remaining planning choices in [issue #320](https://github.com/zainfathoni/amux/issues/320) under [ADR 0001](../adr/0001-agent-first-client-lifecycle-cli.md) and the then-accepted ADR 0005 and ADR 0006. It defined a contract for later implementation and changed no command, schema, skill, durable state, or runtime behavior. ADR 0007 later superseded that implementation direction.
 
 The design is deliberately not a workflow engine. It has one narrow append-only retirement record, one fixed dependency table, no persisted scheduling state, and no daemon, scheduler, resident finalizer, custom DAG, or generic state machine. Prepare derives current facts afresh. Finalize makes a bounded pass over the fixed table from a verified independent executor.
 
