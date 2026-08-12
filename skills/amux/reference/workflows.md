@@ -165,6 +165,20 @@ After paired success (or when no pair preflight applies), invoke `amux teardown`
 
 Invoke teardown from a verified independent executor. The target worker cannot safely teardown the Amp transport executing its own command, and unavailable or changed process-incarnation/ancestry evidence blocks before archive, catalog, shelf, or tmux mutation.
 
+## Sweep worktree inventory
+
+`/amux sweep` is a read-only skill workflow, not an `amux sweep` CLI command. Run the loaded skill's `scripts/sweep-inventory` helper with the repository, Amux config directory, and every explicit filesystem root whose immediate child checkouts comprise the inventory boundary:
+
+```sh
+python3 <loaded-amux-skill>/scripts/sweep-inventory --repo <repository> --config-dir <amux-config-directory> --filesystem-root <checkout-parent> [--filesystem-root <other-parent>] --json
+```
+
+The helper performs a stable full outer join over four independent authorities: `git worktree list --porcelain` for Git registrations, `workers.tsv` for thread↔workdir ownership, `reports.json member_thread joined through workers.tsv` for lifecycle evidence through an authoritative worker thread only, and `lstat` plus the explicit roots for filesystem presence. It emits every Git registration, worker record, lifecycle record, and discovered checkout, including directory-without-worker-record, worker-record-without-directory, Git-registration-without-directory, directory-without-Git-registration, lifecycle-without-worker, partial, and malformed rows. `report_id` and `groups.tsv` never establish a workdir.
+
+Filesystem coverage is explicit and uncapped: pass every intended root. The output records the roots and an empty `omitted` list; an unreadable root, malformed source, duplicate binding, relative worker path, symlink root/path, non-directory path, unsupported Git porcelain, or command failure remains a rank-zero error row and returns exit `2`. It is never dropped or interpreted as absence. Rows are ordered by irreversibility rank, then path, thread, and classification, independent of source order. Human and JSON modes expose the same row facts.
+
+This workflow performs no fetch, cleanup, reconciliation, removal, unlock, prune, backup-ref mutation, branch or stash mutation, report mutation, or external-project mutation. Accordingly every row says `removal_verdict=NOT_EVALUATED`: a read-only inventory cannot truthfully satisfy the pruning-fetch and adjacent-revalidation contract in [`removal-safety.md`](removal-safety.md). Inventory classifications describe observed join state only and never authorize removal. A blocked report with absent or literal-zero `authorized_at` is carried as `open_obligation=true`; reports without a worker remain visible but cannot invent a workdir. Preservation-locked historical resources are inventory evidence only and are never changed.
+
 ## Finish a merged worker
 
 Finish is worker-only post-merge orchestration. It never removes a runner implicitly and never treats `status=ready` as cleanup authority.

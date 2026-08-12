@@ -1,0 +1,377 @@
+#!/usr/bin/env python3
+"""Read-only full-outer-join inventory for the /amux sweep workflow."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+
+SCHEMA_VERSION = 1
+ZERO_TIME_PREFIX = "0001-01-01T00:00:00"
+
+
+class DuplicateKey(ValueError):
+    pass
+
+
+def strict_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise DuplicateKey(f"duplicate JSON key {key!r}")
+        value[key] = item
+    return value
+
+
+def inventory_error(source, message, path=None, thread=None):
+    return {
+        "rank": 0,
+        "irreversibility": "unknown_evidence",
+        "classification": "malformed_inventory",
+        "path": path,
+        "thread": thread,
+        "git_registration": False,
+        "filesystem": "unknown",
+        "worker_record": False,
+        "lifecycle_records": [],
+        "open_obligation": False,
+        "removal_verdict": "NOT_EVALUATED",
+        "authority": {
+            "git_registration": "git worktree list --porcelain",
+            "filesystem": "lstat",
+            "worker_record": "workers.tsv",
+            "lifecycle_records": "reports.json member_thread joined through workers.tsv",
+        },
+        "error": {"source": source, "message": message},
+    }
+
+
+def run_git(repo, *args):
+    command = ["git", "-C", repo, *args]
+    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        raise ValueError(f"{' '.join(command[3:])} failed (exit {result.returncode}): {detail}")
+    try:
+        return result.stdout.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(f"{' '.join(command[3:])} returned non-UTF-8 output") from error
+
+
+def absolute_path(raw, source):
+    if not isinstance(raw, str) or not raw:
+        raise ValueError(f"{source} path is empty")
+    expanded = os.path.expanduser(raw)
+    if not os.path.isabs(expanded):
+        raise ValueError(f"{source} path is relative and has no stable machine identity: {raw!r}")
+    return os.path.normpath(expanded)
+
+
+def valid_thread(thread):
+    return thread.startswith("T-") and len(thread) > 2 and not any(character in thread for character in "\t\n\r/ ?#")
+
+
+def parse_worktrees(repo):
+    output = run_git(repo, "worktree", "list", "--porcelain", "-z")
+    records = []
+    for number, block in enumerate(output.rstrip("\0").split("\0\0"), 1):
+        if not block:
+            continue
+        record = {"locked": False, "prunable": False, "branch": None, "detached": False}
+        for line in block.split("\0"):
+            key, separator, value = line.partition(" ")
+            if key == "worktree" and separator:
+                record["path"] = absolute_path(value, "git worktree")
+            elif key == "HEAD" and separator:
+                record["head"] = value
+            elif key == "branch" and separator:
+                record["branch"] = value
+            elif key == "detached" and not separator:
+                record["detached"] = True
+            elif key == "locked":
+                record["locked"] = True
+            elif key == "prunable":
+                record["prunable"] = True
+            elif key == "bare" and not separator:
+                record["bare"] = True
+            else:
+                raise ValueError(f"git worktree record {number} has unsupported line {line!r}")
+        if "path" not in record or "head" not in record:
+            raise ValueError(f"git worktree record {number} lacks path or HEAD")
+        records.append(record)
+    return records
+
+
+def parse_workers(path):
+    if not os.path.exists(path):
+        return [], []
+    rows, errors = [], []
+    try:
+        data = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        return [], [inventory_error("workers.tsv", f"cannot read {path}: {error}")]
+    seen_threads, seen_paths = {}, {}
+    for number, line in enumerate(data.splitlines(), 1):
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) not in (4, 5):
+            errors.append(inventory_error("workers.tsv", f"line {number}: expected 4 or 5 tab-separated fields"))
+            continue
+        workspace, window, raw_path, thread = fields[:4]
+        try:
+            path_value = absolute_path(raw_path, f"workers.tsv line {number}")
+        except ValueError as error:
+            errors.append(inventory_error("workers.tsv", f"line {number}: {error}", thread=thread or None))
+            continue
+        if not workspace or not window or not valid_thread(thread):
+            errors.append(inventory_error("workers.tsv", f"line {number}: workspace/window are required and thread must be canonical", path_value, thread or None))
+            continue
+        if len(fields) == 5 and fields[4] not in ("", "retained_indeterminate"):
+            errors.append(inventory_error("workers.tsv", f"line {number}: unsupported assignment state {fields[4]!r}", path_value, thread))
+            continue
+        if thread in seen_threads:
+            errors.append(inventory_error("workers.tsv", f"line {number}: duplicate thread {thread!r}", path_value, thread))
+            continue
+        if path_value in seen_paths:
+            errors.append(inventory_error("workers.tsv", f"line {number}: workdir is also bound to {seen_paths[path_value]!r}", path_value, thread))
+            continue
+        row = {"workspace": workspace, "window": window, "path": path_value, "thread": thread}
+        seen_threads[thread], seen_paths[path_value] = path_value, thread
+        rows.append(row)
+    return rows, errors
+
+
+def parse_reports(path):
+    if not os.path.exists(path):
+        return [], []
+    try:
+        with open(path, encoding="utf-8") as handle:
+            document = json.load(handle, object_pairs_hook=strict_object)
+    except (OSError, UnicodeError, ValueError) as error:
+        return [], [inventory_error("reports.json", f"cannot parse {path}: {error}")]
+    if not isinstance(document, dict) or document.get("schema_version") != 1 or not isinstance(document.get("reports", []), list):
+        return [], [inventory_error("reports.json", "expected schema_version 1 and a reports array")]
+    reports, errors, seen = [], [], set()
+    for number, item in enumerate(document.get("reports", []), 1):
+        if not isinstance(item, dict):
+            errors.append(inventory_error("reports.json", f"report {number}: expected an object"))
+            continue
+        report_id, thread, status = item.get("report_id"), item.get("member_thread"), item.get("status")
+        if not all(isinstance(value, str) and value for value in (report_id, thread, status)):
+            errors.append(inventory_error("reports.json", f"report {number}: report_id, member_thread, and status are required strings"))
+            continue
+        if not valid_thread(thread):
+            errors.append(inventory_error("reports.json", f"report {number}: member_thread must be canonical", thread=thread))
+            continue
+        if report_id in seen:
+            errors.append(inventory_error("reports.json", f"report {number}: duplicate report_id {report_id!r}", thread=thread))
+            continue
+        if status not in ("ready", "blocked", "merged"):
+            errors.append(inventory_error("reports.json", f"report {number}: unsupported status {status!r}", thread=thread))
+            continue
+        seen.add(report_id)
+        authorized = item.get("authorized_at")
+        if authorized is not None and not isinstance(authorized, str):
+            errors.append(inventory_error("reports.json", f"report {number}: authorized_at must be a string or absent", thread=thread))
+            continue
+        open_obligation = status == "blocked" and (
+            authorized is None or authorized == "" or isinstance(authorized, str) and authorized.startswith(ZERO_TIME_PREFIX)
+        )
+        reports.append({"report_id": report_id, "thread": thread, "status": status, "open_obligation": open_obligation})
+    return reports, errors
+
+
+def filesystem_inventory(roots):
+    paths, errors = set(), []
+    for raw_root in roots:
+        try:
+            root = absolute_path(raw_root, "filesystem root")
+            info = os.lstat(root)
+            if os.path.islink(root):
+                raise ValueError(f"filesystem root is a symlink and will not be traversed: {root}")
+            if not os.path.isdir(root):
+                raise ValueError(f"filesystem root is not a directory: {root}")
+            entries = sorted(os.scandir(root), key=lambda entry: entry.name)
+        except (OSError, ValueError) as error:
+            errors.append(inventory_error("filesystem", str(error), absolute_path(raw_root, "filesystem root") if os.path.isabs(os.path.expanduser(raw_root)) else None))
+            continue
+        candidates = [root] + [entry.path for entry in entries if entry.is_dir(follow_symlinks=False)]
+        for candidate in candidates:
+            marker = os.path.join(candidate, ".git")
+            try:
+                os.lstat(marker)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                errors.append(inventory_error("filesystem", f"cannot inspect Git marker {marker}: {error}", candidate))
+                continue
+            paths.add(os.path.normpath(candidate))
+    return paths, errors
+
+
+def path_state(path):
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return "absent", None
+    except OSError as error:
+        return "unreadable", str(error)
+    if os.path.islink(path):
+        return "ambiguous_symlink", "path is a symlink"
+    if not os.path.isdir(path):
+        return "not_a_directory", "path is not a directory"
+    return "present", None
+
+
+def classify_row(path, git_record, worker, reports, filesystem_seen):
+    state, state_error = path_state(path)
+    git_present, worker_present = git_record is not None, worker is not None
+    lifecycle = sorted(({"report_id": r["report_id"], "status": r["status"]} for r in reports), key=lambda r: r["report_id"])
+    open_obligation = any(r["open_obligation"] for r in reports)
+    if state_error:
+        classification, rank, irreversibility = "ambiguous_path", 0, "unknown_evidence"
+    elif git_present and state == "absent":
+        classification, rank, irreversibility = "git_registration_without_directory", 10, "registered_tip_at_risk"
+    elif worker_present and state == "absent":
+        classification, rank, irreversibility = "worker_record_without_directory", 20, "lifecycle_binding_orphaned"
+    elif open_obligation:
+        classification, rank, irreversibility = "open_lifecycle_obligation", 30, "unfinished_lifecycle"
+    elif state == "present" and not git_present:
+        classification, rank, irreversibility = "directory_without_git_registration", 40, "stray_checkout"
+    elif git_present and state == "present" and not worker_present:
+        classification, rank, irreversibility = "directory_without_worker_record", 50, "unmanaged_checkout"
+    else:
+        classification, rank, irreversibility = "joined_inventory", 60, "fully_joined"
+    return {
+        "rank": rank,
+        "irreversibility": irreversibility,
+        "classification": classification,
+        "path": path,
+        "thread": worker["thread"] if worker else None,
+        "git_registration": git_present,
+        "git_head": git_record.get("head") if git_record else None,
+        "git_branch": git_record.get("branch") if git_record else None,
+        "git_detached": bool(git_record and git_record.get("detached")),
+        "git_locked": bool(git_record and git_record.get("locked")),
+        "git_prunable": bool(git_record and git_record.get("prunable")),
+        "filesystem": state,
+        "filesystem_discovered": path in filesystem_seen,
+        "worker_record": worker_present,
+        "worker_workspace": worker.get("workspace") if worker else None,
+        "worker_window": worker.get("window") if worker else None,
+        "lifecycle_records": lifecycle,
+        "open_obligation": open_obligation,
+        "removal_verdict": "NOT_EVALUATED",
+        "authority": {
+            "git_registration": "git worktree list --porcelain",
+            "filesystem": "lstat plus explicit filesystem roots",
+            "worker_record": "workers.tsv",
+            "lifecycle_records": "reports.json member_thread joined through workers.tsv",
+        },
+        "error": {"source": "path", "message": state_error} if state_error else None,
+    }
+
+
+def build_inventory(args):
+    rows = []
+    try:
+        repo = absolute_path(args.repo, "repository")
+        if path_state(repo)[0] != "present":
+            raise ValueError(f"repository is not a present directory: {repo}")
+        worktrees = parse_worktrees(repo)
+    except ValueError as error:
+        return {"schema_version": SCHEMA_VERSION, "command": "sweep", "read_only": True, "complete": False, "coverage": {"filesystem_roots": args.filesystem_root}, "rows": [inventory_error("git", str(error))]}
+    try:
+        config_dir = absolute_path(args.config_dir, "config directory")
+        workers, worker_errors = parse_workers(os.path.join(config_dir, "workers.tsv"))
+        reports, report_errors = parse_reports(os.path.join(config_dir, "reports.json"))
+    except ValueError as error:
+        config_dir = None
+        workers, reports = [], []
+        worker_errors, report_errors = [inventory_error("config", str(error))], []
+    filesystem_paths, filesystem_errors = filesystem_inventory(args.filesystem_root)
+    rows.extend(worker_errors + report_errors + filesystem_errors)
+
+    git_by_path = {}
+    for record in worktrees:
+        if record["path"] in git_by_path:
+            rows.append(inventory_error("git", "duplicate worktree path", record["path"]))
+        else:
+            git_by_path[record["path"]] = record
+    worker_by_path = {row["path"]: row for row in workers}
+    reports_by_thread = {}
+    worker_threads = {row["thread"] for row in workers}
+    for report in reports:
+        reports_by_thread.setdefault(report["thread"], []).append(report)
+    all_paths = sorted(set(git_by_path) | set(worker_by_path) | filesystem_paths)
+    for path in all_paths:
+        worker = worker_by_path.get(path)
+        joined_reports = reports_by_thread.get(worker["thread"], []) if worker else []
+        rows.append(classify_row(path, git_by_path.get(path), worker, joined_reports, filesystem_paths))
+    for thread in sorted(set(reports_by_thread) - worker_threads):
+        lifecycle = reports_by_thread[thread]
+        rows.append({
+            "rank": 30 if any(item["open_obligation"] for item in lifecycle) else 40,
+            "irreversibility": "unfinished_lifecycle" if any(item["open_obligation"] for item in lifecycle) else "unbound_lifecycle_evidence",
+            "classification": "lifecycle_record_without_worker",
+            "path": None,
+            "thread": thread,
+            "git_registration": False,
+            "filesystem": "unknown",
+            "worker_record": False,
+            "lifecycle_records": sorted(({"report_id": item["report_id"], "status": item["status"]} for item in lifecycle), key=lambda item: item["report_id"]),
+            "open_obligation": any(item["open_obligation"] for item in lifecycle),
+            "removal_verdict": "NOT_EVALUATED",
+            "authority": {
+                "git_registration": "git worktree list --porcelain",
+                "filesystem": "lstat plus explicit filesystem roots",
+                "worker_record": "workers.tsv",
+                "lifecycle_records": "reports.json; no workers.tsv binding",
+            },
+            "error": None,
+        })
+    rows.sort(key=lambda row: (row["rank"], row.get("path") or "", row.get("thread") or "", row["classification"], (row.get("error") or {}).get("message", "")))
+    coverage_roots = []
+    for root in args.filesystem_root:
+        try:
+            coverage_roots.append(absolute_path(root, "filesystem root"))
+        except ValueError:
+            coverage_roots.append(root)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "command": "sweep",
+        "read_only": True,
+        "complete": not any(row.get("error") for row in rows),
+        "coverage": {"filesystem_roots": sorted(coverage_roots), "bounded": True, "omitted": []},
+        "rows": rows,
+    }
+
+
+def human(document):
+    print(f"SWEEP\tschema_version={document['schema_version']}\tcomplete={str(document['complete']).lower()}\trows={len(document['rows'])}")
+    for row in document["rows"]:
+        print("ROW\t" + "\t".join(f"{key}={json.dumps(row[key], sort_keys=True, separators=(',', ':'))}" for key in sorted(row)))
+
+
+def main():
+    parser = argparse.ArgumentParser(description="read-only /amux sweep inventory")
+    parser.add_argument("--repo", default=os.getcwd(), help="repository whose Git worktree registry is authoritative")
+    parser.add_argument("--config-dir", default=os.environ.get("AMUX_CONFIG_DIR", os.path.expanduser("~/.config/amux")))
+    parser.add_argument("--filesystem-root", action="append", required=True, help="complete immediate-child checkout boundary; repeatable")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+    document = build_inventory(args)
+    if args.json:
+        json.dump(document, sys.stdout, sort_keys=True, separators=(",", ":"))
+        print()
+    else:
+        human(document)
+    return 0 if document["complete"] else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

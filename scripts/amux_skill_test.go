@@ -2228,6 +2228,178 @@ func TestRemovalSafetySyntheticFailuresStayErrors(t *testing.T) {
 	}
 }
 
+type sweepDocument struct {
+	SchemaVersion int `json:"schema_version"`
+	Complete      bool
+	Rows          []map[string]any
+}
+
+func TestSweepInventoryFullOuterJoinStableOrderingAndParity(t *testing.T) {
+	root, repo, configDir := newSweepInventoryFixture(t)
+	script := filepath.Join(repoRoot(t), "skills", "amux", "scripts", "sweep-inventory")
+	args := []string{script, "--repo", repo, "--config-dir", configDir, "--filesystem-root", root}
+
+	jsonOutput, exit := runSweepInventory(t, append(args, "--json")...)
+	if exit != 0 {
+		t.Fatalf("sweep JSON exit=%d\n%s", exit, jsonOutput)
+	}
+	var document sweepDocument
+	if err := json.Unmarshal([]byte(jsonOutput), &document); err != nil {
+		t.Fatal(err)
+	}
+	if document.SchemaVersion != 1 || !document.Complete {
+		t.Fatalf("sweep metadata = version %d complete %t", document.SchemaVersion, document.Complete)
+	}
+	wantClasses := map[string]bool{
+		"directory_without_worker_record":    false,
+		"git_registration_without_directory": false,
+		"worker_record_without_directory":    false,
+		"directory_without_git_registration": false,
+		"open_lifecycle_obligation":          false,
+		"lifecycle_record_without_worker":    false,
+	}
+	previous := ""
+	lockedMissingFound := false
+	literalZeroObligationFound := false
+	for _, row := range document.Rows {
+		classification := row["classification"].(string)
+		if _, exists := wantClasses[classification]; exists {
+			wantClasses[classification] = true
+		}
+		if row["removal_verdict"] != "NOT_EVALUATED" {
+			t.Errorf("row %q manufactured removal verdict %v", classification, row["removal_verdict"])
+		}
+		if classification == "git_registration_without_directory" && row["git_locked"] == true && row["git_prunable"] == false {
+			lockedMissingFound = true
+		}
+		if classification == "worker_record_without_directory" && row["thread"] == "T-missing" && row["open_obligation"] == true {
+			literalZeroObligationFound = true
+		}
+		key := fmt.Sprintf("%03.0f\x00%s\x00%s\x00%s", row["rank"].(float64), stringValue(row["path"]), stringValue(row["thread"]), classification)
+		if previous > key {
+			t.Errorf("unstable row order: %q before %q", previous, key)
+		}
+		previous = key
+	}
+	for classification, found := range wantClasses {
+		if !found {
+			t.Errorf("full outer join lacks %q: %#v", classification, document.Rows)
+		}
+	}
+	if !lockedMissingFound {
+		t.Error("locked-and-missing Git registration was not retained and classified from lstat evidence")
+	}
+	if !literalZeroObligationFound {
+		t.Error("literal-zero blocked lifecycle obligation was not carried through the worker binding")
+	}
+
+	repeated, repeatedExit := runSweepInventory(t, append(args, "--json")...)
+	if repeatedExit != 0 || repeated != jsonOutput {
+		t.Fatalf("repeated output was not byte-stable: exit=%d\nfirst=%s\nsecond=%s", repeatedExit, jsonOutput, repeated)
+	}
+	humanOutput, humanExit := runSweepInventory(t, args...)
+	if humanExit != 0 {
+		t.Fatalf("sweep human exit=%d\n%s", humanExit, humanOutput)
+	}
+	humanRows := parseSweepHumanRows(t, humanOutput)
+	if len(humanRows) != len(document.Rows) {
+		t.Fatalf("human rows=%d JSON rows=%d", len(humanRows), len(document.Rows))
+	}
+	for index, jsonRow := range document.Rows {
+		if len(humanRows[index]) != len(jsonRow) {
+			t.Errorf("row %d human fields=%d JSON fields=%d", index, len(humanRows[index]), len(jsonRow))
+		}
+		for field := range jsonRow {
+			if !equalJSONValue(humanRows[index][field], jsonRow[field]) {
+				t.Errorf("row %d field %s differs: human=%#v JSON=%#v", index, field, humanRows[index][field], jsonRow[field])
+			}
+		}
+	}
+}
+
+func TestSweepInventoryMalformedInputsAndPathsFailClosed(t *testing.T) {
+	t.Run("partial malformed stores remain visible", func(t *testing.T) {
+		root, repo, configDir := newSweepInventoryFixture(t)
+		workers := filepath.Join(configDir, "workers.tsv")
+		if err := os.WriteFile(workers, []byte("# amux-schema: workers/v1\nrelative\tbad\trelative/path\tT-relative\nmalformed\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(configDir, "reports.json"), []byte(`{"schema_version":1,"reports":[`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		output, exit := runSweepInventory(t, filepath.Join(repoRoot(t), "skills", "amux", "scripts", "sweep-inventory"), "--repo", repo, "--config-dir", configDir, "--filesystem-root", root, "--json")
+		if exit != 2 {
+			t.Fatalf("malformed sweep exit=%d, want 2\n%s", exit, output)
+		}
+		var document sweepDocument
+		if err := json.Unmarshal([]byte(output), &document); err != nil {
+			t.Fatal(err)
+		}
+		if document.Complete {
+			t.Fatal("malformed inventory was reported complete")
+		}
+		sources := map[string]bool{}
+		for _, row := range document.Rows {
+			if failure, ok := row["error"].(map[string]any); ok {
+				sources[failure["source"].(string)] = true
+			}
+		}
+		if !sources["workers.tsv"] || !sources["reports.json"] {
+			t.Fatalf("malformed source rows were dropped: %#v", sources)
+		}
+	})
+
+	t.Run("symlink boundaries and worker paths are errors", func(t *testing.T) {
+		root, repo, configDir := newSweepInventoryFixture(t)
+		symlinkRoot := filepath.Join(t.TempDir(), "checkout-root-link")
+		if err := os.Symlink(root, symlinkRoot); err != nil {
+			t.Fatal(err)
+		}
+		workerTarget := filepath.Join(root, "worker-target")
+		if err := os.Mkdir(workerTarget, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		workerLink := filepath.Join(root, "worker-link")
+		if err := os.Symlink(workerTarget, workerLink); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(configDir, "workers.tsv"), []byte("ws\tlink\t"+workerLink+"\tT-link\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		output, exit := runSweepInventory(t, filepath.Join(repoRoot(t), "skills", "amux", "scripts", "sweep-inventory"), "--repo", repo, "--config-dir", configDir, "--filesystem-root", symlinkRoot, "--json")
+		if exit != 2 {
+			t.Fatalf("unsafe-path sweep exit=%d, want 2\n%s", exit, output)
+		}
+		for _, required := range []string{"filesystem root is a symlink", "path is a symlink", `"complete":false`} {
+			if !strings.Contains(output, required) {
+				t.Errorf("unsafe-path output lacks %q: %s", required, output)
+			}
+		}
+	})
+}
+
+func TestSweepWorkflowDocumentsReadOnlyAuthorityBoundary(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	for _, required := range []string{
+		"/amux sweep",
+		"read-only skill workflow",
+		"full outer join over four independent authorities",
+		"reports.json member_thread joined through workers.tsv",
+		"report_id` and `groups.tsv` never establish a workdir",
+		"explicit and uncapped",
+		"removal_verdict=NOT_EVALUATED",
+		"no fetch, cleanup, reconciliation, removal, unlock, prune, backup-ref mutation",
+		"Preservation-locked historical resources",
+	} {
+		if !strings.Contains(skill+workflow, required) {
+			t.Errorf("sweep contract lacks %q", required)
+		}
+	}
+}
+
 func TestClaudePairTeardownIsFailClosedAndRunsBeforeWorkerTeardown(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
@@ -2698,6 +2870,110 @@ func syntheticPreciousResolution(worktree, canonical, relative string) (string, 
 		return "duplicate-of-canonical", nil
 	}
 	return "unique", nil
+}
+
+func newSweepInventoryFixture(t *testing.T) (root, repo, configDir string) {
+	t.Helper()
+	root = t.TempDir()
+	repo = filepath.Join(root, "main")
+	gitTest(t, root, "init", "-b", "main", repo)
+	gitTest(t, repo, "config", "user.name", "Synthetic Sweep")
+	gitTest(t, repo, "config", "user.email", "sweep@example.invalid")
+	gitTest(t, repo, "config", "commit.gpgSign", "false")
+	commitFile(t, repo, "tracked.txt", "base\n", "base")
+
+	unmanaged := filepath.Join(root, "unmanaged")
+	gitTest(t, repo, "worktree", "add", "-b", "unmanaged", unmanaged, "HEAD")
+	vanished := filepath.Join(root, "vanished")
+	gitTest(t, repo, "worktree", "add", "--detach", vanished, "HEAD")
+	gitTest(t, repo, "worktree", "lock", vanished)
+	if err := os.RemoveAll(vanished); err != nil {
+		t.Fatal(err)
+	}
+	stray := filepath.Join(root, "stray")
+	gitTest(t, root, "init", "-b", "main", stray)
+
+	missingWorker := filepath.Join(root, "missing-worker")
+	openWorker := filepath.Join(root, "open-worker")
+	gitTest(t, repo, "worktree", "add", "-b", "open-worker", openWorker, "HEAD")
+	configDir = filepath.Join(root, "config")
+	if err := os.Mkdir(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workerRows := strings.Join([]string{
+		"ws\tmissing\t" + missingWorker + "\tT-missing",
+		"ws\topen\t" + openWorker + "\tT-open",
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(configDir, "workers.tsv"), []byte(workerRows), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reports := map[string]any{
+		"schema_version": 1,
+		"reports": []map[string]any{
+			{"report_id": "report-literal-zero", "member_thread": "T-missing", "status": "blocked", "authorized_at": "0001-01-01T00:00:00Z"},
+			{"report_id": "report-open", "member_thread": "T-open", "status": "blocked"},
+			{"report_id": "report-unbound", "member_thread": "T-unbound", "status": "ready"},
+		},
+	}
+	data, err := json.Marshal(reports)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "reports.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return root, repo, configDir
+}
+
+func runSweepInventory(t *testing.T, args ...string) (string, int) {
+	t.Helper()
+	cmd := exec.Command("python3", args...)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return string(out), 0
+	}
+	if exit, ok := err.(*exec.ExitError); ok {
+		return string(out), exit.ExitCode()
+	}
+	t.Fatalf("run sweep inventory: %v", err)
+	return "", -1
+}
+
+func parseSweepHumanRows(t *testing.T, output string) []map[string]any {
+	t.Helper()
+	var rows []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		if !strings.HasPrefix(line, "ROW\t") {
+			continue
+		}
+		row := map[string]any{}
+		for _, field := range strings.Split(strings.TrimPrefix(line, "ROW\t"), "\t") {
+			key, raw, ok := strings.Cut(field, "=")
+			if !ok {
+				t.Fatalf("malformed human field %q", field)
+			}
+			var value any
+			if err := json.Unmarshal([]byte(raw), &value); err != nil {
+				t.Fatalf("decode human field %q: %v", field, err)
+			}
+			row[key] = value
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+func equalJSONValue(left, right any) bool {
+	leftJSON, _ := json.Marshal(left)
+	rightJSON, _ := json.Marshal(right)
+	return bytes.Equal(leftJSON, rightJSON)
+}
+
+func stringValue(value any) string {
+	if value == nil {
+		return ""
+	}
+	return value.(string)
 }
 
 func TestPublicDocsDescribeNarrowProjectlessSpawnException(t *testing.T) {
