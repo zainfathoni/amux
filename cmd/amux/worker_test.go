@@ -515,6 +515,34 @@ func TestWorkerUnshelveRemovesIntentOnlyAfterRemoteSuccess(t *testing.T) {
 	}
 }
 
+func TestWorkerUnshelveBoundsRemoteCommandAndPreservesIntentOnTimeout(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkerRegistry(t, dir, "alpha\ta\t/tmp/a\tT-a\n")
+	shelfPath := filepath.Join(dir, config.ShelvesFile)
+	if err := os.WriteFile(shelfPath, []byte("# amux-schema: shelves/v1\nT-a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTimeout := ampThreadsListTimeout
+	ampThreadsListTimeout = 30 * time.Millisecond
+	t.Cleanup(func() { ampThreadsListTimeout = oldTimeout })
+	oldCommand := ampThreadsListCommand
+	ampThreadsListCommand = func(ctx context.Context, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, os.Args[0], "-test.run=^TestAmpThreadsListSyntheticProcess$", "--", "hang")
+	}
+	t.Cleanup(func() { ampThreadsListCommand = oldCommand })
+	t.Setenv("AMUX_AMP_THREADS_LIST_TEST_PROCESS", "1")
+	t.Setenv("AMUX_AMP_THREADS_LIST_TEST_SCENARIO", "timeout")
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	envelope, err := executeWorkerJSONResult(t, "--json", "--config-dir", dir, "worker", "unshelve", "--thread", "T-a")
+	if err == nil || len(envelope.Failed) != 1 || envelope.Failed[0].Error == nil || !strings.Contains(envelope.Failed[0].Error.Message, "amp threads archive timed out") {
+		t.Fatalf("unshelve timeout envelope = %+v, error = %v", envelope, err)
+	}
+	if data, readErr := os.ReadFile(shelfPath); readErr != nil || !strings.Contains(string(data), "T-a\n") {
+		t.Fatalf("timed-out unshelve changed shelf intent: data=%q err=%v", data, readErr)
+	}
+}
+
 func TestWorkerRemoveDoesNotArchive(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkerRegistry(t, dir, "alpha\ta\t/tmp/a\tT-a\n")

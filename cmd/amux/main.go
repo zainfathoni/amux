@@ -2447,8 +2447,9 @@ func teardownExpectedStartCommand(identity teardownIdentity, row config.Row) str
 }
 
 func archiveAmpThread(thread string) error {
-	cmd := exec.Command("amp", "threads", "archive", thread)
-	out, err := cmd.CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), ampThreadsListTimeout)
+	defer cancel()
+	out, err := runBoundedAmpThreads(ctx, "archive", nil, "threads", "archive", thread)
 	if err != nil {
 		message := strings.TrimSpace(string(out))
 		if message == "" {
@@ -2460,8 +2461,9 @@ func archiveAmpThread(thread string) error {
 }
 
 func unarchiveAmpThread(thread string) error {
-	cmd := exec.Command("amp", "threads", "archive", "--unarchive", thread)
-	out, err := cmd.CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), ampThreadsListTimeout)
+	defer cancel()
+	out, err := runBoundedAmpThreads(ctx, "archive", nil, "threads", "archive", "--unarchive", thread)
 	if err != nil {
 		message := strings.TrimSpace(string(out))
 		if message == "" {
