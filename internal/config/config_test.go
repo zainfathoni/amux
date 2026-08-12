@@ -172,6 +172,54 @@ func TestWorkerAssignmentStateRoundTripsWithoutChangingLegacyRows(t *testing.T) 
 	}
 }
 
+func TestWorkerRowsPreserveLegacyAndNativeAssignmentStates(t *testing.T) {
+	input := "legacy\tworker\t/tmp/legacy\tT-legacy\n" +
+		"retained\tworker\t/tmp/retained\tT-retained\tretained_indeterminate\n" +
+		"native\tworker\t/tmp/native\tT-native\tauthenticated_accepted\n"
+	rows, err := Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 || rows[0].String() != "legacy\tworker\t/tmp/legacy\tT-legacy" || rows[1].String() != "retained\tworker\t/tmp/retained\tT-retained\tretained_indeterminate" || rows[2].AssignmentState != WorkerAssignmentAuthenticatedAccepted {
+		t.Fatalf("rows=%+v", rows)
+	}
+}
+
+func TestSpawnAssignmentStorePersistsBoundariesWithoutPromptText(t *testing.T) {
+	path := filepath.Join(t.TempDir(), SpawnAssignmentsFile)
+	workdir := t.TempDir()
+	record := SpawnAssignmentRecord{
+		SchemaVersion: SpawnAssignmentSchemaVersion, Workspace: "alpha", Window: "worker", Workdir: workdir, Mode: "high",
+		PromptDigest: "sha256:" + strings.Repeat("a", 64), Phase: SpawnAssignmentCreationArmed, Outcome: SpawnAssignmentNotAttempted,
+	}
+	if err := StoreSpawnAssignment(path, record); err != nil {
+		t.Fatal(err)
+	}
+	record.Thread, record.Phase = "T-exact", SpawnAssignmentPrepared
+	if err := StoreSpawnAssignment(path, record); err != nil {
+		t.Fatal(err)
+	}
+	record.Phase, record.Outcome = SpawnAssignmentArmed, SpawnAssignmentIndeterminate
+	if err := StoreSpawnAssignment(path, record); err != nil {
+		t.Fatal(err)
+	}
+	record.Phase, record.Outcome, record.ReceiptCursor = SpawnAssignmentFinalized, SpawnAssignmentAuthenticatedAccepted, "cursor"
+	if err := StoreSpawnAssignment(path, record); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadSpawnAssignments(path)
+	if err != nil || len(loaded) != 1 || loaded[0] != record {
+		t.Fatalf("loaded=%+v err=%v", loaded, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "private assignment") {
+		t.Fatalf("store persisted prompt text: %s", data)
+	}
+}
+
 func TestStoreReplacesAndPreservesComments(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/workspaces.tsv"

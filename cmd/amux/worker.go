@@ -834,7 +834,7 @@ func workerPlacementDetails(row config.Row, localState string) *result.WorkerDet
 }
 
 func workerAssignmentState(row config.Row) string {
-	if row.AssignmentState == config.WorkerAssignmentRetainedIndeterminate {
+	if row.AssignmentState != config.WorkerAssignmentUnknown {
 		return string(row.AssignmentState)
 	}
 	return "unknown"
