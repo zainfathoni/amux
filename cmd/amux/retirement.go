@@ -19,8 +19,12 @@ func (a app) executeRetirement(parsed invocation, dir config.Directory) (*result
 		return &envelope, result.Request(errors.New("usage: amux retirement inspect --record <ret-id>"))
 	}
 	inspection, err := config.DefaultRetirementStore().Inspect(context.Background(), dir, parsed.Selectors.Record)
-	details := retirementDetails(inspection, parsed.Selectors.Record)
-	resource := result.RetirementResource(parsed.Selectors.Record)
+	publicRecordID := parsed.Selectors.Record
+	if config.ValidateRetirementRecordID(publicRecordID) != nil {
+		publicRecordID = ""
+	}
+	details := retirementDetails(inspection, publicRecordID)
+	resource := result.RetirementResource(publicRecordID)
 	if err != nil {
 		code := config.RetirementRecordInvalid
 		var retirementErr *config.RetirementError
@@ -50,9 +54,6 @@ func retirementDetails(inspection config.RetirementInspection, requestedID strin
 	recordID := inspection.RecordID
 	if recordID == "" {
 		recordID = requestedID
-	}
-	if inspection.SchemaVersion == 0 {
-		inspection.SchemaVersion = config.RetirementSchemaVersion
 	}
 	details := &result.RetirementDetails{
 		SchemaVersion:      inspection.SchemaVersion,

@@ -77,6 +77,26 @@ func TestRetirementInspectAbsentUsesStableCodeExitTwoAndDoesNotCreate(t *testing
 	}
 }
 
+func TestRetirementInspectIsIndependentOfLegacyRegistryMigration(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "workspaces.tsv"), []byte("legacy\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	a := app{stdout: &output, stderr: &bytes.Buffer{}}
+	err := a.execute([]string{"--json", "--config-dir", dir, "retirement", "inspect", "--record", cliRetirementRecordID})
+	if result.ExitCode(err) != result.ExitRejected {
+		t.Fatalf("exit=%d err=%v output=%s", result.ExitCode(err), err, output.String())
+	}
+	var envelope result.Envelope
+	if decodeErr := json.Unmarshal(output.Bytes(), &envelope); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if len(envelope.Failed) != 1 || envelope.Failed[0].Error == nil || envelope.Failed[0].Error.Code != config.RetirementRecordNotFound {
+		t.Fatalf("retirement inspect was blocked by migration: %+v", envelope)
+	}
+}
+
 func TestRetirementInspectRejectsLatestAndMutationCommands(t *testing.T) {
 	for _, args := range [][]string{
 		{"retirement", "inspect"},
@@ -90,6 +110,19 @@ func TestRetirementInspectRejectsLatestAndMutationCommands(t *testing.T) {
 		if err := a.execute(args); result.ExitCode(err) != result.ExitRejected {
 			t.Fatalf("args=%v exit=%d err=%v", args, result.ExitCode(err), err)
 		}
+	}
+}
+
+func TestRetirementInspectDoesNotEchoInvalidRecordInput(t *testing.T) {
+	privateInput := "../../private-token"
+	var output bytes.Buffer
+	a := app{stdout: &output, stderr: &bytes.Buffer{}}
+	err := a.execute([]string{"--json", "--config-dir", t.TempDir(), "retirement", "inspect", "--record", privateInput})
+	if result.ExitCode(err) != result.ExitRejected {
+		t.Fatalf("exit=%d err=%v", result.ExitCode(err), err)
+	}
+	if strings.Contains(output.String(), privateInput) || strings.Contains(output.String(), "private-token") {
+		t.Fatalf("invalid private input leaked in output: %s", output.String())
 	}
 }
 

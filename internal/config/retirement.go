@@ -217,7 +217,11 @@ func (s RetirementStore) Append(ctx context.Context, dir Directory, request Reti
 	path := dir.RetirementRecordPath(request.RecordID)
 	loaded, exists, err := loadRetirementPath(path, request.RecordID)
 	if err != nil {
-		return loaded.inspection(), false, err
+		var retirementErr *RetirementError
+		if errors.As(err, &retirementErr) && retirementErr.Code == RetirementRecordRecovery {
+			return loaded.inspection(), false, err
+		}
+		return RetirementInspection{}, false, err
 	}
 	if loaded.recoverableTail {
 		return loaded.inspection(), false, retirementError(RetirementRecordRecovery, errors.New("record has an unterminated tail"))
@@ -236,6 +240,9 @@ func (s RetirementStore) Append(ctx context.Context, dir Directory, request Reti
 	}
 	if operationConflict(loaded.events, request) {
 		return loaded.inspection(), false, retirementError(RetirementRecordInvalid, errors.New("operation ID conflicts with an existing event"))
+	}
+	if len(loaded.events) >= retirementMaxEvents {
+		return loaded.inspection(), false, retirementError(RetirementRecordInvalid, errors.New("record has reached the event limit"))
 	}
 
 	event := RetirementEvent{
@@ -292,10 +299,17 @@ func (s RetirementStore) Inspect(ctx context.Context, dir Directory, recordID st
 		return RetirementInspection{}, retirementError(RetirementRecordLockBusy, errors.New("record lock is busy"))
 	}
 	defer held.Release()
-	loaded, _, err := loadRetirementPath(path, recordID)
+	loaded, exists, err := loadRetirementPath(path, recordID)
+	if !exists && err == nil {
+		return RetirementInspection{}, retirementError(RetirementRecordNotFound, errors.New("record disappeared during inspection"))
+	}
 	inspection := loaded.inspection()
 	if err != nil {
-		return inspection, err
+		var retirementErr *RetirementError
+		if errors.As(err, &retirementErr) && retirementErr.Code == RetirementRecordRecovery {
+			return inspection, err
+		}
+		return RetirementInspection{}, err
 	}
 	if loaded.recoverableTail {
 		return inspection, retirementError(RetirementRecordRecovery, errors.New("record has an unterminated tail"))
@@ -382,6 +396,9 @@ func loadRetirementPath(path, recordID string) (loadedRetirement, bool, error) {
 		return loaded, true, retirementError(RetirementRecordCorrupt, errors.New("record path identity changed during inspection"))
 	}
 	loaded.fileInfo = infoAfter
+	if err := validateOpenFile(file, 0o600); err != nil {
+		return loaded, true, err
+	}
 	if len(data) == 0 {
 		return loaded, true, retirementError(RetirementRecordCorrupt, errors.New("record is empty"))
 	}
@@ -404,10 +421,16 @@ func loadRetirementPath(path, recordID string) (loadedRetirement, bool, error) {
 		event, parseErr := decodeRetirementEvent([]byte(line))
 		if parseErr != nil {
 			if index == len(lines)-1 && !endsNewline {
-				loaded.recoverableTail = true
-				break
+				if _, syntaxErr := parseCanonicalJSON([]byte(line)); syntaxErr != nil {
+					loaded.recoverableTail = true
+					break
+				}
 			}
 			return loaded, true, retirementError(RetirementRecordCorrupt, fmt.Errorf("event %d is malformed", index+1))
+		}
+		canonical, canonicalErr := encodeRetirementEvent(event, false)
+		if canonicalErr != nil || string(canonical) != line {
+			return loaded, true, retirementError(RetirementRecordCorrupt, fmt.Errorf("event %d is not canonically encoded", index+1))
 		}
 		if err := verifyRetirementEvent(event, loaded.events, recordID); err != nil {
 			return loaded, true, retirementError(RetirementRecordCorrupt, fmt.Errorf("event %d failed integrity validation: %w", index+1, err))
@@ -532,7 +555,7 @@ func replayEvent(events []RetirementEvent, request RetirementEventRequest) bool 
 
 func operationConflict(events []RetirementEvent, request RetirementEventRequest) bool {
 	for _, event := range events {
-		if event.OperationID == request.OperationID && event.EventType == request.EventType {
+		if event.OperationID == request.OperationID {
 			return true
 		}
 	}
@@ -631,6 +654,9 @@ func openNoFollow(path string, flags int, mode os.FileMode) (*os.File, error) {
 }
 
 func (s RetirementStore) appendBytes(path string, encoded []byte, exists, needsSeparator bool, expected os.FileInfo) error {
+	if len(encoded) == 0 || len(encoded) > retirementMaxLineBytes {
+		return retirementError(RetirementRecordInvalid, errors.New("event exceeds line size limit"))
+	}
 	flags := os.O_WRONLY | os.O_APPEND
 	if !exists {
 		flags |= os.O_CREATE | os.O_EXCL
@@ -655,6 +681,9 @@ func (s RetirementStore) appendBytes(path string, encoded []byte, exists, needsS
 		bytes = append([]byte{'\n'}, bytes...)
 	}
 	bytes = append(bytes, '\n')
+	if before.Size()+int64(len(bytes)) > retirementMaxFileBytes {
+		return retirementError(RetirementRecordInvalid, errors.New("record would exceed size limit"))
+	}
 	write := s.write
 	if write == nil {
 		write = func(file *os.File, data []byte) (int, error) { return file.Write(data) }
@@ -709,7 +738,7 @@ func validateCommitments(name string, values []string) error {
 		return fmt.Errorf("%s exceeds commitment count limit", name)
 	}
 	for index, value := range values {
-		if err := validateDigest(fmt.Sprintf("%s %d", name, index+1), value); err != nil {
+		if err := validateDigest(fmt.Sprintf("%s %d", name, index+1), value, retirementIdentityDomain); err != nil {
 			return err
 		}
 	}
@@ -730,7 +759,7 @@ func validateIntent(intent []RetirementClassIntent) error {
 		seen := make(map[string]bool)
 		allowed := retirementDispositions[class.Class]
 		for _, item := range class.Items {
-			if err := validateDigest("resource commitment", item.ResourceCommitment); err != nil {
+			if err := validateDigest("resource commitment", item.ResourceCommitment, retirementIdentityDomain); err != nil {
 				return err
 			}
 			if seen[item.ResourceCommitment] {
@@ -743,7 +772,7 @@ func validateIntent(intent []RetirementClassIntent) error {
 			if !allowed[item.ExpectedDisposition] {
 				return fmt.Errorf("disposition %q is not valid for class %s", item.ExpectedDisposition, class.Class)
 			}
-			if err := validateDigest("decision owner commitment", item.DecisionOwnerCommitment); err != nil {
+			if err := validateDigest("decision owner commitment", item.DecisionOwnerCommitment, retirementIdentityDomain); err != nil {
 				return err
 			}
 		}
@@ -794,7 +823,7 @@ func payloadCanonical(eventType string, payload any) (canonicalValue, error) {
 		if value.InitialDescendantState != "exact_bindings" && value.InitialDescendantState != "explicit_none" && value.InitialDescendantState != "explicit_unknown" {
 			return canonicalValue{}, errors.New("invalid initial descendant state")
 		}
-		if err := validateDigest("initial descendant commitment", value.InitialDescendantCommitment); err != nil {
+		if err := validateDigest("initial descendant commitment", value.InitialDescendantCommitment, retirementIdentityDomain); err != nil {
 			return canonicalValue{}, err
 		}
 		return cObject(map[string]canonicalValue{
@@ -822,7 +851,7 @@ func payloadCanonical(eventType string, payload any) (canonicalValue, error) {
 		if !retirementOperationPattern.MatchString(value.OperationID) {
 			return canonicalValue{}, errors.New("operation payload ID is invalid")
 		}
-		if err := validateDigest("subject commitment", value.SubjectCommitment); err != nil {
+		if err := validateDigest("subject commitment", value.SubjectCommitment, retirementIdentityDomain); err != nil {
 			return canonicalValue{}, err
 		}
 		if err := validateIntent(value.Intent); err != nil {
@@ -852,7 +881,7 @@ func payloadCanonical(eventType string, payload any) (canonicalValue, error) {
 		if err := validateDiscriminator("identity kind", value.IdentityKind); err != nil {
 			return canonicalValue{}, err
 		}
-		if err := validateDigest("identity commitment", value.IdentityCommitment); err != nil {
+		if err := validateDigest("identity commitment", value.IdentityCommitment, retirementIdentityDomain); err != nil {
 			return canonicalValue{}, err
 		}
 		if value.SupersedesSequence < 0 {
@@ -871,7 +900,7 @@ func payloadCanonical(eventType string, payload any) (canonicalValue, error) {
 		if err := validateDiscriminator("note kind", value.NoteKind); err != nil {
 			return canonicalValue{}, err
 		}
-		if err := validateDigest("note commitment", value.NoteCommitment); err != nil {
+		if err := validateDigest("note commitment", value.NoteCommitment, retirementIdentityDomain); err != nil {
 			return canonicalValue{}, err
 		}
 		if value.SupersedesSequence < 0 {
@@ -898,7 +927,7 @@ func validateSubject(subject RetirementSubject) error {
 		"initial worktree commitment": subject.InitialWorktreeCommitment,
 		"physical owner commitment":   subject.PhysicalOwnerCommitment,
 	} {
-		if err := validateDigest(name, value); err != nil {
+		if err := validateDigest(name, value, retirementIdentityDomain); err != nil {
 			return err
 		}
 	}
@@ -962,7 +991,7 @@ func RetirementOperationDigest(value RetirementOperationDeclaredPayload) (string
 	if !retirementOperationPattern.MatchString(value.OperationID) {
 		return "", errors.New("operation payload ID is invalid")
 	}
-	if err := validateDigest("subject commitment", value.SubjectCommitment); err != nil {
+	if err := validateDigest("subject commitment", value.SubjectCommitment, retirementIdentityDomain); err != nil {
 		return "", err
 	}
 	return domainDigest(retirementOperationDomain, operationProjection(value))
@@ -1036,11 +1065,11 @@ func decodeRetirementEvent(data []byte) (RetirementEvent, error) {
 		return RetirementEvent{}, errors.New("invalid operation ID")
 	}
 	previous, err := stringField(fields, "previous_event_digest")
-	if err != nil || previous != "" && validateDigest("previous event digest", previous) != nil {
+	if err != nil || previous != "" && validateDigest("previous event digest", previous, retirementEventDomain) != nil {
 		return RetirementEvent{}, errors.New("invalid previous event digest")
 	}
 	digest, err := stringField(fields, "event_digest")
-	if err != nil || validateDigest("event digest", digest) != nil {
+	if err != nil || validateDigest("event digest", digest, retirementEventDomain) != nil {
 		return RetirementEvent{}, errors.New("invalid event digest")
 	}
 	written, err := stringField(fields, "written_at")

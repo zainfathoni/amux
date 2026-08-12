@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
@@ -24,7 +25,7 @@ const (
 	retirementIdentityDomain  = "amux.retirement.identity.v1\x00"
 )
 
-var canonicalInteger = regexp.MustCompile(`^-?(0|[1-9][0-9]*)$`)
+var canonicalInteger = regexp.MustCompile(`^(0|-[1-9][0-9]*|[1-9][0-9]*)$`)
 
 type canonicalKind uint8
 
@@ -150,7 +151,14 @@ func encodeCanonical(value canonicalValue) ([]byte, error) {
 func appendCanonical(out []byte, value canonicalValue) ([]byte, error) {
 	switch value.kind {
 	case canonicalString:
-		return strconv.AppendQuote(out, value.str), nil
+		if !utf8.ValidString(value.str) {
+			return nil, errors.New("canonical string is not valid UTF-8")
+		}
+		encoded, err := json.Marshal(value.str)
+		if err != nil {
+			return nil, err
+		}
+		return append(out, encoded...), nil
 	case canonicalIntegerKind:
 		if !canonicalInteger.MatchString(value.str) {
 			return nil, errors.New("invalid canonical integer")
@@ -179,12 +187,18 @@ func appendCanonical(out []byte, value canonicalValue) ([]byte, error) {
 		sort.Strings(keys)
 		out = append(out, '{')
 		for index, key := range keys {
+			if !utf8.ValidString(key) {
+				return nil, errors.New("canonical object key is not valid UTF-8")
+			}
 			if index != 0 {
 				out = append(out, ',')
 			}
-			out = strconv.AppendQuote(out, key)
+			encodedKey, err := json.Marshal(key)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, encodedKey...)
 			out = append(out, ':')
-			var err error
 			out, err = appendCanonical(out, value.obj[key])
 			if err != nil {
 				return nil, err
@@ -204,7 +218,7 @@ func domainDigest(domain string, value canonicalValue) (string, error) {
 	hash := sha256.New()
 	_, _ = hash.Write([]byte(domain))
 	_, _ = hash.Write(canonical)
-	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil)) + ";domain=" + strings.TrimSuffix(domain, "\x00"), nil
 }
 
 func IdentityCommitment(kind, value string) (string, error) {
@@ -234,12 +248,14 @@ func validateNFC(name, value string) error {
 	return nil
 }
 
-func validateDigest(name, value string) error {
-	if len(value) != len("sha256:")+sha256.Size*2 || value[:len("sha256:")] != "sha256:" {
-		return fmt.Errorf("%s must be sha256 plus 64 lowercase hex characters", name)
+func validateDigest(name, value, domain string) error {
+	wantSuffix := ";domain=" + strings.TrimSuffix(domain, "\x00")
+	if len(value) != len("sha256:")+sha256.Size*2+len(wantSuffix) || !strings.HasPrefix(value, "sha256:") || !strings.HasSuffix(value, wantSuffix) {
+		return fmt.Errorf("%s has the wrong digest algorithm or domain", name)
 	}
-	_, err := hex.DecodeString(value[len("sha256:"):])
-	if err != nil || value != "sha256:"+string(bytes.ToLower([]byte(value[len("sha256:"):]))) {
+	hexPart := value[len("sha256:") : len("sha256:")+sha256.Size*2]
+	_, err := hex.DecodeString(hexPart)
+	if err != nil || hexPart != string(bytes.ToLower([]byte(hexPart))) {
 		return fmt.Errorf("%s must be sha256 plus 64 lowercase hex characters", name)
 	}
 	return nil

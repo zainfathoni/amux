@@ -29,18 +29,29 @@ func TestCanonicalJSONGoldenAndStrictDecode(t *testing.T) {
 		t.Fatalf("canonical JSON = %s, want %s", got, want)
 	}
 	for name, input := range map[string][]byte{
-		"duplicate":    []byte(`{"a":1,"a":2}`),
-		"float":        []byte(`1.0`),
-		"exponent":     []byte(`1e2`),
-		"null":         []byte(`null`),
-		"invalid utf8": {'"', 0xff, '"'},
-		"trailing":     []byte(`{} {}`),
+		"duplicate":     []byte(`{"a":1,"a":2}`),
+		"negative zero": []byte(`-0`),
+		"float":         []byte(`1.0`),
+		"exponent":      []byte(`1e2`),
+		"null":          []byte(`null`),
+		"invalid utf8":  {'"', 0xff, '"'},
+		"trailing":      []byte(`{} {}`),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := parseCanonicalJSON(input); err == nil {
 				t.Fatalf("parseCanonicalJSON(%q) succeeded", input)
 			}
 		})
+	}
+	encoded, err := encodeCanonical(cObject(map[string]canonicalValue{"quoted\nkey": cString("line\n\t\"\\")}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"quoted\nkey":"line\n\t\"\\"}`; string(encoded) != want {
+		t.Fatalf("escaped canonical JSON = %s, want %s", encoded, want)
+	}
+	if _, err := encodeCanonical(cString(string([]byte{0xff}))); err == nil {
+		t.Fatal("canonical encoder accepted malformed UTF-8")
 	}
 }
 
@@ -67,6 +78,15 @@ func TestIdentityCommitmentNormalizesNFCAndSeparatesDomains(t *testing.T) {
 			t.Fatal("cross-domain digest collision")
 		}
 		seen[digest] = true
+	}
+	if err := validateDigest("identity", identity, retirementIdentityDomain); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDigest("identity", identity, retirementEventDomain); err == nil {
+		t.Fatal("identity digest was accepted in the event domain")
+	}
+	if !strings.HasSuffix(identity, ";domain=amux.retirement.identity.v1") {
+		t.Fatalf("identity digest lacks its serialized domain: %q", identity)
 	}
 }
 
@@ -203,6 +223,21 @@ func TestRetirementAllV1EventsAndSupersedingCorrections(t *testing.T) {
 	}
 }
 
+func TestRetirementRejectsOperationIDReuseAcrossEventTypes(t *testing.T) {
+	dir, store := testRetirementStore(t)
+	if _, _, err := store.Append(context.Background(), dir, testCreationRequest(t)); err != nil {
+		t.Fatal(err)
+	}
+	identity := RetirementEventRequest{RecordID: testRecordID, OperationID: "shared-operation", EventType: RetirementIdentityRecorded, Payload: RetirementIdentityCommitmentPayload{IdentityKind: "catalog_binding", IdentityCommitment: testCommitment(t, "catalog_binding", "one")}, WrittenAt: testTime(2)}
+	if _, _, err := store.Append(context.Background(), dir, identity); err != nil {
+		t.Fatal(err)
+	}
+	note := RetirementEventRequest{RecordID: testRecordID, OperationID: identity.OperationID, EventType: RetirementNoteAppended, Payload: RetirementNotePayload{NoteKind: "audit", NoteCommitment: testCommitment(t, "note", "one")}, WrittenAt: testTime(3)}
+	if _, _, err := store.Append(context.Background(), dir, note); retirementCode(err) != RetirementRecordInvalid {
+		t.Fatalf("cross-event operation ID reuse error=%v", err)
+	}
+}
+
 func TestEventDigestBindsEveryEnvelopeField(t *testing.T) {
 	base := RetirementEvent{SchemaVersion: RetirementSchemaVersion, RecordID: testRecordID, Sequence: 2, EventType: RetirementNoteAppended, OperationID: "note-operation", PreviousEventDigest: testCommitment(t, "event", "previous"), Payload: RetirementNotePayload{NoteKind: "audit", NoteCommitment: testCommitment(t, "note", "one")}, WrittenAt: testTime(2)}
 	baseDigest, err := eventDigest(base)
@@ -241,6 +276,9 @@ func TestEventDigestBindsEveryEnvelopeField(t *testing.T) {
 
 func TestRetirementRejectsCorruptionUnknownFieldsAndChainChanges(t *testing.T) {
 	mutations := map[string]func([]byte) []byte{
+		"noncanonical whitespace": func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`:`), []byte(`: `), 1)
+		},
 		"unknown field": func(data []byte) []byte {
 			return bytes.Replace(data, []byte(`{"event_digest"`), []byte(`{"extra":1,"event_digest"`), 1)
 		},
@@ -319,6 +357,23 @@ func TestRetirementTailAndCompleteNoNewlinePolicy(t *testing.T) {
 		}
 		if _, _, err := store.Append(context.Background(), dir, testCreationRequest(t)); retirementCode(err) != RetirementRecordRecovery {
 			t.Fatalf("append error=%v", err)
+		}
+	})
+	t.Run("complete invalid event without newline is corrupt", func(t *testing.T) {
+		dir, store := testRetirementStore(t)
+		if _, _, err := store.Append(context.Background(), dir, testCreationRequest(t)); err != nil {
+			t.Fatal(err)
+		}
+		path := dir.RetirementRecordPath(testRecordID)
+		data, _ := os.ReadFile(path)
+		data = bytes.TrimSuffix(data, []byte("\n"))
+		data = bytes.Replace(data, []byte(`"sequence":1`), []byte(`"sequence":2`), 1)
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		inspection, err := store.Inspect(context.Background(), dir, testRecordID)
+		if retirementCode(err) != RetirementRecordCorrupt || inspection.VerifiedEventCount != 0 || inspection.RecoverableTail {
+			t.Fatalf("inspection=%+v err=%v", inspection, err)
 		}
 	})
 }
@@ -494,6 +549,31 @@ func TestRetirementRejectsOversizedAndMissingWithoutMutation(t *testing.T) {
 	}
 	if _, err := store.Inspect(context.Background(), dir, testRecordID); retirementCode(err) != RetirementRecordCorrupt {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestRetirementAppendEnforcesLimitsBeforeWriting(t *testing.T) {
+	dir, store := testRetirementStore(t)
+	if err := ensureRetirementDirectories(dir); err != nil {
+		t.Fatal(err)
+	}
+	path := dir.RetirementRecordPath(testRecordID)
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), retirementMaxFileBytes-1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.appendBytes(path, []byte(`{}`), true, false, info); retirementCode(err) != RetirementRecordInvalid {
+		t.Fatalf("file limit error=%v", err)
+	}
+	after, err := os.Lstat(path)
+	if err != nil || after.Size() != info.Size() {
+		t.Fatalf("oversized append changed file: before=%d after=%v err=%v", info.Size(), after, err)
+	}
+	if err := store.appendBytes(path, bytes.Repeat([]byte("x"), retirementMaxLineBytes+1), true, false, after); retirementCode(err) != RetirementRecordInvalid {
+		t.Fatalf("line limit error=%v", err)
 	}
 }
 

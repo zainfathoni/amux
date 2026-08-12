@@ -27,7 +27,7 @@ Every bounded line is one object with exactly these fields:
 | `operation_id` | caller-stable, bounded NFC idempotency key |
 | `previous_event_digest` | empty at sequence 1; otherwise exact preceding digest |
 | `payload` | strict event-specific object |
-| `event_digest` | `sha256:<64 lowercase hex>` |
+| `event_digest` | `sha256:<64 lowercase hex>;domain=amux.retirement.event.v1` |
 | `written_at` | UTC RFC3339 with exactly six fractional digits |
 
 Unknown, missing, duplicate, null, floating-point, exponent, malformed UTF-8, non-NFC identity, unsupported schema/event, oversized, and semantically invalid values reject. The only event types are:
@@ -63,6 +63,12 @@ amux.retirement.operation.v1\0
 amux.retirement.manifest.v1\0
 amux.retirement.identity.v1\0
 ```
+
+Every serialized digest carries its domain tag after the lowercase hash as
+`sha256:<64 lowercase hex>;domain=<domain without the terminating NUL>`.
+Readers require the exact domain appropriate to each field, so a syntactically
+valid digest from another retirement domain is rejected rather than accepted
+as an opaque commitment.
 
 The event digest covers every envelope field except `event_digest`, including `previous_event_digest` and the safety timestamp. The operation digest covers exact intent, scope, immutable bindings, and attachment/evidence/authority commitments; it excludes render text and timestamps. Identity commitments use the identity domain. The manifest domain is reserved only: v1 issue #332 emits no manifest digest.
 
