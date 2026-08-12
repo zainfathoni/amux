@@ -40,7 +40,7 @@ var completionCommands = []completionCommand{
 			{Name: "unshelve", Description: "Unshelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "teardown", Description: "Teardown workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "doctor", Description: "Diagnose workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
-			{Name: "reconcile", Description: "Reconcile workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
+			{Name: "reconcile", Description: "Reconcile workers", Flags: []string{"--workspace", "--workdir", "--thread", "--current", "--all", "-w", "-d", "-t"}},
 		},
 	},
 	{

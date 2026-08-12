@@ -73,6 +73,8 @@ func (a app) executeAggregate(in invocation, dir config.Directory) (*result.Enve
 	// both complete mode plans with dry-run semantics while the operation lock is
 	// held, so neither mode can mutate before the other mode accepts its scope.
 	var workerPlan *result.Envelope
+	var runnerPlan *result.Envelope
+	workerRemovalBlocked := false
 	if in.Command.Mutating {
 		preflightApp := a
 		preflightApp.stdout = io.Discard
@@ -93,14 +95,28 @@ func (a app) executeAggregate(in invocation, dir config.Directory) (*result.Enve
 				workerPlan = plan
 			} else {
 				plan, preflightErr = preflightApp.executeRunner(planned, dir)
+				runnerPlan = plan
 			}
 			if preflightErr != nil {
+				if in.Command.Name == "reconcile" && mode.worker && plan != nil && len(plan.Failed) > 0 {
+					workerRemovalBlocked = true
+					if hasPlannedWorkerShelfReconcile(plan) {
+						continue
+					}
+					mergeBlockedReconcileRemovalPlan(&env, runnerPlan)
+				}
+				mergeEnvelope(&env, plan)
 				return &env, result.Preflight(errors.New(preflightErr.Error()))
 			}
 		}
 	}
 
 	if in.Options.DryRun {
+		if workerRemovalBlocked {
+			mergeBlockedReconcileRemovalPlan(&env, runnerPlan)
+			mergeEnvelope(&env, workerPlan)
+			return &env, result.Preflight(errors.New("worker reconcile refused one or more stale-registration removals"))
+		}
 		if useRunner {
 			modeEnv, modeErr := a.executeRunner(runnerIn, dir)
 			mergeEnvelope(&env, modeEnv)
@@ -126,7 +142,9 @@ func (a app) executeAggregate(in invocation, dir config.Directory) (*result.Enve
 
 	var aggregateErr error
 	aggregateStarted := false
-	if useRunner {
+	if workerRemovalBlocked {
+		mergeBlockedReconcileRemovalPlan(&env, runnerPlan)
+	} else if useRunner {
 		modeEnv, modeErr := a.executeRunner(runnerIn, dir)
 		mergeEnvelope(&env, modeEnv)
 		aggregateStarted = len(modeEnv.Successful) > 0 || len(modeEnv.Failed) > 0
@@ -149,6 +167,30 @@ func (a app) executeAggregate(in invocation, dir config.Directory) (*result.Enve
 		return &env, aggregateErr
 	}
 	return &env, nil
+}
+
+func mergeBlockedReconcileRemovalPlan(env *result.Envelope, plan *result.Envelope) {
+	if plan == nil {
+		return
+	}
+	for _, out := range plan.Planned {
+		out.Message = "stale registration removal not attempted because the aggregate worker removal plan was refused"
+		env.Skipped = append(env.Skipped, out)
+	}
+	env.Skipped = append(env.Skipped, plan.Skipped...)
+	env.Failed = append(env.Failed, plan.Failed...)
+}
+
+func hasPlannedWorkerShelfReconcile(plan *result.Envelope) bool {
+	if plan == nil || len(plan.Failed) == 0 {
+		return false
+	}
+	for _, out := range plan.Planned {
+		if out.Resource.Kind == "worker" && out.Reconcile != nil && out.Reconcile.Decision == "synchronize_shelf_intent" {
+			return true
+		}
+	}
+	return false
 }
 
 func appendLatePreflightFailure(env *result.Envelope, plan *result.Envelope, err error) {
@@ -193,6 +235,9 @@ func aggregateInvocations(in invocation, dir config.Directory) (invocation, invo
 		return workerIn, runnerIn, true, false, nil
 	}
 	if in.Selectors.Workdir != "" {
+		if in.Command.Name == "reconcile" {
+			return workerIn, runnerIn, true, true, nil
+		}
 		return workerIn, runnerIn, false, true, nil
 	}
 	workers, err := config.LoadReadOnly(dir.WorkersPath())

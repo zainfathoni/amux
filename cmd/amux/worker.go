@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -161,6 +162,17 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 	if in.Command.Name == "pin" {
 		return a.workerPin(in, dir, rows, &env)
 	}
+	if len(rows) == 0 && in.Command.Name == "reconcile" && in.Selectors.Workdir != "" {
+		return workerReconcileUnregisteredWorkdir(in, &env)
+	}
+	if len(rows) == 0 && in.Command.Name == "reconcile" && (in.Selectors.Thread != "" || in.Selectors.All) {
+		resource := result.CommandResource()
+		if in.Selectors.Thread != "" {
+			resource, _ = result.WorkerResource(in.Selectors.Thread)
+		}
+		env.Skipped = append(env.Skipped, result.Outcome{Resource: resource, Action: "reconcile", Message: "already in desired state; no workers.tsv binding exists"})
+		return &env, nil
+	}
 	if len(rows) == 0 && in.Command.Name == "remove" && in.Selectors.All && len(shelfOnly) == 0 {
 		out := result.Outcome{Resource: result.CommandResource(), Action: "remove", Message: "already in desired state"}
 		env.Skipped = append(env.Skipped, out)
@@ -197,6 +209,11 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 		return &env, result.Preflight(fmt.Errorf("teardown requires exactly one configured worker; selector matched %d", len(rows)))
 	}
 	inspections := make(map[string]workerInspection, len(rows))
+	var reconcilePlans map[string]workerReconcilePlan
+	reconcileRemovalBlocked := false
+	if in.Command.Name == "reconcile" {
+		reconcilePlans, reconcileRemovalBlocked = planWorkerReconcile(dir, rows, &env)
+	}
 	if in.Command.Name == "launch" || in.Command.Name == "restart" {
 		for _, row := range rows {
 			if (in.Command.Name == "launch" || in.Command.Name == "restart") && shelved[row.Thread] {
@@ -225,6 +242,43 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 				return &env, result.Preflight(fmt.Errorf("worker %s/%s has %s tmux identity", row.Workspace, row.Window, inspection.state))
 			}
 			inspections[row.Thread] = inspection
+		}
+	}
+	if in.Command.Name == "reconcile" {
+		if !reconcileRemovalBlocked {
+			for _, row := range rows {
+				plan := reconcilePlans[row.Thread]
+				if plan.state != result.WorkdirMissing {
+					continue
+				}
+				inspection, inspectErr := inspectWorker(row)
+				if inspectErr != nil {
+					plan.localState = "unknown"
+					reconcilePlans[row.Thread] = plan
+					out := workerReconcileOutcome(row, plan, "refuse_unknown_runtime")
+					out.Message = "refused: local runtime ownership could not be inspected"
+					out.Error = &result.Failure{Kind: result.ErrorPreflight, Message: inspectErr.Error()}
+					env.Failed = append(env.Failed, out)
+					reconcileRemovalBlocked = true
+					continue
+				}
+				plan.localState = string(inspection.state)
+				reconcilePlans[row.Thread] = plan
+				if inspection.state == workerPaneAbsent {
+					continue
+				}
+				decision := "refuse_live_runtime"
+				message := "missing worker workdir still has local runtime ownership"
+				if inspection.state == workerPaneConflict || inspection.state == workerPaneAmbiguous {
+					decision = "refuse_ambiguous_runtime"
+					message = "local runtime ownership is " + string(inspection.state)
+				}
+				out := workerReconcileOutcome(row, plan, decision)
+				out.Message = "refused: " + message
+				out.Error = &result.Failure{Kind: result.ErrorPreflight, Message: message}
+				env.Failed = append(env.Failed, out)
+				reconcileRemovalBlocked = true
+			}
 		}
 	}
 	if lifecycleCommandStopsWorker(in.Command.Name) {
@@ -267,6 +321,45 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 	}
 	for _, row := range rows {
 		out := workerOutcome(row, in.Command.Name, "")
+		if in.Command.Name == "teardown" {
+			out.Teardown = newTeardownDetails()
+		}
+		if in.Command.Name == "reconcile" {
+			plan := reconcilePlans[row.Thread]
+			if outcomeFailedForThread(env.Failed, row.Thread) {
+				continue
+			}
+			if plan.state == result.WorkdirMissing {
+				if reconcileRemovalBlocked {
+					out = workerReconcileOutcome(row, plan, "removal_plan_blocked")
+					out.Message = "stale registration removal not attempted because another removal candidate was refused"
+					env.Skipped = append(env.Skipped, out)
+					continue
+				}
+				out = workerReconcileOutcome(row, plan, "remove_stale_registration")
+				out.Message = "remove stale workers.tsv registration for proven missing canonical workdir"
+				if in.Options.DryRun {
+					env.Planned = append(env.Planned, out)
+					continue
+				}
+				reconcileChanged, reconcileErr := revalidateAndRemoveWorkerBinding(dir, row, plan)
+				if reconcileErr != nil {
+					out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: reconcileErr.Error()}
+					env.Failed = append(env.Failed, out)
+					continue
+				}
+				if reconcileChanged {
+					env.Successful = append(env.Successful, out)
+				} else {
+					out.Message = "already in desired state; workers.tsv binding is absent"
+					env.Skipped = append(env.Skipped, out)
+				}
+				continue
+			}
+			out.Reconcile = workerReconcileDetails(plan, "synchronize_shelf_intent")
+			out.Worker = workerPlacementDetails(row, "not_inspected")
+			out.Worker.WorkdirState = plan.state
+		}
 		if (in.Command.Name == "launch" || in.Command.Name == "restart") && shelved[row.Thread] {
 			out.Message = "worker is locally shelved"
 			env.Skipped = append(env.Skipped, out)
@@ -372,17 +465,47 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			changed = err == nil
 		case "teardown":
 			err = archiveAmpThread(row.Thread)
-			if err == nil {
-				_, err = config.RemoveShelf(dir.ShelvesPath(), row.Thread)
+			if err != nil {
+				setTeardownArtifact(out.Teardown, "remote_thread_archive", "failed", err.Error())
+			} else {
+				setTeardownArtifact(out.Teardown, "remote_thread_archive", "completed", "")
+				var shelfRemoved bool
+				shelfRemoved, err = config.RemoveShelf(dir.ShelvesPath(), row.Thread)
+				if err != nil {
+					setTeardownArtifact(out.Teardown, "shelf_intent", "failed", err.Error())
+				} else {
+					if shelfRemoved {
+						setTeardownArtifact(out.Teardown, "shelf_intent", "removed", "")
+					} else {
+						setTeardownArtifact(out.Teardown, "shelf_intent", "already_absent", "shelf intent was already absent")
+					}
+				}
 			}
 			if err == nil && inspections[row.Thread].state == workerPaneExact {
 				err = revalidateWorkerBeforeMutation(row, inspections[row.Thread])
-				if err == nil {
+				if err != nil {
+					setTeardownArtifact(out.Teardown, "local_client", "failed", err.Error())
+				} else {
 					err = tmux.Runner{}.KillWindow(inspections[row.Thread].pane.WindowID)
+					if err != nil {
+						setTeardownArtifact(out.Teardown, "local_client", "failed", err.Error())
+					} else {
+						setTeardownArtifact(out.Teardown, "local_client", "stopped", "")
+					}
 				}
+			} else if err == nil {
+				setTeardownArtifact(out.Teardown, "local_client", "already_stopped", "verified local client was already absent")
 			}
 			if err == nil {
-				_, err = config.Remove(dir.WorkersPath(), row.Workspace, row.Window)
+				var workerRemoved bool
+				workerRemoved, err = config.Remove(dir.WorkersPath(), row.Workspace, row.Window)
+				if err != nil {
+					setTeardownArtifact(out.Teardown, "worker_configuration", "failed", err.Error())
+				} else if workerRemoved {
+					setTeardownArtifact(out.Teardown, "worker_configuration", "removed", "")
+				} else {
+					setTeardownArtifact(out.Teardown, "worker_configuration", "already_absent", "worker configuration was already absent")
+				}
 			}
 			changed = err == nil
 		case "doctor":
@@ -390,8 +513,10 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 			if doctorStatusErr == nil {
 				remote = string(doctorStatuses[canonicalThreadID(row.Thread)])
 			}
+			_, workdirState := workerWorkdirState(row.Workdir)
 			out.Worker = workerPlacementDetails(row, string(inspections[row.Thread].state))
-			out.Message = fmt.Sprintf("local=%s remote=%s workdir=%s intent=%t assignment=%s native_executor=%s native_runner_id=%s execution_affinity=%s", inspections[row.Thread].state, remote, workerWorkdirState(row.Workdir), shelved[row.Thread], workerAssignmentState(row), unknownNativePlacement, unknownNativePlacement, unknownNativePlacement)
+			out.Worker.WorkdirState = workdirState
+			out.Message = fmt.Sprintf("local=%s remote=%s workdir=%s intent=%t assignment=%s native_executor=%s native_runner_id=%s execution_affinity=%s", inspections[row.Thread].state, remote, workdirState, shelved[row.Thread], workerAssignmentState(row), unknownNativePlacement, unknownNativePlacement, unknownNativePlacement)
 			env.Successful = append(env.Successful, out)
 			if !in.Options.JSON {
 				fmt.Fprintf(a.stdout, "%s\t%s\n", row.Thread, out.Message)
@@ -407,15 +532,31 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 		}
 		if err != nil {
 			out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: err.Error()}
+			if in.Command.Name == "teardown" {
+				markTeardownDownstreamUnattempted(out.Teardown)
+				out.Message = teardownMessage(out.Teardown)
+				if !in.Options.JSON {
+					fmt.Fprintf(a.stdout, "%s\t%s; error=%s\n", row.Thread, out.Message, err)
+				}
+			}
 			env.Failed = append(env.Failed, out)
 			continue
 		}
 		if in.Command.Name == "teardown" && inspections[row.Thread].state == workerPaneAbsent {
-			out.Message = "already_stopped"
+			out.Message = teardownMessage(out.Teardown)
 			env.Skipped = append(env.Skipped, out)
+			if !in.Options.JSON {
+				fmt.Fprintf(a.stdout, "%s\t%s\n", row.Thread, out.Message)
+			}
 			continue
 		}
 		if changed {
+			if in.Command.Name == "teardown" {
+				out.Message = teardownMessage(out.Teardown)
+				if !in.Options.JSON {
+					fmt.Fprintf(a.stdout, "%s\t%s\n", row.Thread, out.Message)
+				}
+			}
 			env.Successful = append(env.Successful, out)
 		} else {
 			out.Message = "already in desired state"
@@ -430,6 +571,9 @@ func (a app) executeWorker(in invocation, dir config.Directory) (*result.Envelop
 		})
 	}
 	if len(env.Failed) > 0 {
+		if in.Command.Name == "reconcile" && reconcileRemovalBlocked && len(env.Successful) == 0 {
+			return &env, result.Preflight(errors.New("worker reconcile refused one or more stale-registration removals"))
+		}
 		return &env, result.Runtime(errors.New("one or more worker operations failed"))
 	}
 	return &env, nil
@@ -696,18 +840,199 @@ func workerAssignmentState(row config.Row) string {
 	return "unknown"
 }
 
-func workerWorkdirState(workdir string) string {
-	stat, err := os.Stat(config.ExpandHome(workdir))
+func workerWorkdirState(workdir string) (string, result.WorkdirState) {
+	expanded := config.ExpandHome(workdir)
+	if !filepath.IsAbs(expanded) {
+		return "", result.WorkdirAmbiguous
+	}
+	canonical, err := config.CanonicalWorkdir(workdir)
+	if err != nil {
+		return "", result.WorkdirUnknown
+	}
+	_, lstatErr := os.Lstat(canonical)
+	if os.IsNotExist(lstatErr) {
+		return canonical, result.WorkdirMissing
+	}
+	if lstatErr != nil {
+		return canonical, result.WorkdirUnreadable
+	}
+	stat, err := os.Stat(canonical)
 	if os.IsNotExist(err) {
-		return "missing"
+		return canonical, result.WorkdirUnreadable
 	}
 	if err != nil {
-		return "unreadable"
+		return canonical, result.WorkdirUnreadable
 	}
 	if !stat.IsDir() {
-		return "not_a_directory"
+		return canonical, result.WorkdirNotDirectory
 	}
-	return "present"
+	return canonical, result.WorkdirPresent
+}
+
+type workerReconcilePlan struct {
+	workdir         string
+	state           result.WorkdirState
+	localState      string
+	openObligations []string
+}
+
+func planWorkerReconcile(dir config.Directory, rows []config.Row, env *result.Envelope) (map[string]workerReconcilePlan, bool) {
+	plans := make(map[string]workerReconcilePlan, len(rows))
+	missing := false
+	for _, row := range rows {
+		workdir, state := workerWorkdirState(row.Workdir)
+		plan := workerReconcilePlan{workdir: workdir, state: state, localState: "unknown"}
+		plans[row.Thread] = plan
+		decision, refusal := "", ""
+		switch state {
+		case result.WorkdirPresent:
+			continue
+		case result.WorkdirMissing:
+			missing = true
+			continue
+		case result.WorkdirNotDirectory:
+			decision = "refuse_not_a_directory"
+			refusal = "registry workdir is not a directory"
+		case result.WorkdirUnreadable:
+			decision = "refuse_unreadable"
+			refusal = "registry workdir is unreadable"
+		case result.WorkdirAmbiguous:
+			decision = "refuse_relative_ambiguity"
+			refusal = "registry workdir is relative and has no stable machine identity"
+		default:
+			decision = "refuse_unknown_state"
+			refusal = "registry workdir state is unknown"
+		}
+		out := workerReconcileOutcome(row, plan, decision)
+		out.Message = "refused: " + refusal
+		out.Error = &result.Failure{Kind: result.ErrorPreflight, Message: refusal}
+		env.Failed = append(env.Failed, out)
+	}
+	if len(env.Failed) > 0 {
+		return plans, true
+	}
+	if !missing {
+		return plans, false
+	}
+	reports, err := config.LoadReports(dir.ReportsPath())
+	if err != nil {
+		env.Failed = append(env.Failed, result.Outcome{
+			Resource:  result.ConfigResource(dir.ReportsPath()),
+			Action:    "reconcile",
+			Message:   "refused: reports.json could not be read; open obligations are unknown",
+			Reconcile: &result.ReconcileDetails{Authority: config.WorkersFile, WorkdirState: result.WorkdirUnknown, Decision: "refuse_unknown_obligations"},
+			Error:     &result.Failure{Kind: result.ErrorPreflight, Message: err.Error()},
+		})
+		return plans, true
+	}
+	reportsByThread := make(map[string][]config.ReportRecord)
+	for _, report := range reports {
+		reportsByThread[report.MemberThread] = append(reportsByThread[report.MemberThread], report)
+	}
+	for _, row := range rows {
+		plan := plans[row.Thread]
+		if plan.state != result.WorkdirMissing {
+			continue
+		}
+		for _, report := range reportsByThread[row.Thread] {
+			if report.Status == config.ReportBlocked && report.AuthorizedAt.IsZero() {
+				plan.openObligations = append(plan.openObligations, report.ReportID)
+			}
+		}
+		sort.Strings(plan.openObligations)
+		plans[row.Thread] = plan
+		if len(plan.openObligations) == 0 {
+			continue
+		}
+		out := workerReconcileOutcome(row, plan, "refuse_open_obligation")
+		out.Message = "refused: blocked report without finish authorization"
+		out.Error = &result.Failure{Kind: result.ErrorPreflight, Message: "blocked report without finish authorization"}
+		env.Failed = append(env.Failed, out)
+	}
+	if len(env.Failed) > 0 {
+		return plans, true
+	}
+	return plans, false
+}
+
+func outcomeFailedForThread(outcomes []result.Outcome, thread string) bool {
+	for _, outcome := range outcomes {
+		if outcome.Resource.Thread == thread {
+			return true
+		}
+	}
+	return false
+}
+
+func workerReconcileUnregisteredWorkdir(in invocation, env *result.Envelope) (*result.Envelope, error) {
+	workdir, state := workerWorkdirState(in.Selectors.Workdir)
+	resource := result.ResourceID{Kind: "worker_workdir", Workdir: workdir}
+	details := &result.ReconcileDetails{Authority: config.WorkersFile, RegistryBinding: false, Workdir: workdir, WorkdirState: state}
+	out := result.Outcome{Resource: resource, Action: "reconcile", Reconcile: details}
+	if state == result.WorkdirPresent || state == result.WorkdirMissing {
+		details.Decision = "preserve_unregistered_directory"
+		out.Message = "refused filesystem cleanup: no workers.tsv row binds a thread to this canonical workdir"
+		env.Skipped = append(env.Skipped, out)
+		return env, nil
+	}
+	details.Decision = "refuse_unproven_workdir_state"
+	out.Message = "refused: unregistered workdir state is not safely actionable"
+	out.Error = &result.Failure{Kind: result.ErrorPreflight, Message: out.Message}
+	env.Failed = append(env.Failed, out)
+	return env, result.Preflight(errors.New(out.Message))
+}
+
+func workerReconcileOutcome(row config.Row, plan workerReconcilePlan, decision string) result.Outcome {
+	out := workerOutcome(row, "reconcile", "")
+	out.Worker = workerPlacementDetails(row, plan.localState)
+	out.Worker.WorkdirState = plan.state
+	out.Reconcile = workerReconcileDetails(plan, decision)
+	return out
+}
+
+func revalidateAndRemoveWorkerBinding(dir config.Directory, row config.Row, plan workerReconcilePlan) (bool, error) {
+	workdir, state := workerWorkdirState(row.Workdir)
+	if state != result.WorkdirMissing || workdir != plan.workdir {
+		return false, fmt.Errorf("worker reconcile precondition changed: canonical workdir %s is %s", plan.workdir, state)
+	}
+	inspection, err := inspectWorker(row)
+	if err != nil {
+		return false, fmt.Errorf("worker reconcile precondition changed: inspect local runtime: %w", err)
+	}
+	if inspection.state != workerPaneAbsent {
+		return false, fmt.Errorf("worker reconcile precondition changed: local runtime ownership is %s", inspection.state)
+	}
+	reports, err := config.LoadReports(dir.ReportsPath())
+	if err != nil {
+		return false, fmt.Errorf("worker reconcile precondition changed: read reports: %w", err)
+	}
+	for _, report := range reports {
+		if report.MemberThread == row.Thread && report.Status == config.ReportBlocked && report.AuthorizedAt.IsZero() {
+			return false, fmt.Errorf("worker reconcile precondition changed: blocked report %q is never authorized", report.ReportID)
+		}
+	}
+	removed, err := config.RemoveRows(dir.WorkersPath(), func(candidate config.Row) bool {
+		candidateWorkdir, candidateErr := config.CanonicalWorkdir(candidate.Workdir)
+		return candidateErr == nil && candidate.Workspace == row.Workspace && candidate.Window == row.Window && candidate.Thread == row.Thread && candidateWorkdir == plan.workdir
+	})
+	if err != nil {
+		return false, err
+	}
+	if removed != 1 {
+		return false, errors.New("worker reconcile precondition changed: exact workers.tsv binding no longer exists")
+	}
+	return true, nil
+}
+
+func workerReconcileDetails(plan workerReconcilePlan, decision string) *result.ReconcileDetails {
+	return &result.ReconcileDetails{
+		Authority:       config.WorkersFile,
+		RegistryBinding: true,
+		Workdir:         plan.workdir,
+		WorkdirState:    plan.state,
+		Decision:        decision,
+		OpenObligations: append([]string(nil), plan.openObligations...),
+	}
 }
 
 func verifyAdoptionThreadAndTmux(row config.Row) (workerInspection, error) {
@@ -760,6 +1085,65 @@ func selectWorkerRows(rows []config.Row, s selectors) []config.Row {
 func workerOutcome(r config.Row, action, message string) result.Outcome {
 	id, _ := result.WorkerResource(r.Thread)
 	return result.Outcome{Resource: id, Action: action, Message: message}
+}
+
+func newTeardownDetails() *result.TeardownDetails {
+	details := &result.TeardownDetails{Artifacts: make([]result.TeardownArtifactDetails, 0, 8)}
+	for _, artifact := range []string{"remote_thread_archive", "shelf_intent", "local_client", "worker_configuration"} {
+		details.Artifacts = append(details.Artifacts, result.TeardownArtifactDetails{
+			Artifact: artifact,
+			Outcome:  "unattempted",
+			Reason:   "teardown artifact has not run",
+		})
+	}
+	for _, artifact := range []struct {
+		name   string
+		reason string
+	}{
+		{"worktree_directory", "amux teardown does not own worktree directory cleanup"},
+		{"branch_refs", "amux teardown does not own Git branch refs"},
+		{"stashes", "amux teardown does not own Git stashes"},
+		{"external_project_records", "amux teardown does not own external project registries"},
+	} {
+		details.Artifacts = append(details.Artifacts, result.TeardownArtifactDetails{Artifact: artifact.name, Outcome: "not_owned", Reason: artifact.reason})
+	}
+	return details
+}
+
+func setTeardownArtifact(details *result.TeardownDetails, artifact, outcome, reason string) {
+	for i := range details.Artifacts {
+		if details.Artifacts[i].Artifact == artifact {
+			details.Artifacts[i].Outcome = outcome
+			details.Artifacts[i].Reason = reason
+			return
+		}
+	}
+}
+
+func markTeardownDownstreamUnattempted(details *result.TeardownDetails) {
+	failedArtifact := ""
+	for i := range details.Artifacts {
+		artifact := &details.Artifacts[i]
+		if artifact.Outcome == "failed" {
+			failedArtifact = artifact.Artifact
+			continue
+		}
+		if failedArtifact != "" && artifact.Outcome == "unattempted" {
+			artifact.Reason = "not attempted because " + failedArtifact + " failed"
+		}
+	}
+}
+
+func teardownMessage(details *result.TeardownDetails) string {
+	parts := make([]string, 0, len(details.Artifacts))
+	for _, artifact := range details.Artifacts {
+		part := artifact.Artifact + "=" + artifact.Outcome
+		if artifact.Reason != "" {
+			part += " (" + artifact.Reason + ")"
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func workerRowsEquivalent(left, right config.Row) bool {

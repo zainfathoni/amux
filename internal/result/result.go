@@ -138,18 +138,39 @@ type RunnerDetails struct {
 	ProcessAgeSeconds int64  `json:"process_age_seconds,omitempty"`
 }
 
+type WorkdirState string
+
+const (
+	WorkdirPresent      WorkdirState = "present"
+	WorkdirMissing      WorkdirState = "missing"
+	WorkdirNotDirectory WorkdirState = "not_a_directory"
+	WorkdirUnreadable   WorkdirState = "unreadable"
+	WorkdirAmbiguous    WorkdirState = "ambiguous"
+	WorkdirUnknown      WorkdirState = "unknown"
+)
+
 type WorkerDetails struct {
-	Workspace         string `json:"workspace"`
-	Window            string `json:"window"`
-	WindowID          string `json:"window_id,omitempty"`
-	PaneID            string `json:"pane_id,omitempty"`
-	Workdir           string `json:"workdir"`
-	LocalState        string `json:"local_state"`
-	AssignmentState   string `json:"assignment_state,omitempty"`
-	ReceiptSource     string `json:"receipt_source,omitempty"`
-	NativeExecutor    string `json:"native_executor"`
-	NativeRunnerID    string `json:"native_runner_id"`
-	ExecutionAffinity string `json:"execution_affinity"`
+	Workspace         string       `json:"workspace"`
+	Window            string       `json:"window"`
+	WindowID          string       `json:"window_id,omitempty"`
+	PaneID            string       `json:"pane_id,omitempty"`
+	Workdir           string       `json:"workdir"`
+	WorkdirState      WorkdirState `json:"workdir_state,omitempty"`
+	LocalState        string       `json:"local_state"`
+	AssignmentState   string       `json:"assignment_state,omitempty"`
+	ReceiptSource     string       `json:"receipt_source,omitempty"`
+	NativeExecutor    string       `json:"native_executor"`
+	NativeRunnerID    string       `json:"native_runner_id"`
+	ExecutionAffinity string       `json:"execution_affinity"`
+}
+
+type ReconcileDetails struct {
+	Authority       string       `json:"authority"`
+	RegistryBinding bool         `json:"registry_binding"`
+	Workdir         string       `json:"workdir,omitempty"`
+	WorkdirState    WorkdirState `json:"workdir_state"`
+	Decision        string       `json:"decision"`
+	OpenObligations []string     `json:"open_obligations,omitempty"`
 }
 
 type GroupDetails struct {
@@ -197,6 +218,16 @@ type GroupNamingDetails struct {
 	ConfigSource  string `json:"config_source"`
 }
 
+type TeardownArtifactDetails struct {
+	Artifact string `json:"artifact"`
+	Outcome  string `json:"outcome"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+type TeardownDetails struct {
+	Artifacts []TeardownArtifactDetails `json:"artifacts"`
+}
+
 type Outcome struct {
 	Resource    ResourceID          `json:"resource"`
 	Action      string              `json:"action"`
@@ -209,6 +240,8 @@ type Outcome struct {
 	Report      *ReportDetails      `json:"report,omitempty"`
 	Callback    *CallbackDetails    `json:"callback,omitempty"`
 	GroupNaming *GroupNamingDetails `json:"group_naming,omitempty"`
+	Teardown    *TeardownDetails    `json:"teardown,omitempty"`
+	Reconcile   *ReconcileDetails   `json:"reconcile,omitempty"`
 	Error       *Failure            `json:"error,omitempty"`
 }
 

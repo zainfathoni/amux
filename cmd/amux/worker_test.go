@@ -595,8 +595,31 @@ func TestWorkerTeardownCompletesWhenLocalWorkerIsAlreadyStopped(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
 	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "teardown", "--thread", "T-a")
-	if len(got.Successful) != 0 || len(got.Skipped) != 1 || got.Skipped[0].Message != "already_stopped" {
+	if len(got.Successful) != 0 || len(got.Skipped) != 1 {
 		t.Fatalf("missing-window teardown result = %+v", got)
+	}
+	artifacts := teardownArtifactsByName(t, got.Skipped[0])
+	for artifact, outcome := range map[string]string{
+		"remote_thread_archive":    "completed",
+		"shelf_intent":             "removed",
+		"local_client":             "already_stopped",
+		"worker_configuration":     "removed",
+		"worktree_directory":       "not_owned",
+		"branch_refs":              "not_owned",
+		"stashes":                  "not_owned",
+		"external_project_records": "not_owned",
+	} {
+		if actual := artifacts[artifact].Outcome; actual != outcome {
+			t.Fatalf("teardown artifact %s outcome = %q, want %q; outcome=%+v", artifact, actual, outcome, got.Skipped[0])
+		}
+	}
+	for _, artifact := range []string{"worktree_directory", "branch_refs", "stashes", "external_project_records"} {
+		if artifacts[artifact].Reason == "" {
+			t.Fatalf("not-owned teardown artifact %s has no reason: %+v", artifact, got.Skipped[0])
+		}
+	}
+	if !strings.Contains(got.Skipped[0].Message, "remote_thread_archive=completed") || !strings.Contains(got.Skipped[0].Message, "worktree_directory=not_owned") {
+		t.Fatalf("missing-window teardown message is not honest: %q", got.Skipped[0].Message)
 	}
 	rows, err := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
 	if err != nil || len(rows) != 0 {
@@ -612,6 +635,141 @@ func TestWorkerTeardownCompletesWhenLocalWorkerIsAlreadyStopped(t *testing.T) {
 	}
 	if !strings.Contains(string(log), "amp threads archive T-a") || strings.Contains(string(log), "tmux kill-window") {
 		t.Fatalf("missing-window teardown calls:\n%s", log)
+	}
+}
+
+func TestWorkerTeardownAlreadyStoppedReportsIdempotentAbsentShelf(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkerRegistry(t, dir, "alpha\ta\t/tmp/a\tT-a\n")
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "teardown", "--thread", "T-a")
+	if len(got.Skipped) != 1 || len(got.Successful) != 0 {
+		t.Fatalf("idempotent missing-window teardown result = %+v", got)
+	}
+	artifacts := teardownArtifactsByName(t, got.Skipped[0])
+	if artifacts["shelf_intent"].Outcome != "already_absent" || artifacts["local_client"].Outcome != "already_stopped" {
+		t.Fatalf("idempotent teardown artifacts = %+v", artifacts)
+	}
+}
+
+func TestWorkerTeardownAlreadyStoppedPrintsHonestHumanResult(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkerRegistry(t, dir, "alpha\ta\t/tmp/a\tT-a\n")
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).execute([]string{"--config-dir", dir, "worker", "teardown", "--thread", "T-a"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"T-a\t",
+		"remote_thread_archive=completed",
+		"local_client=already_stopped",
+		"worker_configuration=removed",
+		"worktree_directory=not_owned (amux teardown does not own worktree directory cleanup)",
+		"external_project_records=not_owned",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("human teardown output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestWorkerTeardownDryRunUsesNeutralUnattemptedReasons(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkerRegistry(t, dir, "alpha\ta\t/tmp/a\tT-a\n")
+	bin := t.TempDir()
+	ampCalled := filepath.Join(bin, "amp-called")
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\ntouch '"+ampCalled+"'\nexit 99\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	got := executeWorkerJSON(t, "--json", "--dry-run", "--config-dir", dir, "worker", "teardown", "--thread", "T-a")
+	if len(got.Planned) != 1 || len(got.Successful) != 0 || len(got.Skipped) != 0 || len(got.Failed) != 0 {
+		t.Fatalf("dry-run teardown result = %+v", got)
+	}
+	artifacts := teardownArtifactsByName(t, got.Planned[0])
+	for _, artifact := range []string{"remote_thread_archive", "shelf_intent", "local_client", "worker_configuration"} {
+		details := artifacts[artifact]
+		if details.Outcome != "unattempted" || details.Reason != "teardown artifact has not run" || strings.Contains(details.Reason, "failed") {
+			t.Fatalf("dry-run teardown artifact %s = %+v", artifact, details)
+		}
+	}
+	if _, err := os.Stat(ampCalled); !os.IsNotExist(err) {
+		t.Fatalf("dry-run teardown called amp: %v", err)
+	}
+}
+
+func TestWorkerTeardownPartialFailureReportsCompletedArtifacts(t *testing.T) {
+	for _, jsonOutput := range []bool{true, false} {
+		name := map[bool]string{true: "json", false: "human"}[jsonOutput]
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			row := config.Row{Workspace: "alpha", Window: "a", Workdir: "/tmp/a", Thread: "T-a"}
+			writeWorkerRegistry(t, dir, row.String()+"\n")
+			if err := os.WriteFile(filepath.Join(dir, config.ShelvesFile), []byte("# amux-schema: shelves/v1\nT-a\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			start := teardownExpectedStartCommand(teardownIdentity{Workspace: "alpha", Session: "alpha", Window: "a", Thread: "T-a"}, row)
+			bin := t.TempDir()
+			writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\nexit 0\n")
+			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 0; fi\nif [ \"$1\" = list-panes ]; then printf '%s\\n' "+shellSingleQuote("a\t@1\t"+start)+"; exit 0; fi\nif [ \"$1\" = kill-window ]; then echo kill-failed >&2; exit 7; fi\nexit 2\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+			args := []string{"--config-dir", dir, "worker", "teardown", "--thread", "T-a"}
+			if jsonOutput {
+				args = append([]string{"--json"}, args...)
+			}
+			var stdout bytes.Buffer
+			err := (app{stdout: &stdout}).execute(args)
+			if err == nil || result.ExitCode(err) != result.ExitRuntimeFailure {
+				t.Fatalf("partial teardown error = %v, want runtime failure", err)
+			}
+			if jsonOutput {
+				var envelope result.Envelope
+				if decodeErr := json.NewDecoder(&stdout).Decode(&envelope); decodeErr != nil {
+					t.Fatalf("decode partial teardown: %v\n%s", decodeErr, stdout.String())
+				}
+				if len(envelope.Failed) != 1 || envelope.Failed[0].Error == nil {
+					t.Fatalf("partial teardown envelope = %+v", envelope)
+				}
+				artifacts := teardownArtifactsByName(t, envelope.Failed[0])
+				if artifacts["remote_thread_archive"].Outcome != "completed" || artifacts["shelf_intent"].Outcome != "removed" {
+					t.Fatalf("partial teardown completed artifacts = %+v", artifacts)
+				}
+				if artifacts["local_client"].Outcome != "failed" || !strings.Contains(artifacts["local_client"].Reason, "exit status 7") {
+					t.Fatalf("failed local client artifact = %+v", artifacts["local_client"])
+				}
+				if artifacts["worker_configuration"].Outcome != "unattempted" || artifacts["worker_configuration"].Reason != "not attempted because local_client failed" {
+					t.Fatalf("unattempted worker configuration artifact = %+v", artifacts["worker_configuration"])
+				}
+			} else {
+				for _, want := range []string{"remote_thread_archive=completed", "shelf_intent=removed", "local_client=failed", "worker_configuration=unattempted", "error="} {
+					if !strings.Contains(stdout.String(), want) {
+						t.Fatalf("human partial teardown output missing %q:\n%s", want, stdout.String())
+					}
+				}
+			}
+			rows, loadErr := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
+			if loadErr != nil || len(rows) != 1 {
+				t.Fatalf("partial teardown removed retry configuration: rows=%+v err=%v", rows, loadErr)
+			}
+			shelves, loadErr := config.LoadShelvesReadOnly(filepath.Join(dir, config.ShelvesFile))
+			if loadErr != nil || len(shelves) != 0 {
+				t.Fatalf("partial teardown did not preserve completed shelf removal: shelves=%+v err=%v", shelves, loadErr)
+			}
+		})
 	}
 }
 
@@ -677,6 +835,17 @@ func TestWorkerTeardownArchivesRemovesAndStopsLiveWorker(t *testing.T) {
 	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "teardown", "--thread", "T-a")
 	if len(got.Successful) != 1 || len(got.Skipped) != 0 {
 		t.Fatalf("live-window teardown result = %+v", got)
+	}
+	artifacts := teardownArtifactsByName(t, got.Successful[0])
+	for artifact, outcome := range map[string]string{
+		"remote_thread_archive": "completed",
+		"local_client":          "stopped",
+		"shelf_intent":          "removed",
+		"worker_configuration":  "removed",
+	} {
+		if actual := artifacts[artifact].Outcome; actual != outcome {
+			t.Fatalf("live teardown artifact %s outcome = %q, want %q; outcome=%+v", artifact, actual, outcome, got.Successful[0])
+		}
 	}
 	rows, err := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
 	if err != nil || len(rows) != 0 {
@@ -1216,8 +1385,311 @@ func TestWorkerDoctorExpandsTildeWorkdir(t *testing.T) {
 	})
 
 	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "doctor", "--thread", row.Thread)
-	if len(got.Successful) != 1 || len(got.Failed) != 0 || !strings.Contains(got.Successful[0].Message, "workdir=present") {
+	if len(got.Successful) != 1 || len(got.Failed) != 0 || got.Successful[0].Worker == nil || got.Successful[0].Worker.Workdir != row.Workdir || got.Successful[0].Worker.WorkdirState != result.WorkdirPresent || !strings.Contains(got.Successful[0].Message, "workdir=present") {
 		t.Fatalf("worker doctor tilde workdir = %+v", got)
+	}
+}
+
+func TestWorkerReconcileRemovesOnlyProvenMissingCanonicalRegistrationAndConverges(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	missing := filepath.Join(home, "missing-worker")
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: "~/missing-worker", Thread: "T-missing"}
+	writeWorkerRegistry(t, dir, row.String()+"\n")
+	installAbsentWorkerTmux(t)
+	registryPath := filepath.Join(dir, config.WorkersFile)
+	before, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dry := executeWorkerJSON(t, "--json", "--dry-run", "--config-dir", dir, "worker", "reconcile", "--thread", row.Thread)
+	if len(dry.Planned) != 1 || dry.Planned[0].Worker == nil || dry.Planned[0].Worker.Workdir != row.Workdir || dry.Planned[0].Reconcile == nil || dry.Planned[0].Reconcile.Authority != config.WorkersFile || !dry.Planned[0].Reconcile.RegistryBinding || dry.Planned[0].Reconcile.Workdir != missing || dry.Planned[0].Reconcile.WorkdirState != result.WorkdirMissing || dry.Planned[0].Reconcile.Decision != "remove_stale_registration" {
+		t.Fatalf("worker reconcile dry-run evidence = %+v", dry)
+	}
+	if after, readErr := os.ReadFile(registryPath); readErr != nil || !bytes.Equal(before, after) {
+		t.Fatalf("worker reconcile dry-run mutated registry: before=%q after=%q err=%v", before, after, readErr)
+	}
+
+	done := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "reconcile", "--thread", row.Thread)
+	if len(done.Successful) != 1 || done.Successful[0].Reconcile == nil || done.Successful[0].Reconcile.Decision != "remove_stale_registration" {
+		t.Fatalf("worker reconcile result = %+v", done)
+	}
+	rows, err := config.LoadReadOnly(registryPath)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("worker reconcile retained stale binding: rows=%+v err=%v", rows, err)
+	}
+	repeated := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "reconcile", "--thread", row.Thread)
+	if len(repeated.Skipped) != 1 || !strings.Contains(repeated.Skipped[0].Message, "no workers.tsv binding") {
+		t.Fatalf("repeated worker reconcile = %+v", repeated)
+	}
+}
+
+func TestWorkerReconcilePreservesDirectoryWithoutRegistryAuthority(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, config.GroupsFile), []byte("# unrelated group evidence\nteam\tmember\tT-unregistered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, config.ReportsFile), []byte(`{"malformed":"ignored without a workers.tsv binding"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "reconcile", "--workdir", workdir)
+	if len(got.Skipped) != 1 || got.Skipped[0].Resource.Kind != "worker_workdir" || got.Skipped[0].Reconcile == nil || got.Skipped[0].Reconcile.Authority != config.WorkersFile || got.Skipped[0].Reconcile.RegistryBinding || got.Skipped[0].Reconcile.WorkdirState != result.WorkdirPresent || got.Skipped[0].Reconcile.Decision != "preserve_unregistered_directory" {
+		t.Fatalf("unregistered directory reconcile = %+v", got)
+	}
+	if stat, err := os.Stat(workdir); err != nil || !stat.IsDir() {
+		t.Fatalf("unregistered directory was mutated: %v, %v", stat, err)
+	}
+}
+
+func TestWorkerReconcilePresentWorkdirPreservesLegacyDependenciesAndCatalogSpelling(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workdir := filepath.Join(home, "worker")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: "~/worker", Thread: "T-present"}
+	writeWorkerRegistry(t, dir, row.String()+"\n")
+	if err := os.WriteFile(filepath.Join(dir, config.ReportsFile), []byte("malformed reports must be irrelevant to present reconcile"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	ampLog := filepath.Join(bin, "amp.log")
+	tmuxCalled := filepath.Join(bin, "tmux-called")
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\necho \"$*\" >> '"+ampLog+"'\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+tmuxCalled+"'\nexit 99\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	got := executeWorkerJSON(t, "--json", "--config-dir", dir, "worker", "reconcile", "--thread", row.Thread)
+	if len(got.Successful) != 1 || got.Successful[0].Worker == nil || got.Successful[0].Worker.Workdir != row.Workdir || got.Successful[0].Worker.WorkdirState != result.WorkdirPresent || got.Successful[0].Worker.LocalState != "not_inspected" || got.Successful[0].Reconcile == nil || got.Successful[0].Reconcile.Workdir != workdir || got.Successful[0].Reconcile.Decision != "synchronize_shelf_intent" {
+		t.Fatalf("present worker reconcile = %+v", got)
+	}
+	if data, err := os.ReadFile(ampLog); err != nil || !strings.Contains(string(data), "threads archive --unarchive "+row.Thread) {
+		t.Fatalf("present worker reconcile remote sync = %q, %v", data, err)
+	}
+	if _, err := os.Stat(tmuxCalled); !os.IsNotExist(err) {
+		t.Fatalf("present worker reconcile probed tmux: %v", err)
+	}
+}
+
+func TestWorkerReconcileBulkKeepsPresentRemoteSyncIndependentOfUnsafeRemoval(t *testing.T) {
+	dir := t.TempDir()
+	present := t.TempDir()
+	unreadable := filepath.Join(t.TempDir(), "loop")
+	if err := os.Symlink(filepath.Base(unreadable), unreadable); err != nil {
+		t.Fatal(err)
+	}
+	rows := []config.Row{
+		{Workspace: "alpha", Window: "present", Workdir: present, Thread: "T-present"},
+		{Workspace: "alpha", Window: "unreadable", Workdir: unreadable, Thread: "T-unreadable"},
+	}
+	writeWorkerRegistry(t, dir, rows[0].String()+"\n"+rows[1].String()+"\n")
+	registryPath := filepath.Join(dir, config.WorkersFile)
+	before, _ := os.ReadFile(registryPath)
+	bin := t.TempDir()
+	ampLog := filepath.Join(bin, "amp.log")
+	tmuxCalled := filepath.Join(bin, "tmux-called")
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\necho \"$*\" >> '"+ampLog+"'\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+tmuxCalled+"'\nexit 99\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	got, reconcileErr := executeWorkerJSONResult(t, "--json", "--config-dir", dir, "worker", "reconcile", "--all")
+	if reconcileErr == nil || result.ExitCode(reconcileErr) != result.ExitRuntimeFailure || len(got.Successful) != 1 || got.Successful[0].Resource.Thread != "T-present" || got.Successful[0].Reconcile == nil || got.Successful[0].Reconcile.Decision != "synchronize_shelf_intent" || len(got.Failed) != 1 || got.Failed[0].Resource.Thread != "T-unreadable" || got.Failed[0].Reconcile == nil || got.Failed[0].Reconcile.Decision != "refuse_unreadable" {
+		t.Fatalf("bulk unsafe worker reconcile = %+v err=%v", got, reconcileErr)
+	}
+	after, _ := os.ReadFile(registryPath)
+	if !bytes.Equal(before, after) {
+		t.Fatalf("bulk unsafe worker reconcile mutated registry: before=%q after=%q", before, after)
+	}
+	if data, err := os.ReadFile(ampLog); err != nil || !strings.Contains(string(data), "threads archive --unarchive T-present") {
+		t.Fatalf("bulk unsafe worker reconcile did not preserve present remote sync: %q, %v", data, err)
+	}
+	if _, err := os.Stat(tmuxCalled); !os.IsNotExist(err) {
+		t.Fatalf("bulk unsafe worker reconcile probed tmux: %v", err)
+	}
+}
+
+func TestWorkerReconcileRemovalPlanIsAllOrNothingWhilePresentRowsSynchronize(t *testing.T) {
+	dir := t.TempDir()
+	present := t.TempDir()
+	blockedMissing := filepath.Join(t.TempDir(), "blocked-missing")
+	safeMissing := filepath.Join(t.TempDir(), "safe-missing")
+	rows := []config.Row{
+		{Workspace: "alpha", Window: "present", Workdir: present, Thread: "T-present"},
+		{Workspace: "alpha", Window: "blocked", Workdir: blockedMissing, Thread: "T-blocked"},
+		{Workspace: "alpha", Window: "safe", Workdir: safeMissing, Thread: "T-safe"},
+	}
+	writeWorkerRegistry(t, dir, rows[0].String()+"\n"+rows[1].String()+"\n"+rows[2].String()+"\n")
+	writeBlockedWorkerReport(t, dir, rows[1].Thread, "blocked-report", true)
+	registryPath := filepath.Join(dir, config.WorkersFile)
+	before, _ := os.ReadFile(registryPath)
+	bin := t.TempDir()
+	ampLog := filepath.Join(bin, "amp.log")
+	tmuxCalled := filepath.Join(bin, "tmux-called")
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\necho \"$*\" >> '"+ampLog+"'\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\ntouch '"+tmuxCalled+"'\nexit 99\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	got, reconcileErr := executeWorkerJSONResult(t, "--json", "--config-dir", dir, "worker", "reconcile", "--all")
+	if reconcileErr == nil || result.ExitCode(reconcileErr) != result.ExitRuntimeFailure || len(got.Successful) != 1 || got.Successful[0].Resource.Thread != "T-present" || len(got.Failed) != 1 || got.Failed[0].Resource.Thread != "T-blocked" || got.Failed[0].Reconcile == nil || got.Failed[0].Reconcile.Decision != "refuse_open_obligation" || len(got.Skipped) != 1 || got.Skipped[0].Resource.Thread != "T-safe" || got.Skipped[0].Reconcile == nil || got.Skipped[0].Reconcile.Decision != "removal_plan_blocked" {
+		t.Fatalf("all-or-nothing worker removal plan = %+v err=%v", got, reconcileErr)
+	}
+	after, _ := os.ReadFile(registryPath)
+	if !bytes.Equal(before, after) {
+		t.Fatalf("worker removal plan partially mutated registry: before=%q after=%q", before, after)
+	}
+	if data, err := os.ReadFile(ampLog); err != nil || !strings.Contains(string(data), "threads archive --unarchive T-present") {
+		t.Fatalf("worker removal refusal suppressed present sync: %q, %v", data, err)
+	}
+	if _, err := os.Stat(tmuxCalled); !os.IsNotExist(err) {
+		t.Fatalf("blocked removal plan probed tmux: %v", err)
+	}
+}
+
+func TestWorkerReconcileRefusesBlockedNeverAuthorizedReportsWithZeroAndAbsentKeys(t *testing.T) {
+	for _, absentKey := range []bool{false, true} {
+		name := "literal-go-zero"
+		if absentKey {
+			name = "absent-key"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			missing := filepath.Join(t.TempDir(), "missing")
+			row := config.Row{Workspace: "alpha", Window: "worker", Workdir: missing, Thread: "T-blocked"}
+			writeWorkerRegistry(t, dir, row.String()+"\n")
+			writeBlockedWorkerReport(t, dir, row.Thread, "free-text-report-id", absentKey)
+			registryPath := filepath.Join(dir, config.WorkersFile)
+			before, err := os.ReadFile(registryPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			dry, dryErr := executeWorkerJSONResult(t, "--json", "--dry-run", "--config-dir", dir, "worker", "reconcile", "--thread", row.Thread)
+			if dryErr == nil || result.ExitCode(dryErr) != result.ExitRejected || len(dry.Successful) != 0 || len(dry.Planned) != 0 || len(dry.Failed) != 1 || dry.Failed[0].Reconcile == nil || dry.Failed[0].Reconcile.Decision != "refuse_open_obligation" || strings.Join(dry.Failed[0].Reconcile.OpenObligations, ",") != "free-text-report-id" {
+				t.Fatalf("blocked worker reconcile dry-run = %+v err=%v", dry, dryErr)
+			}
+			afterDryRun, readErr := os.ReadFile(registryPath)
+			if readErr != nil || !bytes.Equal(before, afterDryRun) {
+				t.Fatalf("blocked worker reconcile dry-run mutated registry: before=%q after=%q err=%v", before, afterDryRun, readErr)
+			}
+
+			got, reconcileErr := executeWorkerJSONResult(t, "--json", "--config-dir", dir, "worker", "reconcile", "--thread", row.Thread)
+			if reconcileErr == nil || result.ExitCode(reconcileErr) != result.ExitRejected || len(got.Failed) != 1 || got.Failed[0].Reconcile == nil || got.Failed[0].Reconcile.Decision != "refuse_open_obligation" || strings.Join(got.Failed[0].Reconcile.OpenObligations, ",") != "free-text-report-id" {
+				t.Fatalf("blocked worker reconcile = %+v err=%v", got, reconcileErr)
+			}
+			after, readErr := os.ReadFile(registryPath)
+			if readErr != nil || !bytes.Equal(before, after) {
+				t.Fatalf("blocked worker reconcile mutated registry: before=%q after=%q err=%v", before, after, readErr)
+			}
+		})
+	}
+}
+
+func TestWorkerReconcileFailsClosedOnUnprovenStatesAndReportReadErrors(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		workdir   func(*testing.T) string
+		wantState result.WorkdirState
+		decision  string
+	}{
+		{name: "not-a-directory", workdir: func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "file")
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}, wantState: result.WorkdirNotDirectory, decision: "refuse_not_a_directory"},
+		{name: "unreadable", workdir: func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "loop")
+			if err := os.Symlink(filepath.Base(path), path); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}, wantState: result.WorkdirUnreadable, decision: "refuse_unreadable"},
+		{name: "dangling-symlink", workdir: func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "dangling")
+			if err := os.Symlink("missing-target", path); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}, wantState: result.WorkdirUnreadable, decision: "refuse_unreadable"},
+		{name: "relative-ambiguity", workdir: func(*testing.T) string { return "relative/missing" }, wantState: result.WorkdirAmbiguous, decision: "refuse_relative_ambiguity"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			row := config.Row{Workspace: "alpha", Window: "worker", Workdir: test.workdir(t), Thread: "T-worker"}
+			writeWorkerRegistry(t, dir, row.String()+"\n")
+			registryPath := filepath.Join(dir, config.WorkersFile)
+			before, err := os.ReadFile(registryPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, reconcileErr := executeWorkerJSONResult(t, "--json", "--config-dir", dir, "worker", "reconcile", "--all")
+			if reconcileErr == nil || result.ExitCode(reconcileErr) != result.ExitRejected || len(got.Failed) != 1 || got.Failed[0].Reconcile == nil || got.Failed[0].Reconcile.WorkdirState != test.wantState || got.Failed[0].Reconcile.Decision != test.decision {
+				t.Fatalf("%s reconcile = %+v err=%v", test.name, got, reconcileErr)
+			}
+			after, readErr := os.ReadFile(registryPath)
+			if readErr != nil || !bytes.Equal(before, after) {
+				t.Fatalf("%s reconcile mutated registry: before=%q after=%q err=%v", test.name, before, after, readErr)
+			}
+		})
+	}
+
+	t.Run("reports-read-error", func(t *testing.T) {
+		dir := t.TempDir()
+		row := config.Row{Workspace: "alpha", Window: "worker", Workdir: filepath.Join(t.TempDir(), "missing"), Thread: "T-worker"}
+		writeWorkerRegistry(t, dir, row.String()+"\n")
+		if err := os.WriteFile(filepath.Join(dir, config.ReportsFile), []byte("not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+		got, reconcileErr := executeWorkerJSONResult(t, "--json", "--config-dir", dir, "worker", "reconcile", "--thread", row.Thread)
+		if reconcileErr == nil || len(got.Failed) != 1 || got.Failed[0].Reconcile == nil || got.Failed[0].Reconcile.Decision != "refuse_unknown_obligations" {
+			t.Fatalf("reports read error reconcile = %+v err=%v", got, reconcileErr)
+		}
+		after, _ := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+		if !bytes.Equal(before, after) {
+			t.Fatalf("reports read error mutated registry: before=%q after=%q", before, after)
+		}
+	})
+}
+
+func TestWorkerReconcileRefusesMissingWorkdirWithLiveWorkerRuntime(t *testing.T) {
+	dir := t.TempDir()
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: filepath.Join(t.TempDir(), "missing"), Thread: "T-live"}
+	writeWorkerRegistry(t, dir, row.String()+"\n")
+	installWorkerDoctorTmux(t, []config.Row{row})
+	before, _ := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+
+	got, reconcileErr := executeWorkerJSONResult(t, "--json", "--config-dir", dir, "worker", "reconcile", "--thread", row.Thread)
+	if reconcileErr == nil || len(got.Failed) != 1 || got.Failed[0].Reconcile == nil || got.Failed[0].Reconcile.Decision != "refuse_live_runtime" {
+		t.Fatalf("live worker reconcile = %+v err=%v", got, reconcileErr)
+	}
+	if got.Failed[0].Worker == nil || got.Failed[0].Worker.LocalState != "exact" {
+		t.Fatalf("live worker reconcile lost runtime evidence: %+v", got.Failed[0])
+	}
+	after, _ := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+	if !bytes.Equal(before, after) {
+		t.Fatalf("live worker reconcile mutated registry: before=%q after=%q", before, after)
+	}
+}
+
+func TestWorkerReconcileDoesNotTreatReportIDAsWorkerIdentity(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "missing")
+	row := config.Row{Workspace: "alpha", Window: "worker", Workdir: missing, Thread: "T-worker"}
+	writeWorkerRegistry(t, dir, row.String()+"\n")
+	writeBlockedWorkerReport(t, dir, "T-unregistered", row.Thread+"-"+filepath.Base(missing), false)
+	installAbsentWorkerTmux(t)
+
+	got := executeWorkerJSON(t, "--json", "--dry-run", "--config-dir", dir, "worker", "reconcile", "--thread", row.Thread)
+	if len(got.Planned) != 1 || got.Planned[0].Reconcile == nil || got.Planned[0].Reconcile.Decision != "remove_stale_registration" || len(got.Planned[0].Reconcile.OpenObligations) != 0 {
+		t.Fatalf("free-text report ID affected worker identity = %+v", got)
 	}
 }
 
@@ -1556,6 +2028,58 @@ func installWorkerDoctorTmux(t *testing.T, rows []config.Row) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+func installAbsentWorkerTmux(t *testing.T) {
+	t.Helper()
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 99\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func writeBlockedWorkerReport(t *testing.T, dir, thread, reportID string, omitAuthorizedAt bool) {
+	t.Helper()
+	at := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)
+	record := config.ReportRecord{
+		ReportID:     reportID,
+		RequestHash:  config.ReportRequestHash("team", thread, "350", "worker-reconcile"),
+		GroupID:      "team",
+		MemberThread: thread,
+		Issue:        "350",
+		Reference:    "worker-reconcile",
+		Summary:      "blocked obligation",
+		Status:       config.ReportBlocked,
+		CreatedAt:    at,
+		UpdatedAt:    at,
+	}
+	path := filepath.Join(dir, config.ReportsFile)
+	if _, err := config.SubmitReport(path, record); err != nil {
+		t.Fatalf("write blocked report: %v", err)
+	}
+	if !omitAuthorizedAt {
+		data, err := os.ReadFile(path)
+		if err != nil || !bytes.Contains(data, []byte(`"authorized_at":"0001-01-01T00:00:00Z"`)) {
+			t.Fatalf("blocked report lacks literal Go-zero authorized_at: %s, %v", data, err)
+		}
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	reports := document["reports"].([]any)
+	delete(reports[0].(map[string]any), "authorized_at")
+	data, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func slicesContain(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {
@@ -1647,6 +2171,21 @@ func executeWorkerJSONError(t *testing.T, args ...string) error {
 		t.Fatalf("decode failed execute(%q): %v\nstdout: %s", args, decodeErr, stdout.String())
 	}
 	return err
+}
+
+func teardownArtifactsByName(t *testing.T, outcome result.Outcome) map[string]result.TeardownArtifactDetails {
+	t.Helper()
+	if outcome.Teardown == nil {
+		t.Fatalf("teardown details are absent: %+v", outcome)
+	}
+	artifacts := make(map[string]result.TeardownArtifactDetails, len(outcome.Teardown.Artifacts))
+	for _, artifact := range outcome.Teardown.Artifacts {
+		if _, duplicate := artifacts[artifact.Artifact]; duplicate {
+			t.Fatalf("duplicate teardown artifact %q: %+v", artifact.Artifact, outcome.Teardown.Artifacts)
+		}
+		artifacts[artifact.Artifact] = artifact
+	}
+	return artifacts
 }
 
 func writeWorkerRegistry(t *testing.T, dir, rows string) {

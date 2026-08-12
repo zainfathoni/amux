@@ -423,6 +423,136 @@ func TestAggregateReconcilePlansWorkerAndMissingRunnerWithoutMutation(t *testing
 	}
 }
 
+func TestAggregateReconcileWorkdirScopeChecksBothAuthorities(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "missing")
+	writeWorkerRegistry(t, dir, "alpha\tworker\t"+missing+"\tT-worker\n")
+	installAbsentWorkerTmux(t)
+
+	got := executeAggregateJSON(t, "--json", "--dry-run", "--config-dir", dir, "reconcile", "--workdir", missing)
+	if len(got.Planned) != 1 || got.Planned[0].Resource.Thread != "T-worker" || got.Planned[0].Reconcile == nil || got.Planned[0].Reconcile.Authority != config.WorkersFile || got.Planned[0].Reconcile.Decision != "remove_stale_registration" {
+		t.Fatalf("aggregate workdir reconcile worker plan = %+v", got)
+	}
+	if len(got.Skipped) != 1 || got.Skipped[0].Resource.Kind != "runner" {
+		t.Fatalf("aggregate workdir reconcile runner evidence = %+v", got)
+	}
+}
+
+func TestAggregateReconcilePreservesTypedWorkerRefusalAndPreventsRunnerMutation(t *testing.T) {
+	dir := t.TempDir()
+	workerMissing := filepath.Join(t.TempDir(), "worker-missing")
+	runnerMissing := filepath.Join(t.TempDir(), "runner-missing")
+	worker := config.Row{Workspace: "alpha", Window: "worker", Workdir: workerMissing, Thread: "T-blocked"}
+	writeWorkerRegistry(t, dir, worker.String()+"\n")
+	writeRunnerRegistry(t, dir, "alpha\t"+runnerMissing+"\n")
+	writeBlockedWorkerReport(t, dir, worker.Thread, "blocked-report", true)
+	installAbsentWorkerTmux(t)
+	workerBefore, _ := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+	runnerBefore, _ := os.ReadFile(filepath.Join(dir, config.RunnersFile))
+
+	var dryStdout bytes.Buffer
+	dryErr := (app{stdout: &dryStdout}).execute([]string{"--json", "--dry-run", "--config-dir", dir, "reconcile", "--workspace", "alpha"})
+	var dry result.Envelope
+	if err := json.NewDecoder(&dryStdout).Decode(&dry); err != nil {
+		t.Fatalf("decode aggregate all-refused dry-run: %v\n%s", err, dryStdout.String())
+	}
+	if dryErr == nil || result.ExitCode(dryErr) != result.ExitRejected || len(dry.Successful) != 0 || len(dry.Planned) != 0 || len(dry.Failed) != 1 || dry.Failed[0].Reconcile == nil || dry.Failed[0].Reconcile.Decision != "refuse_open_obligation" {
+		t.Fatalf("aggregate all-refused dry-run contract = %+v err=%v", dry, dryErr)
+	}
+	if len(dry.Skipped) != 1 || dry.Skipped[0].Resource.Kind != "runner" || dry.Skipped[0].Resource.Workdir != runnerMissing || !strings.Contains(dry.Skipped[0].Message, "worker removal plan was refused") {
+		t.Fatalf("aggregate all-refused dry-run omitted blocked runner evidence = %+v", dry)
+	}
+
+	var stdout bytes.Buffer
+	reconcileErr := (app{stdout: &stdout}).execute([]string{"--json", "--config-dir", dir, "reconcile", "--workspace", "alpha"})
+	var got result.Envelope
+	if err := json.NewDecoder(&stdout).Decode(&got); err != nil {
+		t.Fatalf("decode aggregate refusal: %v\n%s", err, stdout.String())
+	}
+	if reconcileErr == nil || result.ExitCode(reconcileErr) != result.ExitRejected || len(got.Failed) != 1 || got.Failed[0].Reconcile == nil || got.Failed[0].Reconcile.Decision != "refuse_open_obligation" || strings.Join(got.Failed[0].Reconcile.OpenObligations, ",") != "blocked-report" {
+		t.Fatalf("aggregate worker refusal = %+v err=%v", got, reconcileErr)
+	}
+	if len(got.Skipped) != 1 || got.Skipped[0].Resource.Kind != "runner" || got.Skipped[0].Resource.Workdir != runnerMissing || !strings.Contains(got.Skipped[0].Message, "worker removal plan was refused") {
+		t.Fatalf("aggregate worker refusal omitted blocked runner evidence = %+v", got)
+	}
+	workerAfter, _ := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+	runnerAfter, _ := os.ReadFile(filepath.Join(dir, config.RunnersFile))
+	if !bytes.Equal(workerBefore, workerAfter) || !bytes.Equal(runnerBefore, runnerAfter) {
+		t.Fatalf("aggregate preflight mutated registries: worker=%t runner=%t", bytes.Equal(workerBefore, workerAfter), bytes.Equal(runnerBefore, runnerAfter))
+	}
+}
+
+func TestAggregateReconcileKeepsPresentWorkerSyncButBlocksRemovalPlan(t *testing.T) {
+	dir := t.TempDir()
+	presentWorker := t.TempDir()
+	workerMissing := filepath.Join(t.TempDir(), "worker-missing")
+	runnerMissing := filepath.Join(t.TempDir(), "runner-missing")
+	workers := []config.Row{
+		{Workspace: "alpha", Window: "present", Workdir: presentWorker, Thread: "T-present"},
+		{Workspace: "alpha", Window: "blocked", Workdir: workerMissing, Thread: "T-blocked"},
+	}
+	writeWorkerRegistry(t, dir, workers[0].String()+"\n"+workers[1].String()+"\n")
+	writeRunnerRegistry(t, dir, "alpha\t"+runnerMissing+"\n")
+	writeBlockedWorkerReport(t, dir, workers[1].Thread, "blocked-report", true)
+	workerBefore, _ := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+	runnerBefore, _ := os.ReadFile(filepath.Join(dir, config.RunnersFile))
+	bin := t.TempDir()
+	ampLog := filepath.Join(bin, "amp.log")
+	writeExecutable(t, filepath.Join(bin, "amp"), "#!/bin/sh\necho \"$*\" >> '"+ampLog+"'\n")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 0\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	var dryStdout bytes.Buffer
+	dryErr := (app{stdout: &dryStdout}).execute([]string{"--json", "--dry-run", "--config-dir", dir, "reconcile", "--workspace", "alpha"})
+	var dry result.Envelope
+	if err := json.NewDecoder(&dryStdout).Decode(&dry); err != nil {
+		t.Fatalf("decode aggregate mixed dry-run: %v\n%s", err, dryStdout.String())
+	}
+	if dryErr == nil || result.ExitCode(dryErr) != result.ExitRejected || len(dry.Successful) != 0 || len(dry.Planned) != 1 || dry.Planned[0].Resource.Thread != "T-present" || len(dry.Failed) != 1 || dry.Failed[0].Resource.Thread != "T-blocked" {
+		t.Fatalf("aggregate mixed dry-run refusal contract = %+v err=%v", dry, dryErr)
+	}
+	dryBlockedRunner := false
+	for _, out := range dry.Skipped {
+		if out.Resource.Kind == "runner" && out.Resource.Workdir == runnerMissing && strings.Contains(out.Message, "worker removal plan was refused") {
+			dryBlockedRunner = true
+		}
+	}
+	if !dryBlockedRunner {
+		t.Fatalf("aggregate mixed dry-run omitted blocked runner evidence: %+v", dry.Skipped)
+	}
+	if _, err := os.Stat(ampLog); !os.IsNotExist(err) {
+		t.Fatalf("aggregate mixed dry-run performed present worker sync: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	reconcileErr := (app{stdout: &stdout}).execute([]string{"--json", "--config-dir", dir, "reconcile", "--workspace", "alpha"})
+	var got result.Envelope
+	if err := json.NewDecoder(&stdout).Decode(&got); err != nil {
+		t.Fatalf("decode aggregate mixed reconcile: %v\n%s", err, stdout.String())
+	}
+	if reconcileErr == nil || result.ExitCode(reconcileErr) != result.ExitRuntimeFailure || len(got.Successful) != 1 || got.Successful[0].Resource.Thread != "T-present" || len(got.Failed) != 1 || got.Failed[0].Resource.Thread != "T-blocked" || got.Failed[0].Reconcile == nil || got.Failed[0].Reconcile.Decision != "refuse_open_obligation" {
+		t.Fatalf("aggregate mixed reconcile = %+v err=%v", got, reconcileErr)
+	}
+	foundBlockedRunner := false
+	for _, out := range got.Skipped {
+		if out.Resource.Kind == "runner" && out.Resource.Workdir == runnerMissing && strings.Contains(out.Message, "worker removal plan was refused") {
+			foundBlockedRunner = true
+		}
+	}
+	if !foundBlockedRunner {
+		t.Fatalf("aggregate did not expose blocked runner removal: %+v", got.Skipped)
+	}
+	workerAfter, _ := os.ReadFile(filepath.Join(dir, config.WorkersFile))
+	runnerAfter, _ := os.ReadFile(filepath.Join(dir, config.RunnersFile))
+	if !bytes.Equal(workerBefore, workerAfter) || !bytes.Equal(runnerBefore, runnerAfter) {
+		t.Fatalf("aggregate removal plan partially mutated registries: worker=%t runner=%t", bytes.Equal(workerBefore, workerAfter), bytes.Equal(runnerBefore, runnerAfter))
+	}
+	if data, err := os.ReadFile(ampLog); err != nil || !strings.Contains(string(data), "threads archive --unarchive T-present") {
+		t.Fatalf("aggregate removal refusal suppressed present worker sync: %q, %v", data, err)
+	}
+}
+
 func TestAggregateDoctorDiagnosesBothModes(t *testing.T) {
 	dir := t.TempDir()
 	runnerDir := t.TempDir()
