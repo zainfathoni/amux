@@ -1960,6 +1960,238 @@ func TestFinishRemovalGateDocumentsEveryFailClosedInvariant(t *testing.T) {
 	}
 }
 
+func TestBackupRemovalRefsContractIsNarrowAndFailClosed(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	reference := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "removal-safety.md"))
+	for _, required := range []string{
+		"classify → backup → unlock → prune",
+		"one `git update-ref --stdin` transaction",
+		"absent ref is created at the exact tip",
+		"already at that tip is verified as an idempotent no-op",
+		"abort",
+		"--no-backup",
+		"removal_authorized` is always false",
+		"Human output ends with the exact JSON facts envelope",
+		"Restart the complete preflight",
+		"ignore only that expected exact ref",
+		"including rows that need no backup",
+		"never removes files or worktrees, unlocks, prunes, deletes branches",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("backup workflow is missing %q", required)
+		}
+	}
+	for _, required := range []string{"verified durable branch", "complete-set backup procedure", "never authorizes or performs removal"} {
+		if !strings.Contains(reference, required) {
+			t.Errorf("removal-safety reference is missing backup contract %q", required)
+		}
+	}
+}
+
+func TestBackupRemovalRefsDryRunApplyIdempotencyAndParity(t *testing.T) {
+	repo, _, baseline := newRemovalSafetyRepo(t)
+	worktree := filepath.Join(t.TempDir(), "unique-detached")
+	gitTest(t, repo, "worktree", "add", "--detach", worktree, baseline)
+	commitFile(t, worktree, "unique.txt", "unique\n", "unique detached")
+	manifest, backupRef, tip := writeBackupManifest(t, repo, baseline, "targeted_remove", []backupManifestTarget{{path: worktree}})
+
+	dry := runBackupHelper(t, manifest, "--dry-run", "--json")
+	if dry["dry_run"] != true || dry["backup_satisfied"] != false || dry["removal_authorized"] != false {
+		t.Fatalf("dry-run envelope = %#v", dry)
+	}
+	rows := dry["rows"].([]any)
+	if len(rows) != 1 || rows[0].(map[string]any)["backup_state"] != "planned" || rows[0].(map[string]any)["backup_ref"] != backupRef {
+		t.Fatalf("dry-run rows = %#v", rows)
+	}
+	if got := gitTestOptionalRef(t, repo, backupRef); got != "" {
+		t.Fatalf("dry-run created backup ref %s at %s", backupRef, got)
+	}
+
+	humanCommand := exec.Command("python3", backupHelperPath(t), "--manifest", manifest, "--dry-run")
+	humanOutput, err := humanCommand.CombinedOutput()
+	if err != nil {
+		t.Fatalf("human dry-run: %v\n%s", err, humanOutput)
+	}
+	var humanFacts map[string]any
+	for _, line := range strings.Split(string(humanOutput), "\n") {
+		if strings.HasPrefix(line, "facts ") {
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "facts ")), &humanFacts); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if humanFacts == nil || fmt.Sprint(humanFacts) != fmt.Sprint(dry) {
+		t.Fatalf("human/JSON facts differ\nhuman=%#v\njson=%#v", humanFacts, dry)
+	}
+
+	created := runBackupHelper(t, manifest, "--json")
+	if created["removal_authorized"] != false || created["rows"].([]any)[0].(map[string]any)["backup_state"] != "created" {
+		t.Fatalf("created envelope = %#v", created)
+	}
+	if got := gitTestOptionalRef(t, repo, backupRef); got != tip {
+		t.Fatalf("backup ref = %q, want %q", got, tip)
+	}
+	if _, err := os.Stat(worktree); err != nil {
+		t.Fatalf("helper deleted or changed worktree directory: %v", err)
+	}
+
+	satisfied := runBackupHelper(t, manifest, "--json")
+	if satisfied["rows"].([]any)[0].(map[string]any)["backup_state"] != "already_satisfied" {
+		t.Fatalf("idempotent envelope = %#v", satisfied)
+	}
+}
+
+func TestBackupRemovalRefsDeclineConflictAndDriftFailClosed(t *testing.T) {
+	t.Run("explicit no-backup blocks without mutation", func(t *testing.T) {
+		repo, _, baseline := newRemovalSafetyRepo(t)
+		worktree := filepath.Join(t.TempDir(), "declined")
+		gitTest(t, repo, "worktree", "add", "--detach", worktree, baseline)
+		commitFile(t, worktree, "declined.txt", "declined\n", "declined")
+		manifest, backupRef, _ := writeBackupManifest(t, repo, baseline, "targeted_remove", []backupManifestTarget{{path: worktree}})
+		document := runBackupHelperExit(t, 2, manifest, "--no-backup", "--json")
+		if document["backup_satisfied"] != false || document["removal_authorized"] != false {
+			t.Fatalf("declined envelope = %#v", document)
+		}
+		if got := gitTestOptionalRef(t, repo, backupRef); got != "" {
+			t.Fatalf("--no-backup created %s at %s", backupRef, got)
+		}
+	})
+
+	t.Run("conflicting ref aborts complete set", func(t *testing.T) {
+		repo, _, baseline := newRemovalSafetyRepo(t)
+		first := filepath.Join(t.TempDir(), "first")
+		second := filepath.Join(t.TempDir(), "second")
+		gitTest(t, repo, "worktree", "add", "--detach", first, baseline)
+		gitTest(t, repo, "worktree", "add", "--detach", second, baseline)
+		commitFile(t, first, "first.txt", "first\n", "first")
+		commitFile(t, second, "second.txt", "second\n", "second")
+		firstTip := strings.TrimSpace(gitTest(t, first, "rev-parse", "HEAD"))
+		secondTip := strings.TrimSpace(gitTest(t, second, "rev-parse", "HEAD"))
+		if err := os.RemoveAll(first); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(second); err != nil {
+			t.Fatal(err)
+		}
+		manifest, _, _ := writeBackupManifest(t, repo, baseline, "prune", []backupManifestTarget{
+			{path: first, tip: firstTip, pathState: "absent", prunable: true},
+			{path: second, tip: secondTip, pathState: "absent", prunable: true},
+		})
+		var parsed map[string]any
+		contents, err := os.ReadFile(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(contents, &parsed); err != nil {
+			t.Fatal(err)
+		}
+		rows := parsed["rows"].([]any)
+		firstRef := rows[0].(map[string]any)["backup_ref"].(string)
+		secondRef := rows[1].(map[string]any)["backup_ref"].(string)
+		gitTest(t, repo, "branch", strings.TrimPrefix(secondRef, "refs/heads/"), baseline)
+		document := runBackupHelperExit(t, 2, manifest, "--json")
+		if !strings.Contains(document["error"].(string), "different commit") {
+			t.Fatalf("conflict error = %#v", document)
+		}
+		if got := gitTestOptionalRef(t, repo, firstRef); got != "" {
+			t.Fatalf("complete-set failure partially created %s at %s", firstRef, got)
+		}
+	})
+
+	t.Run("target drift rejects stale evidence", func(t *testing.T) {
+		repo, _, baseline := newRemovalSafetyRepo(t)
+		worktree := filepath.Join(t.TempDir(), "drift")
+		gitTest(t, repo, "worktree", "add", "--detach", worktree, baseline)
+		commitFile(t, worktree, "before.txt", "before\n", "before")
+		manifest, backupRef, _ := writeBackupManifest(t, repo, baseline, "targeted_remove", []backupManifestTarget{{path: worktree}})
+		commitFile(t, worktree, "after.txt", "after\n", "after")
+		document := runBackupHelperExit(t, 2, manifest, "--json")
+		if !strings.Contains(document["error"].(string), "identity changed") {
+			t.Fatalf("drift error = %#v", document)
+		}
+		if got := gitTestOptionalRef(t, repo, backupRef); got != "" {
+			t.Fatalf("drifted target created stale backup %s at %s", backupRef, got)
+		}
+	})
+}
+
+func TestBackupRemovalRefsPruneRequiresCompleteSetAndRejectsUnsafePaths(t *testing.T) {
+	t.Run("malformed duplicate manifest key", func(t *testing.T) {
+		manifest := filepath.Join(t.TempDir(), "duplicate.json")
+		if err := os.WriteFile(manifest, []byte(`{"schema_version":1,"schema_version":1}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		document := runBackupHelperExit(t, 2, manifest, "--json")
+		if !strings.Contains(document["error"].(string), "duplicate JSON key") || document["removal_authorized"] != false {
+			t.Fatalf("malformed manifest result = %#v", document)
+		}
+	})
+
+	t.Run("omitted prune row", func(t *testing.T) {
+		repo, _, baseline := newRemovalSafetyRepo(t)
+		firstRoot := t.TempDir()
+		secondRoot := t.TempDir()
+		first := filepath.Join(firstRoot, "first-missing")
+		second := filepath.Join(secondRoot, "second-missing")
+		gitTest(t, repo, "worktree", "add", "--detach", first, baseline)
+		gitTest(t, repo, "worktree", "add", "--detach", second, baseline)
+		commitFile(t, first, "first.txt", "first\n", "first")
+		commitFile(t, second, "second.txt", "second\n", "second")
+		firstTip := strings.TrimSpace(gitTest(t, first, "rev-parse", "HEAD"))
+		if err := os.RemoveAll(first); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(second); err != nil {
+			t.Fatal(err)
+		}
+		manifest, backupRef, _ := writeBackupManifest(t, repo, baseline, "prune", []backupManifestTarget{{path: first, tip: firstTip, pathState: "absent", prunable: true}})
+		document := runBackupHelperExit(t, 2, manifest, "--json")
+		if !strings.Contains(document["error"].(string), "complete current") {
+			t.Fatalf("incomplete prune error = %#v", document)
+		}
+		if got := gitTestOptionalRef(t, repo, backupRef); got != "" {
+			t.Fatalf("incomplete prune created %s at %s", backupRef, got)
+		}
+	})
+
+	t.Run("repository symlink escape", func(t *testing.T) {
+		repo, _, baseline := newRemovalSafetyRepo(t)
+		worktree := filepath.Join(t.TempDir(), "escaped")
+		gitTest(t, repo, "worktree", "add", "--detach", worktree, baseline)
+		commitFile(t, worktree, "escape.txt", "escape\n", "escape")
+		manifest, backupRef, _ := writeBackupManifest(t, repo, baseline, "targeted_remove", []backupManifestTarget{{path: worktree}})
+		contents, err := os.ReadFile(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document map[string]any
+		if err := json.Unmarshal(contents, &document); err != nil {
+			t.Fatal(err)
+		}
+		repositoryLink := filepath.Join(t.TempDir(), "repo-link")
+		if err := os.Symlink(document["repository"].(string), repositoryLink); err != nil {
+			t.Fatal(err)
+		}
+		document["repository"] = repositoryLink
+		contents, err = json.Marshal(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(manifest, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		result := runBackupHelperExit(t, 2, manifest, "--json")
+		if !strings.Contains(result["error"].(string), "symlink") {
+			t.Fatalf("path escape error = %#v", result)
+		}
+		if got := gitTestOptionalRef(t, repo, backupRef); got != "" {
+			t.Fatalf("unsafe path created %s at %s", backupRef, got)
+		}
+	})
+}
+
 func TestRemovalSafetySyntheticRefCoverageAndPatchEquivalence(t *testing.T) {
 	t.Run("attached local branch", func(t *testing.T) {
 		repo, _, baseline := newRemovalSafetyRepo(t)
@@ -2546,6 +2778,118 @@ func commitFile(t *testing.T, repo, name, contents, message string) {
 	}
 	gitTest(t, repo, "add", name)
 	gitTest(t, repo, "commit", "-m", message)
+}
+
+type backupManifestTarget struct {
+	path      string
+	tip       string
+	pathState string
+	locked    bool
+	prunable  bool
+}
+
+func backupHelperPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(repoRoot(t), "skills", "amux", "scripts", "backup-removal-refs")
+}
+
+func writeBackupManifest(t *testing.T, repo, baseline, operation string, targets []backupManifestTarget) (manifestPath, firstRef, firstTip string) {
+	t.Helper()
+	repository := strings.TrimSpace(gitTest(t, repo, "rev-parse", "--show-toplevel"))
+	baselineTip := strings.TrimSpace(gitTest(t, repo, "rev-parse", baseline+"^{commit}"))
+	rows := make([]map[string]any, 0, len(targets))
+	for _, target := range targets {
+		path := target.path
+		if target.pathState == "" || target.pathState == "present" {
+			path = strings.TrimSpace(gitTest(t, target.path, "rev-parse", "--show-toplevel"))
+		}
+		tip := target.tip
+		if tip == "" {
+			tip = strings.TrimSpace(gitTest(t, target.path, "rev-parse", "HEAD"))
+		}
+		pathState := target.pathState
+		if pathState == "" {
+			pathState = "present"
+		}
+		backupRef := "refs/heads/backup/" + filepath.Base(path) + "-before-remove-2026-08-12"
+		rows = append(rows, map[string]any{
+			"path":               path,
+			"tip":                tip,
+			"branch":             nil,
+			"locked":             target.locked,
+			"prunable":           target.prunable,
+			"path_state":         pathState,
+			"verdict":            "NEEDS_BACKUP",
+			"covering_refs":      []string{},
+			"rule_evidence":      map[string]any{"rule": "5"},
+			"backup_ref":         backupRef,
+			"date":               "2026-08-12",
+			"ownership_evidence": map[string]any{"worker": "none", "runner": "none", "process": "none"},
+		})
+		if firstRef == "" {
+			firstRef, firstTip = backupRef, tip
+		}
+	}
+	document := map[string]any{
+		"schema_version": 1,
+		"operation":      operation,
+		"repository":     repository,
+		"fetch":          map[string]any{"command": []string{"git", "fetch", "--prune", "origin"}, "result": "success"},
+		"baseline":       map[string]any{"ref": baseline, "tip": baselineTip, "source": "origin/HEAD"},
+		"rows":           rows,
+	}
+	contents, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestPath = filepath.Join(t.TempDir(), "backup-manifest.json")
+	if err := os.WriteFile(manifestPath, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return manifestPath, firstRef, firstTip
+}
+
+func runBackupHelper(t *testing.T, manifest string, args ...string) map[string]any {
+	t.Helper()
+	return runBackupHelperExit(t, 0, manifest, args...)
+}
+
+func runBackupHelperExit(t *testing.T, wantExit int, manifest string, args ...string) map[string]any {
+	t.Helper()
+	commandArgs := []string{backupHelperPath(t), "--manifest", manifest}
+	commandArgs = append(commandArgs, args...)
+	command := exec.Command("python3", commandArgs...)
+	output, err := command.CombinedOutput()
+	gotExit := 0
+	if err != nil {
+		if exit, ok := err.(*exec.ExitError); ok {
+			gotExit = exit.ExitCode()
+		} else {
+			t.Fatalf("run backup helper: %v", err)
+		}
+	}
+	if gotExit != wantExit {
+		t.Fatalf("backup helper exit=%d want=%d\n%s", gotExit, wantExit, output)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(output), &document); err != nil {
+		t.Fatalf("decode backup helper output: %v\n%s", err, output)
+	}
+	return document
+}
+
+func gitTestOptionalRef(t *testing.T, repo, ref string) string {
+	t.Helper()
+	command := exec.Command("git", "-C", repo, "rev-parse", "--verify", "--quiet", ref)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		return strings.TrimSpace(string(output))
+	}
+	if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
+		return ""
+	}
+	t.Fatalf("inspect ref %s: %v\n%s", ref, err, output)
+	return ""
 }
 
 func gitTest(t *testing.T, dir string, args ...string) string {
