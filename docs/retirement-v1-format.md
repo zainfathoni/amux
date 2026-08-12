@@ -12,7 +12,7 @@ Each record has exactly one stream:
 <config-dir>/retirement/v1/records/ret_<32-lowercase-hex>.jsonl
 ```
 
-Record IDs contain 128 CSPRNG bits. `retirement`, `v1`, `records`, and `locks` are real directories with mode `0700`. Record and advisory-lock files are real, single-link regular files with mode `0600`. Reads and writes reject symlinks, hard links, wrong modes, non-regular files, unsafe path components, and identity changes. Creation uses exclusive/no-follow opens. The stream does not contain raw worktree paths, prompts, patches, secrets, provider payloads, transcripts, or receipts; callers commit bounded identities before append.
+Record IDs contain 128 CSPRNG bits. `retirement`, `v1`, `records`, and `locks` are real directories with mode `0700`. Record and advisory-lock files are real, single-link regular files with mode `0600`. Reads and writes reject symlinks, hard links, wrong or special permission bits, non-regular files, unsafe path components, and identity changes. Directory components are retained as verified descriptors; child creation and opening is descriptor-relative with no-follow semantics, preventing an ancestor replacement from redirecting mutation. Creation uses exclusive opens. The stream does not contain raw worktree paths, prompts, patches, secrets, provider payloads, transcripts, or receipts; callers commit bounded identities before append.
 
 ## Strict JSONL envelope
 
@@ -83,3 +83,5 @@ Append lock order is machine mutation lock, then the record lock; locks are held
 `amux retirement inspect --record <ret-id>` is the only public surface. `--json` uses the existing result envelope and includes exact record ID, verified count, last sequence/digest, integrity/tail status, immutable subject commitments, and latest operation commitments. It emits no raw paths or unbounded payload. Verified records exit 0. Missing, malformed, unsupported, corrupt, unsafe, busy, and recoverable-tail records exit 2; absence uses `retirement_record_not_found`.
 
 No existing registry or durable file is migrated or admitted. Existing clients behave unchanged. Clients older than this format do not know the `retirement/v1` subtree and leave it inert; rollback retains it as evidence. They must not delete or modify that subtree. New readers reject unknown versions and event families rather than broadening authority. Future compatible readers may add optional result-envelope fields, but changing canonical bytes, payload fields, event meaning, or digest domains requires a new version.
+
+The implementation requires Go 1.25 because NFC normalization uses the first `golang.org/x/text` release containing the fix for GO-2026-5970. Downgrading to a Go 1.24-compatible `x/text` release would restore that known denial-of-service vulnerability at an untrusted record parsing boundary.

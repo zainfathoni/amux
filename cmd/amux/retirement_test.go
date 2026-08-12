@@ -126,6 +126,24 @@ func TestRetirementInspectDoesNotEchoInvalidRecordInput(t *testing.T) {
 	}
 }
 
+func TestRetirementInspectReportsDryRunWithoutMutation(t *testing.T) {
+	dir := t.TempDir()
+	var output bytes.Buffer
+	a := app{stdout: &output, stderr: &bytes.Buffer{}}
+	_ = a.execute([]string{"--json", "--dry-run", "--config-dir", dir, "retirement", "inspect", "--record", cliRetirementRecordID})
+	var envelope result.Envelope
+	if err := json.Unmarshal(output.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if !envelope.DryRun {
+		t.Fatalf("dry-run not reflected: %+v", envelope)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("dry-run inspect mutated config: entries=%v err=%v", entries, err)
+	}
+}
+
 func createCLIRetirementRecord(t *testing.T, path string) {
 	t.Helper()
 	commitment := func(kind, value string) string {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/zainfathoni/amux/internal/lock"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -202,20 +203,38 @@ func (s RetirementStore) Append(ctx context.Context, dir Directory, request Reti
 			return RetirementInspection{}, false, retirementError(RetirementRecordInvalid, errors.New("record cannot be inspected safely"))
 		}
 	}
-	if err := ensureRetirementDirectories(dir); err != nil {
+	filesystem, err := openRetirementFilesystem(dir, true)
+	if err != nil {
 		return RetirementInspection{}, false, err
 	}
-	if err := ensureLockFile(dir.RetirementLockPath(request.RecordID)); err != nil {
+	defer filesystem.close()
+	if !filesystem.matchesPaths(dir) {
+		return RetirementInspection{}, false, retirementError(RetirementRecordInvalid, errors.New("retirement directory identity changed"))
+	}
+	lockName := request.RecordID + ".lock"
+	if err := ensureLockFileAt(filesystem.locks, lockName, dir.RetirementLockPath(request.RecordID)); err != nil {
 		return RetirementInspection{}, false, err
 	}
-	recordLock, err := lock.AcquireMode(lockContext, dir.RetirementLockPath(request.RecordID), lock.Owner{Command: "amux retirement append"}, lock.Exclusive, false)
+	lockFile, err := openFileAt(filesystem.locks, lockName, os.O_RDWR, 0)
+	if err != nil || validateOpenFile(lockFile, 0o600) != nil {
+		if lockFile != nil {
+			_ = lockFile.Close()
+		}
+		return RetirementInspection{}, false, retirementError(RetirementRecordInvalid, errors.New("record lock cannot be opened safely"))
+	}
+	recordLock, err := lock.AcquireOpenFile(lockContext, lockFile, dir.RetirementLockPath(request.RecordID), lock.Owner{Command: "amux retirement append"}, lock.Exclusive, true)
 	if err != nil {
 		return RetirementInspection{}, false, retirementError(RetirementRecordLockBusy, errors.New("record lock is busy"))
 	}
 	defer recordLock.Release()
+	lockInfo, err := recordLock.FileInfo()
+	if err != nil || !sameFileAt(filesystem.locks, lockName, lockInfo) {
+		return RetirementInspection{}, false, retirementError(RetirementRecordRecovery, errors.New("record lock identity changed"))
+	}
 
 	path := dir.RetirementRecordPath(request.RecordID)
-	loaded, exists, err := loadRetirementPath(path, request.RecordID)
+	recordName := request.RecordID + ".jsonl"
+	loaded, exists, err := loadRetirementFile(filesystem.records, recordName, request.RecordID)
 	if err != nil {
 		var retirementErr *RetirementError
 		if errors.As(err, &retirementErr) && retirementErr.Code == RetirementRecordRecovery {
@@ -231,11 +250,29 @@ func (s RetirementStore) Append(ctx context.Context, dir Directory, request Reti
 	}
 	if exists && request.EventType == RetirementRecordCreated {
 		if replayEvent(loaded.events, request) {
+			if err := s.syncReplay(filesystem.records, recordName, path, loaded.fileInfo); err != nil {
+				return loaded.inspection(), false, err
+			}
+			if !filesystem.matchesPaths(dir) {
+				return loaded.inspection(), false, retirementError(RetirementRecordRecovery, errors.New("retirement directory identity changed during replay"))
+			}
+			if !sameFileAt(filesystem.locks, lockName, lockInfo) {
+				return loaded.inspection(), false, retirementError(RetirementRecordRecovery, errors.New("record lock identity changed during replay"))
+			}
 			return loaded.inspection(), true, nil
 		}
 		return loaded.inspection(), false, retirementError(RetirementRecordInvalid, errors.New("record already exists with different creation intent"))
 	}
 	if replayEvent(loaded.events, request) {
+		if err := s.syncReplay(filesystem.records, recordName, path, loaded.fileInfo); err != nil {
+			return loaded.inspection(), false, err
+		}
+		if !filesystem.matchesPaths(dir) {
+			return loaded.inspection(), false, retirementError(RetirementRecordRecovery, errors.New("retirement directory identity changed during replay"))
+		}
+		if !sameFileAt(filesystem.locks, lockName, lockInfo) {
+			return loaded.inspection(), false, retirementError(RetirementRecordRecovery, errors.New("record lock identity changed during replay"))
+		}
 		return loaded.inspection(), true, nil
 	}
 	if operationConflict(loaded.events, request) {
@@ -268,8 +305,14 @@ func (s RetirementStore) Append(ctx context.Context, dir Directory, request Reti
 	if err != nil {
 		return loaded.inspection(), false, retirementError(RetirementRecordInvalid, err)
 	}
-	if err := s.appendBytes(path, encoded, exists, loaded.completeWithoutNewline, loaded.fileInfo); err != nil {
+	if err := s.appendBytes(filesystem.records, recordName, path, encoded, exists, loaded.completeWithoutNewline, loaded.fileInfo); err != nil {
 		return loaded.inspection(), false, err
+	}
+	if !filesystem.matchesPaths(dir) {
+		return loaded.inspection(), false, retirementError(RetirementRecordRecovery, errors.New("retirement directory identity changed during append"))
+	}
+	if !sameFileAt(filesystem.locks, lockName, lockInfo) {
+		return loaded.inspection(), false, retirementError(RetirementRecordRecovery, errors.New("record lock identity changed during append"))
 	}
 	loaded.events = append(loaded.events, event)
 	return loaded.inspection(), false, nil
@@ -279,27 +322,47 @@ func (s RetirementStore) Inspect(ctx context.Context, dir Directory, recordID st
 	if err := ValidateRetirementRecordID(recordID); err != nil {
 		return RetirementInspection{}, retirementError(RetirementRecordInvalid, err)
 	}
-	path := dir.RetirementRecordPath(recordID)
-	if _, err := os.Lstat(path); err != nil {
+	filesystem, err := openRetirementFilesystem(dir, false)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return RetirementInspection{}, retirementError(RetirementRecordNotFound, errors.New("record does not exist"))
+		}
+		return RetirementInspection{}, err
+	}
+	defer filesystem.close()
+	if !filesystem.matchesPaths(dir) {
+		return RetirementInspection{}, retirementError(RetirementRecordInvalid, errors.New("retirement directory identity changed"))
+	}
+	recordName := recordID + ".jsonl"
+	if _, err := statAt(filesystem.records, recordName); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return RetirementInspection{}, retirementError(RetirementRecordNotFound, errors.New("record does not exist"))
 		}
 		return RetirementInspection{}, retirementError(RetirementRecordInvalid, errors.New("record cannot be inspected safely"))
 	}
-	if err := validateRetirementDirectories(dir); err != nil {
-		return RetirementInspection{}, err
-	}
-	if err := validatePrivateRegular(dir.RetirementLockPath(recordID), 0o600); err != nil {
+	lockName := recordID + ".lock"
+	if err := validatePrivateRegularAt(filesystem.locks, lockName, 0o600); err != nil {
 		return RetirementInspection{}, err
 	}
 	lockContext, cancel := context.WithTimeout(ctx, s.lockWait())
 	defer cancel()
-	held, err := lock.AcquireMode(lockContext, dir.RetirementLockPath(recordID), lock.Owner{}, lock.Shared, false)
+	lockFile, err := openFileAt(filesystem.locks, lockName, os.O_RDONLY, 0)
+	if err != nil || validateOpenFile(lockFile, 0o600) != nil {
+		if lockFile != nil {
+			_ = lockFile.Close()
+		}
+		return RetirementInspection{}, retirementError(RetirementRecordInvalid, errors.New("record lock cannot be opened safely"))
+	}
+	held, err := lock.AcquireOpenFile(lockContext, lockFile, dir.RetirementLockPath(recordID), lock.Owner{}, lock.Shared, false)
 	if err != nil {
 		return RetirementInspection{}, retirementError(RetirementRecordLockBusy, errors.New("record lock is busy"))
 	}
 	defer held.Release()
-	loaded, exists, err := loadRetirementPath(path, recordID)
+	lockInfo, err := held.FileInfo()
+	if err != nil || !sameFileAt(filesystem.locks, lockName, lockInfo) {
+		return RetirementInspection{}, retirementError(RetirementRecordInvalid, errors.New("record lock identity changed"))
+	}
+	loaded, exists, err := loadRetirementFile(filesystem.records, recordName, recordID)
 	if !exists && err == nil {
 		return RetirementInspection{}, retirementError(RetirementRecordNotFound, errors.New("record disappeared during inspection"))
 	}
@@ -313,6 +376,12 @@ func (s RetirementStore) Inspect(ctx context.Context, dir Directory, recordID st
 	}
 	if loaded.recoverableTail {
 		return inspection, retirementError(RetirementRecordRecovery, errors.New("record has an unterminated tail"))
+	}
+	if !sameFileAt(filesystem.locks, lockName, lockInfo) {
+		return RetirementInspection{}, retirementError(RetirementRecordInvalid, errors.New("record lock identity changed during inspection"))
+	}
+	if !filesystem.matchesPaths(dir) {
+		return RetirementInspection{}, retirementError(RetirementRecordInvalid, errors.New("retirement directory identity changed during inspection"))
 	}
 	return inspection, nil
 }
@@ -366,9 +435,9 @@ func (l loadedRetirement) inspection() RetirementInspection {
 	return inspection
 }
 
-func loadRetirementPath(path, recordID string) (loadedRetirement, bool, error) {
+func loadRetirementFile(records *os.File, name, recordID string) (loadedRetirement, bool, error) {
 	var loaded loadedRetirement
-	file, err := openNoFollow(path, os.O_RDONLY, 0)
+	file, err := openFileAt(records, name, os.O_RDONLY, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return loaded, false, nil
 	}
@@ -391,7 +460,7 @@ func loadRetirementPath(path, recordID string) (loadedRetirement, bool, error) {
 	if statErr != nil || !os.SameFile(infoBefore, infoAfter) || int64(len(data)) != infoAfter.Size() {
 		return loaded, true, retirementError(RetirementRecordCorrupt, errors.New("record changed during inspection"))
 	}
-	pathInfo, pathErr := os.Lstat(path)
+	pathInfo, pathErr := statAt(records, name)
 	if pathErr != nil || !os.SameFile(infoAfter, pathInfo) {
 		return loaded, true, retirementError(RetirementRecordCorrupt, errors.New("record path identity changed during inspection"))
 	}
@@ -407,7 +476,11 @@ func loadRetirementPath(path, recordID string) (loadedRetirement, bool, error) {
 	if endsNewline {
 		lines = lines[:len(lines)-1]
 	}
-	if len(lines) > retirementMaxEvents {
+	completeLineCount := len(lines)
+	if !endsNewline {
+		completeLineCount--
+	}
+	if completeLineCount > retirementMaxEvents {
 		return loaded, true, retirementError(RetirementRecordCorrupt, errors.New("record has too many events"))
 	}
 	for index, line := range lines {
@@ -427,6 +500,9 @@ func loadRetirementPath(path, recordID string) (loadedRetirement, bool, error) {
 				}
 			}
 			return loaded, true, retirementError(RetirementRecordCorrupt, fmt.Errorf("event %d is malformed", index+1))
+		}
+		if index >= retirementMaxEvents {
+			return loaded, true, retirementError(RetirementRecordCorrupt, errors.New("record has too many events"))
 		}
 		canonical, canonicalErr := encodeRetirementEvent(event, false)
 		if canonicalErr != nil || string(canonical) != line {
@@ -461,6 +537,11 @@ func verifyRetirementEvent(event RetirementEvent, prior []RetirementEvent, recor
 	}
 	if event.Sequence != 1 && event.EventType == RetirementRecordCreated {
 		return errors.New("record_created appears more than once")
+	}
+	for _, previous := range prior {
+		if previous.OperationID == event.OperationID {
+			return errors.New("operation ID appears more than once")
+		}
 	}
 	wantDigest, err := eventDigest(event)
 	if err != nil {
@@ -523,7 +604,9 @@ func validateEventRequest(request RetirementEventRequest) error {
 	if err := validateNFC("operation ID", request.OperationID); err != nil {
 		return err
 	}
-	if request.WrittenAt.IsZero() || request.WrittenAt.Location() != time.UTC || request.WrittenAt.Nanosecond()%1000 != 0 {
+	formattedTime := request.WrittenAt.Format("2006-01-02T15:04:05.000000Z")
+	parsedTime, parseErr := time.Parse("2006-01-02T15:04:05.000000Z", formattedTime)
+	if request.WrittenAt.IsZero() || request.WrittenAt.Location() != time.UTC || request.WrittenAt.Nanosecond()%1000 != 0 || parseErr != nil || !parsedTime.Equal(request.WrittenAt) {
 		return errors.New("written_at must be UTC with microsecond precision")
 	}
 	_, err := payloadCanonical(request.EventType, request.Payload)
@@ -562,49 +645,142 @@ func operationConflict(events []RetirementEvent, request RetirementEventRequest)
 	return false
 }
 
-func ensureRetirementDirectories(dir Directory) error {
-	paths := []string{
-		filepath.Join(dir.Path, RetirementDirectory),
-		dir.RetirementRootPath(),
-		dir.RetirementRecordsPath(),
-		dir.RetirementLocksPath(),
-	}
-	for _, path := range paths {
-		if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-			return retirementError(RetirementRecordInvalid, errors.New("retirement directory cannot be created"))
-		}
-	}
-	if err := validateRetirementDirectories(dir); err != nil {
-		return err
-	}
-	for _, path := range []string{dir.Path, filepath.Join(dir.Path, RetirementDirectory), dir.RetirementRootPath()} {
-		if err := syncDirectory(path); err != nil {
-			return retirementError(RetirementRecordRecovery, errors.New("retirement directory durability is uncertain"))
-		}
-	}
-	return nil
+type retirementFilesystem struct {
+	config, retirement, version, records, locks *os.File
 }
 
-func validateRetirementDirectories(dir Directory) error {
-	paths := []string{filepath.Join(dir.Path, RetirementDirectory), dir.RetirementRootPath(), dir.RetirementRecordsPath(), dir.RetirementLocksPath()}
-	root := filepath.Clean(dir.RetirementRootPath())
-	for _, path := range paths {
-		clean := filepath.Clean(path)
-		if clean != root && !strings.HasPrefix(clean, root+string(filepath.Separator)) && clean != filepath.Join(dir.Path, RetirementDirectory) {
-			return retirementError(RetirementRecordInvalid, errors.New("retirement path escapes canonical root"))
-		}
-		info, err := os.Lstat(path)
-		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
-			return retirementError(RetirementRecordInvalid, errors.New("retirement directories must be private real directories"))
+func (filesystem retirementFilesystem) close() {
+	for _, directory := range []*os.File{filesystem.locks, filesystem.records, filesystem.version, filesystem.retirement, filesystem.config} {
+		if directory != nil {
+			_ = directory.Close()
 		}
 	}
-	return nil
 }
 
-func ensureLockFile(path string) error {
-	file, err := openNoFollow(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+func (filesystem retirementFilesystem) matchesPaths(dir Directory) bool {
+	checks := []struct {
+		file *os.File
+		path string
+	}{
+		{filesystem.config, dir.Path},
+		{filesystem.retirement, filepath.Join(dir.Path, RetirementDirectory)},
+		{filesystem.version, dir.RetirementRootPath()},
+		{filesystem.records, dir.RetirementRecordsPath()},
+		{filesystem.locks, dir.RetirementLocksPath()},
+	}
+	for _, check := range checks {
+		opened, err := check.file.Stat()
+		pathInfo, pathErr := os.Lstat(check.path)
+		if err != nil || pathErr != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, pathInfo) {
+			return false
+		}
+	}
+	return true
+}
+
+func openRetirementFilesystem(dir Directory, create bool) (retirementFilesystem, error) {
+	var filesystem retirementFilesystem
+	config, err := openDirectoryNoFollow(dir.Path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) && !create {
+			return filesystem, err
+		}
+		return filesystem, retirementError(RetirementRecordInvalid, errors.New("config directory cannot be opened safely"))
+	}
+	filesystem.config = config
+	steps := []struct {
+		parent **os.File
+		name   string
+		target **os.File
+	}{
+		{&filesystem.config, RetirementDirectory, &filesystem.retirement},
+		{&filesystem.retirement, RetirementVersionDirectory, &filesystem.version},
+		{&filesystem.version, RetirementRecordsDirectory, &filesystem.records},
+		{&filesystem.version, RetirementLocksDirectory, &filesystem.locks},
+	}
+	for _, step := range steps {
+		opened, openErr := openDirectoryAt(*step.parent, step.name)
+		if errors.Is(openErr, os.ErrNotExist) && create {
+			if mkdirErr := unix.Mkdirat(int((*step.parent).Fd()), step.name, 0o700); mkdirErr != nil && !errors.Is(mkdirErr, syscall.EEXIST) {
+				filesystem.close()
+				return retirementFilesystem{}, retirementError(RetirementRecordInvalid, errors.New("retirement directory cannot be created safely"))
+			}
+			opened, openErr = openDirectoryAt(*step.parent, step.name)
+		}
+		if openErr != nil {
+			filesystem.close()
+			if errors.Is(openErr, os.ErrNotExist) {
+				return retirementFilesystem{}, openErr
+			}
+			return retirementFilesystem{}, retirementError(RetirementRecordInvalid, errors.New("retirement directories must be private real directories"))
+		}
+		*step.target = opened
+	}
+	if create {
+		for _, directory := range []*os.File{filesystem.config, filesystem.retirement, filesystem.version} {
+			if err := directory.Sync(); err != nil {
+				filesystem.close()
+				return retirementFilesystem{}, retirementError(RetirementRecordRecovery, errors.New("retirement directory durability is uncertain"))
+			}
+		}
+	}
+	return filesystem, nil
+}
+
+func openDirectoryNoFollow(path string) (*os.File, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	return os.NewFile(uintptr(fd), path), nil
+}
+
+func openDirectoryAt(parent *os.File, name string) (*os.File, error) {
+	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "openat", Path: name, Err: err}
+	}
+	file := os.NewFile(uintptr(fd), name)
+	info, statErr := file.Stat()
+	if statErr != nil || !info.IsDir() || privateMode(info.Mode()) != 0o700 {
+		_ = file.Close()
+		return nil, errors.New("directory is not a private real directory")
+	}
+	return file, nil
+}
+
+func openFileAt(parent *os.File, name string, flags int, mode os.FileMode) (*os.File, error) {
+	fd, err := unix.Openat(int(parent.Fd()), name, flags|unix.O_CLOEXEC|unix.O_NOFOLLOW, uint32(mode.Perm()))
+	if err != nil {
+		return nil, &os.PathError{Op: "openat", Path: name, Err: err}
+	}
+	return os.NewFile(uintptr(fd), name), nil
+}
+
+func statAt(parent *os.File, name string) (os.FileInfo, error) {
+	file, err := openFileAt(parent, name, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return file.Stat()
+}
+
+func sameFileAt(parent *os.File, name string, expected os.FileInfo) bool {
+	info, err := statAt(parent, name)
+	return err == nil && expected != nil && os.SameFile(info, expected)
+}
+
+func ensureLockFileAt(directory *os.File, name, path string) error {
+	file, err := openFileAt(directory, name, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if errors.Is(err, os.ErrExist) {
-		return validatePrivateRegular(path, 0o600)
+		if err := validatePrivateRegularAt(directory, name, 0o600); err != nil {
+			return err
+		}
+		if err := directory.Sync(); err != nil {
+			return retirementError(RetirementRecordRecovery, errors.New("record lock durability is uncertain"))
+		}
+		return nil
 	}
 	if err != nil {
 		return retirementError(RetirementRecordInvalid, errors.New("record lock cannot be created safely"))
@@ -612,30 +788,27 @@ func ensureLockFile(path string) error {
 	if closeErr := file.Close(); closeErr != nil {
 		return retirementError(RetirementRecordInvalid, errors.New("record lock cannot be closed"))
 	}
-	if err := validatePrivateRegular(path, 0o600); err != nil {
+	if err := validatePrivateRegularAt(directory, name, 0o600); err != nil {
 		return err
 	}
-	if err := syncDirectory(filepath.Dir(path)); err != nil {
+	if err := directory.Sync(); err != nil {
 		return retirementError(RetirementRecordRecovery, errors.New("record lock durability is uncertain"))
 	}
 	return nil
 }
 
-func validatePrivateRegular(path string, mode os.FileMode) error {
-	info, err := os.Lstat(path)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != mode {
+func validatePrivateRegularAt(directory *os.File, name string, mode os.FileMode) error {
+	file, err := openFileAt(directory, name, os.O_RDONLY, 0)
+	if err != nil {
 		return retirementError(RetirementRecordInvalid, errors.New("retirement file must be a private regular file"))
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Nlink != 1 {
-		return retirementError(RetirementRecordInvalid, errors.New("retirement file must have exactly one link"))
-	}
-	return nil
+	defer file.Close()
+	return validateOpenFile(file, mode)
 }
 
 func validateOpenFile(file *os.File, mode os.FileMode) error {
 	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != mode {
+	if err != nil || !info.Mode().IsRegular() || privateMode(info.Mode()) != mode {
 		return retirementError(RetirementRecordInvalid, errors.New("retirement file must be a private regular file"))
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
@@ -645,15 +818,11 @@ func validateOpenFile(file *os.File, mode os.FileMode) error {
 	return nil
 }
 
-func openNoFollow(path string, flags int, mode os.FileMode) (*os.File, error) {
-	fd, err := syscall.Open(path, flags|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, uint32(mode.Perm()))
-	if err != nil {
-		return nil, &os.PathError{Op: "open", Path: path, Err: err}
-	}
-	return os.NewFile(uintptr(fd), path), nil
+func privateMode(mode os.FileMode) os.FileMode {
+	return mode & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)
 }
 
-func (s RetirementStore) appendBytes(path string, encoded []byte, exists, needsSeparator bool, expected os.FileInfo) error {
+func (s RetirementStore) appendBytes(records *os.File, name, path string, encoded []byte, exists, needsSeparator bool, expected os.FileInfo) error {
 	if len(encoded) == 0 || len(encoded) > retirementMaxLineBytes {
 		return retirementError(RetirementRecordInvalid, errors.New("event exceeds line size limit"))
 	}
@@ -661,7 +830,7 @@ func (s RetirementStore) appendBytes(path string, encoded []byte, exists, needsS
 	if !exists {
 		flags |= os.O_CREATE | os.O_EXCL
 	}
-	file, err := openNoFollow(path, flags, 0o600)
+	file, err := openFileAt(records, name, flags, 0o600)
 	if err != nil {
 		return retirementError(RetirementRecordInvalid, errors.New("record cannot be opened for append"))
 	}
@@ -700,30 +869,54 @@ func (s RetirementStore) appendBytes(path string, encoded []byte, exists, needsS
 		return retirementError(RetirementRecordRecovery, errors.New("record durability is uncertain; inspection is required"))
 	}
 	after, err := file.Stat()
-	if err != nil || !os.SameFile(before, after) {
+	if err != nil || !os.SameFile(before, after) || validateOpenFile(file, 0o600) != nil {
 		return retirementError(RetirementRecordRecovery, errors.New("record identity changed during append"))
 	}
-	pathInfo, err := os.Lstat(path)
+	pathInfo, err := statAt(records, name)
 	if err != nil || !os.SameFile(after, pathInfo) {
 		return retirementError(RetirementRecordRecovery, errors.New("record path identity changed during append"))
 	}
 	syncDir := s.syncDir
+	var syncErr error
 	if syncDir == nil {
-		syncDir = syncDirectory
+		syncErr = records.Sync()
+	} else {
+		syncErr = syncDir(filepath.Dir(path))
 	}
-	if err := syncDir(filepath.Dir(path)); err != nil {
+	if syncErr != nil {
 		return retirementError(RetirementRecordRecovery, errors.New("record directory durability is uncertain"))
 	}
 	return nil
 }
 
-func syncDirectory(path string) error {
-	directory, err := os.Open(path)
+func (s RetirementStore) syncReplay(records *os.File, name, path string, expected os.FileInfo) error {
+	file, err := openFileAt(records, name, os.O_RDONLY, 0)
 	if err != nil {
-		return err
+		return retirementError(RetirementRecordRecovery, errors.New("record cannot be reopened for durability verification"))
 	}
-	defer directory.Close()
-	return directory.Sync()
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || expected == nil || !os.SameFile(info, expected) || validateOpenFile(file, 0o600) != nil {
+		return retirementError(RetirementRecordRecovery, errors.New("record identity changed before replay verification"))
+	}
+	syncFile := s.syncFile
+	if syncFile == nil {
+		syncFile = func(file *os.File) error { return file.Sync() }
+	}
+	if err := syncFile(file); err != nil {
+		return retirementError(RetirementRecordRecovery, errors.New("record durability is uncertain; inspection is required"))
+	}
+	syncDir := s.syncDir
+	var syncErr error
+	if syncDir == nil {
+		syncErr = records.Sync()
+	} else {
+		syncErr = syncDir(filepath.Dir(path))
+	}
+	if syncErr != nil {
+		return retirementError(RetirementRecordRecovery, errors.New("record directory durability is uncertain"))
+	}
+	return nil
 }
 
 func validateDiscriminator(name, value string) error {

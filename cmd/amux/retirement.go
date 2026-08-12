@@ -14,7 +14,7 @@ func isRetirementPath(path []string) bool {
 }
 
 func (a app) executeRetirement(parsed invocation, dir config.Directory) (*result.Envelope, error) {
-	envelope := result.NewEnvelope("retirement inspect", false)
+	envelope := result.NewEnvelope("retirement inspect", parsed.Options.DryRun)
 	if parsed.Command.Name != "inspect" || parsed.Selectors.Record == "" || len(parsed.Args) != 0 {
 		return &envelope, result.Request(errors.New("usage: amux retirement inspect --record <ret-id>"))
 	}

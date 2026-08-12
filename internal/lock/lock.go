@@ -41,6 +41,13 @@ type Lock struct {
 	released bool
 }
 
+func (l *Lock) FileInfo() (os.FileInfo, error) {
+	if l == nil || l.file == nil {
+		return nil, errors.New("lock is not open")
+	}
+	return l.file.Stat()
+}
+
 type Mode int
 
 const (
@@ -62,6 +69,16 @@ func MachinePath() (string, error) {
 
 func Acquire(ctx context.Context, path string, owner Owner) (*Lock, error) {
 	return AcquireMode(ctx, path, owner, Exclusive, true)
+}
+
+// AcquireOpenFile obtains an advisory lock on an already safely opened file.
+// Ownership of file transfers to the returned lock, or is closed on error.
+func AcquireOpenFile(ctx context.Context, file *os.File, label string, owner Owner, mode Mode, recordOwner bool) (*Lock, error) {
+	if mode != Exclusive && mode != Shared {
+		_ = file.Close()
+		return nil, errors.New("invalid lock mode")
+	}
+	return acquireFile(ctx, file, label, owner, mode, recordOwner)
 }
 
 // AcquireMode obtains an advisory lock. create=false is used by read-only

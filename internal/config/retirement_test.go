@@ -238,6 +238,33 @@ func TestRetirementRejectsOperationIDReuseAcrossEventTypes(t *testing.T) {
 	}
 }
 
+func TestRetirementInspectRejectsDuplicateOperationIDInStoredChain(t *testing.T) {
+	dir, store := testRetirementStore(t)
+	if _, _, err := store.Append(context.Background(), dir, testCreationRequest(t)); err != nil {
+		t.Fatal(err)
+	}
+	note := RetirementEventRequest{RecordID: testRecordID, OperationID: "note-operation", EventType: RetirementNoteAppended, Payload: RetirementNotePayload{NoteKind: "audit", NoteCommitment: testCommitment(t, "note", "one")}, WrittenAt: testTime(2)}
+	if _, _, err := store.Append(context.Background(), dir, note); err != nil {
+		t.Fatal(err)
+	}
+	path := dir.RetirementRecordPath(testRecordID)
+	data, _ := os.ReadFile(path)
+	lines := bytes.Split(bytes.TrimSuffix(data, []byte("\n")), []byte("\n"))
+	event, err := decodeRetirementEvent(lines[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.OperationID = testCreationRequest(t).OperationID
+	event.EventDigest, _ = eventDigest(event)
+	lines[1], _ = encodeRetirementEvent(event, false)
+	if err := os.WriteFile(path, append(bytes.Join(lines, []byte("\n")), '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Inspect(context.Background(), dir, testRecordID); retirementCode(err) != RetirementRecordCorrupt {
+		t.Fatalf("duplicate operation ID error=%v", err)
+	}
+}
+
 func TestEventDigestBindsEveryEnvelopeField(t *testing.T) {
 	base := RetirementEvent{SchemaVersion: RetirementSchemaVersion, RecordID: testRecordID, Sequence: 2, EventType: RetirementNoteAppended, OperationID: "note-operation", PreviousEventDigest: testCommitment(t, "event", "previous"), Payload: RetirementNotePayload{NoteKind: "audit", NoteCommitment: testCommitment(t, "note", "one")}, WrittenAt: testTime(2)}
 	baseDigest, err := eventDigest(base)
@@ -379,6 +406,20 @@ func TestRetirementTailAndCompleteNoNewlinePolicy(t *testing.T) {
 }
 
 func TestRetirementFilesystemSafety(t *testing.T) {
+	t.Run("ancestor symlink does not mutate target", func(t *testing.T) {
+		dir, store := testRetirementStore(t)
+		target := t.TempDir()
+		if err := os.Symlink(target, filepath.Join(dir.Path, RetirementDirectory)); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.Append(context.Background(), dir, testCreationRequest(t)); retirementCode(err) != RetirementRecordInvalid {
+			t.Fatalf("error=%v", err)
+		}
+		entries, err := os.ReadDir(target)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("symlink target was mutated: entries=%v err=%v", entries, err)
+		}
+	})
 	t.Run("record permissions", func(t *testing.T) {
 		dir, store := testRetirementStore(t)
 		if _, _, err := store.Append(context.Background(), dir, testCreationRequest(t)); err != nil {
@@ -401,6 +442,26 @@ func TestRetirementFilesystemSafety(t *testing.T) {
 		}
 		if _, err := store.Inspect(context.Background(), dir, testRecordID); retirementCode(err) != RetirementRecordInvalid {
 			t.Fatalf("error=%v", err)
+		}
+	})
+	t.Run("special permission bits", func(t *testing.T) {
+		dir, store := testRetirementStore(t)
+		if _, _, err := store.Append(context.Background(), dir, testCreationRequest(t)); err != nil {
+			t.Fatal(err)
+		}
+		path := dir.RetirementRecordPath(testRecordID)
+		if err := os.Chmod(path, 0o4600); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&os.ModeSetuid == 0 {
+			t.Skip("filesystem did not preserve setuid bit")
+		}
+		if _, err := store.Inspect(context.Background(), dir, testRecordID); retirementCode(err) != RetirementRecordInvalid {
+			t.Fatalf("error=%v mode=%v", err, info.Mode())
 		}
 	})
 	t.Run("symlink", func(t *testing.T) {
@@ -493,6 +554,28 @@ func TestRetirementInterruptedBoundariesAndLockContention(t *testing.T) {
 	})
 }
 
+func TestRetirementReplayRetriesDurability(t *testing.T) {
+	dir, _ := testRetirementStore(t)
+	failSync := true
+	store := RetirementStore{syncFile: func(file *os.File) error {
+		if failSync {
+			return errors.New("injected")
+		}
+		return file.Sync()
+	}}
+	request := testCreationRequest(t)
+	if _, _, err := store.Append(context.Background(), dir, request); retirementCode(err) != RetirementRecordRecovery {
+		t.Fatalf("initial append error=%v", err)
+	}
+	if _, _, err := store.Append(context.Background(), dir, request); retirementCode(err) != RetirementRecordRecovery {
+		t.Fatalf("replay while sync fails error=%v", err)
+	}
+	failSync = false
+	if inspection, replay, err := store.Append(context.Background(), dir, request); err != nil || !replay || inspection.VerifiedEventCount != 1 {
+		t.Fatalf("durable replay inspection=%+v replay=%t err=%v", inspection, replay, err)
+	}
+}
+
 func TestRetirementConcurrentAppendIsSequenceSafe(t *testing.T) {
 	dir, store := testRetirementStore(t)
 	if _, _, err := store.Append(context.Background(), dir, testCreationRequest(t)); err != nil {
@@ -554,9 +637,11 @@ func TestRetirementRejectsOversizedAndMissingWithoutMutation(t *testing.T) {
 
 func TestRetirementAppendEnforcesLimitsBeforeWriting(t *testing.T) {
 	dir, store := testRetirementStore(t)
-	if err := ensureRetirementDirectories(dir); err != nil {
+	filesystem, err := openRetirementFilesystem(dir, true)
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer filesystem.close()
 	path := dir.RetirementRecordPath(testRecordID)
 	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), retirementMaxFileBytes-1), 0o600); err != nil {
 		t.Fatal(err)
@@ -565,15 +650,28 @@ func TestRetirementAppendEnforcesLimitsBeforeWriting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.appendBytes(path, []byte(`{}`), true, false, info); retirementCode(err) != RetirementRecordInvalid {
+	name := testRecordID + ".jsonl"
+	if err := store.appendBytes(filesystem.records, name, path, []byte(`{}`), true, false, info); retirementCode(err) != RetirementRecordInvalid {
 		t.Fatalf("file limit error=%v", err)
 	}
 	after, err := os.Lstat(path)
 	if err != nil || after.Size() != info.Size() {
 		t.Fatalf("oversized append changed file: before=%d after=%v err=%v", info.Size(), after, err)
 	}
-	if err := store.appendBytes(path, bytes.Repeat([]byte("x"), retirementMaxLineBytes+1), true, false, after); retirementCode(err) != RetirementRecordInvalid {
+	if err := store.appendBytes(filesystem.records, name, path, bytes.Repeat([]byte("x"), retirementMaxLineBytes+1), true, false, after); retirementCode(err) != RetirementRecordInvalid {
 		t.Fatalf("line limit error=%v", err)
+	}
+}
+
+func TestRetirementRejectsUnrepresentableTimestampBeforeWriting(t *testing.T) {
+	dir, store := testRetirementStore(t)
+	request := testCreationRequest(t)
+	request.WrittenAt = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if _, _, err := store.Append(context.Background(), dir, request); retirementCode(err) != RetirementRecordInvalid {
+		t.Fatalf("timestamp error=%v", err)
+	}
+	if _, err := os.Lstat(dir.RetirementRecordPath(testRecordID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid timestamp created a record: %v", err)
 	}
 }
 
