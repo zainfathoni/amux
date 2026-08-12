@@ -2,6 +2,7 @@
 """Read-only full-outer-join inventory for the /amux sweep workflow."""
 
 import argparse
+import fnmatch
 import json
 import os
 from pathlib import Path
@@ -39,6 +40,7 @@ def inventory_error(source, message, path=None, thread=None):
         "lifecycle_records": [],
         "open_obligation": False,
         "removal_verdict": "NOT_EVALUATED",
+        "presentation": {"baseline": None, "divergence_raw": None, "divergence_filtered": None, "precious_paths": [], "stashes": []},
         "authority": {
             "git_registration": "git worktree list --porcelain",
             "filesystem": "lstat",
@@ -51,7 +53,10 @@ def inventory_error(source, message, path=None, thread=None):
 
 def run_git(repo, *args):
     command = ["git", "-C", repo, *args]
-    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    try:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    except OSError as error:
+        raise ValueError(f"cannot execute git: {error}") from error
     if result.returncode != 0:
         detail = result.stderr.decode("utf-8", "replace").strip()
         raise ValueError(f"{' '.join(command[3:])} failed (exit {result.returncode}): {detail}")
@@ -105,15 +110,32 @@ def parse_worktrees(repo):
     return records
 
 
+def regular_file_state(path):
+    if not os.path.lexists(path):
+        return "absent", None
+    try:
+        info = os.lstat(path)
+    except OSError as error:
+        return "unreadable", str(error)
+    if os.path.islink(path):
+        return "ambiguous_symlink", "path is a symlink"
+    if not os.path.isfile(path):
+        return "not_a_file", "path is not a regular file"
+    return "present", None
+
+
 def parse_workers(path):
-    if not os.path.exists(path):
+    state, state_error = regular_file_state(path)
+    if state == "absent":
         return [], []
+    if state != "present":
+        return [], [inventory_error("workers.tsv", f"cannot read {path}: {state_error}")]
     rows, errors = [], []
     try:
         data = Path(path).read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
         return [], [inventory_error("workers.tsv", f"cannot read {path}: {error}")]
-    seen_threads, seen_paths = {}, {}
+    candidates = []
     for number, line in enumerate(data.splitlines(), 1):
         if not line or line.startswith("#"):
             continue
@@ -133,25 +155,59 @@ def parse_workers(path):
         if len(fields) == 5 and fields[4] not in ("", "retained_indeterminate"):
             errors.append(inventory_error("workers.tsv", f"line {number}: unsupported assignment state {fields[4]!r}", path_value, thread))
             continue
-        if thread in seen_threads:
-            errors.append(inventory_error("workers.tsv", f"line {number}: duplicate thread {thread!r}", path_value, thread))
-            continue
-        if path_value in seen_paths:
-            errors.append(inventory_error("workers.tsv", f"line {number}: workdir is also bound to {seen_paths[path_value]!r}", path_value, thread))
-            continue
-        row = {"workspace": workspace, "window": window, "path": path_value, "thread": thread}
-        seen_threads[thread], seen_paths[path_value] = path_value, thread
-        rows.append(row)
+        candidates.append({"workspace": workspace, "window": window, "path": path_value, "thread": thread, "line": number})
+    conflicts = set()
+    indexes = ({}, {}, {})
+    for index, row in enumerate(candidates):
+        keys = (row["thread"], row["path"], row["workspace"] + "\0" + row["window"])
+        for key, values in zip(keys, indexes):
+            values.setdefault(key, []).append(index)
+    for values in indexes:
+        for participants in values.values():
+            if len(participants) > 1:
+                conflicts.update(participants)
+    for index, row in enumerate(candidates):
+        if index in conflicts:
+            errors.append(inventory_error("workers.tsv", f"line {row['line']}: ambiguous duplicate worker identity", row["path"], row["thread"]))
+        else:
+            rows.append({key: row[key] for key in ("workspace", "window", "path", "thread")})
     return rows, errors
 
 
-def parse_reports(path):
-    if not os.path.exists(path):
-        return [], []
+def validate_reports_with_amux(amux, config_dir):
+    command = [amux, "--json", "--config-dir", config_dir, "report", "pending", "--all"]
     try:
-        with open(path, encoding="utf-8") as handle:
-            document = json.load(handle, object_pairs_hook=strict_object)
-    except (OSError, UnicodeError, ValueError) as error:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    except OSError as error:
+        raise ValueError(f"cannot execute authoritative amux report validator: {error}") from error
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip() or result.stdout.decode("utf-8", "replace").strip()
+        raise ValueError(f"authoritative amux report validation failed (exit {result.returncode}): {detail}")
+    try:
+        document = json.loads(result.stdout)
+    except (UnicodeError, ValueError) as error:
+        raise ValueError("authoritative amux report validator returned malformed JSON") from error
+    if not isinstance(document, dict) or document.get("schema_version") != 1 or document.get("failed"):
+        raise ValueError("authoritative amux report validator did not return a successful v1 envelope")
+
+
+def parse_reports(path, amux, config_dir):
+    state, state_error = regular_file_state(path)
+    if state == "absent":
+        return [], []
+    if state != "present":
+        return [], [inventory_error("reports.json", f"cannot read {path}: {state_error}")]
+    try:
+        before = Path(path).read_bytes()
+        validate_reports_with_amux(amux, config_dir)
+        after = Path(path).read_bytes()
+        if before != after:
+            raise ValueError("reports.json changed during authoritative validation")
+    except (OSError, ValueError) as error:
+        return [], [inventory_error("reports.json", str(error))]
+    try:
+        document = json.loads(before.decode("utf-8"), object_pairs_hook=strict_object)
+    except (UnicodeError, ValueError) as error:
         return [], [inventory_error("reports.json", f"cannot parse {path}: {error}")]
     if not isinstance(document, dict) or document.get("schema_version") != 1 or not isinstance(document.get("reports", []), list):
         return [], [inventory_error("reports.json", "expected schema_version 1 and a reports array")]
@@ -213,6 +269,77 @@ def filesystem_inventory(roots):
     return paths, errors
 
 
+def presentation_inventory(repo, path, git_record, baseline, generated_excludes, precious_pattern, canonical_worktree):
+    details = {"baseline": baseline, "divergence_raw": None, "divergence_filtered": None, "precious_paths": [], "stashes": []}
+    errors = []
+    if baseline and git_record:
+        try:
+            changed = sorted(filter(None, run_git(repo, "diff", "--name-only", f"{baseline}...{git_record['head']}").splitlines()))
+            details["divergence_raw"] = changed
+            details["divergence_filtered"] = [item for item in changed if not any(fnmatch.fnmatch(item, pattern) for pattern in generated_excludes)]
+        except ValueError as error:
+            errors.append(f"presentation divergence: {error}")
+    if git_record:
+        try:
+            stash_rows = run_git(repo, "stash", "list", "--format=%gd%x09%H%x09%P%x09%gs").splitlines()
+            branch = (git_record.get("branch") or "").removeprefix("refs/heads/")
+            for stash_row in stash_rows:
+                fields = stash_row.split("\t")
+                if len(fields) != 4:
+                    raise ValueError(f"malformed stash row {stash_row!r}")
+                selector, commit, parents, subject = fields
+                bases = parents.split()
+                affected = branch and branch in subject or not branch and bases and bases[0] == git_record["head"]
+                if not affected:
+                    continue
+                changed = sorted(filter(None, run_git(repo, "stash", "show", "--name-only", selector).splitlines()))
+                details["stashes"].append({
+                    "selector": selector,
+                    "commit": commit,
+                    "subject": subject,
+                    "paths_raw": changed,
+                    "paths_filtered": [item for item in changed if not any(fnmatch.fnmatch(item, pattern) for pattern in generated_excludes)],
+                })
+        except ValueError as error:
+            errors.append(f"presentation stashes: {error}")
+    if path_state(path)[0] != "present":
+        return details, errors
+    try:
+        status = run_git(path, "status", "--porcelain", "--untracked-files=all", "--ignored")
+    except ValueError as error:
+        return details, errors + [f"presentation precious scan: {error}"]
+    import re
+    try:
+        precious = re.compile(precious_pattern, re.IGNORECASE)
+    except re.error as error:
+        return details, errors + [f"invalid precious pattern: {error}"]
+    for line in status.splitlines():
+        if not line.startswith("!! "):
+            continue
+        relative = line[3:]
+        if any(fnmatch.fnmatch(relative, pattern) for pattern in generated_excludes) or not precious.search(relative):
+            continue
+        item_path = os.path.join(path, relative)
+        record = {"path": relative, "status": "unique", "comparison_target": None}
+        try:
+            info = os.lstat(item_path)
+            if os.path.islink(item_path):
+                resolved = os.path.realpath(item_path)
+                if not os.path.exists(resolved):
+                    raise ValueError("broken symlink")
+                if os.path.commonpath([os.path.realpath(path), resolved]) != os.path.realpath(path):
+                    record.update(status="symlink-to-external", comparison_target=resolved)
+            elif canonical_worktree:
+                canonical = os.path.join(canonical_worktree, relative)
+                if os.path.isfile(canonical) and info.st_mode and Path(item_path).read_bytes() == Path(canonical).read_bytes():
+                    record.update(status="duplicate-of-canonical", comparison_target=canonical)
+        except (OSError, ValueError) as error:
+            record["error"] = str(error)
+            errors.append(f"precious path {relative}: {error}")
+        details["precious_paths"].append(record)
+    return details, errors
+
+
 def path_state(path):
     try:
         info = os.lstat(path)
@@ -227,12 +354,12 @@ def path_state(path):
     return "present", None
 
 
-def classify_row(path, git_record, worker, reports, filesystem_seen):
+def classify_row(path, git_record, worker, reports, filesystem_seen, presentation, presentation_errors):
     state, state_error = path_state(path)
     git_present, worker_present = git_record is not None, worker is not None
     lifecycle = sorted(({"report_id": r["report_id"], "status": r["status"]} for r in reports), key=lambda r: r["report_id"])
     open_obligation = any(r["open_obligation"] for r in reports)
-    if state_error:
+    if state_error or presentation_errors:
         classification, rank, irreversibility = "ambiguous_path", 0, "unknown_evidence"
     elif git_present and state == "absent":
         classification, rank, irreversibility = "git_registration_without_directory", 10, "registered_tip_at_risk"
@@ -266,13 +393,14 @@ def classify_row(path, git_record, worker, reports, filesystem_seen):
         "lifecycle_records": lifecycle,
         "open_obligation": open_obligation,
         "removal_verdict": "NOT_EVALUATED",
+        "presentation": presentation,
         "authority": {
             "git_registration": "git worktree list --porcelain",
             "filesystem": "lstat plus explicit filesystem roots",
             "worker_record": "workers.tsv",
             "lifecycle_records": "reports.json member_thread joined through workers.tsv",
         },
-        "error": {"source": "path", "message": state_error} if state_error else None,
+        "error": {"source": "path" if state_error else "presentation", "message": state_error or "; ".join(presentation_errors)} if state_error or presentation_errors else None,
     }
 
 
@@ -287,8 +415,14 @@ def build_inventory(args):
         return {"schema_version": SCHEMA_VERSION, "command": "sweep", "read_only": True, "complete": False, "coverage": {"filesystem_roots": args.filesystem_root}, "rows": [inventory_error("git", str(error))]}
     try:
         config_dir = absolute_path(args.config_dir, "config directory")
-        workers, worker_errors = parse_workers(os.path.join(config_dir, "workers.tsv"))
-        reports, report_errors = parse_reports(os.path.join(config_dir, "reports.json"))
+        config_state, config_error = path_state(config_dir)
+        if config_state not in ("present", "absent"):
+            raise ValueError(f"config directory is {config_state}: {config_error or config_dir}")
+        if config_state == "absent":
+            workers, worker_errors, reports, report_errors = [], [], [], []
+        else:
+            workers, worker_errors = parse_workers(os.path.join(config_dir, "workers.tsv"))
+            reports, report_errors = parse_reports(os.path.join(config_dir, "reports.json"), args.amux, config_dir)
     except ValueError as error:
         config_dir = None
         workers, reports = [], []
@@ -311,7 +445,8 @@ def build_inventory(args):
     for path in all_paths:
         worker = worker_by_path.get(path)
         joined_reports = reports_by_thread.get(worker["thread"], []) if worker else []
-        rows.append(classify_row(path, git_by_path.get(path), worker, joined_reports, filesystem_paths))
+        presentation, presentation_errors = presentation_inventory(repo, path, git_by_path.get(path), args.presentation_baseline, args.generated_exclude, args.precious_pattern, args.canonical_worktree)
+        rows.append(classify_row(path, git_by_path.get(path), worker, joined_reports, filesystem_paths, presentation, presentation_errors))
     for thread in sorted(set(reports_by_thread) - worker_threads):
         lifecycle = reports_by_thread[thread]
         rows.append({
@@ -326,6 +461,7 @@ def build_inventory(args):
             "lifecycle_records": sorted(({"report_id": item["report_id"], "status": item["status"]} for item in lifecycle), key=lambda item: item["report_id"]),
             "open_obligation": any(item["open_obligation"] for item in lifecycle),
             "removal_verdict": "NOT_EVALUATED",
+            "presentation": {"baseline": args.presentation_baseline, "divergence_raw": None, "divergence_filtered": None, "precious_paths": [], "stashes": []},
             "authority": {
                 "git_registration": "git worktree list --porcelain",
                 "filesystem": "lstat plus explicit filesystem roots",
@@ -361,7 +497,12 @@ def main():
     parser = argparse.ArgumentParser(description="read-only /amux sweep inventory")
     parser.add_argument("--repo", default=os.getcwd(), help="repository whose Git worktree registry is authoritative")
     parser.add_argument("--config-dir", default=os.environ.get("AMUX_CONFIG_DIR", os.path.expanduser("~/.config/amux")))
+    parser.add_argument("--amux", default="amux", help="authoritative amux binary used for read-only reports.json validation")
     parser.add_argument("--filesystem-root", action="append", required=True, help="complete immediate-child checkout boundary; repeatable")
+    parser.add_argument("--presentation-baseline", help="optional commit-ish for presentation-only committed divergence")
+    parser.add_argument("--generated-exclude", action="append", default=[], help="presentation-only generated path glob; repeatable")
+    parser.add_argument("--precious-pattern", default=r"\.env|local\.json|auth", help="case-insensitive ignored precious-path regex")
+    parser.add_argument("--canonical-worktree", type=os.path.abspath, help="canonical copy for precious-file byte comparison")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     document = build_inventory(args)

@@ -14,6 +14,9 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/zainfathoni/amux/internal/config"
 )
 
 var publicSkillFiles = []string{
@@ -2237,7 +2240,7 @@ type sweepDocument struct {
 func TestSweepInventoryFullOuterJoinStableOrderingAndParity(t *testing.T) {
 	root, repo, configDir := newSweepInventoryFixture(t)
 	script := filepath.Join(repoRoot(t), "skills", "amux", "scripts", "sweep-inventory")
-	args := []string{script, "--repo", repo, "--config-dir", configDir, "--filesystem-root", root}
+	args := []string{script, "--repo", repo, "--config-dir", configDir, "--amux", buildSweepAmux(t), "--filesystem-root", root}
 
 	jsonOutput, exit := runSweepInventory(t, append(args, "--json")...)
 	if exit != 0 {
@@ -2327,7 +2330,7 @@ func TestSweepInventoryMalformedInputsAndPathsFailClosed(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(configDir, "reports.json"), []byte(`{"schema_version":1,"reports":[`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		output, exit := runSweepInventory(t, filepath.Join(repoRoot(t), "skills", "amux", "scripts", "sweep-inventory"), "--repo", repo, "--config-dir", configDir, "--filesystem-root", root, "--json")
+		output, exit := runSweepInventory(t, filepath.Join(repoRoot(t), "skills", "amux", "scripts", "sweep-inventory"), "--repo", repo, "--config-dir", configDir, "--amux", buildSweepAmux(t), "--filesystem-root", root, "--json")
 		if exit != 2 {
 			t.Fatalf("malformed sweep exit=%d, want 2\n%s", exit, output)
 		}
@@ -2366,7 +2369,7 @@ func TestSweepInventoryMalformedInputsAndPathsFailClosed(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(configDir, "workers.tsv"), []byte("ws\tlink\t"+workerLink+"\tT-link\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		output, exit := runSweepInventory(t, filepath.Join(repoRoot(t), "skills", "amux", "scripts", "sweep-inventory"), "--repo", repo, "--config-dir", configDir, "--filesystem-root", symlinkRoot, "--json")
+		output, exit := runSweepInventory(t, filepath.Join(repoRoot(t), "skills", "amux", "scripts", "sweep-inventory"), "--repo", repo, "--config-dir", configDir, "--amux", buildSweepAmux(t), "--filesystem-root", symlinkRoot, "--json")
 		if exit != 2 {
 			t.Fatalf("unsafe-path sweep exit=%d, want 2\n%s", exit, output)
 		}
@@ -2376,6 +2379,126 @@ func TestSweepInventoryMalformedInputsAndPathsFailClosed(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("authoritative report validation rejects impossible stores", func(t *testing.T) {
+		root, repo, configDir := newSweepInventoryFixture(t)
+		invalid := `{"schema_version":1,"reports":[{"schema_version":1,"report_id":"bad","member_thread":"T-open","status":"blocked","authorized_at":"garbage","unknown":true}],"deadlines":[{"group_id":"bad"}]}`
+		if err := os.WriteFile(filepath.Join(configDir, "reports.json"), []byte(invalid), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		output, exit := runSweepInventory(t, filepath.Join(repoRoot(t), "skills", "amux", "scripts", "sweep-inventory"), "--repo", repo, "--config-dir", configDir, "--amux", buildSweepAmux(t), "--filesystem-root", root, "--json")
+		if exit != 2 || !strings.Contains(output, "authoritative amux report validation failed") || !strings.Contains(output, `"complete":false`) {
+			t.Fatalf("invalid authoritative store did not fail closed: exit=%d\n%s", exit, output)
+		}
+	})
+
+	t.Run("ambiguous workers are quarantined independent of order", func(t *testing.T) {
+		for _, reverse := range []bool{false, true} {
+			root, repo, configDir := newSweepInventoryFixture(t)
+			rows := []string{
+				"ws\tshared-a\t" + filepath.Join(root, "a") + "\tT-shared",
+				"ws\tshared-b\t" + filepath.Join(root, "b") + "\tT-shared",
+				"ws\tduplicate-window\t" + filepath.Join(root, "c") + "\tT-c",
+				"ws\tduplicate-window\t" + filepath.Join(root, "d") + "\tT-d",
+			}
+			if reverse {
+				for left, right := 0, len(rows)-1; left < right; left, right = left+1, right-1 {
+					rows[left], rows[right] = rows[right], rows[left]
+				}
+			}
+			if err := os.WriteFile(filepath.Join(configDir, "workers.tsv"), []byte(strings.Join(rows, "\n")+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			output, exit := runSweepInventory(t, filepath.Join(repoRoot(t), "skills", "amux", "scripts", "sweep-inventory"), "--repo", repo, "--config-dir", configDir, "--amux", buildSweepAmux(t), "--filesystem-root", root, "--json")
+			if exit != 2 || strings.Contains(output, `"worker_record":true`) || strings.Contains(output, `"classification":"open_lifecycle_obligation"`) {
+				t.Fatalf("ambiguous worker order reverse=%t selected authority: exit=%d\n%s", reverse, exit, output)
+			}
+		}
+	})
+
+	t.Run("non-directory config and missing git are structured errors", func(t *testing.T) {
+		root, repo, _ := newSweepInventoryFixture(t)
+		configFile := filepath.Join(root, "config-file")
+		if err := os.WriteFile(configFile, []byte("not a directory"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		script := filepath.Join(repoRoot(t), "skills", "amux", "scripts", "sweep-inventory")
+		output, exit := runSweepInventory(t, script, "--repo", repo, "--config-dir", configFile, "--amux", buildSweepAmux(t), "--filesystem-root", root, "--json")
+		if exit != 2 || !strings.Contains(output, "config directory is not_a_directory") {
+			t.Fatalf("non-directory config did not fail closed: exit=%d\n%s", exit, output)
+		}
+		python, err := exec.LookPath("python3")
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(python, script, "--repo", repo, "--config-dir", filepath.Join(root, "absent-config"), "--filesystem-root", root, "--json")
+		cmd.Env = append(os.Environ(), "PATH=/nonexistent")
+		gitOutput, gitErr := cmd.CombinedOutput()
+		gitExit, ok := gitErr.(*exec.ExitError)
+		if !ok || gitExit.ExitCode() != 2 || !strings.Contains(string(gitOutput), "cannot execute git") || !strings.Contains(string(gitOutput), `"complete":false`) {
+			t.Fatalf("missing git was not a structured exit 2: err=%v\n%s", gitErr, gitOutput)
+		}
+	})
+}
+
+func TestSweepPresentationFiltersNeverChangeSafety(t *testing.T) {
+	root, repo, configDir := newSweepInventoryFixture(t)
+	worktree := filepath.Join(root, "open-worker")
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(".env.local\nauth.local.json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, repo, "add", ".gitignore")
+	gitTest(t, repo, "commit", "-m", "ignore precious files")
+	gitTest(t, worktree, "merge", "main")
+	for _, target := range []string{filepath.Join(repo, ".env.local"), filepath.Join(worktree, ".env.local")} {
+		if err := os.WriteFile(target, []byte("duplicate\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "auth.local.json"), []byte("unique\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, worktree, "dist/generated.js", "generated\n", "generated")
+	commitFile(t, worktree, "src/real.go", "package real\n", "real")
+	if err := os.WriteFile(filepath.Join(worktree, "dist/generated.js"), []byte("generated stash\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, worktree, "stash", "push", "-m", "generated-only")
+	args := []string{
+		filepath.Join(repoRoot(t), "skills", "amux", "scripts", "sweep-inventory"),
+		"--repo", repo, "--config-dir", configDir, "--amux", buildSweepAmux(t), "--filesystem-root", root,
+		"--presentation-baseline", "refs/heads/main", "--generated-exclude", "dist/*", "--canonical-worktree", repo, "--json",
+	}
+	output, exit := runSweepInventory(t, args...)
+	if exit != 0 {
+		t.Fatalf("presentation sweep exit=%d\n%s", exit, output)
+	}
+	var document sweepDocument
+	if err := json.Unmarshal([]byte(output), &document); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range document.Rows {
+		if row["thread"] != "T-open" {
+			continue
+		}
+		presentation := row["presentation"].(map[string]any)
+		if !equalJSONValue(presentation["divergence_raw"], []any{"dist/generated.js", "src/real.go"}) || !equalJSONValue(presentation["divergence_filtered"], []any{"src/real.go"}) {
+			t.Errorf("unexpected divergence presentation: %#v", presentation)
+		}
+		precious := presentation["precious_paths"].([]any)
+		if len(precious) != 2 || !strings.Contains(fmt.Sprint(precious), "duplicate-of-canonical") || !strings.Contains(fmt.Sprint(precious), "unique") {
+			t.Errorf("unexpected precious presentation: %#v", precious)
+		}
+		stashes := presentation["stashes"].([]any)
+		if len(stashes) != 1 || !strings.Contains(fmt.Sprint(stashes), "dist/generated.js") || !strings.Contains(fmt.Sprint(stashes), "paths_filtered:[]") {
+			t.Errorf("unexpected stash presentation: %#v", stashes)
+		}
+		if row["removal_verdict"] != "NOT_EVALUATED" {
+			t.Errorf("presentation filter changed safety: %#v", row)
+		}
+		return
+	}
+	t.Fatal("T-open presentation row not found")
 }
 
 func TestSweepWorkflowDocumentsReadOnlyAuthorityBoundary(t *testing.T) {
@@ -2907,22 +3030,31 @@ func newSweepInventoryFixture(t *testing.T) (root, repo, configDir string) {
 	if err := os.WriteFile(filepath.Join(configDir, "workers.tsv"), []byte(workerRows), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	reports := map[string]any{
-		"schema_version": 1,
-		"reports": []map[string]any{
-			{"report_id": "report-literal-zero", "member_thread": "T-missing", "status": "blocked", "authorized_at": "0001-01-01T00:00:00Z"},
-			{"report_id": "report-open", "member_thread": "T-open", "status": "blocked"},
-			{"report_id": "report-unbound", "member_thread": "T-unbound", "status": "ready"},
-		},
-	}
-	data, err := json.Marshal(reports)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(configDir, "reports.json"), data, 0o600); err != nil {
-		t.Fatal(err)
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	for _, report := range []config.ReportRecord{
+		{ReportID: "report-literal-zero", GroupID: "sweep-test", MemberThread: "T-missing", Status: config.ReportBlocked},
+		{ReportID: "report-open", GroupID: "sweep-test", MemberThread: "T-open", Status: config.ReportBlocked},
+		{ReportID: "report-unbound", GroupID: "sweep-test", MemberThread: "T-unbound", Status: config.ReportReady},
+	} {
+		report.SchemaVersion = config.ReportsSchemaVersion
+		report.RequestHash = config.ReportRequestHash(report.GroupID, report.MemberThread, "", "")
+		report.CreatedAt, report.UpdatedAt = now, now
+		if _, err := config.SubmitReport(filepath.Join(configDir, "reports.json"), report); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return root, repo, configDir
+}
+
+func buildSweepAmux(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "amux")
+	cmd := exec.Command("go", "build", "-o", path, "./cmd/amux")
+	cmd.Dir = repoRoot(t)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build sweep amux validator: %v\n%s", err, out)
+	}
+	return path
 }
 
 func runSweepInventory(t *testing.T, args ...string) (string, int) {
