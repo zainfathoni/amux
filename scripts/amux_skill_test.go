@@ -2581,6 +2581,34 @@ func TestSweepPresentationFiltersNeverChangeSafety(t *testing.T) {
 	t.Fatal("T-open presentation row not found")
 }
 
+func TestSweepPresentationInputsFailClosedWithoutMutation(t *testing.T) {
+	root, repo, configDir := newSweepInventoryFixture(t)
+	script := filepath.Join(repoRoot(t), "skills", "amux", "scripts", "sweep-inventory")
+	amux := buildSweepAmux(t)
+	probeDir := t.TempDir()
+	probe := filepath.Join(probeDir, "git-output")
+	output, exit := runSweepInventory(t, script, "--repo", repo, "--config-dir", configDir, "--amux", amux, "--filesystem-root", root, "--presentation-baseline=--output="+probe, "--json")
+	if exit != 2 || !strings.Contains(output, `"complete":false`) || !strings.Contains(output, "presentation divergence") {
+		t.Fatalf("option-like baseline did not fail closed: exit=%d\n%s", exit, output)
+	}
+	entries, err := os.ReadDir(probeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("option-like baseline created files: %#v", entries)
+	}
+
+	canonical := filepath.Join(t.TempDir(), "canonical")
+	if err := os.Symlink(repo, canonical); err != nil {
+		t.Fatal(err)
+	}
+	output, exit = runSweepInventory(t, script, "--repo", repo, "--config-dir", configDir, "--amux", amux, "--filesystem-root", root, "--canonical-worktree", canonical, "--json")
+	if exit != 2 || !strings.Contains(output, "canonical worktree is ambiguous_symlink") || !strings.Contains(output, `"complete":false`) {
+		t.Fatalf("canonical final symlink did not fail closed: exit=%d\n%s", exit, output)
+	}
+}
+
 func TestSweepWorkflowDocumentsReadOnlyAuthorityBoundary(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)

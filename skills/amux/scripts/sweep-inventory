@@ -290,7 +290,11 @@ def presentation_inventory(repo, path, git_record, baseline, generated_excludes,
     errors = []
     if baseline and git_record:
         try:
-            changed = sorted(filter(None, run_git(repo, "diff", "--name-only", f"{baseline}...{git_record['head']}").splitlines()))
+            baseline_oid = run_git(repo, "rev-parse", "--verify", "--end-of-options", f"{baseline}^{{commit}}").strip()
+            if not baseline_oid or any(character not in "0123456789abcdefABCDEF" for character in baseline_oid):
+                raise ValueError("presentation baseline did not resolve to a commit OID")
+            details["baseline"] = baseline_oid
+            changed = sorted(filter(None, run_git(repo, "diff", "--name-only", "--end-of-options", f"{baseline_oid}...{git_record['head']}").splitlines()))
             details["divergence_raw"] = changed
             details["divergence_filtered"] = [item for item in changed if not any(fnmatch.fnmatch(item, pattern) for pattern in generated_excludes)]
         except ValueError as error:
@@ -306,7 +310,7 @@ def presentation_inventory(repo, path, git_record, baseline, generated_excludes,
                 selector, commit, parents, subject = fields
                 bases = parents.split()
                 affected = bool(branch and (subject.startswith(f"WIP on {branch}: ") or subject.startswith(f"On {branch}: ")) or not branch and bases and bases[0] == git_record["head"])
-                changed = sorted(filter(None, run_git(repo, "stash", "show", "--include-untracked", "--name-only", selector).splitlines()))
+                changed = sorted(filter(None, run_git(repo, "stash", "show", "--include-untracked", "--name-only", commit).splitlines()))
                 details["stashes"].append({
                     "selector": selector,
                     "commit": commit,
@@ -523,6 +527,9 @@ def main():
     if args.canonical_worktree:
         try:
             args.canonical_worktree = absolute_path(args.canonical_worktree, "canonical worktree")
+            canonical_state, canonical_error = path_state(args.canonical_worktree)
+            if canonical_state != "present":
+                raise ValueError(f"canonical worktree is {canonical_state}: {canonical_error or args.canonical_worktree}")
         except ValueError as error:
             document = {"schema_version": SCHEMA_VERSION, "command": "sweep", "read_only": True, "complete": False, "coverage": {"filesystem_roots": args.filesystem_root}, "rows": [inventory_error("presentation", str(error))]}
             if args.json:
