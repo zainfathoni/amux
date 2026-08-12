@@ -2,6 +2,8 @@
 
 This reference is the source of truth for the removal-safety verdict ladder. It classifies whether Git commits survive removing a worktree; it does not authorize removal, cleanup, branch deletion, or any lifecycle action.
 
+For the mutation gate, adjacent revalidation, PR/stash/file-loss reporting, and repository-wide prune procedure, follow [`workflows.md` removal preflight](workflows.md#removal-preflight-for-finish-remove-on-missing-and-prune). A classifier verdict alone never authorizes mutation.
+
 `git worktree remove` deletes exactly one ref: that worktree's `HEAD`. A branch ref survives it. The question is therefore **"does any other ref hold this commit?"**, not **"is it merged?"**.
 
 ## Classification inputs
@@ -14,13 +16,15 @@ git for-each-ref --contains <C> refs/heads refs/remotes refs/tags
 
 The include-list is semantic, not cosmetic. Bare `for-each-ref` also returns `refs/stash`: a stash commit's first parent is `HEAD` at stash time, so treating it as coverage would be false safety. The include-list also excludes unrelated namespaces such as `refs/notes/*` and `refs/pull/*`. A detached `HEAD` is not a ref and is already omitted; no exclusion clause is needed. An attached worktree's branch is a covering local ref and must remain included.
 
-Before classifying, fetch remote refs. Resolve the baseline in this order:
+Before classifying, run and record successful `git fetch --prune origin`. Plain `git fetch origin` is insufficient: it can retain a remote-tracking ref after its upstream branch was deleted, creating phantom rule-2a coverage. A deleted upstream ref must not satisfy rule 2a; classify only after pruning remote-tracking refs, and fail closed if the pruning fetch fails.
+
+Resolve the baseline in this order:
 
 1. An explicit `--baseline` override, when provided.
 2. `git symbolic-ref refs/remotes/origin/HEAD`.
 3. `gh repo view --json defaultBranchRef`.
 
-Record the resolved baseline, the winning source (`override`, `origin/HEAD`, or `GitHub default branch`), and that fetch completed. Never hardcode a branch name.
+Record the resolved baseline, the winning source (`override`, `origin/HEAD`, or `GitHub default branch`), and the exact successful pruning-fetch evidence. Map a GitHub default branch name explicitly to `refs/remotes/origin/<name>`. Never hardcode a branch name.
 
 ## Verdict ladder
 
