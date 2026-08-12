@@ -1,6 +1,6 @@
 ---
 name: amux
-description: "Manage local Amp worker, runner, workspace, and work-group orchestration with amux. Use for pin/unpin/park/restart/shelve/unshelve/launch/spawn, doctor, teardown, /amux health, /amux sprawl, /amux finish, and coordinate issue workers. Also 'forget this on restore', 'hide it for now', 'defer this workspace', 'Show shelved work', and 'Restore my workspace'. Experimental Tycho, Claude, or Pi routes are separate explicit-only skills (/amux-tycho, /amux-claude, /amux-pi)."
+description: "Manage local Amp worker, runner, workspace, and work-group orchestration with amux. Use for pin/unpin/park/restart/shelve/unshelve/launch/spawn, doctor, teardown, /amux health, /amux sprawl, the one-time staged-drain /amux sweep, /amux finish, and coordinate issue workers. Also 'forget this on restore', 'hide it for now', 'defer this workspace', 'Show shelved work', and 'Restore my workspace'. Experimental Tycho, Claude, or Pi routes are separate explicit-only skills (/amux-tycho, /amux-claude, /amux-pi)."
 ---
 
 # amux
@@ -18,7 +18,7 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 - Every skill-driven spawn MUST pass an explicit mode. When a linked ChatGPT subscription and target-mode availability are known, choose `low` for small mechanical work, `medium` for ordinary implementation, or `high` for hard architecture, debugging, or review. Otherwise use `medium`. An explicitly requested mode always wins; `ultra`, plugin, and other special modes remain explicit-only.
 - **Invocation defaults:** mode labels are capability presets, not stable model or cost selectors. Preserve `medium` when mode or subscription routing is unknown; do not Read Thread for task context; give Oracle supplied diff/context only—never Read Thread to feed Oracle. Details in [`reference/contract-v1.md`](reference/contract-v1.md).
 - Before automatic spawn mode selection, creating a native Amp child, reading another Amp thread, or sending a native child message, load [`reference/amp-invocation-policy.md`](reference/amp-invocation-policy.md). Never bypass a binding `ask` or `reject`. Read Thread remains instruction-only until a promoted gate exists—still do not use it without explicit permission.
-- `/amux health`, `/amux sprawl`, and `/amux finish` are skill-only. Never invoke `amux health|sprawl|finish` as CLI commands.
+- `/amux health`, `/amux sprawl`, `/amux sweep`, and `/amux finish` are skill-only. Never invoke `amux health|sprawl|sweep|finish` as CLI commands.
 - Prefer `--dry-run` and `--json`. Exit `2` = preflight rejection; exit `1` = runtime failure. For projectless local spawn, first require the authenticated native existing-thread `thread_interact` message action and reject before calling amux when unavailable. Run `prepare`, then `arm`, issue exactly one `thread_interact` call with `action: message`, the exact prepared thread, and the unchanged prompt, then `finalize`. Success with `latestCursor` proves only authenticated exact-thread acceptance/queueing; execution and physical executor/workdir affinity remain unproven. Any undocumented/tool-connection result after arm is indeterminate and never retried. Never paste, press Enter, clean up, archive, search, reconcile, or use another receiver.
 - Work-group reports and wake-ups never authorize finish. A `ready` report is not cleanup authority.
 
@@ -38,6 +38,7 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 - **Teardown this worker**: load [`reference/workflows.md`](reference/workflows.md#teardown-a-worker). If `/amux-claude` pairs may exist, run that skill's paired lifecycle preflight first; then `amux teardown` last.
 - **/amux health**: [`workflows.md`](reference/workflows.md#health-workers-and-runners).
 - **/amux sprawl**: [`workflows.md`](reference/workflows.md#sprawl-independent-issue-workers).
+- **/amux sweep**: one-time staged-drain inventory only; [`workflows.md`](reference/workflows.md#sweep-worktree-inventory).
 - **/amux finish**: [`workflows.md`](reference/workflows.md#finish-a-merged-worker).
 - **Before any worktree remove or prune path**: load [`reference/removal-safety.md`](reference/removal-safety.md).
 
@@ -48,7 +49,7 @@ Experimental external execution is explicit-only. Load **`/amux-tycho`** for the
 ## Load only what you need
 
 - Selectors, side effects, install: [`reference/commands.md`](reference/commands.md)
-- Spawn, health, sprawl, teardown, finish: [`reference/workflows.md`](reference/workflows.md)
+- Spawn, health, sprawl, sweep, teardown, finish: [`reference/workflows.md`](reference/workflows.md)
 - Durable protocol workers must read once: [`reference/contract-v1.md`](reference/contract-v1.md)
 - Coordinator deadlines: [`reference/deadline-v1.md`](reference/deadline-v1.md)
 - Stuck clients / recovery: [`reference/troubleshooting.md`](reference/troubleshooting.md)
