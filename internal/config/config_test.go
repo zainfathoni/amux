@@ -220,6 +220,72 @@ func TestSpawnAssignmentStorePersistsBoundariesWithoutPromptText(t *testing.T) {
 	}
 }
 
+func TestProjectlessHostSpawnAssignmentRoundTripsExactAdmissionBinding(t *testing.T) {
+	path := filepath.Join(t.TempDir(), SpawnAssignmentsFile)
+	record := SpawnAssignmentRecord{
+		SchemaVersion: SpawnAssignmentProjectlessHostSchemaVersion,
+		Admission:     SpawnAssignmentProjectlessHostAdmission,
+		PhysicalHost:  "host-exact",
+		Workspace:     "alpha",
+		Window:        "worker",
+		Workdir:       t.TempDir(),
+		Thread:        "T-exact",
+		Mode:          "high",
+		PromptDigest:  "sha256:" + strings.Repeat("a", 64),
+		Phase:         SpawnAssignmentPrepared,
+		Outcome:       SpawnAssignmentNotAttempted,
+	}
+	if err := StoreSpawnAssignment(path, record); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadSpawnAssignments(path)
+	if err != nil || len(loaded) != 1 || loaded[0] != record {
+		t.Fatalf("loaded=%+v err=%v", loaded, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, exact := range []string{`"schema_version":1`, `"schema_version":2`, `"admission":"` + SpawnAssignmentProjectlessHostAdmission + `"`, `"physical_host":"host-exact"`} {
+		if !strings.Contains(string(data), exact) {
+			t.Errorf("stored exception lacks %s: %s", exact, data)
+		}
+	}
+
+	invalid := record
+	invalid.Admission = ""
+	if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), "invalid post-cutover spawn admission") {
+		t.Fatalf("invalid admission error=%v", err)
+	}
+	invalid = record
+	invalid.SchemaVersion = SpawnAssignmentSchemaVersion
+	if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), "legacy spawn assignment") {
+		t.Fatalf("mixed legacy binding error=%v", err)
+	}
+}
+
+func TestSpawnAssignmentLoadRejectsMissingRecordCutoverProvenance(t *testing.T) {
+	path := filepath.Join(t.TempDir(), SpawnAssignmentsFile)
+	contents := `{"schema_version":1,"assignments":[{"workspace":"alpha","window":"worker","workdir":"/tmp","thread":"T-exact","mode":"high","prompt_digest":"sha256:` + strings.Repeat("a", 64) + `","phase":"prepared","assignment":"not_attempted"}]}`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadSpawnAssignments(path); err == nil || !strings.Contains(err.Error(), "unsupported spawn assignment schema version 0") {
+		t.Fatalf("missing record schema error=%v", err)
+	}
+}
+
+func TestSpawnAssignmentLoadRejectsNonCanonicalWorkdirBinding(t *testing.T) {
+	path := filepath.Join(t.TempDir(), SpawnAssignmentsFile)
+	contents := `{"schema_version":1,"assignments":[{"schema_version":1,"workspace":"alpha","window":"worker","workdir":"relative","thread":"T-exact","mode":"high","prompt_digest":"sha256:` + strings.Repeat("a", 64) + `","phase":"prepared","assignment":"not_attempted"}]}`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadSpawnAssignments(path); err == nil || !strings.Contains(err.Error(), "workdir must be the canonical absolute path") {
+		t.Fatalf("non-canonical workdir error=%v", err)
+	}
+}
+
 func TestStoreReplacesAndPreservesComments(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/workspaces.tsv"

@@ -403,7 +403,7 @@ func TestInvocationPolicyIsProgressivelyDisclosedWithoutChangingClaudeRoutes(t *
 			t.Errorf("invocation policy is missing %q", required)
 		}
 	}
-	for _, required := range []string{"explicit executor", "known linked ChatGPT subscription", "small mechanical work", "ordinary implementation", "hard architecture", "Amp-native `runner(id)`", "does not return a prompt digest", "do not claim exactly-once delivery"} {
+	for _, required := range []string{"exact Workspace Project and Orb", "known linked ChatGPT subscription", "small mechanical work", "ordinary implementation", "hard architecture", "one exact runner ID", "parent/child route", "Do not automatically invoke `amux worker adopt`"} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("native creation workflow is missing %q", required)
 		}
@@ -413,7 +413,7 @@ func TestInvocationPolicyIsProgressivelyDisclosedWithoutChangingClaudeRoutes(t *
 	}
 }
 
-func TestNativeAdoptionDoesNotClaimExecutorMigration(t *testing.T) {
+func TestNativeCreationDoesNotAdoptOrClaimExecutorMigration(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
@@ -423,9 +423,9 @@ func TestNativeAdoptionDoesNotClaimExecutorMigration(t *testing.T) {
 		contents string
 		required []string
 	}{
-		"workflow": {workflow, []string{"Orb creation followed by physical adoption as migration", "Adoption neither changes nor verifies continued affinity", "owner-supplied workdir", "preserves legacy catalog spelling", "execution affinity as `unknown`"}},
+		"workflow": {workflow, []string{"exact Workspace Project and Orb", "one exact runner ID", "Do not automatically invoke `amux worker adopt`", "Same-directory Amux ownership remains separate and unmanaged", "stop without retry"}},
 		"ADR 0003": {adr, []string{"Adoption does not re-home, migrate, or retarget", "does not verify continued affinity", "admission-canonicalized workdir", "authoritative catalog spelling unchanged", "execution affinity as `unknown`"}},
-		"README":   {readme, []string{"Adoption never re-homes the thread or proves where future turns run", "legacy relative value is not a canonical or physical-location claim", "owner-supplied canonical workdir", "execution affinity as `unknown`"}},
+		"README":   {readme, []string{"exact intended Workspace Project and Orb", "one exact live runner", "do **not** automatically run `amux worker adopt`", "do not fall back between executors", "stop without retrying"}},
 	} {
 		for _, required := range check.required {
 			if !strings.Contains(check.contents, required) {
@@ -438,7 +438,7 @@ func TestNativeAdoptionDoesNotClaimExecutorMigration(t *testing.T) {
 func TestDurableTaskGroupLeadTitleGuidanceIsPresent(t *testing.T) {
 	t.Parallel()
 	workflow := readSkillFile(t, repoRoot(t), filepath.Join("skills", "amux", "reference", "workflows.md"))
-	for _, required := range []string{"Every durable task-group Lead title starts with `🎖️ `", "never deliberately apply it to member workers", "presentation only", "neither executor placement nor authoritative group role", "amp threads rename", "create no replacement", "stop before group or adoption mutations"} {
+	for _, required := range []string{"Every durable task-group Lead title starts with `🎖️ `", "never deliberately apply it to member workers", "presentation only", "neither executor placement nor authoritative group role", "Do not rename a thread merely to drain it", "Existing presentation metadata conveys no new authority"} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("durable task-group Lead title guidance is missing %q", required)
 		}
@@ -466,7 +466,7 @@ func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
-	stages := []string{"### 1. Preflight authoritative state and bootstrap the CLI", "### 2. Declare the group and register the verified coordinator lease", "### 3. Native-create and adopt the authoritative thread", "### 4. Persist ready, wake, acknowledge, and independently verify", "### 5. Merge, verify post-merge CI, then authorize finish", "### 6. Submit merged and run `/amux finish`", "### 7. Coordinator-owned deadline queue"}
+	stages := []string{"### 1. Preflight existing authoritative state", "### 2. Revalidate the existing coordinator lease", "### 3. Continue only the existing member", "### 4. Persist ready, wake, acknowledge, and independently verify", "### 5. Merge, verify post-merge CI, then authorize finish", "### 6. Submit merged and run `/amux finish`", "### 7. Coordinator-owned deadline queue"}
 	last := -1
 	for _, stage := range stages {
 		at := strings.Index(workflow, stage)
@@ -476,8 +476,8 @@ func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
 		last = at
 	}
 	for _, required := range []string{
-		"native parent/sub-issue/blocked-by/blocking relationships", "fresh `origin/main`", "issue-unprefixed semantic window", "worker adopt", "--group <durable-issue-group>",
-		"amux --json callback register", "amux report submit --report-id <stable-report-id>", "amux report pending --group <durable-issue-group>", "amux report acknowledge --report-id <stable-report-id>",
+		"native parent/child association", "authenticated child creation", "exact executor/workdir", "task-only assignment", "leave it unmanaged by Amux", "compatibility-only", "Do not add a new member", "--group <durable-issue-group>",
+		"amux report submit --report-id <stable-report-id>", "amux report pending --group <durable-issue-group>", "amux report acknowledge --report-id <stable-report-id>",
 		"PR URL, head branch/SHA", "amux report authorize-finish --report-id <stable-report-id>", "post-merge CI", "--status merged", "amux teardown --thread <member-thread>", "Group membership and report history survive teardown",
 	} {
 		if !strings.Contains(workflow, required) {
@@ -486,19 +486,19 @@ func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
 	}
 }
 
-func TestIssueCoordinationPreservesAndConfiguresDurableIdentity(t *testing.T) {
+func TestIssueCoordinationUsesNativeIdentityAndDrainsExistingDurableIdentity(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
 	readme := readSkillFile(t, root, "README.md")
-	for _, required := range []string{"issue-bearing branch/worktree", "issue-unprefixed semantic window", "exact durable group", "stable report ID", "immutable coordination input"} {
+	for _, required := range []string{"issue-bearing branch/worktree", "issue-unprefixed semantic title", "authenticated native-created thread", "Do not declare an Amux group", "already-recorded member thread", "stable report ID"} {
 		if !strings.Contains(workflow, required) {
-			t.Errorf("workflow is missing durable identity rule %q", required)
+			t.Errorf("workflow is missing native/drain identity rule %q", required)
 		}
 	}
-	for _, required := range []string{"amux group declare --group amux-131", "--report-id amux-133-worker-1 --group amux-133", "explicit local adoption"} {
+	for _, required := range []string{"spawn-native-cutover-v1", "do **not** automatically run `amux worker adopt`", "remain drain-writable only", "worker-family cutover"} {
 		if !strings.Contains(readme, required) {
-			t.Errorf("README is missing durable identity example %q", required)
+			t.Errorf("README is missing native/drain cutover rule %q", required)
 		}
 	}
 }
@@ -512,9 +512,9 @@ func TestConfigurableGroupNamingSourceReferencesStayConsistent(t *testing.T) {
 			t.Errorf("current native workflow still advertises removed automatic spawn naming %q", removed)
 		}
 	}
-	for _, required := range []string{"worker adopt", "exact group", "stable report ID"} {
+	for _, required := range []string{"never automatic after native creation", "projectless physical-host", "stable report ID"} {
 		if !strings.Contains(current, required) {
-			t.Errorf("current native workflow is missing explicit identity %q", required)
+			t.Errorf("current native/drain workflow is missing explicit identity %q", required)
 		}
 	}
 }
@@ -1827,7 +1827,7 @@ func TestCoordinatorSafetyAppearsInPublicReferences(t *testing.T) {
 	}
 }
 
-func TestSkillDrivenSpawnCommandsUseExplicitMode(t *testing.T) {
+func TestBoundedSpawnExceptionCommandsUseExplicitMode(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	for _, relativePath := range publicSkillFiles {
@@ -1846,9 +1846,9 @@ func TestSkillDrivenSpawnCommandsUseExplicitMode(t *testing.T) {
 	}
 
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
-	for _, required := range []string{"MUST pass an explicit mode", "linked ChatGPT subscription", "target-mode availability", "small mechanical work", "ordinary implementation", "hard architecture", "An explicitly requested mode always wins", "special modes remain explicit-only"} {
+	for _, required := range []string{"Every native creation and bounded exception uses an explicit mode", "linked ChatGPT subscription", "target-mode availability", "small mechanical work", "ordinary implementation", "hard architecture", "An explicitly requested mode always wins", "special modes remain explicit-only"} {
 		if !strings.Contains(skill, required) {
-			t.Errorf("SKILL.md is missing spawn policy %q", required)
+			t.Errorf("SKILL.md is missing native creation mode policy %q", required)
 		}
 	}
 }
@@ -1856,20 +1856,27 @@ func TestSkillDrivenSpawnCommandsUseExplicitMode(t *testing.T) {
 func TestSprawlContractUsesDedicatedSemanticWorkers(t *testing.T) {
 	t.Parallel()
 	workflow := readSkillFile(t, repoRoot(t), filepath.Join("skills", "amux", "reference", "workflows.md"))
+	sprawlAt := strings.Index(workflow, "## Sprawl independent issue workers")
+	coordinateAt := strings.Index(workflow, "## Coordinate a durable issue work group")
+	if sprawlAt < 0 || coordinateAt <= sprawlAt {
+		t.Fatal("sprawl workflow section is missing")
+	}
+	sprawl := workflow[sprawlAt:coordinateAt]
 	for _, required := range []string{
 		"native dependency",
 		"one dedicated branch/worktree",
-		"issue-unprefixed semantic window",
+		"issue-unprefixed semantic title",
 		"task-only assignment",
-		"native-created thread",
-		"worker adopt",
+		"authenticated native-created thread",
+		"exact selected live runner",
+		"do not create an Amux worker/group/report representation",
 	} {
-		if !strings.Contains(workflow, required) {
+		if !strings.Contains(sprawl, required) {
 			t.Errorf("sprawl workflow is missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"--window issue-<issue>", "--window #<issue>", "runner spawn"} {
-		if strings.Contains(workflow, forbidden) {
+	for _, forbidden := range []string{"--window issue-<issue>", "--window #<issue>", "runner spawn", "worker adopt"} {
+		if strings.Contains(sprawl, forbidden) {
 			t.Errorf("sprawl workflow contains forbidden guidance %q", forbidden)
 		}
 	}
@@ -3237,13 +3244,13 @@ func TestContractV1IsProgressivelyDisclosedForWorkers(t *testing.T) {
 	if healthAt := strings.Index(coordinate, "## Health workers and runners"); healthAt > 0 {
 		coordinate = coordinate[:healthAt]
 	}
-	for _, required := range []string{"contract-v1.md", "task-only assignment"} {
+	for _, required := range []string{"contract-v1.md", "task-only assignment", "leave it unmanaged by Amux"} {
 		if !strings.Contains(coordinate, required) {
 			t.Errorf("coordinator work-group spawn must carry the contract read requirement: missing %q", required)
 		}
 	}
 	triggers := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md"))
-	if !strings.Contains(triggers, "absolute path to contract-v1") {
+	if !strings.Contains(triggers, "absolute contract-v1 path") {
 		t.Error("trigger checklist must require absolute contract-v1 path on spawn")
 	}
 }
@@ -3762,11 +3769,14 @@ func TestPublicDocsDescribeNarrowProjectlessSpawnException(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	for _, path := range []string{"README.md", filepath.Join("skills", "amux", "SKILL.md"), filepath.Join("skills", "amux", "reference", "commands.md"), filepath.Join("skills", "amux", "reference", "workflows.md")} {
-		contents := readSkillFile(t, root, path)
-		for _, required := range []string{"projectless", "physical", "runner"} {
-			if !strings.Contains(strings.ToLower(contents), required) {
+		contents := strings.ToLower(readSkillFile(t, root, path))
+		for _, required := range []string{"projectless", "physical", "runner", "amux lifecycle"} {
+			if !strings.Contains(contents, required) {
 				t.Errorf("%s does not describe narrow spawn term %q", path, required)
 			}
+		}
+		if !strings.Contains(contents, "owner-authoriz") && !strings.Contains(contents, "owner authoriz") {
+			t.Errorf("%s does not require owner authorization", path)
 		}
 	}
 }

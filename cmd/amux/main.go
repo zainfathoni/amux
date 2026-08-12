@@ -3294,30 +3294,6 @@ Commands:
       row(s). Run launch afterwards to restore live tmux/Amp windows.
       Side effects: unarchives remote Amp thread(s) only.
 
-  spawn [--mode <mode> | -m <mode>] [--title-prefix <prefix>] [--message-file <path> | --message-stdin] <window> <workdir> [<initial-message>] [workspace] [session]
-      Create an empty Amp thread, open it in an interactive tmux window,
-      submit the initial message through tmux, and store the row.
-      Positional <initial-message> is single-line only. Use --message-file or
-      --message-stdin for explicit multi-line prompts; these options are
-      mutually exclusive with positional <initial-message> and each other.
-      With one workspace arg, session defaults to the workspace name; with no
-      workspace arg, defaults remain workspace=mac session=Amp.
-      The spawned Amp process receives AMUX_WORKSPACE, AMUX_SESSION,
-      AMUX_WINDOW, AMUX_THREAD_ID, and AMUX_WORKDIR identity variables.
-      Use --mode or -m to create the remote Amp thread with an Amp mode.
-      Built-in Dial modes are low, medium, high, and ultra; custom/plugin
-      mode strings are passed through unchanged.
-      Use --title-prefix to name the spawned tmux window "<prefix> <window>"
-      and rename only the newly created Amp thread to that same name after the
-      initial message is submitted, for example "#255 worker".
-      If the Amp thread rename fails after the worker is created, spawn reports
-      a warning with a retry command and leaves the created/stored worker intact.
-      Side effects: creates a remote Amp thread, mutates live local tmux/Amp,
-      may rename the new remote Amp thread, and stores the restore-config row
-      under the final window name.
-      With --dry-run, only validate and print intended actions; do not create
-      or rename an Amp thread, mutate tmux, send keys, or update the config.
-
   teardown [<workspace> <window> [session]]
   teardown --thread <thread-id-or-url> [--session <session>]
       With no args, from an amux-spawned Amp process, verify AMUX_* identity,

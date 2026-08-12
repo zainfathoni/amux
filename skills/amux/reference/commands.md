@@ -14,7 +14,7 @@ amux park|restart|remove|doctor|reconcile [selectors]
 amux worker list|launch|park|restart|remove|doctor|reconcile [worker selectors]
 amux runner list|launch|park|restart|remove|doctor|reconcile [runner selectors]
 amux worker pin --workspace <name> --window <name> --workdir <path> --thread <id>
-amux worker adopt --workspace <name> --window <name> --workdir <path> --thread <native-created-id> [--group <id>]
+amux worker adopt --workspace <name> --window <name> --workdir <path> --thread <existing-explicit-adoption-id> [--group <id>]
 amux worker pin --current
 amux worker unpin --thread <id>
 amux worker unpin --current
@@ -23,9 +23,9 @@ amux runner pin --current
 amux runner unpin --workdir <path>
 amux runner unpin --current
 
-# Worker-only concise routes
-amux worker adopt --thread <thread> --workspace <name> --window <slug> --workdir <path> [--group <id>]
+# Worker-only concise routes and spawn drain/exception alias
 amux shelve|unshelve|teardown [--workspace <name>|--thread <id>|--current|--all]
+amux spawn --assignment-phase <prepare|arm|finalize> --workdir <canonical-path> --workspace <assignment-namespace> --window <assignment-key> --mode <mode> --prompt-file <path|-> [phase-specific flags]
 
 # Durable group intent, reports, and ephemeral callbacks
 amux group declare|add|remove|coordinator --group <id> --thread <id>
@@ -71,13 +71,13 @@ Removed commands and positional forms fail with remediation. Do not use `store`,
 | `doctor` | inspect | inspect | inspect | inspect only where needed |
 | `launch` | read; skip shelved workers | read | create/verify selected clients | none |
 | mode-specific `pin` / `unpin` | pin mutates worker registry; unpin removes worker and matching shelf intent | mutate runner registry only | none | none |
-| `worker adopt` | persist exact native-created worker and optional group intent | reject canonical-workdir overlap | create/verify exact local client | inspect active status only; never send a message |
+| `worker adopt` | compatibility path for existing explicit adoption operations; never automatic after native creation | reject canonical-workdir overlap | create/verify exact local client | inspect active status only; never send a message |
 | `park` | preserve | preserve | stop verified selected clients | none |
 | `restart` | preserve | preserve | replace verified selected clients | none |
 | `remove` | remove selected config; remove worker shelf intent | remove selected config | stop verified selected clients | none |
 | `shelve` | record intent first; preserve worker | none | park verified workers | archive selected threads |
 | `unshelve` | remove intent only after unarchive | none | none | unarchive selected threads |
-| `spawn` | durable prepare/arm/finalize state plus exact ownership and optional group intent | reject without native message capability or on ownership overlap | presentation-only exact client after finalization; no prompt input | one empty local create plus one coordinator-native exact-thread message; execution/affinity unproven |
+| `spawn` | reject generalized prepare; drain schema-1 exact state or write only a schema-2 exact-host exception assignment | reject without native message capability, owner authorization, exact host/workdir, or on ownership overlap | none | exception only: one empty exact-host local create plus one coordinator-native exact-thread message; execution unproven |
 | `teardown` | remove worker and shelf intent | none | stop verified worker; absence is benign | archive verified thread |
 | `reconcile` | synchronize shelf/remote drift; remove only proven-missing safe worker bindings | repair stale runner ownership | only verified repairs | worker archive synchronization only for present bindings |
 
@@ -88,7 +88,7 @@ Worker reconcile accepts canonical `--workdir` scope. `workers.tsv` is the sole 
 ## Work-group, report, and callback contract
 
 - Group IDs are at most 32 characters and match `^[a-z0-9]+(?:-[a-z0-9]+)*$` byte-for-byte. Local `groups.tsv` intent is authoritative and survives worker teardown and finish. External labels project member roles only; coordinator identity remains local so long-lived coordinators do not accumulate supervised-group labels. Member labels are add-only: reconcile skips coordinators, removal is local-only and reports `external_sync: unsupported` plus `drift: may_remain_indefinitely`, and promoting an already-labelled member cannot remove its prior label. Coordinator reassignment demotes the prior coordinator to member and reports it separately as `external_sync: additive_ensure_required` plus `drift: label_may_be_missing`; run `group reconcile` to add-only ensure that member's label. Repeated `group declare`/`coordinator` and `group add` targeting an existing coordinator are skipped no-ops that never probe Amp.
-- Prefer native create → adopt when the repository is an Amp Workspace Project. For the projectless physical-host exception, capability-check the coordinator's authenticated `thread_interact` existing-thread message action before mutation. `prepare` creates exactly one empty local thread in the canonical cwd and retains exact ownership; `arm` durably makes interruption indeterminate; the coordinator then sends exactly one unchanged prompt to that exact ID with `thread_interact action=message`; `finalize` records `rejected`, `indeterminate`, or `authenticated_accepted` (requiring successful `latestCursor`) before creating a presentation-only tmux client. Prompt text is never persisted or sent through tmux; its digest only binds unchanged phase input and proves nothing. Tool success/latestCursor proves acceptance/queueing only—not message ID, inference, executor/workdir affinity, or execution. Tool connection or undocumented outcomes are indeterminate; no message, create, paste, Enter, fallback, search, cleanup, or archive is retried automatically. Existing `retained_indeterminate` and legacy 4-column rows remain unchanged and are never upgraded.
+- Ordinary new work uses authenticated native creation directly on the exact intended Workspace Project/Orb or exact live runner/workdir. It is not automatically adopted or represented in any Amux lifecycle store. The projectless physical-host exception requires an exact owner authorization, `--owner-authorized-projectless-physical-host`, byte-exact `--physical-host`, canonical `--workdir`, no group, and the authenticated existing-thread message capability. Prepare binds schema-2 admission, host, workdir, mode, key, and digest before one create; arm permits one message attempt; finalize writes only assignment truth. It creates no worker, group, operation, shelf, or pane state and permits no retry, fallback, reroute, rebind, or adoption. Pre-cutover schema-1 records may only follow their exact next transition and update only `spawn-assignments.json`; unknown provenance fails closed.
 - Report identity is the stable `--report-id` plus immutable group/thread/issue/reference binding. Exact duplicate submission is a skipped replay and retries callback notification. Conflicting reuse and illegal transitions are exit `2`. `ready` requires a PR and means implementation, tests, one review, PR, and normal CI are complete. `blocked` may use `--pr none`; `merged` requires prior durable finish authorization.
 - Submission persists or confirms the report before callback verification. Human fields are tab-separated: recorded submission is `<report><TAB><status><TAB>recorded<TAB><thread>`, exact replay substitutes `duplicate`, and dry-run substitutes `planned`. Its next line is `CALLBACK<TAB><group><TAB><report><TAB>notified`; callback failure substitutes `failed`. Callback failure is exit `1`, with a successful/skipped report outcome and separate failed callback outcome; the report remains pending.
 - `acknowledge` prints `<report><TAB>acknowledged` (or `<report><TAB>duplicate`), but does not authorize finish. `authorize-finish` prints `<report><TAB>authorized` (or `<report><TAB>duplicate`) and is accepted only from the current durable group coordinator for a `ready` report.

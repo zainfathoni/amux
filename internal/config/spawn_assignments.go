@@ -11,7 +11,19 @@ import (
 	"strings"
 )
 
-const SpawnAssignmentSchemaVersion = 1
+const (
+	// SpawnAssignmentSchemaVersion is both the file schema and the legacy record
+	// schema. A record at this version is proof that its admission predates the
+	// native spawn cutover.
+	SpawnAssignmentSchemaVersion = 1
+
+	// SpawnAssignmentProjectlessHostSchemaVersion marks the sole post-cutover
+	// admission route. Keeping it newer than the file schema makes older clients
+	// reject rather than silently erase the exact-host binding.
+	SpawnAssignmentProjectlessHostSchemaVersion = 2
+	SpawnCutoverGeneration                      = "spawn-native-cutover-v1"
+	SpawnAssignmentProjectlessHostAdmission     = SpawnCutoverGeneration + "/projectless-physical-host-exception"
+)
 
 type SpawnAssignmentPhase string
 type SpawnAssignmentOutcome string
@@ -32,6 +44,8 @@ const (
 
 type SpawnAssignmentRecord struct {
 	SchemaVersion int                    `json:"schema_version"`
+	Admission     string                 `json:"admission,omitempty"`
+	PhysicalHost  string                 `json:"physical_host,omitempty"`
 	Workspace     string                 `json:"workspace"`
 	Window        string                 `json:"window"`
 	Workdir       string                 `json:"workdir"`
@@ -82,12 +96,20 @@ func StoreSpawnAssignment(path string, record SpawnAssignmentRecord) error {
 	if record.SchemaVersion == 0 {
 		record.SchemaVersion = SpawnAssignmentSchemaVersion
 	}
-	if err := record.Validate(); err != nil {
+	workdir, err := CanonicalWorkdir(record.Workdir)
+	if err != nil {
 		return err
 	}
-	record.Workdir, _ = CanonicalWorkdir(record.Workdir)
+	record.Workdir = workdir
 	if record.Thread != "" {
-		record.Thread, _ = CanonicalThreadID(record.Thread)
+		thread, err := CanonicalThreadID(record.Thread)
+		if err != nil {
+			return err
+		}
+		record.Thread = thread
+	}
+	if err := record.Validate(); err != nil {
+		return err
 	}
 	records, err := LoadSpawnAssignments(path)
 	if err != nil {
@@ -108,8 +130,24 @@ func StoreSpawnAssignment(path string, record SpawnAssignmentRecord) error {
 }
 
 func (r SpawnAssignmentRecord) Validate() error {
-	if r.SchemaVersion != 0 && r.SchemaVersion != SpawnAssignmentSchemaVersion {
+	if r.SchemaVersion != SpawnAssignmentSchemaVersion && r.SchemaVersion != SpawnAssignmentProjectlessHostSchemaVersion {
 		return fmt.Errorf("unsupported spawn assignment schema version %d", r.SchemaVersion)
+	}
+	switch r.SchemaVersion {
+	case SpawnAssignmentSchemaVersion:
+		if r.Admission != "" || r.PhysicalHost != "" {
+			return errors.New("legacy spawn assignment must not carry post-cutover admission fields")
+		}
+	case SpawnAssignmentProjectlessHostSchemaVersion:
+		if r.Admission != SpawnAssignmentProjectlessHostAdmission {
+			return fmt.Errorf("invalid post-cutover spawn admission %q", r.Admission)
+		}
+		if err := validateField("physical host", r.PhysicalHost); err != nil {
+			return err
+		}
+		if r.Group != "" {
+			return errors.New("projectless physical-host assignment must not carry group intent")
+		}
 	}
 	for name, value := range map[string]string{"workspace": r.Workspace, "window": r.Window, "workdir": r.Workdir, "mode": r.Mode, "prompt digest": r.PromptDigest} {
 		if err := validateField(name, value); err != nil {
@@ -123,8 +161,12 @@ func (r SpawnAssignmentRecord) Validate() error {
 	if _, err := hex.DecodeString(digest); err != nil {
 		return errors.New("prompt digest must be sha256 followed by 64 hexadecimal characters")
 	}
-	if _, err := CanonicalWorkdir(r.Workdir); err != nil {
+	workdir, err := CanonicalWorkdir(r.Workdir)
+	if err != nil {
 		return err
+	}
+	if !filepath.IsAbs(r.Workdir) || r.Workdir != workdir {
+		return fmt.Errorf("spawn assignment workdir must be the canonical absolute path %s", workdir)
 	}
 	if r.Group != "" {
 		if err := ValidateGroupID(r.Group); err != nil {

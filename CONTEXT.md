@@ -37,9 +37,9 @@ _Avoid_: Session when referring to the configured lifecycle group
 
 **Health** — Active, mode-specific verification that configured clients are responsive or running as intended. Worker health uses a verified TUI response; runner health verifies its workdir, ownership, and `amp --no-tui` process.
 
-**Sprawl** — A skill-only workflow that fans independent issues out into instructed interactive workers in separate worktrees. Sprawl does not provision runners or create remote agent threads.
+**Sprawl** — A skill-only workflow that fans independent issues out through authenticated native Amp thread creation on exact Orbs or live runners/workdirs. Native-created children retain Amp parent/reply routing and are not automatically represented as Amux workers, groups, reports, shelves, or panes.
 
-**Finish** — A skill-only post-merge workflow for a sprawled worker. Finish refuses to delete a worktree that is unexpectedly owned by a runner and performs worker teardown only after Git and worktree cleanup succeeds.
+**Finish** — A skill-only post-merge drain workflow for an existing Amux worker. Finish refuses to delete a worktree that is unexpectedly owned by a runner and performs worker teardown only after Git and worktree cleanup succeeds. Native-created unmanaged work does not acquire this lifecycle merely because it came from sprawl.
 
 **Reconcile** — Explicitly repair drift between amux intent and external or runtime state. Worker reconciliation synchronizes shelf intent with remote archive state and removes a `workers.tsv` binding only when its canonical workdir is proven missing, no local worker runtime remains, and no blocked never-authorized report leaves an open obligation. Stale-registration removals preflight as one all-or-nothing plan; a refusal blocks every worker and aggregate runner removal in that plan but does not suppress independent shelf/archive synchronization for workers whose workdirs are present. A directory without a worker binding is reported and preserved because `workers.tsv`, not `reports.json` or `groups.tsv`, is the sole thread↔workdir authority. Runner reconciliation removes stale configuration for missing workdirs without silently adopting ambiguous processes.
 

@@ -926,7 +926,7 @@
               <div class="trigger-row"><span class="trigger-say">“Shelve this”</span><code class="trigger-run">amux shelve --thread …</code></div>
               <div class="trigger-row"><span class="trigger-say">“Restore my workspace”</span><code class="trigger-run">amux launch --workspace …</code></div>
               <div class="trigger-row"><span class="trigger-say">“Doctor amux”</span><code class="trigger-run">amux doctor --workspace … (read-only)</code></div>
-              <div class="trigger-row"><span class="trigger-say">“Coordinate issue workers”</span><code class="trigger-run">skill-only · native creation with explicit task-shaped mode, worker adopt, groups, callbacks, reports</code></div>
+              <div class="trigger-row"><span class="trigger-say">“Coordinate issue workers”</span><code class="trigger-run">authenticated native creation on exact executor/workdir · native reply routing and waiting · no Amux adoption or lifecycle state</code></div>
               <div class="trigger-row"><span class="trigger-say">“/amux health”</span><code class="trigger-run">skill-only · read-only responsiveness check</code></div>
               <div class="trigger-row"><span class="trigger-say">“/amux sprawl”</span><code class="trigger-run">skill-only · coordinated issue workers</code></div>
               <div class="trigger-row"><span class="trigger-say">“/amux finish”</span><code class="trigger-run">skill-only · authorized cleanup; teardown last</code></div>
@@ -1039,10 +1039,10 @@
         },
         spawn: {
           label: "spawn",
-          desc: "Worker creation is native to Amp; adopt the exact returned thread into local amux state.",
-          domains: [0, 2, 3],
-          note: "Create and assign the thread natively with an explicit task-shaped mode, then adopt it; Medium remains the fallback.",
-          script: [{ cmd: "amux worker adopt --thread T-native --workspace product --window fix-spec --workdir ~/Code/product-fix", out: ["native thread adopted into local worker state"] }],
+          desc: "Generalized Amux spawn is closed. Create ordinary work with authenticated native Amp creation on the exact Orb or live runner/workdir, without Amux adoption.",
+          domains: [3],
+          note: "Only an owner-authorized projectless physical-host placement may use the exact host/workdir-bound Amux exception; existing schema-1 assignments are drain-only.",
+          script: [{ cmd: "native Amp thread creation: exact project + Orb, or exact live runner/workdir", out: ["native parent/child route retained; no Amux worker, group, report, shelf, operation, or pane state"] }],
         },
         teardown: {
           label: "teardown",

@@ -35,7 +35,7 @@ var completionCommands = []completionCommand{
 			{Name: "restart", Description: "Restart workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "remove", Description: "Remove workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "adopt", Description: "Adopt a native-created thread", Flags: []string{"--workspace", "--window", "--workdir", "--thread", "--group", "-w", "-W", "-d", "-t"}},
-			{Name: "spawn", Description: "Prepare, arm, or finalize one native local assignment", Flags: []string{"--workdir", "--workspace", "--window", "--group", "--mode", "--prompt-file", "--assignment-phase", "--assignment-outcome", "--native-capability", "--latest-cursor", "--thread", "-d", "-w", "-W", "-m", "-t"}},
+			{Name: "spawn", Description: "Drain an assignment or run the bounded projectless host exception", Flags: []string{"--workdir", "--workspace", "--window", "--group", "--mode", "--prompt-file", "--assignment-phase", "--assignment-outcome", "--native-capability", "--latest-cursor", "--physical-host", "--owner-authorized-projectless-physical-host", "--thread", "-d", "-w", "-W", "-m", "-t"}},
 			{Name: "shelve", Description: "Shelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "unshelve", Description: "Unshelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "teardown", Description: "Teardown workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
@@ -67,7 +67,7 @@ var completionCommands = []completionCommand{
 		{Name: "list", Description: "List worker and runner workspaces", Flags: []string{"--mode", "-m"}},
 	}},
 	{Name: "workspaces", Description: "Exact alias for workspace list", Flags: []string{"--mode", "-m"}},
-	{Name: "spawn", Description: "Prepare, arm, or finalize one native local assignment", Flags: []string{"--workdir", "--workspace", "--window", "--group", "--mode", "--prompt-file", "--assignment-phase", "--assignment-outcome", "--native-capability", "--latest-cursor", "--thread", "-d", "-w", "-W", "-m", "-t"}},
+	{Name: "spawn", Description: "Drain an assignment or run the bounded projectless host exception", Flags: []string{"--workdir", "--workspace", "--window", "--group", "--mode", "--prompt-file", "--assignment-phase", "--assignment-outcome", "--native-capability", "--latest-cursor", "--physical-host", "--owner-authorized-projectless-physical-host", "--thread", "-d", "-w", "-W", "-m", "-t"}},
 	{Name: "shelve", Description: "Shelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 	{Name: "unshelve", Description: "Unshelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 	{Name: "teardown", Description: "Teardown workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
@@ -152,7 +152,7 @@ _amux_complete() {
       else
         case "$leaf" in
 		  adopt) COMPREPLY=( $(compgen -W "--workspace --window --workdir --thread --group -w -W -d -t" -- "$cur") ) ;;
-          spawn) COMPREPLY=( $(compgen -W "--workdir --workspace --window --group --mode --prompt-file --assignment-phase --assignment-outcome --native-capability --latest-cursor --thread -d -w -W -m -t" -- "$cur") ) ;;
+          spawn) COMPREPLY=( $(compgen -W "--workdir --workspace --window --group --mode --prompt-file --assignment-phase --assignment-outcome --native-capability --latest-cursor --physical-host --owner-authorized-projectless-physical-host --thread -d -w -W -m -t" -- "$cur") ) ;;
           pin) COMPREPLY=( $(compgen -W "--workspace --window --workdir --thread --current -w -W -d -t" -- "$cur") ) ;;
           unpin) COMPREPLY=( $(compgen -W "--thread --current -t" -- "$cur") ) ;;
           list) COMPREPLY=( $(compgen -W "--workspace --thread --shelf --current --all -w -t" -- "$cur") ) ;;
@@ -217,7 +217,7 @@ _amux_complete() {
         esac
       fi
       ;;
-    spawn) COMPREPLY=( $(compgen -W "--workdir --workspace --window --group --mode --prompt-file --assignment-phase --assignment-outcome --native-capability --latest-cursor --thread -d -w -W -m -t" -- "$cur") ) ;;
+    spawn) COMPREPLY=( $(compgen -W "--workdir --workspace --window --group --mode --prompt-file --assignment-phase --assignment-outcome --native-capability --latest-cursor --physical-host --owner-authorized-projectless-physical-host --thread -d -w -W -m -t" -- "$cur") ) ;;
     shelve|unshelve|teardown) COMPREPLY=( $(compgen -W "--workspace --thread --current --all -w -t" -- "$cur") ) ;;
     list|launch|park|restart|remove|doctor|reconcile) COMPREPLY=( $(compgen -W "--workspace --thread --workdir --current --all -w -t -d" -- "$cur") ) ;;
     workspaces) COMPREPLY=( $(compgen -W "--mode -m" -- "$cur") ) ;;
@@ -331,7 +331,7 @@ case $state in
         else
           case $leaf in
 		    adopt) _arguments '--workspace[workspace]:workspace:' '--window[window]:window:' '--workdir[working directory]:directory:_directories' '--thread[exact native-created thread id or URL]:thread:' '--group[optional exact durable group]:group:' '-w[workspace]:workspace:' '-W[window]:window:' '-d[working directory]:directory:_directories' '-t[thread id or URL]:thread:' ;;
-            spawn) _arguments '--workdir[canonical physical workdir]:directory:_directories' '--workspace[tmux workspace]:workspace:' '--window[semantic window]:window:' '--group[optional existing group]:group:' '--mode[exact mode]:mode:(low medium high ultra)' '--prompt-file[prompt path or -]:file:_files' '--assignment-phase[prepare arm or finalize]:phase:(prepare arm finalize)' '--assignment-outcome[native message outcome]:outcome:(rejected indeterminate authenticated_accepted)' '--native-capability[caller-confirmed capability]:capability:(existing-thread-message-v1)' '--latest-cursor[native acceptance cursor]:cursor:' '--thread[exact thread]:thread:' '-d[canonical physical workdir]:directory:_directories' '-w[tmux workspace]:workspace:' '-W[semantic window]:window:' '-m[exact mode]:mode:(low medium high ultra)' '-t[exact thread]:thread:' ;;
+            spawn) _arguments '--workdir[canonical physical workdir]:directory:_directories' '--workspace[assignment namespace]:workspace:' '--window[assignment key]:window:' '--group[pre-cutover drain group only]:group:' '--mode[exact mode]:mode:(low medium high ultra)' '--prompt-file[prompt path or -]:file:_files' '--assignment-phase[prepare arm or finalize]:phase:(prepare arm finalize)' '--assignment-outcome[native message outcome]:outcome:(rejected indeterminate authenticated_accepted)' '--native-capability[caller-confirmed capability]:capability:(existing-thread-message-v1)' '--latest-cursor[native acceptance cursor]:cursor:' '--physical-host[exact local hostname]:host:' '--owner-authorized-projectless-physical-host[owner authorized the bounded exception]' '--thread[exact thread]:thread:' '-d[canonical physical workdir]:directory:_directories' '-w[assignment namespace]:workspace:' '-W[assignment key]:window:' '-m[exact mode]:mode:(low medium high ultra)' '-t[exact thread]:thread:' ;;
             pin) _arguments '--workspace[workspace]:workspace:' '--window[window]:window:' '--workdir[working directory]:directory:_directories' '--thread[thread id or URL]:thread:' '--current[current worker]' '-w[workspace]:workspace:' '-W[window]:window:' '-d[working directory]:directory:_directories' '-t[thread id or URL]:thread:' ;;
             unpin) _arguments '--thread[thread id or URL]:thread:' '--current[current worker]' '-t[thread id or URL]:thread:' ;;
             list) _arguments '--workspace[workspace]:workspace:' '--thread[thread id or URL]:thread:' '--shelf[shelf intent]:intent:(shelved unshelved)' '--current[current worker]' '--all[all workers]' '-w[workspace]:workspace:' '-t[thread id or URL]:thread:' ;;
@@ -409,7 +409,7 @@ case $state in
         _arguments '--thread[select by thread id or URL]:thread:' '--workspace[select workspace]:workspace:' '--current[current worker]' '--all[all workers]' '-t[select by thread id or URL]:thread:' '-w[select workspace]:workspace:'
         ;;
       spawn)
-        _arguments '--workdir[canonical physical workdir]:directory:_directories' '--workspace[tmux workspace]:workspace:' '--window[semantic window]:window:' '--group[optional existing group]:group:' '--mode[exact mode]:mode:(low medium high ultra)' '--prompt-file[prompt path or -]:file:_files' '-d[canonical physical workdir]:directory:_directories' '-w[tmux workspace]:workspace:' '-W[semantic window]:window:' '-m[exact mode]:mode:(low medium high ultra)'
+        _arguments '--workdir[canonical physical workdir]:directory:_directories' '--workspace[assignment namespace]:workspace:' '--window[assignment key]:window:' '--group[pre-cutover drain group only]:group:' '--mode[exact mode]:mode:(low medium high ultra)' '--prompt-file[prompt path or -]:file:_files' '--assignment-phase[prepare arm or finalize]:phase:(prepare arm finalize)' '--assignment-outcome[native message outcome]:outcome:(rejected indeterminate authenticated_accepted)' '--native-capability[caller-confirmed capability]:capability:(existing-thread-message-v1)' '--latest-cursor[native acceptance cursor]:cursor:' '--physical-host[exact local hostname]:host:' '--owner-authorized-projectless-physical-host[owner authorized the bounded exception]' '--thread[exact thread]:thread:' '-d[canonical physical workdir]:directory:_directories' '-w[assignment namespace]:workspace:' '-W[assignment key]:window:' '-m[exact mode]:mode:(low medium high ultra)' '-t[exact thread]:thread:'
         ;;
       teardown)
         _arguments '--thread[select by thread id or URL]:thread:' '--workspace[select workspace]:workspace:' '--current[current worker]' '--all[all workers]' '-t[select by thread id or URL]:thread:' '-w[select workspace]:workspace:'
@@ -787,6 +787,10 @@ func flagDescription(flag string) string {
 		return "Caller-confirmed native message capability"
 	case "--latest-cursor":
 		return "Native acceptance cursor"
+	case "--physical-host":
+		return "Exact local physical host"
+	case "--owner-authorized-projectless-physical-host":
+		return "Owner authorized the bounded projectless host exception"
 	case "--idempotency-key":
 		return "Stable spawn operation key"
 	case "--include-runners":
@@ -802,7 +806,7 @@ func flagDescription(flag string) string {
 
 func flagTakesValue(flag string) bool {
 	switch flag {
-	case "--config-dir", "-c", "--terminal-launcher", "--thread", "-t", "--group", "--pane", "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--shelf", "--mode", "-m", "--title-prefix", "--work-item-id", "--worker-ordinal", "--message", "--message-file", "--idempotency-key", "--report-id", "--status", "--issue", "--reference", "--pr", "--summary", "--update-owner", "--prompt-file", "--assignment-phase", "--assignment-outcome", "--native-capability", "--latest-cursor":
+	case "--config-dir", "-c", "--terminal-launcher", "--thread", "-t", "--group", "--pane", "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--shelf", "--mode", "-m", "--title-prefix", "--work-item-id", "--worker-ordinal", "--message", "--message-file", "--idempotency-key", "--report-id", "--status", "--issue", "--reference", "--pr", "--summary", "--update-owner", "--prompt-file", "--assignment-phase", "--assignment-outcome", "--native-capability", "--latest-cursor", "--physical-host":
 		return true
 	default:
 		return false

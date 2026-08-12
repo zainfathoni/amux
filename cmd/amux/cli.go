@@ -29,36 +29,38 @@ type cliOptions struct {
 }
 
 type selectors struct {
-	Workspace         string
-	Window            string
-	Workdir           string
-	Thread            string
-	Group             string
-	Groups            []string
-	Mode              string
-	TitlePrefix       string
-	WorkItemID        string
-	WorkerOrdinal     string
-	Current           bool
-	All               bool
-	Shelf             string
-	IdempotencyKey    string
-	ReportID          string
-	Pane              string
-	Status            string
-	Issue             string
-	Reference         string
-	PRURL             string
-	Summary           string
-	Message           string
-	MessageFile       string
-	MessageStdin      bool
-	PromptFile        string
-	AssignmentPhase   string
-	AssignmentOutcome string
-	NativeCapability  string
-	LatestCursor      string
-	Reconcile         bool
+	Workspace                              string
+	Window                                 string
+	Workdir                                string
+	Thread                                 string
+	Group                                  string
+	Groups                                 []string
+	Mode                                   string
+	TitlePrefix                            string
+	WorkItemID                             string
+	WorkerOrdinal                          string
+	Current                                bool
+	All                                    bool
+	Shelf                                  string
+	IdempotencyKey                         string
+	ReportID                               string
+	Pane                                   string
+	Status                                 string
+	Issue                                  string
+	Reference                              string
+	PRURL                                  string
+	Summary                                string
+	Message                                string
+	MessageFile                            string
+	MessageStdin                           bool
+	PromptFile                             string
+	AssignmentPhase                        string
+	AssignmentOutcome                      string
+	NativeCapability                       string
+	LatestCursor                           string
+	PhysicalHost                           string
+	OwnerAuthorizedProjectlessPhysicalHost bool
+	Reconcile                              bool
 }
 
 type commandSpec struct {
@@ -166,12 +168,13 @@ func workerLeaf(name, summary string, mutating bool, flags ...string) *commandSp
 }
 
 func workerSpawnCommand(usage string) *commandSpec {
-	return workerLeaf("spawn", "Prepare, arm, or finalize one native local assignment", true,
+	return workerLeaf("spawn", "Drain an existing assignment or run the bounded projectless host exception", true,
 		"--workdir, -d <canonical-path>", "--workspace, -w <name>",
 		"--window, -W <name>", "--group <existing-id>", "--mode, -m <mode> (default medium)",
 		"--prompt-file <path|->", "--assignment-phase <prepare|arm|finalize>",
 		"--assignment-outcome <rejected|indeterminate|authenticated_accepted>",
 		"--native-capability <existing-thread-message-v1>", "--latest-cursor <opaque-value>",
+		"--physical-host <exact-local-host>", "--owner-authorized-projectless-physical-host",
 		"--thread, -t <exact-id>")
 }
 
@@ -557,7 +560,7 @@ func commandOptionRequiresValue(arg string) bool {
 	case "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--thread", "-t",
 		"--group", "--mode", "-m", "--title-prefix", "--work-item-id", "--worker-ordinal", "--shelf", "--idempotency-key",
 		"--report-id", "--pane", "--status", "--issue", "--reference", "--pr", "--summary",
-		"--message", "--message-file", "--prompt-file", "--update-owner":
+		"--message", "--message-file", "--prompt-file", "--physical-host", "--update-owner":
 		return true
 	default:
 		return false
@@ -763,7 +766,7 @@ func parseSelectors(args []string) (selectors, []string, error) {
 			if err := setSelector(&parsed.PromptFile, value, name); err != nil {
 				return parsed, nil, err
 			}
-		case "--assignment-phase", "--assignment-outcome", "--native-capability", "--latest-cursor":
+		case "--assignment-phase", "--assignment-outcome", "--native-capability", "--latest-cursor", "--physical-host":
 			value, next, err := selectorValue(args, i, name, inline, hasInline)
 			if err != nil {
 				return parsed, nil, err
@@ -774,10 +777,19 @@ func parseSelectors(args []string) (selectors, []string, error) {
 				"--assignment-outcome": &parsed.AssignmentOutcome,
 				"--native-capability":  &parsed.NativeCapability,
 				"--latest-cursor":      &parsed.LatestCursor,
+				"--physical-host":      &parsed.PhysicalHost,
 			}[name]
 			if err := setSelector(target, value, name); err != nil {
 				return parsed, nil, err
 			}
+		case "--owner-authorized-projectless-physical-host":
+			if hasInline {
+				return parsed, nil, errors.New("--owner-authorized-projectless-physical-host does not accept a value")
+			}
+			if parsed.OwnerAuthorizedProjectlessPhysicalHost {
+				return parsed, nil, errors.New("--owner-authorized-projectless-physical-host may be specified only once")
+			}
+			parsed.OwnerAuthorizedProjectlessPhysicalHost = true
 		case "--message-stdin":
 			if hasInline {
 				return parsed, nil, errors.New("--message-stdin does not accept a value")
@@ -869,6 +881,7 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 		{"--assignment-outcome", parsed.AssignmentOutcome},
 		{"--native-capability", parsed.NativeCapability},
 		{"--latest-cursor", parsed.LatestCursor},
+		{"--physical-host", parsed.PhysicalHost},
 	}
 	for _, test := range tests {
 		if test.value != "" && !commandAcceptsFlag(command, test.name) {
@@ -921,6 +934,14 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 		if err := config.ValidateField("mode", parsed.Mode); err != nil {
 			return err
 		}
+	}
+	if parsed.PhysicalHost != "" {
+		if err := config.ValidateField("physical host", parsed.PhysicalHost); err != nil {
+			return err
+		}
+	}
+	if parsed.OwnerAuthorizedProjectlessPhysicalHost && !commandAcceptsFlag(command, "--owner-authorized-projectless-physical-host") {
+		return fmt.Errorf("%s does not accept --owner-authorized-projectless-physical-host; run `amux help %s`", command.UsageName(), command.UsageName())
 	}
 	if parsed.TitlePrefix != "" {
 		if err := config.ValidateField("title-prefix", parsed.TitlePrefix); err != nil {
@@ -991,7 +1012,7 @@ func compactStrings(values []string) []string {
 }
 
 func selectorsEmpty(parsed selectors) bool {
-	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && parsed.WorkItemID == "" && parsed.WorkerOrdinal == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && parsed.PromptFile == "" && parsed.AssignmentPhase == "" && parsed.AssignmentOutcome == "" && parsed.NativeCapability == "" && parsed.LatestCursor == "" && !parsed.Reconcile
+	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && parsed.WorkItemID == "" && parsed.WorkerOrdinal == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && parsed.PromptFile == "" && parsed.AssignmentPhase == "" && parsed.AssignmentOutcome == "" && parsed.NativeCapability == "" && parsed.LatestCursor == "" && parsed.PhysicalHost == "" && !parsed.OwnerAuthorizedProjectlessPhysicalHost && !parsed.Reconcile
 }
 
 func isGroupPath(path []string) bool {

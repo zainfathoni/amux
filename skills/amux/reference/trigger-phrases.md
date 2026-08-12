@@ -15,12 +15,12 @@ This table is the complete activation and routing contract for [`../SKILL.md`](.
 | `Show shelved work` | `amux worker list --shelf shelved` | Local shelf intent only. |
 | `Unshelve this` | `amux unshelve --current` or `--thread <id>` | Unarchive, then remove intent; do not launch. |
 | `Restore my workspace` | `amux launch --workspace <name>` | Aggregate by default; worker route narrows. |
-| `Spawn a worker for` | workflow, native thread creation, then `amux worker adopt ...` | Explicit task-shaped Low/Medium/High when ChatGPT routing and availability are known; otherwise Medium; task-only native message + absolute path to contract-v1 (read once). |
-| `Coordinate issue workers` | [`workflows.md#coordinate-a-durable-issue-work-group`](workflows.md#coordinate-a-durable-issue-work-group) | Durable group/report/auth; callback is wake-up only. |
+| `Spawn a worker for` | authenticated native thread creation on the exact Orb or live runner/workdir; projectless host exception only with exact owner authorization | Never auto-adopt or create Amux state; explicit task-shaped Low/Medium/High when routing and availability are known, otherwise Medium; absolute contract-v1 path. |
+| `Coordinate issue workers` | native parent/child creation, reply routing, messaging, and waiting; existing durable groups are drain-only | No new Amux worker/group/report representation. |
 | `Teardown this worker` | [`workflows.md#teardown-a-worker`](workflows.md#teardown-a-worker), then `amux teardown` | Paired Claude preflight only if `/amux-claude` may apply; Amp teardown last. |
 | `Doctor amux` | aggregate or mode-specific `doctor` | Read-only diagnosis. |
 | `/amux health` | [`workflows.md#health-workers-and-runners`](workflows.md#health-workers-and-runners) | Skill-only aggregate, safe mode-specific probes. |
-| `/amux sprawl` | [`workflows.md#sprawl-independent-issue-workers`](workflows.md#sprawl-independent-issue-workers) | Skill-only, worker-only fan-out. |
+| `/amux sprawl` | [`workflows.md#sprawl-independent-issue-workers`](workflows.md#sprawl-independent-issue-workers) | Skill-only native fan-out; no Amux adoption/lifecycle state. |
 | `/amux finish` | [`workflows.md#finish-a-merged-worker`](workflows.md#finish-a-merged-worker) | Skill-only; fail closed on runner ownership. |
 
 When editing a trigger, update the frontmatter description, top-level routing, this table, its linked workflow/reference, and consistency tests together.
