@@ -33,11 +33,13 @@ Amux still has evidence that native Amp does not replace directly: historical th
 
 After the owning implementation change cuts over an operation family, no command, skill, migration, or recovery path may create a new resource in that family. In particular:
 
-- native Amp creates all new Amp threads and selects their Orb or exact runner placement;
-- no newly created native thread is adopted, pinned, grouped, shelved, or assigned an Amux report merely for local representation;
+- native authenticated Amp thread creation is the default for all new work and must select the exact intended Orb or live runner and workdir directly; generalized `amux spawn` is not a new-work route;
+- a native-created thread is not automatically passed through `amux worker adopt`, pinned, grouped, shelved, or assigned an Amux report merely for local representation; if its workdir conflicts with an existing same-directory Amux ownership claim, Amux leaves it unmanaged rather than adopting, rebinding, or manufacturing exclusive ownership;
 - no new Amux runner is pinned or maintenance schedule installed; local Amp runner processes move to explicit native runner IDs and owner-selected operating-system supervision;
 - no new group, callback lease, deadline, finish authorization, or general report is created; and
 - no replacement resource may be created to make an old indeterminate operation appear recoverable.
+
+The only retained new-work exception is an explicit owner-authorized projectless physical-host route where native project-backed Orb/runner creation cannot express the requested placement. It is not a generalized spawn fallback: it must bind one exact physical host and workdir before launch, create no group or unrelated lifecycle state, and remain fail-closed on any identity, placement, ownership, launch, or delivery ambiguity. An indeterminate attempt is preserved as indeterminate and is never retried, adopted, rebound, or rerouted through another host, Orb, runner, or transport. Remove this exception when native authenticated creation can represent the same projectless physical-host placement.
 
 Cutover is per operation family, not one global flag. The implementation and release notes must publish the exact cutover generation for each family. A client that cannot prove whether the target record predates that generation fails closed.
 
@@ -45,17 +47,17 @@ Cutover is per operation family, not one global flag. The implementation and rel
 
 `/amux-tycho` remains available under its current explicit-only, report-only receipt contract until a direct route has been field-validated. This is the only temporary exception that may create new compatibility records after core admission starts closing, because deleting the bridge first would make provider output less trustworthy rather than more native.
 
-The replacement gate requires one ordinary owner-authorized task to prove all of the following in one route:
+The authenticated direct structured-return acceptance gate requires one ordinary owner-authorized task to prove all of the following in one route:
 
 1. one exact owner-selected Tycho route is spawned without fallback;
-2. the request is bound to the intended task and artifact identity;
-3. the caller receives one bounded structured `complete` or `blocked` response through the direct route;
+2. the request and returned result are authenticated and correlated to the invoking Amp request/thread and the intended task and artifact identity;
+3. that caller receives exactly one schema-valid, bounded structured `complete` or `blocked` response directly through the selected route;
 4. provider exit, logs, pane text, memory, and unbound prose are not accepted as the response;
 5. `blocked` carries its exact blockers and incomplete scope;
 6. the Amp caller independently verifies any finding and remains the only authority for GitHub or other shared mutation; and
 7. interruption and no-response behavior produce no finding and no automatic retry.
 
-The target response contains only `status`, `summary`, `findings`, `blockers`, and `verification`, with reviewed bounds. Reading that authenticated structured response establishes delivery; the replacement adds no Amux consume/acknowledge ceremony. Once the field gate is accepted, new Tycho receipt creation stops at a published generation. Existing created, reported, delivered, cleanup-pending, and indeterminate receipts continue only through the old bridge's exact drain paths until terminal or explicitly retained. The old and new routes never run for the same task.
+The target response contains only `status`, `summary`, `findings`, `blockers`, and `verification`, with reviewed bounds. Returning that authenticated structured response directly to the invoking caller establishes delivery; the replacement uses no Amux receipt, consume, or acknowledge step. Once this single field gate is accepted, new Tycho receipt creation stops at a published generation. Existing receipts drain only through their current exact lifecycle, `created → valid_report → delivered → acknowledged|abandoned`. `acknowledged` and `abandoned` are terminal receipt states; notification uncertainty and terminal capability-cleanup status remain separate metadata and never become receipt states. The old and new routes never run for the same task.
 
 ## Drain-only mutation contract
 
@@ -69,7 +71,7 @@ Read-only-at-once is unsafe. Existing armed sends, pending reports, shelf transi
 - the result is terminal or strictly closer to terminal under the existing state machine; and
 - the operation is recorded by the existing store only, never also by a new native or Amux store.
 
-Allowed examples include finalizing an already armed spawn without resending; acknowledging or finishing an already authorized report; completing an already recorded shelve/unshelve transition; safely parking or removing an already configured worker or runner; replaying terminal Tycho capability cleanup; and explicitly abandoning an eligible created-only Tycho receipt. Listing, doctor, history, pending, export, and integrity checks remain read-only.
+Allowed examples include finalizing an already armed pre-cutover spawn without resending; acknowledging or finishing an already authorized report; completing an already recorded shelve/unshelve transition; safely parking or removing an already configured worker or runner; replaying terminal Tycho capability cleanup; and explicitly abandoning an eligible created-only Tycho receipt. Listing, doctor, history, pending, export, and integrity checks remain read-only. The projectless physical-host exception above is a separately bounded admission exception, not a reason to treat other new spawns as drain work.
 
 Forbidden examples include pinning a replacement worker to drain an old one, creating a new group/report to describe migration, upgrading indeterminate delivery to accepted, resending after an armed or accepted attempt, recreating a missing worker, or writing both an Amux transition and a native replacement record for one operation.
 
@@ -82,11 +84,11 @@ admission open → admission closed / drain writable → exported and frozen
 → compatibility readable → writer and schema support removed
 ```
 
-Before freeze, the migration inventory must account for every record and classify it as terminal, explicitly retained, indeterminate-preserved, or blocked with an owner and next action. Export is versioned, privacy-safe, deterministic, and lossless for identity, event history, assignment state, authorization, and uncertainty. Export never claims that a cursor proves execution or that absent runtime proves successful cleanup.
+Before freeze, per-store accounting must classify every record as terminal, explicitly retained, indeterminate-preserved, or blocked with an owner and next action. Export is versioned, privacy-safe, deterministic, and lossless for identity, event history, assignment state, authorization, and uncertainty. Export never claims that a cursor proves execution or that absent runtime proves successful cleanup. This accounting does not extend or rerun the one-time `/amux sweep` inventory.
 
 Frozen source files stay at their original paths through the compatibility window. They are not automatically deleted, moved, compacted, upgraded, or imported into a second database. The compatibility reader performs no reconciliation or mutation. A release that removes a writer must state the minimum reader version, downgrade boundary, sunset date, and recovery path for unsupported or corrupt state.
 
-The exact duration of the read-only compatibility window is a release decision. Its completion gate is evidence-based: at least one released reader can inspect every frozen schema, the migration inventory has no unowned blocker, and release notes identify where the immutable export and original files remain.
+The exact duration of the read-only compatibility window is a release decision. Its completion gate is evidence-based: at least one released reader can inspect every frozen schema, the per-store accounting has no unowned blocker, and release notes identify where the immutable export and original files remain.
 
 ## Runner orphan migration and issue #232
 
@@ -112,7 +114,7 @@ The safety surface must not grow into a retirement ledger, provider reconciler, 
 ## Rollout sequence
 
 1. **Adopt this direction:** publish the superseding ADR and active disposition ledger. Make no runtime claim from documentation alone.
-2. **Bound the inventory:** narrow PR #360 to a one-time migration inventory with explicit sunset conditions; do not turn it into a permanent sweep/reconciler.
+2. **Run and remove the bounded inventory:** merged PR #360 provides one strictly read-only migration inventory and completed #351. After the owner accepts one inventory or explicitly dispositions it incomplete/error and confirms no repeat is required, delete the helper, sweep-only tests, and every `/amux sweep` route/reference before the next Amux release. Do not wait for store freeze or reuse it as a recurring or final reconciler.
 3. **Close the runner safety gap:** implement and test the #232 migration preflight before closing runner admission.
 4. **Validate direct Tycho return:** retain the current bridge until the field gate above passes.
 5. **Close admission per family:** native Amp becomes the sole owner for new work; publish each cutover generation and reject new Amux resources.
