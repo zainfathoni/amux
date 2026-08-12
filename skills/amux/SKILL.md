@@ -1,6 +1,6 @@
 ---
 name: amux
-description: "Manage local Amp worker, runner, workspace, and work-group orchestration with amux. Use for pin/unpin/park/restart/shelve/unshelve/launch/spawn, doctor, teardown, /amux health, /amux sprawl, /amux sweep, /amux finish, and coordinate issue workers. Also 'forget this on restore', 'hide it for now', 'defer this workspace', 'Show shelved work', and 'Restore my workspace'. Experimental Tycho, Claude, or Pi routes are separate explicit-only skills (/amux-tycho, /amux-claude, /amux-pi)."
+description: "Manage local Amp worker, runner, workspace, and work-group orchestration with amux. Use for pin/unpin/park/restart/shelve/unshelve/launch/spawn, doctor, teardown, /amux health, /amux sprawl, the one-time staged-drain /amux sweep, /amux finish, and coordinate issue workers. Also 'forget this on restore', 'hide it for now', 'defer this workspace', 'Show shelved work', and 'Restore my workspace'. Experimental Tycho, Claude, or Pi routes are separate explicit-only skills (/amux-tycho, /amux-claude, /amux-pi)."
 ---
 
 # amux
@@ -38,7 +38,7 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 - **Teardown this worker**: load [`reference/workflows.md`](reference/workflows.md#teardown-a-worker). If `/amux-claude` pairs may exist, run that skill's paired lifecycle preflight first; then `amux teardown` last.
 - **/amux health**: [`workflows.md`](reference/workflows.md#health-workers-and-runners).
 - **/amux sprawl**: [`workflows.md`](reference/workflows.md#sprawl-independent-issue-workers).
-- **/amux sweep**: [`workflows.md`](reference/workflows.md#sweep-worktree-inventory).
+- **/amux sweep**: one-time staged-drain inventory only; [`workflows.md`](reference/workflows.md#sweep-worktree-inventory).
 - **/amux finish**: [`workflows.md`](reference/workflows.md#finish-a-merged-worker).
 - **Before any worktree remove or prune path**: load [`reference/removal-safety.md`](reference/removal-safety.md).
 

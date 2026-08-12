@@ -3018,6 +3018,10 @@ func TestSweepWorkflowDocumentsReadOnlyAuthorityBoundary(t *testing.T) {
 		"removal_verdict=NOT_EVALUATED",
 		"no fetch, cleanup, reconciliation, removal, unlock, prune, backup-ref mutation",
 		"Preservation-locked historical resources",
+		"one-time read-only migration inventory for the staged Amux drain",
+		"after the owner records acceptance of one complete staged-drain inventory",
+		"delete `scripts/sweep-inventory`, its sweep-only tests, and every `/amux sweep` route/reference before the next Amux release",
+		"Do not promote the helper into the CLI, retain it as a standing diagnostic, schedule it, or extend it for post-drain monitoring",
 	} {
 		if !strings.Contains(skill+workflow, required) {
 			t.Errorf("sweep contract lacks %q", required)
