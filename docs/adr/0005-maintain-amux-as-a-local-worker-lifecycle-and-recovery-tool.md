@@ -1,10 +1,13 @@
 ---
-status: accepted
+status: superseded
 date: 2026-07-30
 supersedes: 0004
+superseded-by: 0007
 ---
 
 # Maintain amux as a local worker lifecycle and recovery tool
+
+> **Historical decision:** [ADR 0007](0007-retire-amux-through-native-cutover-and-staged-drain.md) supersedes the permanent maintained-lifecycle mission. Exact identity, no-blind-retry, and preservation invariants remain migration requirements, but new work moves to native Amp and existing state drains before writers are removed.
 
 ## Decision
 
