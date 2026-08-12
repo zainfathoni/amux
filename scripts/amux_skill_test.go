@@ -2380,6 +2380,37 @@ func TestSweepInventoryMalformedInputsAndPathsFailClosed(t *testing.T) {
 		}
 	})
 
+	t.Run("ancestor symlink aliases canonicalize to one identity", func(t *testing.T) {
+		root, repo, configDir := newSweepInventoryFixture(t)
+		aliasParent := filepath.Join(t.TempDir(), "alias-parent")
+		if err := os.Symlink(filepath.Dir(root), aliasParent); err != nil {
+			t.Fatal(err)
+		}
+		aliasRoot := filepath.Join(aliasParent, filepath.Base(root))
+		workers, err := os.ReadFile(filepath.Join(configDir, "workers.tsv"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		workers = []byte(strings.ReplaceAll(string(workers), root, aliasRoot))
+		if err := os.WriteFile(filepath.Join(configDir, "workers.tsv"), workers, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		output, exit := runSweepInventory(t, filepath.Join(repoRoot(t), "skills", "amux", "scripts", "sweep-inventory"), "--repo", repo, "--config-dir", configDir, "--amux", buildSweepAmux(t), "--filesystem-root", aliasRoot, "--json")
+		var document sweepDocument
+		if err := json.Unmarshal([]byte(output), &document); err != nil {
+			t.Fatal(err)
+		}
+		joined := 0
+		for _, row := range document.Rows {
+			if row["thread"] == "T-open" && row["git_registration"] == true && row["worker_record"] == true {
+				joined++
+			}
+		}
+		if exit != 0 || joined != 1 {
+			t.Fatalf("ancestor alias split one physical identity: exit=%d\n%s", exit, output)
+		}
+	})
+
 	t.Run("authoritative report validation rejects impossible stores", func(t *testing.T) {
 		root, repo, configDir := newSweepInventoryFixture(t)
 		invalid := `{"schema_version":1,"reports":[{"schema_version":1,"report_id":"bad","member_thread":"T-open","status":"blocked","authorized_at":"garbage","unknown":true}],"deadlines":[{"group_id":"bad"}]}`
@@ -2413,6 +2444,26 @@ func TestSweepInventoryMalformedInputsAndPathsFailClosed(t *testing.T) {
 			if exit != 2 || strings.Contains(output, `"worker_record":true`) || strings.Contains(output, `"classification":"open_lifecycle_obligation"`) {
 				t.Fatalf("ambiguous worker order reverse=%t selected authority: exit=%d\n%s", reverse, exit, output)
 			}
+		}
+	})
+
+	t.Run("all current worker assignment states are accepted", func(t *testing.T) {
+		root, repo, configDir := newSweepInventoryFixture(t)
+		states := []string{"", "retained_indeterminate", "native_not_attempted", "native_rejected", "native_indeterminate", "authenticated_accepted"}
+		var rows []string
+		for index, state := range states {
+			row := fmt.Sprintf("ws\tstate-%d\t%s\tT-state-%d", index, filepath.Join(root, fmt.Sprintf("state-%d", index)), index)
+			if state != "" {
+				row += "\t" + state
+			}
+			rows = append(rows, row)
+		}
+		if err := os.WriteFile(filepath.Join(configDir, "workers.tsv"), []byte(strings.Join(rows, "\n")+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		output, exit := runSweepInventory(t, filepath.Join(repoRoot(t), "skills", "amux", "scripts", "sweep-inventory"), "--repo", repo, "--config-dir", configDir, "--amux", buildSweepAmux(t), "--filesystem-root", root, "--json")
+		if exit != 0 || strings.Contains(output, "unsupported assignment state") {
+			t.Fatalf("current assignment states rejected: exit=%d\n%s", exit, output)
 		}
 	})
 
@@ -2464,6 +2515,27 @@ func TestSweepPresentationFiltersNeverChangeSafety(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitTest(t, worktree, "stash", "push", "-m", "generated-only")
+	if err := os.WriteFile(filepath.Join(worktree, "dist/untracked.js"), []byte("untracked stash\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, worktree, "stash", "push", "-u", "-m", "untracked-generated")
+	unmanaged := filepath.Join(root, "unmanaged")
+	if err := os.WriteFile(filepath.Join(unmanaged, "tracked.txt"), []byte("other branch stash\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, unmanaged, "stash", "push", "-m", "mentions open-worker in prose")
+	indexPath := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "--git-path", "index"))
+	if !filepath.IsAbs(indexPath) {
+		indexPath = filepath.Join(worktree, indexPath)
+	}
+	staleTime := time.Now().Add(time.Hour)
+	if err := os.Chtimes(filepath.Join(worktree, "tracked.txt"), staleTime, staleTime); err != nil {
+		t.Fatal(err)
+	}
+	indexBefore, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	args := []string{
 		filepath.Join(repoRoot(t), "skills", "amux", "scripts", "sweep-inventory"),
 		"--repo", repo, "--config-dir", configDir, "--amux", buildSweepAmux(t), "--filesystem-root", root,
@@ -2472,6 +2544,13 @@ func TestSweepPresentationFiltersNeverChangeSafety(t *testing.T) {
 	output, exit := runSweepInventory(t, args...)
 	if exit != 0 {
 		t.Fatalf("presentation sweep exit=%d\n%s", exit, output)
+	}
+	indexAfter, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(indexBefore, indexAfter) {
+		t.Error("read-only sweep refreshed or rewrote the external worktree index")
 	}
 	var document sweepDocument
 	if err := json.Unmarshal([]byte(output), &document); err != nil {
@@ -2490,7 +2569,8 @@ func TestSweepPresentationFiltersNeverChangeSafety(t *testing.T) {
 			t.Errorf("unexpected precious presentation: %#v", precious)
 		}
 		stashes := presentation["stashes"].([]any)
-		if len(stashes) != 1 || !strings.Contains(fmt.Sprint(stashes), "dist/generated.js") || !strings.Contains(fmt.Sprint(stashes), "paths_filtered:[]") {
+		stashText := fmt.Sprint(stashes)
+		if len(stashes) != 3 || !strings.Contains(stashText, "dist/generated.js") || !strings.Contains(stashText, "dist/untracked.js") || !strings.Contains(stashText, "association:unassigned") || !strings.Contains(stashText, "paths_filtered:[]") {
 			t.Errorf("unexpected stash presentation: %#v", stashes)
 		}
 		if row["removal_verdict"] != "NOT_EVALUATED" {

@@ -54,7 +54,9 @@ def inventory_error(source, message, path=None, thread=None):
 def run_git(repo, *args):
     command = ["git", "-C", repo, *args]
     try:
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        environment = os.environ.copy()
+        environment["GIT_OPTIONAL_LOCKS"] = "0"
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=environment)
     except OSError as error:
         raise ValueError(f"cannot execute git: {error}") from error
     if result.returncode != 0:
@@ -72,7 +74,8 @@ def absolute_path(raw, source):
     expanded = os.path.expanduser(raw)
     if not os.path.isabs(expanded):
         raise ValueError(f"{source} path is relative and has no stable machine identity: {raw!r}")
-    return os.path.normpath(expanded)
+    normalized = os.path.normpath(expanded)
+    return os.path.normpath(os.path.join(os.path.realpath(os.path.dirname(normalized)), os.path.basename(normalized)))
 
 
 def valid_thread(thread):
@@ -152,7 +155,14 @@ def parse_workers(path):
         if not workspace or not window or not valid_thread(thread):
             errors.append(inventory_error("workers.tsv", f"line {number}: workspace/window are required and thread must be canonical", path_value, thread or None))
             continue
-        if len(fields) == 5 and fields[4] not in ("", "retained_indeterminate"):
+        if len(fields) == 5 and fields[4] not in (
+            "",
+            "retained_indeterminate",
+            "native_not_attempted",
+            "native_rejected",
+            "native_indeterminate",
+            "authenticated_accepted",
+        ):
             errors.append(inventory_error("workers.tsv", f"line {number}: unsupported assignment state {fields[4]!r}", path_value, thread))
             continue
         candidates.append({"workspace": workspace, "window": window, "path": path_value, "thread": thread, "line": number})
@@ -255,7 +265,13 @@ def filesystem_inventory(roots):
         except (OSError, ValueError) as error:
             errors.append(inventory_error("filesystem", str(error), absolute_path(raw_root, "filesystem root") if os.path.isabs(os.path.expanduser(raw_root)) else None))
             continue
-        candidates = [root] + [entry.path for entry in entries if entry.is_dir(follow_symlinks=False)]
+        candidates = [root]
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    candidates.append(absolute_path(entry.path, "filesystem entry"))
+            except OSError as error:
+                errors.append(inventory_error("filesystem", f"cannot inspect directory entry {entry.path}: {error}", absolute_path(entry.path, "filesystem entry")))
         for candidate in candidates:
             marker = os.path.join(candidate, ".git")
             try:
@@ -289,14 +305,13 @@ def presentation_inventory(repo, path, git_record, baseline, generated_excludes,
                     raise ValueError(f"malformed stash row {stash_row!r}")
                 selector, commit, parents, subject = fields
                 bases = parents.split()
-                affected = branch and branch in subject or not branch and bases and bases[0] == git_record["head"]
-                if not affected:
-                    continue
-                changed = sorted(filter(None, run_git(repo, "stash", "show", "--name-only", selector).splitlines()))
+                affected = bool(branch and (subject.startswith(f"WIP on {branch}: ") or subject.startswith(f"On {branch}: ")) or not branch and bases and bases[0] == git_record["head"])
+                changed = sorted(filter(None, run_git(repo, "stash", "show", "--include-untracked", "--name-only", selector).splitlines()))
                 details["stashes"].append({
                     "selector": selector,
                     "commit": commit,
                     "subject": subject,
+                    "association": "affected" if affected else "unassigned",
                     "paths_raw": changed,
                     "paths_filtered": [item for item in changed if not any(fnmatch.fnmatch(item, pattern) for pattern in generated_excludes)],
                 })
@@ -502,9 +517,20 @@ def main():
     parser.add_argument("--presentation-baseline", help="optional commit-ish for presentation-only committed divergence")
     parser.add_argument("--generated-exclude", action="append", default=[], help="presentation-only generated path glob; repeatable")
     parser.add_argument("--precious-pattern", default=r"\.env|local\.json|auth", help="case-insensitive ignored precious-path regex")
-    parser.add_argument("--canonical-worktree", type=os.path.abspath, help="canonical copy for precious-file byte comparison")
+    parser.add_argument("--canonical-worktree", help="canonical copy for precious-file byte comparison")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
+    if args.canonical_worktree:
+        try:
+            args.canonical_worktree = absolute_path(args.canonical_worktree, "canonical worktree")
+        except ValueError as error:
+            document = {"schema_version": SCHEMA_VERSION, "command": "sweep", "read_only": True, "complete": False, "coverage": {"filesystem_roots": args.filesystem_root}, "rows": [inventory_error("presentation", str(error))]}
+            if args.json:
+                json.dump(document, sys.stdout, sort_keys=True, separators=(",", ":"))
+                print()
+            else:
+                human(document)
+            return 2
     document = build_inventory(args)
     if args.json:
         json.dump(document, sys.stdout, sort_keys=True, separators=(",", ":"))
