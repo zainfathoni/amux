@@ -54,4 +54,4 @@ For a vanished worktree, preserve the order:
 classify → backup → unlock → prune
 ```
 
-Do not unlock before classification and backup: unlocking makes a locked missing entry prunable. `NEEDS_BACKUP` requires a backup ref before any removal proceeds. Worktree removal and branch deletion are separate operations; this classifier never deletes a branch, and `SAFE_KEEP_BRANCH` explicitly preserves the local branch.
+Do not unlock before classification and backup: unlocking makes a locked missing entry prunable. `NEEDS_BACKUP` requires a verified durable branch at exactly the classified tip before any removal proceeds. Use the complete-set backup procedure in [`workflows.md`](workflows.md#back-up-needs_backup-rows); its helper creates refs only and never authorizes or performs removal. Worktree removal and branch deletion are separate operations; this classifier never deletes a branch, and `SAFE_KEEP_BRANCH` explicitly preserves the local branch.
