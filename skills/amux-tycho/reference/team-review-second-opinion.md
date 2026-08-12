@@ -1,8 +1,15 @@
 # Authoritative Amp `/team-review` with one Opus second opinion
 
-This `/amux-tycho` application workflow is the progressive-disclosure home for [#328](https://github.com/zainfathoni/amux/issues/328). It reuses the one canonical receipt helper and protocol in [`tycho-report-bridge.md`](tycho-report-bridge.md). It does not widen stable Amux core, promote `/amux-tycho`, close [#323](https://github.com/zainfathoni/amux/issues/323), launch Tycho, or authorize a live field cycle from documentation alone.
+This `/amux-tycho` application workflow is the progressive-disclosure home for [#328](https://github.com/zainfathoni/amux/issues/328). It reuses the one canonical receipt helper and protocol in [`tycho-report-bridge.md`](tycho-report-bridge.md). It does not widen stable Amux core, formally promote `/amux-tycho`, alter closed [#323](https://github.com/zainfathoni/amux/issues/323), launch Tycho, or authorize a live field cycle from documentation alone.
 
-Readiness remains **Runtime-unverified**. Keep a real Amp thread as coordinator and consume/acknowledgement authority. Do not interpret this recipe, synthetic tests, or a useful provider run without a complete bridge cycle as field proof.
+The generic `/amux-tycho` route is practically usable under its explicit owner-authorized contract. This narrower #328 workflow remains blocked on #327's newly spawned local-worker assignment requirement. Keep a real Amp thread as coordinator and consume/acknowledgement authority.
+
+## Policy categories
+
+- **Route selection:** exact owner-selected host, Tycho agent/project/harness/model, and current availability determine where the review may run.
+- **Task-specific validation:** repository, head, tree, worktree, and PENDING-review checks validate this code-review task; they are not generic receipt requirements.
+- **Exceptional recovery:** provider stop without a report, notification uncertainty, custody loss, and cleanup replay use the bridge recovery procedure only when those failures occur.
+- **Optional formal promotion:** multi-cycle, natural-failure, supported-ingress, privacy, and ADR evidence do not gate ordinary `/amux-tycho` use or #323 closure.
 
 ## Settled design decisions
 
@@ -56,14 +63,14 @@ If the provider stops, is killed, times out, or exits without a successful durab
 
 Exact replay of an already-submitted report is duplicate-safe. Conflicting replay fails closed. There is no second submit with a different body under the same event ID.
 
-### 4. Same-head proof across Amp and Tycho worktrees
+### 4. Task-specific validation: same-head proof across Amp and Tycho worktrees
 
 Path or directory-name equality is not identity. The bridge helper does **not** attest Git state; Amp (or the owner-operated coordinator) must prove attachment with ordinary `git`/`gh` reads outside the helper.
 
 **When to prove (all mandatory):**
 
 - **Pre-create / pre-Tycho** — before receipt `create` and before Tycho starts.
-- **Post-Tycho / pre-consume** — after Tycho finishes (or fails to submit) and **before** `consume`, candidate acceptance, PENDING mutation, or any claim of #323 cycle credit.
+- **Post-Tycho / pre-consume** — after Tycho finishes (or fails to submit) and **before** `consume`, candidate acceptance, PENDING mutation, or any claim that the #328 cycle passed its task-specific checks.
 
 Each proof requires all of:
 
@@ -75,7 +82,7 @@ Each proof requires all of:
 6. **Distinct worktree paths are allowed** — Amp and Tycho paths may differ from each other. Bind the Tycho canonical absolute `workdir` into the receipt; never rebind to the Amp path or treat basename equality as proof.
 7. **Route and head are frozen in the task digest** — the bounded task bytes MUST include, as exact literal fields: repository `owner/repo`, PR number, full head SHA, full tree SHA, Amp worktree path, Tycho worktree path, Tycho agent key, project, harness, model (normally exact `claude-opus-5`), `producer_role`, and `report_only`. `task_digest` is SHA-256 of those exact task bytes. Changing head, model, project, harness, agent, or either worktree path requires a newly authorized receipt, never mutation of the old one.
 
-If any pre-create check fails, do not create a receipt and do not start Tycho. If any post-Tycho/pre-consume check fails (including read failure), **reject the application payload**: do not treat candidates as usable review input, do not mutate GitHub, and do not claim #323 cycle credit—even if a durable `valid_report` exists. The receipt may still be consumed/acknowledged for bridge hygiene with an explicit “application-rejected: attachment drift” handling record.
+If any pre-create check fails, do not create a receipt and do not start Tycho. If any post-Tycho/pre-consume check fails (including read failure), **reject the application payload**: do not treat candidates as usable review input, mutate GitHub, or claim the #328 cycle passed—even if a durable `valid_report` exists. The receipt may still be consumed/acknowledged for bridge hygiene with an explicit “application-rejected: attachment drift” handling record.
 
 ### 5. Stale / concurrent PENDING-review generation protection
 
@@ -151,18 +158,18 @@ Immediately before **every** GitHub review or comment write—including the firs
 5. After each successful write, re-read and record the new snapshot as the next baseline before any further edit; re-check PR head before the next write again.
 6. Publication (`COMMENT` / `APPROVE` / `REQUEST_CHANGES`), worker finish, and bridge acknowledgement remain separately authorized transitions. Wake-ups and schedules never imply them.
 
-### 6. Exact evidence required for #323 to count a cycle
+### 6. Exact evidence required for the #328 workflow
 
-A useful provider opinion is not a bridge cycle. The owner may count one #328 field run toward #323 only when **all** of the following are recorded against the same receipt:
+A useful provider opinion is not a complete #328 workflow. Count a #328 field run only when **all** of the following are recorded against the same receipt:
 
-1. **#327 categorical gate (current blocker)** — no field run and no #323 credit until [#327](https://github.com/zainfathoni/amux/issues/327) has an **accepted and merged** solution **and** that exact accepted version is installed and verified on the host. Local, unmerged, draft, or merely “available” routes do **not** satisfy the gate. As of this writing, #327 remains open and is externally blocked by a missing Amp receipt-bearing physical-runner assignment API; treat the entire #328 field cycle as **blocked** until that changes under owner acceptance.
+1. **#328-specific #327 prerequisite** — do not run this newly spawned local-worker workflow until [#327](https://github.com/zainfathoni/amux/issues/327) has an **accepted and merged** solution and that exact accepted version is installed and verified on the host. Local, unmerged, draft, or merely “available” routes do not satisfy this #328 prerequisite. This does not block generic `/amux-tycho` use with an existing coordinator or alter closed #323.
 2. After the #327 gate clears: prove the authoritative Amp `/team-review` worker's initial assignment through that exact accepted merged delivery semantics (version/commit recorded).
 3. Owner authorization naming exact Tycho agent, project, harness, model, and worktree; adjacent revalidation that the route still matches.
 4. **Pre-Tycho** both-worktree repository, canonical workdir, full head SHA, full tree SHA, and cleanliness proofs from decision 4, plus frozen task bytes and recomputed `task_digest`.
 5. Immutable `create` before Tycho execution with every required binding and `report_only`.
 6. Separate-process recovery of the same receipt and owner capabilities from the original canonical directories is either performed in the cycle or already proven for that install and re-validated by `show` before consume.
 7. Exactly one producer/session/run/task-bound durable `valid_report` (`complete` or `blocked`) through the canonical helper—not logs or exit codes.
-8. **Post-Tycho / pre-consume** same-head proof (decision 4) on both Amp and Tycho attachments; failure rejects application payload and denies #323 credit.
+8. **Post-Tycho / pre-consume** same-head proof (decision 4) on both Amp and Tycho attachments; failure rejects the application payload and the #328 cycle.
 9. Explicit Amp-origin `consume` establishing `delivered` (bridge delivery only; application rejection may still follow).
 10. Amp independent verification of every candidate against the pinned head, with unsupported and application-invalid claims rejected.
 11. Amp-only reconciliation of at most one **owned** current-user PENDING review without publication unless separately authorized, including pre/post PENDING snapshots **and** per-write PR head equality checks (decision 5).
@@ -171,9 +178,9 @@ A useful provider opinion is not a bridge cycle. The owner may count one #328 fi
 14. **Cleanup evidence from acknowledge output, not `show`:** record the `acknowledge` result JSON (and any identical same-directory replay results) for `custody_cleanup` (`removed` or truthful `pending`). The helper does not persist cleanup status into the receipt store; `show` cannot supply it.
 15. After acknowledge (and any cleanup replay), final `show` only to inspect terminal `acknowledged` state and append-only event order.
 16. Explicit mapping that all six PR #11886 compliance gaps are closed for this cycle.
-17. Readiness remains Runtime-unverified unless the owner separately promotes under #323's full gates.
+17. Record the cycle for owner assessment; it does not by itself change formal promotion status.
 
-Natural-failure recovery without report loss remains a distinct #323 gate. One clean #328 cycle does not satisfy it by itself. The bridge helper never attests Git or GitHub head state.
+Natural-failure recovery without report loss may inform optional formal promotion, but it is not a normal-use or #323 closure gate. The bridge helper never attests Git or GitHub head state.
 
 ## Authority boundaries
 
@@ -190,7 +197,7 @@ Perform steps in order. Stop on any failed check.
 
 ### A. Authoritative Amp first pass
 
-1. **#327 categorical gate first:** stop unless #327 is accepted, merged, and that exact accepted version is installed and verified. Local/unmerged routes are insufficient. While #327 remains open (including its external Amp physical-runner assignment API gap), do not run this field cycle.
+1. **#328-specific #327 prerequisite first:** stop this newly spawned local-worker workflow unless #327 is accepted, merged, and that exact accepted version is installed and verified. Local/unmerged routes are insufficient for this workflow only.
 2. Create or adopt the authoritative Amp `/team-review` worker on the exact review worktree.
 3. Prove initial assignment through the exact accepted merged #327 delivery semantics; record the installed version/commit.
 4. Pin the PR repository, full head SHA, and full tree SHA; prove Amp worktree cleanliness per decision 4.
@@ -226,7 +233,7 @@ Perform steps in order. Stop on any failed check.
 3. Require exactly one durable `submit` of a typed `complete` or `blocked` report through the canonical bridge.
 4. If no valid submit arrives, retain the receipt, record “no Tycho finding,” and skip candidate consumption. Do not mine logs or state (decision 3).
 5. Capture a post-Tycho GitHub snapshot; any review/comment mutation during the Tycho phase is a compliance failure even if a report exists.
-6. **Post-Tycho / pre-consume same-head proof** (decision 4) on both Amp and Tycho attachments. On failure, reject the application payload and deny #323 credit.
+6. **Post-Tycho / pre-consume same-head proof** (decision 4) on both Amp and Tycho attachments. On failure, reject the application payload and the #328 cycle.
 
 ### E. Explicit consume, independent verify, PENDING reconcile
 
@@ -236,7 +243,7 @@ Perform steps in order. Stop on any failed check.
 4. Bridge acknowledgement is a **later** distinct coordinator action after verification/handling. It is not consumption, publication, finish, or acceptance of every candidate.
 5. Optional notification and one-time schedules are wake-up only.
 
-### F. Terminal truth and #323 evidence package
+### F. Terminal truth and #328 evidence package
 
 1. Complete separate `acknowledge` when handling is done; **retain the acknowledge JSON** as cleanup evidence (`custody_cleanup`).
 2. If cleanup is `pending`, replay the identical terminal event against the same original capability directory until `removed` or retain the exact blocker; retain each replay JSON.
@@ -256,16 +263,16 @@ Perform steps in order. Stop on any failed check.
 
 ## Troubleshooting
 
-- **#327 not accepted/merged/installed** — categorical stop; no field cycle and no #323 credit. Local/unmerged routes do not count. #327 is currently externally blocked by a missing Amp receipt-bearing physical-runner assignment API.
+- **#327 not accepted/merged/installed** — stop this #328 newly spawned local-worker workflow. This does not block generic `/amux-tycho` use with an existing coordinator or alter closed #323.
 - **Tycho stopped / exit 143 / no submit** — `show` should remain without a new report. Do not reconstruct findings. Owner may authorize a **new** receipt and run only after re-validating head and route.
 - **`blocked` report consumed** — verify any partial findings independently; treat blockers as incomplete scope; do not publish solely because Tycho blocked.
 - **`complete` with blockers or empty verification** — application-invalid; consume, reject as finished second opinion, record handling, optionally acknowledge; do not treat blockers as accepted defects.
-- **Wrong head, tree mismatch, dirty Amp/Tycho tree, or post-Tycho attachment drift** — fail before `create`, or reject application payload before consume/GitHub mutation; never rebind; no #323 credit.
+- **Wrong head, tree mismatch, dirty Amp/Tycho tree, or post-Tycho attachment drift** — fail before `create`, or reject the application payload before consume/GitHub mutation; never rebind; the #328 cycle fails.
 - **PR head advanced before write** — conflict; leave GitHub untouched (create and reconcile paths alike).
 - **Producer asks for custody/ack/GitHub write credentials** — refuse; resupply only producer proof + state dir.
 - **Unowned or concurrent PENDING drift** — stop GitHub mutation; preserve receipt; report conflict.
 - **Notification succeeded but nobody consumed** — notification is not delivery; `consume` explicitly.
-- **Desire to mark field-proven** — refused here; only #323's owner gates change readiness.
+- **Desire to formally promote the transport** — refused here; formal promotion requires a separate owner decision.
 - **Pre-split receipt** — preserve original paths and identities; continue with the installed `/amux-tycho` helper without migration mutation.
 
 ## Out of scope

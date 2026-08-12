@@ -9,7 +9,7 @@ Explicit-only external-executor bridge. Tycho may route Claude or Pi, but Tycho 
 
 The current real Amp `T-...` thread remains coordinator, consumer, delivery authority, and acknowledgement authority. Tycho receives no group/member/callback/finish/label/merge/release/cleanup authority. An optional group reference is correlation metadata only. Do not activate this skill from an incidental Tycho, Claude, Pi, model, harness, capacity, or generic review mention.
 
-Before any field use, consult the [provider executor readiness matrix](https://github.com/zainfathoni/amux/blob/main/docs/provider-executor-readiness.md). This route is runtime-unverified. Do not interpret helper availability, synthetic tests, or a useful provider opinion without a complete bridge cycle as field readiness. This skill never marks `/amux-tycho` field-proven or closes #323's real-cycle gate by itself.
+Before use, consult the [provider executor readiness matrix](https://github.com/zainfathoni/amux/blob/main/docs/provider-executor-readiness.md). The accepted Karsa/nix-home lifecycle establishes this experimental route as practically usable for normal explicit owner-authorized work with an existing Amp coordinator.
 
 ## Route triggers
 
@@ -20,29 +20,36 @@ Before any field use, consult the [provider executor readiness matrix](https://g
 
 ## Explicit-only workflow
 
-1. **Keep Amp in charge.** For a new receipt, bind the current canonical Amp thread as immutable `origin_thread` and retain its custody through delivery and acknowledgement. For an existing receipt, inspect `show` and require the current canonical Amp thread to exactly match the already-bound origin; otherwise stop. Owner authorization and custody possession never transfer coordinator, consume, or acknowledgement authority. Never substitute a Tycho key, provider session, project, run, task message, pane, or invented `T-...` identity.
-2. **Select an existing Tycho route.** With explicit owner authorization, identify the exact existing Tycho agent, project, harness, and model/provider route. Record what Tycho reports without normalizing aliases or inferring provider identity. This selection is a coordinator assertion, not bridge attestation of project, harness, provider, or model identity. Missing, ambiguous, unavailable, or owner-unapproved selection blocks. Do not create a Tycho agent/project, switch harnesses/models, transfer credentials, accept fallback, or retry another provider under this skill.
-3. **Freeze the task and binding.** Before external execution, write one bounded task with acceptance criteria and a stable reference, compute its SHA-256 digest, and fix the immutable receipt identity: canonical origin Amp thread, correlation ID, producer nonce, exact Tycho agent key, nullable provider session ID, run ID, task message ID, canonical workdir, task reference/digest, producer role, exact `report_only` authority, and optional reference-only group and coordinator-selected notification target. A changed task, route, producer, session, run, message, workdir, or role requires a newly authorized operation; never rebind an existing receipt.
-4. **Establish restart-safe custody.** Create the receipt before asking Tycho to execute. Keep the coordinator token, abandonment token, coordinator-custody directory, and abandonment-capability directory owner-private and out of Tycho input. Give the producer only the exact proof fields, producer nonce, and state-directory path required for `submit`. Use the canonical helper and storage contract in [`reference/tycho-report-bridge.md`](reference/tycho-report-bridge.md).
-5. **Run through Tycho, not as Tycho.** The selected Tycho system owns machine/provider routing and may invoke Claude or Pi. This skill does not launch or control that provider process and does not grant Tycho Claude/Pi provider identity or `/amux-claude`/`/amux-pi` authority. Process exit, logs, blocked state, pane text, hook execution, and model prose are not completion.
-6. **Submit one semantic report.** The producer submits one bounded structured `complete` or `blocked` report with summary, findings, blockers, and verification while repeating all immutable proof fields. Only a valid durable `submit` creates `valid_report`. A hook may invoke that idempotent operation; its queue is never durable truth.
-7. **Recover explicitly.** After restart, notification failure, or uncertain Tycho state, inspect the private receipt with `show`. Preserve the original event IDs and binding. Retry only an identical operation after lock contention. Never poll Tycho as delivery, invent a new receipt to evade conflict, resend after notification intent, or mutate stable Amux group/report/callback state.
-8. **Consume, assess, then acknowledge.** The bound Amp coordinator explicitly `consume`s `valid_report`, which durably records `delivered` and returns the semantic payload. Independently assess it, then use a separate event to `acknowledge` that exact delivered report. Consumption is not acceptance; acknowledgement grants no merge, finish, or cleanup authority.
-9. **Handle notification as wake-up only.** A coordinator-selected exact live Amp pane may receive only the bounded correlation token. Success, failure, stale target, timeout, or indeterminate outcome never establishes delivery or acknowledgement and never authorizes automatic resend. No verified pane means a recoverable owner-private inbox, not arbitrary Amp Web-thread delivery.
-10. **Abandon only the narrow lost-custody case.** A created-only receipt with irrecoverably missing bound coordinator custody may be terminally abandoned only with the separately stored matching abandonment capability and exact owner authorization. Never abandon a submitted report, recreate custody, delete/rewrite history, move a capability to fake absence, or retrofit a legacy receipt.
-11. **Finish cleanup truthfully.** Acknowledgement removes coordinator custody only after the terminal event is durable; abandonment similarly removes its capability. Cleanup `pending` means replay the same terminal event against the same original capability directory. Never infer global absence from `removed`, and remove a separately found leftover record only after `show` proves its exact receipt is already terminal.
+1. **Bind the minimum semantic receipt.** Bind the existing real Amp coordinator, the exact owner-selected producer route, and the SHA-256 digest of the bounded task and reviewed artifact identity. Encode artifact identity in the task bytes covered by `task_digest`; do not add another field. The current helper's correlation, capability, and route-coordinate fields are compatibility transport mechanics, not extra semantic authority.
+2. **Submit one typed report.** Tycho receives only `report_only` authority and submits exactly one bounded `complete` or `blocked` report. Process exit, logs, blocked state, pane text, hook execution, and model prose are not a report.
+3. **Consume separately.** The bound Amp coordinator explicitly `consume`s the report to establish delivery and assess the returned payload. Consumption is not acceptance.
+4. **Acknowledge separately.** After handling, the same coordinator performs a distinct `acknowledge`. Acknowledgement grants no merge, finish, publication, or cleanup authority beyond the compatibility receipt's own custody cleanup.
+
+## Route selection
+
+With explicit owner authorization, select the exact existing Tycho agent/project/harness/model and host route. Route availability, model identity, entitlement, and host suitability decide where execution may run; they are not receipt fields or evidence of report delivery. Do not create a route, normalize aliases, infer provider identity, transfer credentials, accept fallback, or retry another provider under this skill.
+
+## Task-specific validation
+
+Apply only checks required by the task. For example, a code or PR review may require repository, head, tree, and worktree-cleanliness checks before accepting findings. Those checks validate the reviewed artifact; they do not attest Tycho's model/host route and are not generic receipt ceremony. The #328 workflow owns its stricter review-specific checks.
+
+## Exceptional recovery
+
+Use `show`, notification recovery, created-only abandonment, and cleanup replay only after restart, failure, indeterminate notification, lost custody, or terminal cleanup `pending`. Preserve original bindings, event IDs, and capability directories. Retry only an identical operation after lock contention; never poll as delivery, rebind, resend after notification intent, or invent a new receipt to evade conflict. Details live in the canonical [bridge protocol](reference/tycho-report-bridge.md), not the ordinary happy path.
 
 ## Optional long-run wake-up
 
 For a long Tycho run, the Amp coordinator may own a single one-time Amp schedule whose prompt only re-checks the exact bound local Tycho agent's status/result. Clear it as soon as the run reaches a terminal or recovered state. The schedule firing is only a wake-up token—never durable truth, delivery, consume, or acknowledgement—and grants no retry, resend, lifecycle, or authority change. Do not turn it into a recurring watcher.
 
-## Field-readiness limits
+## Optional formal promotion policy
 
-- No live Tycho/provider run is authorized merely by loading this skill. Current readiness is synthetic coverage only.
-- The `/team-review` second-opinion recipe may contribute evidence toward #323 only when a complete bridge cycle is owner-proven **and** [#327](https://github.com/zainfathoni/amux/issues/327) is accepted, merged, and that exact accepted version is installed/verified; local/unmerged routes do not count. It does not promote the bridge, close the real-cycle gate, or change the Runtime-unverified row by itself. #327 is currently a categorical field-cycle blocker (missing Amp receipt-bearing physical-runner assignment API).
-- Promotion still requires two useful real cycles, one natural receipt-preserving recovery, supported versioned Tycho ingress, authorization/privacy review, a stable scope/ADR decision, and separate owner approval.
+- Loading this skill never authorizes a provider run; every run requires explicit owner authorization and exact route selection.
+- [#327](https://github.com/zainfathoni/amux/issues/327) is scoped only to [#328](https://github.com/zainfathoni/amux/issues/328)'s newly spawned local-worker assignment route. It does not block ordinary `/amux-tycho` use with an existing Amp coordinator.
+- [#323](https://github.com/zainfathoni/amux/issues/323) closed after the accepted [Karsa/nix-home lifecycle](https://github.com/zainfathoni/nix-home/issues/13#issuecomment-5248690973) proved create, separate-process recovery, one typed report, consume, separate acknowledgement, and terminal cleanup.
+- Multiple cycles, natural-failure recovery, supported versioned ingress, privacy review, ADR work, and formal readiness promotion are optional formal-promotion policy—not ordinary-use or #323 closure gates.
 - Owner-only filesystem permissions protect against other OS users, not another process with the same UID. The helper does not confine Tycho.
-- There is no resident watcher, arbitrary Amp Web-thread return route, model/entitlement attestation, provider fallback, automatic retry, or stable Go command/schema.
+- The semantic receipt is temporary compatibility transport. Remove it when Amp supports native authenticated structured delivery and separate acknowledgement; do not promote its helper fields into a stable Go command/schema merely to preserve the experiment.
+- There is no resident watcher, arbitrary Amp Web-thread return route, model/entitlement attestation, provider fallback, or automatic retry.
 - Stable `cmd/`, `internal/`, canonical Amp identity, group/report/callback, and lifecycle boundaries remain unchanged.
 
 ## Migrating pre-split receipts

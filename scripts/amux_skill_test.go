@@ -641,22 +641,18 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 		}
 	}
 	for _, required := range []string{
-		"existing Tycho agent, project, harness, and model/provider route",
-		"Freeze the task and binding",
-		"restart-safe custody",
-		"Run through Tycho, not as Tycho",
-		"Submit one semantic report",
-		"Recover explicitly",
-		"Consume, assess, then acknowledge",
-		"notification as wake-up only",
-		"created-only receipt",
-		"cleanup `pending`",
-		"Field-readiness limits",
-		"Tycho may route Claude or Pi",
-		"does not grant Tycho Claude/Pi provider identity",
-		"not bridge attestation of project, harness, provider, or model identity",
+		"Bind the minimum semantic receipt",
+		"existing real Amp coordinator",
+		"exact owner-selected producer route",
+		"task bytes covered by `task_digest`; do not add another field",
+		"Submit one typed report",
+		"Consume separately",
+		"Acknowledge separately",
+		"Route selection",
+		"Task-specific validation",
+		"Exceptional recovery",
+		"Optional formal promotion policy",
 		"Migrating pre-split receipts",
-		"custody possession never transfer coordinator, consume, or acknowledgement authority",
 		"a single one-time Amp schedule",
 		"only re-checks the exact bound local Tycho agent's status/result",
 		"Clear it as soon as the run reaches a terminal or recovered state",
@@ -664,8 +660,8 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 		"Do not turn it into a recurring watcher",
 		"Authoritative Amp `/team-review` with one Opus second opinion",
 		"reference/team-review-second-opinion.md",
-		"never marks `/amux-tycho` field-proven or closes #323",
-		"Provider stop or exit without `submit`",
+		"temporary compatibility transport",
+		"native authenticated structured delivery and separate acknowledgement",
 		"Only Amp mutates the PENDING GitHub review",
 	} {
 		if !strings.Contains(skill, required) {
@@ -692,7 +688,11 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 		"no arbitrary Amp Web-thread delivery claim",
 		"There is no resident watcher",
 		"no compatibility guarantee",
-		"two useful real cycles",
+		"Minimal semantic contract",
+		"task/artifact digest",
+		"no additional receipt field is required",
+		"temporary compatibility transport",
+		"native authenticated structured report delivery and separate acknowledgement",
 		"process exit, logs, and prose never substitute",
 		"team-review-second-opinion.md",
 	} {
@@ -700,13 +700,13 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 			t.Errorf("experimental Tycho contract is missing %q", required)
 		}
 	}
-	if !strings.Contains(matrix, "| `/amux-tycho` semantic-report receipt/inbox | Runtime-unverified |") ||
+	if !strings.Contains(matrix, "| `/amux-tycho` semantic-report receipt/inbox | Conditional |") ||
 		!strings.Contains(matrix, "Tycho has `report_only` authority") ||
-		!strings.Contains(matrix, "existing Tycho agent/project/harness/model route") ||
-		!strings.Contains(matrix, "no live Tycho cycle") ||
+		!strings.Contains(matrix, "exact producer route") ||
+		!strings.Contains(matrix, "task/artifact digest") ||
 		!strings.Contains(matrix, "Tycho never mutates GitHub reviews") ||
 		!strings.Contains(matrix, "#328") ||
-		!strings.Contains(matrix, "does not change this row") {
+		!strings.Contains(matrix, "optional promotion policy") {
 		t.Error("readiness matrix overstates or omits the experimental Tycho route")
 	}
 	for _, path := range []string{
@@ -731,6 +731,66 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 	}
 }
 
+func TestTychoPolicyCategoriesStaySeparate(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "SKILL.md"))
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "reference", "team-review-second-opinion.md"))
+	contract := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "reference", "tycho-report-bridge.md"))
+	matrix := readSkillFile(t, root, filepath.Join("docs", "provider-executor-readiness.md"))
+
+	ordinaryStart := strings.Index(skill, "## Explicit-only workflow")
+	ordinaryEnd := strings.Index(skill, "## Route selection")
+	if ordinaryStart < 0 || ordinaryEnd <= ordinaryStart {
+		t.Fatal("amux-tycho skill does not separate the ordinary receipt contract from route selection")
+	}
+	ordinary := skill[ordinaryStart:ordinaryEnd]
+	for _, required := range []string{"existing real Amp coordinator", "exact owner-selected producer route", "task_digest", "`complete` or `blocked`", "`consume`", "`acknowledge`"} {
+		if !strings.Contains(ordinary, required) {
+			t.Errorf("ordinary receipt contract is missing %q", required)
+		}
+	}
+	for _, conflated := range []string{"worktree-cleanliness", "entitlement", "natural-failure", "cleanup replay", "#327", "#328"} {
+		if strings.Contains(ordinary, conflated) {
+			t.Errorf("ordinary receipt contract conflates policy category %q", conflated)
+		}
+	}
+
+	for name, contents := range map[string]string{"skill": skill, "bridge contract": contract, "#328 workflow": workflow} {
+		for _, stale := range []string{"Runtime-unverified", "runtime-unverified", "categorical field-cycle blocker", "#327 categorical"} {
+			if strings.Contains(contents, stale) {
+				t.Errorf("%s retains stale Tycho policy %q", name, stale)
+			}
+		}
+	}
+	for _, required := range []string{"Route selection", "Task-specific validation", "Exceptional recovery", "Optional formal promotion"} {
+		if !strings.Contains(skill, "## "+required) || !strings.Contains(workflow, required) {
+			t.Errorf("Tycho policy does not consistently label category %q", required)
+		}
+	}
+	for _, required := range []string{"temporary compatibility transport", "native authenticated structured report delivery", "no additional receipt field is required"} {
+		if !strings.Contains(contract, required) {
+			t.Errorf("bridge removal contract is missing %q", required)
+		}
+	}
+
+	var tychoRow string
+	for _, line := range strings.Split(matrix, "\n") {
+		if strings.HasPrefix(line, "| `/amux-tycho` semantic-report receipt/inbox |") {
+			tychoRow = line
+			break
+		}
+	}
+	if tychoRow == "" {
+		t.Fatal("readiness matrix has no /amux-tycho row")
+	}
+	for _, stale := range []string{"Runtime-unverified", "categorical", "no live Tycho cycle"} {
+		if strings.Contains(tychoRow, stale) {
+			t.Errorf("readiness row retains stale Tycho policy %q", stale)
+		}
+	}
+}
+
 func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
@@ -751,9 +811,9 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 		"Bounded `complete` / `blocked` finding schema",
 		"Producer-only submit capability delivery",
 		"Truthful blocked-report behavior near provider stop",
-		"Same-head proof across Amp and Tycho worktrees",
+		"Task-specific validation: same-head proof across Amp and Tycho worktrees",
 		"Stale / concurrent PENDING-review generation protection",
-		"Exact evidence required for #323 to count a cycle",
+		"Exact evidence required for the #328 workflow",
 		"Authoritative Amp first pass",
 		"Create the receipt **before** Tycho execution",
 		"exactly one durable `submit`",
@@ -769,13 +829,13 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 		"normally exact `claude-opus-5`",
 		"Six PR #11886 gaps",
 		"promote `/amux-tycho`",
-		"close [#323](https://github.com/zainfathoni/amux/issues/323)",
+		"alter closed [#323](https://github.com/zainfathoni/amux/issues/323)",
 		"does not widen stable Amux core",
 		"tycho-report-bridge.md",
 		"authority: \"report_only\"",
 		"Publication",
 		"Wake-ups and schedules never imply them",
-		"Desire to mark field-proven",
+		"Desire to formally promote the transport",
 		"refused here",
 		// Application report invariants beyond generic bridge schema.
 		"`complete` must use `blockers: []`",
@@ -803,11 +863,10 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 		"Post-Tycho / pre-consume",
 		"bridge helper does **not** attest Git state",
 		"reject the application payload",
-		// #323 evidence completeness.
-		"#327 categorical gate (current blocker)",
+		// #328 evidence completeness without reopening #323 policy.
+		"#328-specific #327 prerequisite",
 		"accepted and merged",
-		"Local, unmerged, draft, or merely “available” routes do **not** satisfy the gate",
-		"missing Amp receipt-bearing physical-runner assignment API",
+		"does not block generic `/amux-tycho` use with an existing coordinator or alter closed #323",
 		"Pre-Tycho",
 		"Post-Tycho / pre-consume** same-head proof",
 		"per-write PR head equality checks",
@@ -838,8 +897,8 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 	if !strings.Contains(skill, "reference/team-review-second-opinion.md") {
 		t.Error("amux-tycho SKILL.md must progressively disclose the team-review workflow")
 	}
-	if !strings.Contains(skill, "#327 is currently a categorical field-cycle blocker") {
-		t.Error("amux-tycho SKILL.md must surface the #327 categorical field-cycle blocker")
+	if !strings.Contains(skill, "#327") || !strings.Contains(skill, "scoped only to") || !strings.Contains(skill, "newly spawned local-worker assignment route") {
+		t.Error("amux-tycho SKILL.md must scope #327 to the #328 local-worker workflow")
 	}
 	if !strings.Contains(triggers, "Authoritative Amp /team-review with one Opus second opinion") {
 		t.Error("amux-tycho triggers must route the team-review second-opinion phrase")
@@ -847,14 +906,14 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 	if !strings.Contains(contract, "team-review-second-opinion.md") {
 		t.Error("canonical bridge protocol must point at the application workflow without duplicating a second helper")
 	}
-	if !strings.Contains(matrix, "Runtime-unverified") || strings.Contains(matrix, "| `/amux-tycho` semantic-report receipt/inbox | Proven") {
-		t.Error("#328 must not promote the /amux-tycho readiness row")
+	if !strings.Contains(matrix, "| `/amux-tycho` semantic-report receipt/inbox | Conditional |") || strings.Contains(matrix, "| `/amux-tycho` semantic-report receipt/inbox | Proven") {
+		t.Error("#328 must not formally promote the conditional /amux-tycho readiness row")
 	}
-	if !strings.Contains(matrix, "Current field-cycle blocker") ||
+	if !strings.Contains(matrix, "blocks only") ||
 		!strings.Contains(matrix, "#327") ||
-		!strings.Contains(matrix, "missing Amp receipt-bearing physical-runner assignment API") ||
-		!strings.Contains(matrix, "local/unmerged routes do not count") {
-		t.Error("readiness matrix must surface #327 as the current categorical field-cycle blocker")
+		!strings.Contains(matrix, "#328") ||
+		!strings.Contains(matrix, "not generic `/amux-tycho` use") {
+		t.Error("readiness matrix must scope #327 to #328 rather than generic use")
 	}
 	// Reuse one canonical helper/schema rather than a duplicate implementation.
 	if strings.Contains(workflow, "tycho_report_bridge_v2") || strings.Contains(workflow, "second_opinion_bridge.py") {
