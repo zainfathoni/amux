@@ -79,11 +79,11 @@ Removed commands and positional forms fail with remediation. Do not use `store`,
 | `unshelve` | remove intent only after unarchive | none | none | unarchive selected threads |
 | `spawn` | persist and report exact retained ownership; optional group intent then additive label ensure; delivery/execution remain unproven | reject overlapping amux Runner workdir | create one exact worker pane; attempt one literal paste, then Enter only after paste success; delivery is indeterminate and acknowledgement unavailable | create one empty local thread in canonical physical cwd; return retained-indeterminate |
 | `teardown` | remove worker and shelf intent | none | stop verified worker; absence is benign | archive verified thread |
-| `reconcile` | synchronize shelf/remote drift | repair stale runner ownership | only verified repairs | worker archive synchronization only |
+| `reconcile` | synchronize shelf/remote drift; remove only proven-missing safe worker bindings | repair stale runner ownership | only verified repairs | worker archive synchronization only for present bindings |
 
 `remove` differs from `unpin`: remove stops the selected verified local client and deletes configuration, while unpin never stops it. Worker unpin removes the worker row and matching shelf intent; runner unpin removes only the runner row. Neither changes remote thread state. Worker `remove` never archives. `teardown` is worker-only remove plus verified remote archival.
 
-Runner pin requires a canonical existing directory. Git repository, worktree, and lock state are not runner requirements. Runner reconcile may remove stale config for a missing directory, but never adopts or deletes ambiguous Amp-owned processes.
+Worker reconcile accepts canonical `--workdir` scope. `workers.tsv` is the sole thread↔workdir authority: a directory without a binding is reported and preserved, while a binding is removed only when its canonical directory is proven missing, local runtime is absent, and no blocked never-authorized report remains. It never derives identity or workdir from `report_id` or `groups.tsv`; unreadable, non-directory, relative, read-error, and unknown states fail closed. Runner pin requires a canonical existing directory. Git repository, worktree, and lock state are not runner requirements. Runner reconcile may remove stale config for a missing directory, but never adopts or deletes ambiguous Amp-owned processes.
 
 ## Work-group, report, and callback contract
 

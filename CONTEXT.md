@@ -41,7 +41,7 @@ _Avoid_: Session when referring to the configured lifecycle group
 
 **Finish** — A skill-only post-merge workflow for a sprawled worker. Finish refuses to delete a worktree that is unexpectedly owned by a runner and performs worker teardown only after Git and worktree cleanup succeeds.
 
-**Reconcile** — Explicitly repair drift between amux intent and external or runtime state. Worker reconciliation synchronizes shelf intent with remote archive state; runner reconciliation removes stale configuration for missing workdirs without silently adopting ambiguous processes.
+**Reconcile** — Explicitly repair drift between amux intent and external or runtime state. Worker reconciliation synchronizes shelf intent with remote archive state and removes a `workers.tsv` binding only when its canonical workdir is proven missing, no local worker runtime remains, and no blocked never-authorized report leaves an open obligation. Stale-registration removals preflight as one all-or-nothing plan; a refusal blocks every worker and aggregate runner removal in that plan but does not suppress independent shelf/archive synchronization for workers whose workdirs are present. A directory without a worker binding is reported and preserved because `workers.tsv`, not `reports.json` or `groups.tsv`, is the sole thread↔workdir authority. Runner reconciliation removes stale configuration for missing workdirs without silently adopting ambiguous processes.
 
 **Restart** — Replace a running local client in place while preserving its configuration and remote thread.
 
