@@ -14,6 +14,9 @@ SCHEMA_VERSION = 1
 MANIFEST_KEYS = {"schema_version", "operation", "repository", "fetch", "baseline", "rows"}
 FETCH_KEYS = {"command", "result"}
 BASELINE_KEYS = {"ref", "tip", "source"}
+OWNERSHIP_KEYS = {"worker", "runner", "process"}
+OWNERSHIP_ITEM_KEYS = {"status", "evidence"}
+OWNERSHIP_STATUSES = {"absent", "clear", "owned", "blocked"}
 ROW_KEYS = {
     "path",
     "tip",
@@ -47,6 +50,10 @@ def strict_object(pairs):
             raise DuplicateKey(f"duplicate JSON key {key!r}")
         value[key] = item
     return value
+
+
+def reject_constant(value):
+    raise PreflightError(f"unsupported JSON constant {value!r}")
 
 
 def run(command, *, input_text=None, accepted=(0,)):
@@ -170,17 +177,45 @@ def validate_baseline_source(repo, baseline):
         if actual != ref:
             raise PreflightError(f"origin/HEAD changed from {ref!r} to {actual!r}")
     elif source == "GitHub default branch":
-        result = run(["gh", "repo", "view", "--json", "defaultBranchRef"])
+        origin = git(repo, "config", "--get", "remote.origin.url").stdout.strip()
+        github_repo = github_repository(origin)
+        result = run(["gh", "repo", "view", "--repo", github_repo, "--json", "defaultBranchRef"])
         try:
-            document = json.loads(result.stdout, object_pairs_hook=strict_object)
+            document = json.loads(
+                result.stdout,
+                object_pairs_hook=strict_object,
+                parse_constant=reject_constant,
+            )
+            require_exact_keys(document, {"defaultBranchRef"}, "GitHub response")
+            require_exact_keys(document["defaultBranchRef"], {"name"}, "GitHub defaultBranchRef")
             name = document["defaultBranchRef"]["name"]
-        except (DuplicateKey, KeyError, TypeError, json.JSONDecodeError) as error:
+            require_string(name, "GitHub default branch name")
+        except (DuplicateKey, KeyError, TypeError, json.JSONDecodeError, PreflightError) as error:
             raise PreflightError(f"malformed GitHub default branch evidence: {error}") from error
         if "refs/remotes/origin/" + name != ref:
             raise PreflightError("GitHub default branch no longer matches the recorded baseline")
 
 
+def github_repository(origin):
+    prefixes = (
+        "https://github.com/",
+        "http://github.com/",
+        "git@github.com:",
+        "ssh://git@github.com/",
+    )
+    for prefix in prefixes:
+        if origin.startswith(prefix):
+            name = origin[len(prefix) :].removesuffix(".git").strip("/")
+            parts = name.split("/")
+            if len(parts) == 2 and all(parts):
+                return name
+    raise PreflightError("origin is not an exact supported GitHub repository URL")
+
+
 def ref_oid(repo, ref):
+    symbolic = git(repo, "symbolic-ref", "--quiet", ref, accepted=(0, 1))
+    if symbolic.returncode == 0:
+        raise PreflightError(f"backup ref {ref} is symbolic, not a durable direct ref")
     result = git(repo, "rev-parse", "--verify", "--quiet", ref, accepted=(0, 1))
     if result.returncode == 1:
         return None
@@ -190,7 +225,7 @@ def ref_oid(repo, ref):
     return value
 
 
-def classify(repo, baseline_ref, tip, ignored_backup_ref=None):
+def classify(repo, baseline_tip, baseline_ref, tip, ignored_backup_ref=None):
     output = git(
         repo,
         "for-each-ref",
@@ -208,10 +243,10 @@ def classify(repo, baseline_ref, tip, ignored_backup_ref=None):
         return "SAFE", refs, {"rule": "2a", "refs": remote}
     if local:
         return "SAFE_KEEP_BRANCH", refs, {"rule": "2b", "refs": local}
-    ancestor = git(repo, "merge-base", "--is-ancestor", tip, baseline_ref, accepted=(0, 1))
+    ancestor = git(repo, "merge-base", "--is-ancestor", tip, baseline_tip, accepted=(0, 1))
     if ancestor.returncode == 0:
         return "SAFE", refs, {"rule": "3", "baseline": baseline_ref}
-    cherry = git(repo, "cherry", baseline_ref, tip).stdout
+    cherry = git(repo, "cherry", baseline_tip, tip).stdout
     lines = cherry.splitlines()
     if lines and all(line.startswith("- ") and len(line.split()) == 2 for line in lines):
         return "SAFE", refs, {"rule": "4", "rows": lines}
@@ -236,6 +271,49 @@ def validate_backup_ref(repo, row):
     return expected
 
 
+def validate_ownership(value, label):
+    require_exact_keys(value, OWNERSHIP_KEYS, label)
+    for kind in sorted(OWNERSHIP_KEYS):
+        item = value[kind]
+        require_exact_keys(item, OWNERSHIP_ITEM_KEYS, f"{label} {kind}")
+        status = require_string(item["status"], f"{label} {kind} status")
+        if status not in OWNERSHIP_STATUSES:
+            raise PreflightError(f"{label} {kind} has unsupported status")
+        evidence = require_string(item["evidence"], f"{label} {kind} evidence")
+        if len(evidence.encode("utf-8")) > 4096:
+            raise PreflightError(f"{label} {kind} evidence exceeds 4096 bytes")
+        if status in ("owned", "blocked"):
+            raise PreflightError(f"{label} {kind} blocks backup/removal")
+
+
+def validate_rule_evidence(value, verdict, label):
+    if not isinstance(value, dict):
+        raise PreflightError(f"{label} must be an object")
+    rule = require_string(value.get("rule"), f"{label} rule")
+    expected = {
+        "SAFE": {"2a", "3", "4"},
+        "SAFE_KEEP_BRANCH": {"2b"},
+        "NEEDS_BACKUP": {"5"},
+    }[verdict]
+    if rule not in expected:
+        raise PreflightError(f"{label} rule does not match {verdict}")
+    keys = {"rule"}
+    if rule in ("2a", "2b"):
+        keys.add("refs")
+        refs = value.get("refs")
+        if not isinstance(refs, list) or not refs or any(not isinstance(ref, str) or not ref for ref in refs):
+            raise PreflightError(f"{label} refs must be a non-empty string array")
+    elif rule == "3":
+        keys.add("baseline")
+        require_string(value.get("baseline"), f"{label} baseline")
+    elif rule == "4":
+        keys.add("rows")
+        rows = value.get("rows")
+        if not isinstance(rows, list) or not rows or any(not isinstance(row, str) or not row for row in rows):
+            raise PreflightError(f"{label} rows must be a non-empty string array")
+    require_exact_keys(value, keys, label)
+
+
 def load_manifest(path):
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
@@ -255,7 +333,11 @@ def load_manifest(path):
         if len(data) > 1024 * 1024:
             raise PreflightError("manifest exceeds the 1 MiB limit")
         raw = data.decode("utf-8")
-        manifest = json.loads(raw, object_pairs_hook=strict_object)
+        manifest = json.loads(
+            raw,
+            object_pairs_hook=strict_object,
+            parse_constant=reject_constant,
+        )
     except PreflightError:
         raise
     except (OSError, UnicodeError, DuplicateKey, json.JSONDecodeError) as error:
@@ -268,7 +350,8 @@ def load_manifest(path):
 
 def preflight(manifest):
     repo = canonical_repository(manifest["repository"])
-    if manifest["operation"] not in ("targeted_remove", "prune"):
+    operation = require_string(manifest["operation"], "operation")
+    if operation not in ("targeted_remove", "prune"):
         raise PreflightError("operation must be targeted_remove or prune")
     require_exact_keys(manifest["fetch"], FETCH_KEYS, "fetch")
     if manifest["fetch"] != {"command": ["git", "fetch", "--prune", "origin"], "result": "success"}:
@@ -278,7 +361,9 @@ def preflight(manifest):
     baseline = manifest["baseline"]
     require_exact_keys(baseline, BASELINE_KEYS, "baseline")
     require_string(baseline["ref"], "baseline ref")
-    if baseline["source"] not in BASELINE_SOURCES:
+    require_string(baseline["tip"], "baseline tip")
+    source = require_string(baseline["source"], "baseline source")
+    if source not in BASELINE_SOURCES:
         raise PreflightError("unsupported baseline source")
     validate_baseline_source(repo, baseline)
     validate_oid(repo, baseline["tip"], "baseline tip")
@@ -289,10 +374,11 @@ def preflight(manifest):
     rows = manifest["rows"]
     if not isinstance(rows, list) or not rows:
         raise PreflightError("manifest rows must be a non-empty array")
-    if manifest["operation"] == "targeted_remove" and len(rows) != 1:
+    if operation == "targeted_remove" and len(rows) != 1:
         raise PreflightError("targeted_remove requires exactly one classified row")
     inventory = parse_worktrees(repo)
     seen_paths = set()
+    seen_backup_refs = set()
     facts = []
     transaction = []
     for number, row in enumerate(rows, 1):
@@ -301,16 +387,21 @@ def preflight(manifest):
         if path in seen_paths:
             raise PreflightError(f"duplicate target path {path!r}")
         seen_paths.add(path)
-        if row["verdict"] not in VERDICTS:
+        verdict_recorded = require_string(row["verdict"], f"row {number} verdict")
+        if verdict_recorded not in VERDICTS:
             raise PreflightError(f"row {number} has unsupported verdict")
-        if not isinstance(row["ownership_evidence"], dict) or not row["ownership_evidence"]:
-            raise PreflightError(f"row {number} lacks exact ownership evidence")
-        if not isinstance(row["covering_refs"], list) or any(not isinstance(ref, str) for ref in row["covering_refs"]):
+        validate_ownership(row["ownership_evidence"], f"row {number} ownership_evidence")
+        if (
+            not isinstance(row["covering_refs"], list)
+            or any(not isinstance(ref, str) or not ref for ref in row["covering_refs"])
+            or len(set(row["covering_refs"])) != len(row["covering_refs"])
+        ):
             raise PreflightError(f"row {number} covering_refs must be a string array")
-        if not isinstance(row["rule_evidence"], dict) or not row["rule_evidence"]:
-            raise PreflightError(f"row {number} lacks rule evidence")
+        validate_rule_evidence(row["rule_evidence"], verdict_recorded, f"row {number} rule_evidence")
         if type(row["locked"]) is not bool or type(row["prunable"]) is not bool:
             raise PreflightError(f"row {number} lock/prunable evidence must be boolean")
+        if row["branch"] is not None:
+            require_string(row["branch"], f"row {number} branch")
         record = inventory.get(path)
         if record is None:
             raise PreflightError(f"classified worktree disappeared from inventory: {path!r}")
@@ -318,29 +409,39 @@ def preflight(manifest):
         if any(record[key] != row[key] for key in ("tip", "branch", "locked", "prunable")):
             raise PreflightError(f"worktree identity changed since classification: {path!r}")
         state = inspect_path(path)
-        if row["path_state"] not in ("present", "absent") or state != row["path_state"]:
+        path_state = require_string(row["path_state"], f"row {number} path_state")
+        if path_state not in ("present", "absent") or state != path_state:
             raise PreflightError(f"worktree path state changed since classification: {path!r}")
         if state == "present":
             status = git(path, "status", "--porcelain", "--untracked-files=no").stdout
             if status:
                 raise PreflightError(f"tracked changes now block backup/removal: {path!r}")
-        if manifest["operation"] == "prune" and not (state == "absent" and (row["prunable"] or row["locked"])):
+        if operation == "prune" and not (state == "absent" and (row["prunable"] or row["locked"])):
             raise PreflightError(f"prune row is not currently missing and prunable/planned-unlock: {path!r}")
 
         backup_ref = None
         existing = None
-        if row["verdict"] == "NEEDS_BACKUP":
+        if verdict_recorded == "NEEDS_BACKUP":
             backup_ref = validate_backup_ref(repo, row)
+            if backup_ref in seen_backup_refs:
+                raise PreflightError(f"duplicate backup ref in complete set: {backup_ref}")
+            seen_backup_refs.add(backup_ref)
             existing = ref_oid(repo, backup_ref)
             if existing not in (None, tip):
                 raise PreflightError(f"backup ref {backup_ref} exists at a different commit")
         elif row["backup_ref"] is not None or row["date"] is not None:
-            raise PreflightError(f"row {number} supplies backup fields for {row['verdict']}")
+            raise PreflightError(f"row {number} supplies backup fields for {verdict_recorded}")
 
-        verdict, refs, evidence = classify(repo, baseline["ref"], tip, backup_ref if existing == tip else None)
-        if verdict != row["verdict"] or refs != sorted(row["covering_refs"]) or evidence != row["rule_evidence"]:
+        verdict, refs, evidence = classify(
+            repo,
+            baseline["tip"],
+            baseline["ref"],
+            tip,
+            backup_ref if existing == tip else None,
+        )
+        if verdict != verdict_recorded or refs != sorted(row["covering_refs"]) or evidence != row["rule_evidence"]:
             raise PreflightError(f"rule/ref evidence changed since classification: {path!r}")
-        if row["verdict"] == "NEEDS_BACKUP":
+        if verdict_recorded == "NEEDS_BACKUP":
             transaction.append((backup_ref, tip, existing))
         facts.append(
             {
@@ -360,7 +461,7 @@ def preflight(manifest):
             }
         )
 
-    if manifest["operation"] == "prune":
+    if operation == "prune":
         candidates = set()
         for path, record in inventory.items():
             state = inspect_path(path)
@@ -374,7 +475,7 @@ def preflight(manifest):
 def apply_transaction(repo, transaction):
     if not transaction:
         return
-    commands = ["start"]
+    commands = ["start", "option no-deref"]
     for ref, tip, existing in transaction:
         if existing is None:
             commands.append(f"create {ref} {tip}")
@@ -438,6 +539,7 @@ def main(argv=None):
         manifest = load_manifest(args.manifest)
         repo, _, facts, transaction = preflight(manifest)
         if not args.dry_run and not args.no_backup:
+            repo, _, facts, transaction = preflight(manifest)
             apply_transaction(repo, transaction)
             for fact in facts:
                 if fact["backup_ref"] and ref_oid(repo, fact["backup_ref"]) != fact["tip"]:
@@ -445,7 +547,7 @@ def main(argv=None):
         document = envelope(repo, manifest, facts, dry_run=args.dry_run, no_backup=args.no_backup)
         emit(document, args.json)
         return 2 if args.no_backup and not document["backup_satisfied"] else 0
-    except PreflightError as error:
+    except (PreflightError, TypeError, ValueError) as error:
         document = {
             "schema_version": SCHEMA_VERSION,
             "error": str(error),
