@@ -15,6 +15,7 @@ const (
 	GroupsFile                   = "groups.tsv"
 	GroupNamingFile              = "group-naming.json"
 	OperationsFile               = "operations.json"
+	SpawnAssignmentsFile         = "spawn-assignments.json"
 	ReportsFile                  = "reports.json"
 	MaintenanceFile              = "runner-maintenance.json"
 	MaintenanceResultFile        = "runner-maintenance-result.json"
@@ -69,6 +70,10 @@ func (d Directory) GroupNamingPath() string {
 
 func (d Directory) OperationsPath() string {
 	return filepath.Join(d.Path, OperationsFile)
+}
+
+func (d Directory) SpawnAssignmentsPath() string {
+	return filepath.Join(d.Path, SpawnAssignmentsFile)
 }
 
 func (d Directory) ReportsPath() string { return filepath.Join(d.Path, ReportsFile) }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ const maxSpawnPromptBytes = 1 << 20
 
 var (
 	spawnCreateThread    = createLocalAmpThread
+	spawnStoreAssignment = config.StoreSpawnAssignment
 	spawnReadinessLimit  = 10 * time.Second
 	spawnReadinessPoll   = 100 * time.Millisecond
 	spawnReadinessSettle = 500 * time.Millisecond
@@ -28,8 +30,8 @@ var (
 
 func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelope) (*result.Envelope, error) {
 	s := in.Selectors
-	if s.Workdir == "" || s.Workspace == "" || s.Window == "" || s.PromptFile == "" {
-		return env, result.Request(errors.New("spawn requires --workdir, --workspace, --window, and --prompt-file <path|->"))
+	if s.Workdir == "" || s.Workspace == "" || s.Window == "" || s.PromptFile == "" || s.AssignmentPhase == "" {
+		return env, result.Request(errors.New("spawn requires --assignment-phase, --workdir, --workspace, --window, and --prompt-file <path|->"))
 	}
 	if len(in.Args) != 0 {
 		return env, result.Request(errors.New("spawn accepts no positional prompt or identity arguments"))
@@ -53,7 +55,41 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 	if !filepath.IsAbs(s.Workdir) || s.Workdir != workdir {
 		return env, result.Preflight(fmt.Errorf("--workdir must be the canonical existing path %s", workdir))
 	}
-	row := config.Row{Workspace: s.Workspace, Window: s.Window, Workdir: workdir, AssignmentState: config.WorkerAssignmentRetainedIndeterminate}
+	digest := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(prompt)))
+	row := config.Row{Workspace: s.Workspace, Window: s.Window, Workdir: workdir}
+	request := config.SpawnAssignmentRecord{Workspace: row.Workspace, Window: row.Window, Workdir: workdir, Mode: mode, Group: s.Group, PromptDigest: digest}
+	if s.Thread != "" {
+		request.Thread = s.Thread
+	}
+	if s.NativeCapability != "existing-thread-message-v1" {
+		failure := result.Preflight(errors.New("native existing-thread message capability must be confirmed before spawn mutation with --native-capability existing-thread-message-v1"))
+		out := result.Outcome{Resource: result.CommandResource(), Action: "spawn-preflight", Message: "creation rejected before mutation because native assignment is unsupported", Assignment: spawnAssignmentDetails("rejected", "absent", "absent", "unsupported", digest, "")}
+		out.Error = &result.Failure{Kind: result.ErrorPreflight, Message: failure.Error()}
+		env.Failed = append(env.Failed, out)
+		return env, failure
+	}
+	switch s.AssignmentPhase {
+	case "prepare":
+		if s.Thread != "" || s.AssignmentOutcome != "" || s.LatestCursor != "" {
+			return env, result.Request(errors.New("spawn prepare does not accept --thread, --assignment-outcome, or --latest-cursor"))
+		}
+	case "arm":
+		if s.Thread == "" || s.AssignmentOutcome != "" || s.LatestCursor != "" {
+			return env, result.Request(errors.New("spawn arm requires --thread and does not accept --assignment-outcome or --latest-cursor"))
+		}
+	case "finalize":
+		if s.Thread == "" || s.AssignmentOutcome == "" {
+			return env, result.Request(errors.New("spawn finalize requires --thread and --assignment-outcome"))
+		}
+		if s.AssignmentOutcome == string(config.SpawnAssignmentAuthenticatedAccepted) && s.LatestCursor == "" {
+			return env, result.Request(errors.New("authenticated_accepted finalization requires --latest-cursor from native tool success"))
+		}
+		if s.AssignmentOutcome != string(config.SpawnAssignmentAuthenticatedAccepted) && s.LatestCursor != "" {
+			return env, result.Request(errors.New("--latest-cursor is valid only with authenticated_accepted"))
+		}
+	default:
+		return env, result.Request(errors.New("--assignment-phase must be prepare, arm, or finalize"))
+	}
 	if !in.Options.DryRun {
 		held, err := acquireMutationLock(in.Path)
 		if err != nil {
@@ -61,33 +97,36 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		}
 		defer held.Release()
 	}
-	memberships, err := preflightSpawnOwnership(dir, row, s.Group)
-	if err != nil {
-		return env, result.Preflight(err)
-	}
+	var memberships []config.GroupMembership
 	var groupAmpPath string
-	if s.Group != "" {
-		groupAmpPath, err = preflightGroupAmp()
+	if s.AssignmentPhase == "prepare" {
+		memberships, err = preflightSpawnOwnership(dir, row, s.Group)
 		if err != nil {
 			return env, result.Preflight(err)
 		}
-	}
-	runner := tmux.Runner{}
-	sessionExists, err := runner.SessionExists(row.Workspace)
-	if err != nil {
-		return env, result.Preflight(fmt.Errorf("inspect tmux workspace %s: %w", row.Workspace, err))
-	}
-	if sessionExists {
-		windows, err := runner.WindowNames(row.Workspace)
-		if err != nil {
-			return env, result.Preflight(fmt.Errorf("inspect tmux workspace %s: %w", row.Workspace, err))
+		if s.Group != "" {
+			groupAmpPath, err = preflightGroupAmp()
+			if err != nil {
+				return env, result.Preflight(err)
+			}
 		}
-		if tmux.WindowExists(windows, row.Window) {
-			return env, result.Preflight(fmt.Errorf("tmux window %s/%s already exists", row.Workspace, row.Window))
+		runner := tmux.Runner{}
+		sessionExists, inspectErr := runner.SessionExists(row.Workspace)
+		if inspectErr != nil {
+			return env, result.Preflight(fmt.Errorf("inspect tmux workspace %s: %w", row.Workspace, inspectErr))
+		}
+		if sessionExists {
+			windows, inspectErr := runner.WindowNames(row.Workspace)
+			if inspectErr != nil {
+				return env, result.Preflight(fmt.Errorf("inspect tmux workspace %s: %w", row.Workspace, inspectErr))
+			}
+			if tmux.WindowExists(windows, row.Window) {
+				return env, result.Preflight(fmt.Errorf("tmux window %s/%s already exists", row.Workspace, row.Window))
+			}
 		}
 	}
 	if in.Options.DryRun {
-		out := result.Outcome{Resource: result.CommandResource(), Action: "spawn", Message: fmt.Sprintf("would locally run amp threads new --mode %s once in canonical cwd %s; create tmux worker %s/%s; attempt one bounded literal prompt paste and, only after paste success, one Enter; persist and report exact retained local ownership%s; then return retained-indeterminate because no supported delivery acknowledgement is available", mode, workdir, row.Workspace, row.Window, optionalGroupPlan(s.Group))}
+		out := result.Outcome{Resource: result.CommandResource(), Action: "spawn-" + s.AssignmentPhase, Message: fmt.Sprintf("would execute durable native assignment phase %s for %s/%s; execution remains unproven", s.AssignmentPhase, row.Workspace, row.Window), Assignment: spawnAssignmentDetails("not_attempted", "absent", "absent", "not_attempted", digest, "")}
 		env.Planned = append(env.Planned, out)
 		if !in.Options.JSON {
 			fmt.Fprintln(a.stdout, out.Message)
@@ -95,96 +134,217 @@ func (a app) workerSpawn(in invocation, dir config.Directory, env *result.Envelo
 		return env, nil
 	}
 
-	thread, createErr := spawnCreateThread(workdir, mode)
-	thread = strings.TrimSpace(thread)
-	if createErr != nil {
-		if exact, identityErr := config.CanonicalThreadID(thread); identityErr == nil {
-			row.Thread = exact
-			return env, postCreateSpawnErrorBeforeTmux(exact, row, "create thread returned an error after an exact identity", errors.New("amp threads new returned nonzero after an exact thread identity"))
+	switch s.AssignmentPhase {
+	case "prepare":
+		return a.prepareNativeSpawn(in, dir, env, request, row, memberships, groupAmpPath)
+	case "arm":
+		return a.armNativeSpawn(in, dir, env, request, row)
+	default:
+		return a.finalizeNativeSpawn(in, dir, env, request, row)
+	}
+}
+
+func (a app) prepareNativeSpawn(in invocation, dir config.Directory, env *result.Envelope, request config.SpawnAssignmentRecord, row config.Row, memberships []config.GroupMembership, groupAmpPath string) (*result.Envelope, error) {
+	records, err := config.LoadSpawnAssignments(dir.SpawnAssignmentsPath())
+	if err != nil {
+		return env, result.Preflight(err)
+	}
+	for _, existing := range records {
+		if existing.Workspace == request.Workspace && existing.Window == request.Window {
+			return env, result.Preflight(fmt.Errorf("spawn assignment %s/%s already exists at phase %s; creation and messaging will not be retried", request.Workspace, request.Window, existing.Phase))
 		}
-		return env, creationIndeterminateSpawnError(row)
 	}
-	thread, err = config.CanonicalThreadID(thread)
-	if err != nil {
-		return env, creationIndeterminateSpawnError(row)
+	request.Phase = config.SpawnAssignmentCreationArmed
+	request.Outcome = config.SpawnAssignmentNotAttempted
+	if err := spawnStoreAssignment(dir.SpawnAssignmentsPath(), request); err != nil {
+		return env, result.Runtime(fmt.Errorf("durably arm exact thread creation before mutation: %w", err))
 	}
-	row.Thread = thread
-	command := tmux.ContinueCommandWithEnv(workdir, thread, map[string]string{
-		"AMUX_WORKSPACE": row.Workspace,
-		"AMUX_SESSION":   row.Workspace,
-		"AMUX_WINDOW":    row.Window,
-		"AMUX_THREAD_ID": thread,
-		"AMUX_WORKDIR":   workdir,
-	})
-	created, err := runner.NewWorkerPane(row.Workspace, row.Window, command, !sessionExists)
-	if err != nil {
-		return env, postCreateSpawnError(thread, created, row, "create exact tmux worker", err)
-	}
-	if err := waitForSpawnPane(created, row, command); err != nil {
-		return env, postCreateSpawnError(thread, created, row, "wait for exact tmux worker readiness", err)
-	}
-	inputStatus := "one-paste-one-enter-completed"
-	inputOut := spawnWorkerOutcome(row, created, "attempt-input", "input_attempt_completed")
-	if err := runner.PasteLiteral(created.PaneID, prompt); err != nil {
-		inputStatus = "paste-failed-enter-not-attempted"
-		inputOut.Message = "the sole prompt paste command failed; Enter was not attempted; delivery and execution are unproven"
-		inputOut.Error = &result.Failure{Kind: result.ErrorRuntime, Message: "local input attempt failed at the sole paste command; Enter was not attempted"}
-		env.Failed = append(env.Failed, inputOut)
-	} else if err := runner.SendEnter(created.PaneID); err != nil {
-		inputStatus = "paste-completed-enter-failed-indeterminate"
-		inputOut.Message = "the sole prompt paste completed locally and the sole Enter command failed; delivery and execution are unproven"
-		inputOut.Error = &result.Failure{Kind: result.ErrorRuntime, Message: "local input attempt became indeterminate when the sole Enter command failed"}
-		env.Failed = append(env.Failed, inputOut)
-	} else {
-		inputOut.Message = "one prompt paste and one Enter completed locally; delivery and execution are unproven"
-		env.Successful = append(env.Successful, inputOut)
-	}
-	workerOut := spawnWorkerOutcome(row, created, "persist-worker", "retained")
-	workerOut.Message = "persisted exact local worker ownership; delivery and execution are unproven"
-	if _, err := config.Store(dir.WorkersPath(), row); err != nil {
-		failure := retainedIndeterminateSpawnPhaseError(thread, created, row, inputStatus, nil, "persist exact worker", err)
-		appendSpawnFailure(env, workerOut, failure)
+
+	thread, createErr := spawnCreateThread(request.Workdir, request.Mode)
+	thread = strings.TrimSpace(thread)
+	exact, identityErr := config.CanonicalThreadID(thread)
+	if createErr != nil || identityErr != nil {
+		resource := result.CommandResource()
+		identity := "no exact thread identity was returned"
+		if identityErr == nil {
+			resource.Thread = exact
+			identity = "exact returned identity=" + exact
+		}
+		failure := result.Runtime(fmt.Errorf("thread creation is indeterminate for %s/%s (%s); durable creation arm prohibits retry, search, cleanup, archive, or alternate creation", request.Workspace, request.Window, identity))
+		out := result.Outcome{Resource: resource, Action: "spawn-prepare", Message: failure.Error(), Assignment: spawnAssignmentDetails("indeterminate", "absent", "absent", "not_attempted", request.PromptDigest, "")}
+		out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: failure.Error()}
+		env.Failed = append(env.Failed, out)
 		return env, failure
 	}
-	env.Successful = append(env.Successful, workerOut)
-	if !in.Options.JSON {
-		fmt.Fprintf(a.stdout, "PERSIST-WORKER\tthread=%s\tworkspace=%s\twindow=%s\twindow-id=%s\tpane-id=%s\tassignment=%s\n", thread, row.Workspace, row.Window, created.WindowID, created.PaneID, workerAssignmentState(row))
+	request.Thread = exact
+	request.Phase = config.SpawnAssignmentPrepared
+	if err := spawnStoreAssignment(dir.SpawnAssignmentsPath(), request); err != nil {
+		return env, result.Runtime(fmt.Errorf("exact thread %s was allocated but prepare finalization failed; creation is indeterminate and must not be retried: %w", exact, err))
 	}
-	if s.Group != "" {
-		membership := config.GroupMembership{Group: s.Group, Thread: thread, Role: config.GroupMember}
+	row.Thread = exact
+	row.AssignmentState = config.WorkerAssignmentNativeNotAttempted
+	if _, err := config.Store(dir.WorkersPath(), row); err != nil {
+		return env, result.Runtime(fmt.Errorf("exact thread %s was allocated and prepared but local ownership persistence failed; assignment was not attempted: %w", exact, err))
+	}
+	if request.Group != "" {
+		membership := config.GroupMembership{Group: request.Group, Thread: exact, Role: config.GroupMember}
 		memberships = append(memberships, membership)
-		groupOut := groupOutcome(membership, "persist-group")
-		groupOut.Message = "persisted exact group member intent"
 		if err := config.WriteGroups(dir.GroupsPath(), memberships); err != nil {
-			failure := retainedIndeterminateSpawnPhaseError(thread, created, row, inputStatus, []string{"persist-worker"}, "persist exact group member", err)
-			appendSpawnFailure(env, groupOut, failure)
-			return env, failure
-		}
-		env.Successful = append(env.Successful, groupOut)
-		if !in.Options.JSON {
-			fmt.Fprintf(a.stdout, "%s\t%s\t%s\tlocal membership persisted\n", membership.Group, membership.Thread, membership.Role)
+			return env, result.Runtime(fmt.Errorf("exact thread %s was prepared and retained but group persistence failed; assignment was not attempted: %w", exact, err))
 		}
 		labelOut := groupOutcome(membership, "ensure-label")
 		if _, err := a.ensureGroupLabel(env, labelOut, groupAmpPath, membership, in.Options.JSON); err != nil {
-			failure := retainedIndeterminateSpawnPhaseError(thread, created, row, inputStatus, []string{"persist-worker", "persist-group"}, "add-only ensure exact group member label", err)
-			if len(env.Failed) != 0 && env.Failed[len(env.Failed)-1].Error != nil {
-				env.Failed[len(env.Failed)-1].Error.Message = failure.Error()
-			}
-			return env, failure
+			return env, result.Runtime(fmt.Errorf("exact thread %s was prepared and retained but group label ensure failed; assignment was not attempted: %w", exact, err))
 		}
 	}
-	completed := []string{"persist-worker"}
-	if s.Group != "" {
-		completed = append(completed, "persist-group", "ensure-label")
+	out := spawnWorkerOutcome(row, tmux.WindowPane{}, "spawn-prepare", "retained")
+	out.Message = "exact local thread created once and ownership retained; assignment not attempted; use the exact returned thread only"
+	out.Assignment = spawnAssignmentDetails("exact_thread_allocated", "retained", "absent", "not_attempted", request.PromptDigest, "")
+	env.Successful = append(env.Successful, out)
+	if !in.Options.JSON {
+		fmt.Fprintf(a.stdout, "SPAWN-PREPARED\tthread=%s\tcreation=exact_thread_allocated\tlocal-ownership=retained\tlocal-presentation=absent\tassignment=not_attempted\texecution=unproven\tprompt-digest=%s\n", exact, request.PromptDigest)
 	}
-	failure := retainedIndeterminateSpawnError(thread, created, row, inputStatus, completed)
-	out := spawnWorkerOutcome(row, created, "report-delivery-indeterminate", "retained_indeterminate")
-	out.Message = "input attempt and local ownership persistence completed; delivery is indeterminate, acknowledgement is unavailable, and delivery and execution are unproven"
+	return env, nil
+}
+
+func (a app) armNativeSpawn(in invocation, dir config.Directory, env *result.Envelope, request config.SpawnAssignmentRecord, row config.Row) (*result.Envelope, error) {
+	record, err := exactSpawnAssignment(dir.SpawnAssignmentsPath(), request)
+	if err != nil {
+		return env, result.Preflight(err)
+	}
+	if record.Phase != config.SpawnAssignmentPrepared {
+		return env, result.Preflight(fmt.Errorf("spawn assignment for exact thread %s is phase %s; native messaging will not be attempted", request.Thread, record.Phase))
+	}
+	record.Phase = config.SpawnAssignmentArmed
+	record.Outcome = config.SpawnAssignmentIndeterminate
+	if err := spawnStoreAssignment(dir.SpawnAssignmentsPath(), record); err != nil {
+		return env, result.Runtime(fmt.Errorf("arm native assignment for exact thread %s: %w", request.Thread, err))
+	}
+	row.Thread = request.Thread
+	row.AssignmentState = config.WorkerAssignmentNativeIndeterminate
+	if _, err := config.Store(dir.WorkersPath(), row); err != nil {
+		return env, result.Runtime(fmt.Errorf("assignment for exact thread %s was durably armed and is indeterminate, but worker display state failed to persist; the message must not be attempted: %w", request.Thread, err))
+	}
+	out := spawnWorkerOutcome(row, tmux.WindowPane{}, "spawn-arm", "retained")
+	out.Message = "native assignment armed for the exact thread; one coordinator message may now be attempted; interruption is indeterminate and never retryable"
+	out.Assignment = spawnAssignmentDetails("exact_thread_allocated", "retained", "absent", "indeterminate", request.PromptDigest, "")
+	env.Successful = append(env.Successful, out)
+	if !in.Options.JSON {
+		fmt.Fprintf(a.stdout, "SPAWN-ARMED\tthread=%s\tcreation=exact_thread_allocated\tlocal-ownership=retained\tlocal-presentation=absent\tassignment=indeterminate\texecution=unproven\n", request.Thread)
+	}
+	return env, nil
+}
+
+func (a app) finalizeNativeSpawn(in invocation, dir config.Directory, env *result.Envelope, request config.SpawnAssignmentRecord, row config.Row) (*result.Envelope, error) {
+	record, err := exactSpawnAssignment(dir.SpawnAssignmentsPath(), request)
+	if err != nil {
+		return env, result.Preflight(err)
+	}
+	if record.Phase != config.SpawnAssignmentArmed {
+		return env, result.Preflight(fmt.Errorf("spawn assignment for exact thread %s is phase %s; finalization cannot change it", request.Thread, record.Phase))
+	}
+	outcome := config.SpawnAssignmentOutcome(in.Selectors.AssignmentOutcome)
+	switch outcome {
+	case config.SpawnAssignmentRejected, config.SpawnAssignmentIndeterminate, config.SpawnAssignmentAuthenticatedAccepted:
+	default:
+		return env, result.Request(errors.New("--assignment-outcome must be rejected, indeterminate, or authenticated_accepted"))
+	}
+	record.Phase = config.SpawnAssignmentFinalized
+	record.Outcome = outcome
+	record.ReceiptCursor = in.Selectors.LatestCursor
+	if err := spawnStoreAssignment(dir.SpawnAssignmentsPath(), record); err != nil {
+		failure := result.Runtime(fmt.Errorf("native result for exact thread %s could not be durably finalized; assignment remains indeterminate and must not be resent: %w", request.Thread, err))
+		resource := result.CommandResource()
+		resource.Thread = request.Thread
+		out := result.Outcome{Resource: resource, Action: "spawn-finalize", Message: failure.Error(), Assignment: spawnAssignmentDetails("exact_thread_allocated", "retained", "absent", "indeterminate", request.PromptDigest, "")}
+		out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: failure.Error()}
+		env.Failed = append(env.Failed, out)
+		return env, failure
+	}
+	row.Thread = request.Thread
+	switch outcome {
+	case config.SpawnAssignmentRejected:
+		row.AssignmentState = config.WorkerAssignmentNativeRejected
+	case config.SpawnAssignmentIndeterminate:
+		row.AssignmentState = config.WorkerAssignmentNativeIndeterminate
+	default:
+		row.AssignmentState = config.WorkerAssignmentAuthenticatedAccepted
+	}
+	if _, err := config.Store(dir.WorkersPath(), row); err != nil {
+		return appendFinalizedPresentationFailure(env, row, tmux.WindowPane{}, outcome, request.PromptDigest, "persist worker assignment display", err)
+	}
+
+	runner := tmux.Runner{}
+	sessionExists, err := runner.SessionExists(row.Workspace)
+	if err != nil {
+		return appendFinalizedPresentationFailure(env, row, tmux.WindowPane{}, outcome, request.PromptDigest, "inspect tmux workspace", err)
+	}
+	command := tmux.ContinueCommandWithEnv(row.Workdir, row.Thread, map[string]string{
+		"AMUX_WORKSPACE": row.Workspace, "AMUX_SESSION": row.Workspace, "AMUX_WINDOW": row.Window,
+		"AMUX_THREAD_ID": row.Thread, "AMUX_WORKDIR": row.Workdir,
+	})
+	created, err := runner.NewWorkerPane(row.Workspace, row.Window, command, !sessionExists)
+	if err != nil {
+		return appendFinalizedPresentationFailure(env, row, created, outcome, request.PromptDigest, "create exact presentation-only tmux worker", err)
+	}
+	if err := waitForSpawnPane(created, row, command); err != nil {
+		return appendFinalizedPresentationFailure(env, row, created, outcome, request.PromptDigest, "verify exact presentation-only tmux worker", err)
+	}
+	receipt := ""
+	if outcome == config.SpawnAssignmentAuthenticatedAccepted {
+		receipt = "native_latest_cursor"
+	}
+	out := spawnWorkerOutcome(row, created, "spawn-finalize", "exact_client_established")
+	out.Message = fmt.Sprintf("assignment=%s finalized for the exact thread; local client established for presentation only; execution remains unproven", outcome)
+	out.Assignment = spawnAssignmentDetails("exact_thread_allocated", "retained", "exact_client_established", string(outcome), request.PromptDigest, receipt)
+	if outcome == config.SpawnAssignmentAuthenticatedAccepted {
+		env.Successful = append(env.Successful, out)
+		if !in.Options.JSON {
+			fmt.Fprintf(a.stdout, "SPAWN-FINALIZED\tthread=%s\tcreation=exact_thread_allocated\tlocal-ownership=retained\tlocal-presentation=exact_client_established\tassignment=%s\texecution=unproven\treceipt=native_latest_cursor\n", request.Thread, outcome)
+		}
+		return env, nil
+	}
+	failure := result.Runtime(fmt.Errorf("assignment=%s for exact thread %s; local presentation was established, execution remains unproven, and no message retry or TUI fallback is permitted", outcome, request.Thread))
 	out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: failure.Error()}
 	env.Failed = append(env.Failed, out)
 	if !in.Options.JSON {
-		fmt.Fprintf(a.stdout, "RETAINED-INDETERMINATE\tthread=%s\tworkspace=%s\twindow=%s\twindow-id=%s\tpane-id=%s\tassignment=%s\tinput=%s\tcompleted=%s\tdelivery=indeterminate\tacknowledgement=unavailable\n", thread, row.Workspace, row.Window, created.WindowID, created.PaneID, workerAssignmentState(row), inputStatus, strings.Join(completed, ","))
+		fmt.Fprintf(a.stdout, "SPAWN-FINALIZED\tthread=%s\tcreation=exact_thread_allocated\tlocal-ownership=retained\tlocal-presentation=exact_client_established\tassignment=%s\texecution=unproven\n", request.Thread, outcome)
 	}
+	return env, failure
+}
+
+func exactSpawnAssignment(path string, request config.SpawnAssignmentRecord) (config.SpawnAssignmentRecord, error) {
+	records, err := config.LoadSpawnAssignments(path)
+	if err != nil {
+		return config.SpawnAssignmentRecord{}, err
+	}
+	for _, record := range records {
+		if record.Workspace != request.Workspace || record.Window != request.Window {
+			continue
+		}
+		if record.Thread != request.Thread || record.Workdir != request.Workdir || record.Mode != request.Mode || record.Group != request.Group || record.PromptDigest != request.PromptDigest {
+			return config.SpawnAssignmentRecord{}, errors.New("spawn assignment boundary does not exactly match the prepared thread, cwd, mode, group, and prompt digest")
+		}
+		return record, nil
+	}
+	return config.SpawnAssignmentRecord{}, fmt.Errorf("no prepared spawn assignment exists for %s/%s", request.Workspace, request.Window)
+}
+
+func spawnAssignmentDetails(creation, ownership, presentation, assignment, digest, receipt string) *result.SpawnAssignmentDetails {
+	return &result.SpawnAssignmentDetails{Creation: creation, LocalOwnership: ownership, LocalPresentation: presentation, Assignment: assignment, Execution: "unproven", PromptDigest: digest, Receipt: receipt}
+}
+
+func appendFinalizedPresentationFailure(env *result.Envelope, row config.Row, pane tmux.WindowPane, outcome config.SpawnAssignmentOutcome, digest, step string, cause error) (*result.Envelope, error) {
+	failure := result.Runtime(fmt.Errorf("assignment=%s was durably finalized for exact thread %s before presentation failed at %s; acceptance/rejection truth is preserved, execution is unproven, and the message must not be resent: %w", outcome, row.Thread, step, cause))
+	out := spawnWorkerOutcome(row, pane, "spawn-finalize-presentation", "presentation_failed")
+	out.Message = "durable assignment truth preserved before local presentation failure"
+	receipt := ""
+	if outcome == config.SpawnAssignmentAuthenticatedAccepted {
+		receipt = "native_latest_cursor"
+	}
+	out.Assignment = spawnAssignmentDetails("exact_thread_allocated", "retained", "presentation_failed", string(outcome), digest, receipt)
+	out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: failure.Error()}
+	env.Failed = append(env.Failed, out)
 	return env, failure
 }
 
@@ -293,56 +453,10 @@ func waitForSpawnPane(created tmux.WindowPane, row config.Row, command string) e
 	}
 }
 
-func postCreateSpawnError(thread string, pane tmux.WindowPane, row config.Row, step string, cause error) error {
-	identity := "creation-indeterminate requested=" + row.Workspace + "/" + row.Window
-	if pane.WindowID != "" || pane.PaneID != "" {
-		identity = fmt.Sprintf("%s/%s window=%s pane=%s", row.Workspace, row.Window, pane.WindowID, pane.PaneID)
-	}
-	return result.Runtime(fmt.Errorf("post-create spawn stopped at %s: thread=%s tmux=%s; state was preserved without retry or cleanup: %w", step, thread, identity, cause))
-}
-
-func postCreateSpawnErrorBeforeTmux(thread string, row config.Row, step string, cause error) error {
-	return result.Runtime(fmt.Errorf("post-create spawn stopped at %s: thread=%s tmux=not-created requested=%s/%s; state was preserved without retry or cleanup: %w", step, thread, row.Workspace, row.Window, cause))
-}
-
-func creationIndeterminateSpawnError(row config.Row) error {
-	return result.Runtime(fmt.Errorf("thread creation was indeterminate: thread=creation-indeterminate tmux=not-created requested=%s/%s; state was preserved without retry or cleanup", row.Workspace, row.Window))
-}
-
-func retainedIndeterminateSpawnError(thread string, pane tmux.WindowPane, row config.Row, inputStatus string, completed []string) error {
-	return retainedIndeterminateSpawnPhaseError(thread, pane, row, inputStatus, completed, "", nil)
-}
-
-func retainedIndeterminateSpawnPhaseError(thread string, pane tmux.WindowPane, row config.Row, inputStatus string, completed []string, step string, cause error) error {
-	phases := strings.Join(completed, ",")
-	if phases == "" {
-		phases = "none"
-	}
-	message := fmt.Sprintf("spawn retained-indeterminate: thread=%s tmux=%s/%s window=%s pane=%s; input-attempt=%s delivery=indeterminate acknowledgement=unavailable completed-persistence-phases=%s", thread, row.Workspace, row.Window, pane.WindowID, pane.PaneID, inputStatus, phases)
-	if step != "" {
-		message += fmt.Sprintf(" stopped-at=%s: %v", step, cause)
-	}
-	message += "; delivery and execution are unproven; automatic retry, repaste, submit, cleanup, archive, search, reconciliation, and alternate receivers are prohibited; the composer may contain unsent prompt bytes"
-	return result.Runtime(errors.New(message))
-}
-
 func spawnWorkerOutcome(row config.Row, pane tmux.WindowPane, action, localState string) result.Outcome {
 	out := workerOutcome(row, action, "")
 	out.Worker = workerPlacementDetails(row, localState)
 	out.Worker.WindowID = pane.WindowID
 	out.Worker.PaneID = pane.PaneID
 	return out
-}
-
-func appendSpawnFailure(env *result.Envelope, out result.Outcome, failure error) {
-	out.Message = "post-create phase failed; completed state was preserved"
-	out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: failure.Error()}
-	env.Failed = append(env.Failed, out)
-}
-
-func optionalGroupPlan(group string) string {
-	if group == "" {
-		return ""
-	}
-	return ", then persist and report existing group " + group + " and add-only ensure its Amp label"
 }

@@ -164,6 +164,16 @@ type WorkerDetails struct {
 	ExecutionAffinity string       `json:"execution_affinity"`
 }
 
+type SpawnAssignmentDetails struct {
+	Creation          string `json:"creation"`
+	LocalOwnership    string `json:"local_ownership"`
+	LocalPresentation string `json:"local_presentation"`
+	Assignment        string `json:"assignment"`
+	Execution         string `json:"execution"`
+	PromptDigest      string `json:"prompt_digest,omitempty"`
+	Receipt           string `json:"receipt,omitempty"`
+}
+
 type ReconcileDetails struct {
 	Authority       string       `json:"authority"`
 	RegistryBinding bool         `json:"registry_binding"`
@@ -229,20 +239,21 @@ type TeardownDetails struct {
 }
 
 type Outcome struct {
-	Resource    ResourceID          `json:"resource"`
-	Action      string              `json:"action"`
-	Message     string              `json:"message,omitempty"`
-	Executable  *ExecutableDetails  `json:"executable,omitempty"`
-	Maintenance *MaintenanceDetails `json:"maintenance,omitempty"`
-	Runner      *RunnerDetails      `json:"runner,omitempty"`
-	Worker      *WorkerDetails      `json:"worker,omitempty"`
-	Group       *GroupDetails       `json:"group,omitempty"`
-	Report      *ReportDetails      `json:"report,omitempty"`
-	Callback    *CallbackDetails    `json:"callback,omitempty"`
-	GroupNaming *GroupNamingDetails `json:"group_naming,omitempty"`
-	Teardown    *TeardownDetails    `json:"teardown,omitempty"`
-	Reconcile   *ReconcileDetails   `json:"reconcile,omitempty"`
-	Error       *Failure            `json:"error,omitempty"`
+	Resource    ResourceID              `json:"resource"`
+	Action      string                  `json:"action"`
+	Message     string                  `json:"message,omitempty"`
+	Executable  *ExecutableDetails      `json:"executable,omitempty"`
+	Maintenance *MaintenanceDetails     `json:"maintenance,omitempty"`
+	Runner      *RunnerDetails          `json:"runner,omitempty"`
+	Worker      *WorkerDetails          `json:"worker,omitempty"`
+	Assignment  *SpawnAssignmentDetails `json:"spawn_assignment,omitempty"`
+	Group       *GroupDetails           `json:"group,omitempty"`
+	Report      *ReportDetails          `json:"report,omitempty"`
+	Callback    *CallbackDetails        `json:"callback,omitempty"`
+	GroupNaming *GroupNamingDetails     `json:"group_naming,omitempty"`
+	Teardown    *TeardownDetails        `json:"teardown,omitempty"`
+	Reconcile   *ReconcileDetails       `json:"reconcile,omitempty"`
+	Error       *Failure                `json:"error,omitempty"`
 }
 
 type Envelope struct {

@@ -30,6 +30,10 @@ type WorkerAssignmentState string
 const (
 	WorkerAssignmentUnknown               WorkerAssignmentState = ""
 	WorkerAssignmentRetainedIndeterminate WorkerAssignmentState = "retained_indeterminate"
+	WorkerAssignmentNativeNotAttempted    WorkerAssignmentState = "native_not_attempted"
+	WorkerAssignmentNativeRejected        WorkerAssignmentState = "native_rejected"
+	WorkerAssignmentNativeIndeterminate   WorkerAssignmentState = "native_indeterminate"
+	WorkerAssignmentAuthenticatedAccepted WorkerAssignmentState = "authenticated_accepted"
 )
 
 type RunnerRow struct {
@@ -538,7 +542,7 @@ func (r Row) Validate() error {
 	if err := validateField("thread", r.Thread); err != nil {
 		return err
 	}
-	if r.AssignmentState != WorkerAssignmentUnknown && r.AssignmentState != WorkerAssignmentRetainedIndeterminate {
+	if r.AssignmentState != WorkerAssignmentUnknown && r.AssignmentState != WorkerAssignmentRetainedIndeterminate && r.AssignmentState != WorkerAssignmentNativeNotAttempted && r.AssignmentState != WorkerAssignmentNativeRejected && r.AssignmentState != WorkerAssignmentNativeIndeterminate && r.AssignmentState != WorkerAssignmentAuthenticatedAccepted {
 		return fmt.Errorf("invalid worker assignment state %q", r.AssignmentState)
 	}
 	_, err := CanonicalThreadID(r.Thread)

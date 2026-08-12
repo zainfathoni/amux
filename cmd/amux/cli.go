@@ -29,32 +29,36 @@ type cliOptions struct {
 }
 
 type selectors struct {
-	Workspace      string
-	Window         string
-	Workdir        string
-	Thread         string
-	Group          string
-	Groups         []string
-	Mode           string
-	TitlePrefix    string
-	WorkItemID     string
-	WorkerOrdinal  string
-	Current        bool
-	All            bool
-	Shelf          string
-	IdempotencyKey string
-	ReportID       string
-	Pane           string
-	Status         string
-	Issue          string
-	Reference      string
-	PRURL          string
-	Summary        string
-	Message        string
-	MessageFile    string
-	MessageStdin   bool
-	PromptFile     string
-	Reconcile      bool
+	Workspace         string
+	Window            string
+	Workdir           string
+	Thread            string
+	Group             string
+	Groups            []string
+	Mode              string
+	TitlePrefix       string
+	WorkItemID        string
+	WorkerOrdinal     string
+	Current           bool
+	All               bool
+	Shelf             string
+	IdempotencyKey    string
+	ReportID          string
+	Pane              string
+	Status            string
+	Issue             string
+	Reference         string
+	PRURL             string
+	Summary           string
+	Message           string
+	MessageFile       string
+	MessageStdin      bool
+	PromptFile        string
+	AssignmentPhase   string
+	AssignmentOutcome string
+	NativeCapability  string
+	LatestCursor      string
+	Reconcile         bool
 }
 
 type commandSpec struct {
@@ -162,10 +166,13 @@ func workerLeaf(name, summary string, mutating bool, flags ...string) *commandSp
 }
 
 func workerSpawnCommand(usage string) *commandSpec {
-	return workerLeaf("spawn", "Retain one projectless local worker with indeterminate delivery", true,
+	return workerLeaf("spawn", "Prepare, arm, or finalize one native local assignment", true,
 		"--workdir, -d <canonical-path>", "--workspace, -w <name>",
 		"--window, -W <name>", "--group <existing-id>", "--mode, -m <mode> (default medium)",
-		"--prompt-file <path|->")
+		"--prompt-file <path|->", "--assignment-phase <prepare|arm|finalize>",
+		"--assignment-outcome <rejected|indeterminate|authenticated_accepted>",
+		"--native-capability <existing-thread-message-v1>", "--latest-cursor <opaque-value>",
+		"--thread, -t <exact-id>")
 }
 
 func runnerCommand() *commandSpec {
@@ -756,6 +763,21 @@ func parseSelectors(args []string) (selectors, []string, error) {
 			if err := setSelector(&parsed.PromptFile, value, name); err != nil {
 				return parsed, nil, err
 			}
+		case "--assignment-phase", "--assignment-outcome", "--native-capability", "--latest-cursor":
+			value, next, err := selectorValue(args, i, name, inline, hasInline)
+			if err != nil {
+				return parsed, nil, err
+			}
+			i = next
+			target := map[string]*string{
+				"--assignment-phase":   &parsed.AssignmentPhase,
+				"--assignment-outcome": &parsed.AssignmentOutcome,
+				"--native-capability":  &parsed.NativeCapability,
+				"--latest-cursor":      &parsed.LatestCursor,
+			}[name]
+			if err := setSelector(target, value, name); err != nil {
+				return parsed, nil, err
+			}
 		case "--message-stdin":
 			if hasInline {
 				return parsed, nil, errors.New("--message-stdin does not accept a value")
@@ -843,6 +865,10 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 		{"--message", parsed.Message},
 		{"--message-file", parsed.MessageFile},
 		{"--prompt-file", parsed.PromptFile},
+		{"--assignment-phase", parsed.AssignmentPhase},
+		{"--assignment-outcome", parsed.AssignmentOutcome},
+		{"--native-capability", parsed.NativeCapability},
+		{"--latest-cursor", parsed.LatestCursor},
 	}
 	for _, test := range tests {
 		if test.value != "" && !commandAcceptsFlag(command, test.name) {
@@ -965,7 +991,7 @@ func compactStrings(values []string) []string {
 }
 
 func selectorsEmpty(parsed selectors) bool {
-	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && parsed.WorkItemID == "" && parsed.WorkerOrdinal == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && parsed.PromptFile == "" && !parsed.Reconcile
+	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && parsed.WorkItemID == "" && parsed.WorkerOrdinal == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && parsed.PromptFile == "" && parsed.AssignmentPhase == "" && parsed.AssignmentOutcome == "" && parsed.NativeCapability == "" && parsed.LatestCursor == "" && !parsed.Reconcile
 }
 
 func isGroupPath(path []string) bool {
