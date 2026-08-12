@@ -55,6 +55,7 @@ type selectors struct {
 	MessageStdin   bool
 	PromptFile     string
 	Reconcile      bool
+	Record         string
 }
 
 type commandSpec struct {
@@ -96,6 +97,7 @@ var rootCommand = &commandSpec{
 		groupCommand(),
 		callbackCommand(),
 		reportCommand(),
+		retirementCommand(),
 		installCommand(),
 		lifecycleCommand("workspaces", "Exact alias for workspace list", false, "--mode, -m <worker|runner>"),
 		workerSpawnCommand("amux spawn"),
@@ -108,6 +110,12 @@ var rootCommand = &commandSpec{
 		{Name: "version", Summary: "Print version and build metadata", Usage: "amux version", FoundationOnly: true},
 		{Name: "path", Summary: "Print the selected config directory", Usage: "amux path", NeedsConfig: true, FoundationOnly: true},
 	},
+}
+
+func retirementCommand() *commandSpec {
+	return &commandSpec{Name: "retirement", Summary: "Inspect immutable retirement records", Usage: "amux retirement <command>", Children: []*commandSpec{
+		{Name: "inspect", Summary: "Verify and inspect one retirement record", Usage: "amux retirement inspect --record <ret-id>", Flags: []string{"--record <ret-id>"}, NeedsConfig: true},
+	}}
 }
 
 var removedCommands = map[string]string{
@@ -716,7 +724,7 @@ func parseSelectors(args []string) (selectors, []string, error) {
 			if err := setSelector(&parsed.IdempotencyKey, value, "--idempotency-key"); err != nil {
 				return parsed, nil, err
 			}
-		case "--report-id", "--pane", "--status", "--issue", "--reference", "--pr", "--summary":
+		case "--report-id", "--pane", "--status", "--issue", "--reference", "--pr", "--summary", "--record":
 			value, next, err := selectorValue(args, i, name, inline, hasInline)
 			if err != nil {
 				return parsed, nil, err
@@ -730,6 +738,7 @@ func parseSelectors(args []string) (selectors, []string, error) {
 				"--reference": &parsed.Reference,
 				"--pr":        &parsed.PRURL,
 				"--summary":   &parsed.Summary,
+				"--record":    &parsed.Record,
 			}[name]
 			if err := setSelector(target, value, name); err != nil {
 				return parsed, nil, err
@@ -843,6 +852,7 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 		{"--message", parsed.Message},
 		{"--message-file", parsed.MessageFile},
 		{"--prompt-file", parsed.PromptFile},
+		{"--record", parsed.Record},
 	}
 	for _, test := range tests {
 		if test.value != "" && !commandAcceptsFlag(command, test.name) {
@@ -965,7 +975,7 @@ func compactStrings(values []string) []string {
 }
 
 func selectorsEmpty(parsed selectors) bool {
-	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && parsed.WorkItemID == "" && parsed.WorkerOrdinal == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && parsed.PromptFile == "" && !parsed.Reconcile
+	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && parsed.WorkItemID == "" && parsed.WorkerOrdinal == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && parsed.PromptFile == "" && !parsed.Reconcile && parsed.Record == ""
 }
 
 func isGroupPath(path []string) bool {
@@ -1025,7 +1035,7 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 		return a.executeMaintenance(parsed, dir)
 	}
 
-	if !parsed.Command.FoundationOnly && !isAggregateLifecycle(parsed.Path) && !isWorkspaceList(parsed.Path) && !isGroupPath(parsed.Path) && !isReportPath(parsed.Path) && !isCallbackPath(parsed.Path) && (len(parsed.Path) != 2 || parsed.Path[0] != "worker" && parsed.Path[0] != "runner") && !isWorkerConvenience(parsed.Path) {
+	if !parsed.Command.FoundationOnly && !isAggregateLifecycle(parsed.Path) && !isWorkspaceList(parsed.Path) && !isGroupPath(parsed.Path) && !isReportPath(parsed.Path) && !isCallbackPath(parsed.Path) && !isRetirementPath(parsed.Path) && (len(parsed.Path) != 2 || parsed.Path[0] != "worker" && parsed.Path[0] != "runner") && !isWorkerConvenience(parsed.Path) {
 		return nil, result.Preflight(fmt.Errorf("%s is reserved for its lifecycle implementation phase and is not available in the CLI foundations", strings.Join(parsed.Path, " ")))
 	}
 
@@ -1045,6 +1055,9 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 	}
 	if isCallbackPath(parsed.Path) {
 		return a.executeCallback(parsed, dir)
+	}
+	if isRetirementPath(parsed.Path) {
+		return a.executeRetirement(parsed, dir)
 	}
 
 	switch parsed.Command.Name {

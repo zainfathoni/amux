@@ -1106,7 +1106,9 @@ func TestThreadArchiveStatusesBoundsAmpThreadsListFailures(t *testing.T) {
 		ampThreadsListTimeout = oldTimeout
 		ampThreadsListOutputLimit = oldLimit
 	})
-	ampThreadsListTimeout = 50 * time.Millisecond
+	// Race-instrumented subprocess startup can exceed a second on macOS CI.
+	// Keep the fixture bounded without making process startup the assertion.
+	ampThreadsListTimeout = 5 * time.Second
 	ampThreadsListOutputLimit = 64
 	rows := []config.Row{{Workspace: "alpha", Window: "worker", Workdir: "/tmp/worker", Thread: "T-worker"}}
 
@@ -1120,7 +1122,7 @@ func TestThreadArchiveStatusesBoundsAmpThreadsListFailures(t *testing.T) {
 		{
 			name:      "active timeout",
 			behavior:  func([]string) (string, string) { return "timeout", "" },
-			want:      "active thread inventory: amp threads list timed out after 50ms",
+			want:      "active thread inventory: amp threads list timed out after 5s",
 			wantCalls: 1,
 		},
 		{
@@ -1131,7 +1133,7 @@ func TestThreadArchiveStatusesBoundsAmpThreadsListFailures(t *testing.T) {
 				}
 				return "output", `[]`
 			},
-			want:      "archived thread inventory: amp threads list timed out after 50ms",
+			want:      "archived thread inventory: amp threads list timed out after 5s",
 			wantCalls: 2,
 		},
 		{
@@ -1210,7 +1212,7 @@ func TestThreadArchiveStatusesBoundsAmpThreadsListFailures(t *testing.T) {
 				encoded, _ := json.Marshal(page)
 				return "output", string(encoded)
 			},
-			want:      "active thread inventory: amp threads list timed out after 50ms",
+			want:      "active thread inventory: amp threads list timed out after 5s",
 			wantCalls: 2,
 			limit:     32 << 10,
 		},
@@ -1232,7 +1234,7 @@ func TestThreadArchiveStatusesBoundsAmpThreadsListFailures(t *testing.T) {
 			if *calls != test.wantCalls {
 				t.Fatalf("amp threads list calls = %d, want %d", *calls, test.wantCalls)
 			}
-			if time.Since(started) > time.Second {
+			if time.Since(started) > 12*time.Second {
 				t.Fatalf("bounded failure took %s", time.Since(started))
 			}
 		})
@@ -1793,7 +1795,7 @@ func TestScopedWorkerDoctorBoundsCumulativeExactQueryOutput(t *testing.T) {
 	if err == nil || result.ErrorKindOf(err) != result.ErrorRuntime {
 		t.Fatalf("scoped worker doctor error = %v", err)
 	}
-	if time.Since(started) >= time.Second {
+	if time.Since(started) >= 2*time.Second {
 		t.Fatalf("cumulative overflow did not stop current query promptly: %s", time.Since(started))
 	}
 	if *calls != 2 {

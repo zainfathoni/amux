@@ -18,6 +18,10 @@ const (
 	ReportsFile                  = "reports.json"
 	MaintenanceFile              = "runner-maintenance.json"
 	MaintenanceResultFile        = "runner-maintenance-result.json"
+	RetirementDirectory          = "retirement"
+	RetirementVersionDirectory   = "v1"
+	RetirementRecordsDirectory   = "records"
+	RetirementLocksDirectory     = "locks"
 )
 
 // Directory is the complete on-disk configuration selected for one invocation.
@@ -76,4 +80,24 @@ func (d Directory) ReportsPath() string { return filepath.Join(d.Path, ReportsFi
 func (d Directory) MaintenancePath() string { return filepath.Join(d.Path, MaintenanceFile) }
 func (d Directory) MaintenanceResultPath() string {
 	return filepath.Join(d.Path, MaintenanceResultFile)
+}
+
+func (d Directory) RetirementRootPath() string {
+	return filepath.Join(d.Path, RetirementDirectory, RetirementVersionDirectory)
+}
+
+func (d Directory) RetirementRecordsPath() string {
+	return filepath.Join(d.RetirementRootPath(), RetirementRecordsDirectory)
+}
+
+func (d Directory) RetirementLocksPath() string {
+	return filepath.Join(d.RetirementRootPath(), RetirementLocksDirectory)
+}
+
+func (d Directory) RetirementRecordPath(recordID string) string {
+	return filepath.Join(d.RetirementRecordsPath(), recordID+".jsonl")
+}
+
+func (d Directory) RetirementLockPath(recordID string) string {
+	return filepath.Join(d.RetirementLocksPath(), recordID+".lock")
 }

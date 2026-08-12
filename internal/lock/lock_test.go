@@ -3,6 +3,7 @@ package lock
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -41,5 +42,49 @@ func TestAcquireSerializesMutationAndReportsOwner(t *testing.T) {
 	}
 	if err := second.Release(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAcquireModeAllowsSharedReadersAndRejectsWriter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "record.lock")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := AcquireMode(context.Background(), path, Owner{}, Shared, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Release()
+	second, err := AcquireMode(context.Background(), path, Owner{}, Shared, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Release()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := AcquireMode(ctx, path, Owner{}, Exclusive, false); err == nil {
+		t.Fatal("exclusive lock acquired while shared readers held it")
+	}
+}
+
+func TestAcquireModeReadOnlyDoesNotCreateOrFollowSymlink(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing.lock")
+	if _, err := AcquireMode(context.Background(), missing, Owner{}, Shared, false); err == nil {
+		t.Fatal("read-only lock unexpectedly created a missing file")
+	}
+	if _, err := os.Lstat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only lock mutated path: %v", err)
+	}
+	target := filepath.Join(dir, "target.lock")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.lock")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AcquireMode(context.Background(), link, Owner{}, Shared, false); err == nil {
+		t.Fatal("read-only lock followed a symlink")
 	}
 }

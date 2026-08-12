@@ -34,6 +34,10 @@ type ResourceID struct {
 	Path      string `json:"path,omitempty"`
 }
 
+func RetirementResource(recordID string) ResourceID {
+	return ResourceID{Kind: "retirement_record", Path: recordID}
+}
+
 func WorkerResource(value string) (ResourceID, error) {
 	thread, err := config.CanonicalThreadID(value)
 	if err != nil {
@@ -92,6 +96,7 @@ func CommandResource() ResourceID {
 
 type Failure struct {
 	Kind    ErrorKind       `json:"kind"`
+	Code    string          `json:"code,omitempty"`
 	Message string          `json:"message"`
 	Lock    *lock.BusyError `json:"lock,omitempty"`
 }
@@ -228,6 +233,41 @@ type TeardownDetails struct {
 	Artifacts []TeardownArtifactDetails `json:"artifacts"`
 }
 
+type RetirementSubjectDetails struct {
+	ThreadCommitment          string `json:"thread_commitment"`
+	WorkerBindingCommitment   string `json:"worker_binding_commitment"`
+	CreatedBy                 string `json:"created_by"`
+	WorkspaceCommitment       string `json:"workspace_commitment"`
+	InitialWorktreeCommitment string `json:"initial_worktree_commitment"`
+	PhysicalOwnerCommitment   string `json:"physical_owner_commitment"`
+}
+
+type RetirementOperationDetails struct {
+	RecordID              string   `json:"record_id"`
+	RecordCommitment      string   `json:"record_commitment"`
+	OperationID           string   `json:"operation_id"`
+	SubjectCommitment     string   `json:"subject_commitment"`
+	OperationDigest       string   `json:"operation_digest"`
+	Scope                 string   `json:"scope"`
+	AttachmentCommitments []string `json:"attachment_commitments"`
+	EvidenceCommitments   []string `json:"evidence_commitments"`
+	AuthorityCommitments  []string `json:"authority_commitments"`
+	SupersedesOperationID string   `json:"supersedes_operation_id,omitempty"`
+}
+
+type RetirementDetails struct {
+	SchemaVersion      int                         `json:"schema_version"`
+	RecordID           string                      `json:"record_id"`
+	VerifiedEventCount int                         `json:"verified_event_count"`
+	LastSequence       int64                       `json:"last_sequence"`
+	LastEventDigest    string                      `json:"last_event_digest"`
+	IntegrityStatus    string                      `json:"integrity_status"`
+	RecoverableTail    bool                        `json:"recoverable_tail"`
+	RecoveryRequired   bool                        `json:"recovery_required"`
+	Subject            RetirementSubjectDetails    `json:"subject"`
+	LatestOperation    *RetirementOperationDetails `json:"latest_operation,omitempty"`
+}
+
 type Outcome struct {
 	Resource    ResourceID          `json:"resource"`
 	Action      string              `json:"action"`
@@ -242,6 +282,7 @@ type Outcome struct {
 	GroupNaming *GroupNamingDetails `json:"group_naming,omitempty"`
 	Teardown    *TeardownDetails    `json:"teardown,omitempty"`
 	Reconcile   *ReconcileDetails   `json:"reconcile,omitempty"`
+	Retirement  *RetirementDetails  `json:"retirement,omitempty"`
 	Error       *Failure            `json:"error,omitempty"`
 }
 

@@ -91,6 +91,9 @@ var completionCommands = []completionCommand{
 		{Name: "acknowledge", Description: "Acknowledge a report", Flags: []string{"--report-id"}},
 		{Name: "authorize-finish", Description: "Authorize finish for a ready report", Flags: []string{"--report-id", "--thread", "--reference", "-t"}},
 	}},
+	{Name: "retirement", Description: "Inspect immutable retirement records", Subcommands: []completionCommand{
+		{Name: "inspect", Description: "Verify and inspect one retirement record", Flags: []string{"--record"}},
+	}},
 	{Name: "install", Description: "Inspect the amux client installation", Subcommands: []completionCommand{
 		{Name: "doctor", Description: "Diagnose executable targets, versions, and PATH drift"},
 	}},
@@ -135,7 +138,7 @@ _amux_complete() {
     if [[ "$word" == --config-dir=* || "$word" == -c=* || "$word" == --terminal-launcher=* || "$word" == --json || "$word" == -j || "$word" == --dry-run || "$word" == -n || "$word" == --attach || "$word" == --no-attach ]]; then continue; fi
     if [[ -z "$command" ]]; then
       command="$word"
-    elif [[ ( "$command" == worker || "$command" == runner || "$command" == workspace || "$command" == group || "$command" == callback || "$command" == report || "$command" == install ) && -z "$leaf" ]]; then
+    elif [[ ( "$command" == worker || "$command" == runner || "$command" == workspace || "$command" == group || "$command" == callback || "$command" == report || "$command" == retirement || "$command" == install ) && -z "$leaf" ]]; then
       leaf="$word"
     elif [[ "$command" == runner && "$leaf" == maintenance && -z "$branch" ]]; then
       branch="$word"
@@ -216,6 +219,9 @@ _amux_complete() {
           *) COMPREPLY=( $(compgen -W "--report-id" -- "$cur") ) ;;
         esac
       fi
+      ;;
+    retirement)
+      if [[ -z "$leaf" ]]; then COMPREPLY=( $(compgen -W "inspect" -- "$cur") ); else COMPREPLY=( $(compgen -W "--record" -- "$cur") ); fi
       ;;
     spawn) COMPREPLY=( $(compgen -W "--workdir --workspace --window --group --mode --prompt-file -d -w -W -m" -- "$cur") ) ;;
     shelve|unshelve|teardown) COMPREPLY=( $(compgen -W "--workspace --thread --current --all -w -t" -- "$cur") ) ;;
@@ -299,7 +305,7 @@ while (( i <= CURRENT )); do
     --config-dir|-c) (( i += 2 )); continue ;;
     --terminal-launcher) (( i += 2 )); continue ;;
     --config-dir=*|-c=*|--terminal-launcher=*|--json|-j|--dry-run|-n|--attach|--no-attach) (( i++ )); continue ;;
-    *) command=$word; (( i++ )); if [[ $command == worker || $command == runner || $command == workspace || $command == group || $command == callback || $command == report || $command == install ]]; then leaf=$words[$i]; fi; if [[ $command == runner && $leaf == maintenance ]]; then branch=$words[$(( i + 1 ))]; fi; break ;;
+    *) command=$word; (( i++ )); if [[ $command == worker || $command == runner || $command == workspace || $command == group || $command == callback || $command == report || $command == retirement || $command == install ]]; then leaf=$words[$i]; fi; if [[ $command == runner && $leaf == maintenance ]]; then branch=$words[$(( i + 1 ))]; fi; break ;;
   esac
 done`)
 	fmt.Fprintln(w)
@@ -401,6 +407,9 @@ case $state in
             *) _arguments '--report-id[stable report id]:id:' ;;
           esac
         fi
+        ;;
+      retirement)
+        if [[ -z $leaf ]]; then _values 'retirement command' inspect; else _arguments '--record[exact retirement record id]:record:'; fi
         ;;
       shelve)
         _arguments '--thread[select by thread id or URL]:thread:' '--workspace[select workspace]:workspace:' '--current[current worker]' '--all[all workers]' '-t[select by thread id or URL]:thread:' '-w[select workspace]:workspace:'
@@ -521,6 +530,14 @@ function __fish_amux_report_leaf
     end
 end`)
 	fmt.Fprintln(w, `
+function __fish_amux_retirement_leaf
+    set -l words (commandline -opc)
+    set -l index (contains -i -- retirement $words)
+    if test -n "$index"; and test (math $index + 1) -le (count $words)
+        echo $words[(math $index + 1)]
+    end
+end`)
+	fmt.Fprintln(w, `
 function __fish_amux_callback_leaf
     set -l words (commandline -opc)
     set -l index (contains -i -- callback $words)
@@ -596,6 +613,15 @@ end`)
 			for _, subcommand := range command.Subcommands {
 				fmt.Fprintf(w, "complete -c amux -f -n 'test (__fish_amux_root_command) = report; and test -z (__fish_amux_report_leaf)' -a %s -d %s\n", fishQuote(subcommand.Name), fishQuote(subcommand.Description))
 				condition := fmt.Sprintf("test (__fish_amux_root_command) = report; and test (__fish_amux_report_leaf) = %s", subcommand.Name)
+				for _, flag := range subcommand.Flags {
+					writeFishFlag(w, condition, flag, flagDescription(flag), flagTakesValue(flag))
+				}
+			}
+		}
+		if command.Name == "retirement" {
+			for _, subcommand := range command.Subcommands {
+				fmt.Fprintf(w, "complete -c amux -f -n 'test (__fish_amux_root_command) = retirement; and test -z (__fish_amux_retirement_leaf)' -a %s -d %s\n", fishQuote(subcommand.Name), fishQuote(subcommand.Description))
+				condition := fmt.Sprintf("test (__fish_amux_root_command) = retirement; and test (__fish_amux_retirement_leaf) = %s", subcommand.Name)
 				for _, flag := range subcommand.Flags {
 					writeFishFlag(w, condition, flag, flagDescription(flag), flagTakesValue(flag))
 				}
@@ -737,6 +763,8 @@ func flagDescription(flag string) string {
 		return "Report status"
 	case "--report-id":
 		return "Stable report ID"
+	case "--record":
+		return "Exact retirement record ID"
 	case "--pane":
 		return "Exact tmux pane ID"
 	case "--issue":
@@ -794,7 +822,7 @@ func flagDescription(flag string) string {
 
 func flagTakesValue(flag string) bool {
 	switch flag {
-	case "--config-dir", "-c", "--terminal-launcher", "--thread", "-t", "--group", "--pane", "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--shelf", "--mode", "-m", "--title-prefix", "--work-item-id", "--worker-ordinal", "--message", "--message-file", "--idempotency-key", "--report-id", "--status", "--issue", "--reference", "--pr", "--summary", "--update-owner":
+	case "--config-dir", "-c", "--terminal-launcher", "--thread", "-t", "--group", "--pane", "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--shelf", "--mode", "-m", "--title-prefix", "--work-item-id", "--worker-ordinal", "--message", "--message-file", "--idempotency-key", "--report-id", "--record", "--status", "--issue", "--reference", "--pr", "--summary", "--update-owner":
 		return true
 	default:
 		return false

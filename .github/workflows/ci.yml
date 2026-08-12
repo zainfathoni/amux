@@ -31,6 +31,9 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Race test
+        run: go test -race ./...
+
       - name: Build
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
