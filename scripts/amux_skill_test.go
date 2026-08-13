@@ -435,6 +435,57 @@ func TestNativeCreationDoesNotAdoptOrClaimExecutorMigration(t *testing.T) {
 	}
 }
 
+func TestADR0003IsHistoricalAndSupersededByADR0007(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	adr3 := readSkillFile(t, root, filepath.Join("docs", "adr", "0003-native-thread-creation-and-explicit-adoption.md"))
+	adr7 := readSkillFile(t, root, filepath.Join("docs", "adr", "0007-retire-amux-through-native-cutover-and-staged-drain.md"))
+
+	if !strings.HasPrefix(adr3, "---\nstatus: superseded\nsuperseded-by: 0007\n---\n") {
+		t.Error("ADR 0003 frontmatter must mark it superseded by ADR 0007")
+	}
+	for _, required := range []string{
+		"# Historical: native Amp thread creation followed by explicit Amux adoption",
+		"**Historical only — superseded by [ADR 0007]",
+		"Every command, workflow step, preflight, ordering or recovery action, failure-matrix behavior, migration gate, and other imperative statement below is superseded and non-current",
+		"New native children remain unmanaged by Amux and retain native parent/reply routing only",
+		"Only an exact persisted pre-cutover drain-eligible adoption operation may continue its exact allowed next transition under ADR 0007",
+		"Do not native-create then adopt, group, report, or otherwise enroll new work into Amux",
+		"## Historical decision (superseded; non-current)",
+		"## Historical preflight, ordering, and recovery (superseded; non-current)",
+		"## Historical failure matrix (superseded; non-current)",
+		"## Historical migration and removal gate (superseded; non-current)",
+	} {
+		if !strings.Contains(adr3, required) {
+			t.Errorf("ADR 0003 is missing historical-only boundary %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"status: accepted",
+		"# Use native Amp thread creation followed by explicit amux adoption",
+		"Worker assignment becomes a two-owner protocol:",
+		"The prototype command is:",
+		"For a new adoption path,",
+		"The `/amux` skill uses native create → adopt for new workers.",
+	} {
+		if strings.Contains(adr3, forbidden) {
+			t.Errorf("ADR 0003 retains accepted/current native-to-adopt wording %q", forbidden)
+		}
+	}
+
+	for _, required := range []string{
+		"supersedes: 0003, 0005, 0006",
+		"supersedes ADR 0003's native-create → `amux worker adopt` new-work workflow",
+		"ADR 0003 remains only historical rationale and evidence; none of its operational instructions are current",
+		"New native children remain unmanaged by Amux",
+		"Only an exact persisted pre-cutover drain-eligible adoption operation may continue its exact allowed next transition",
+	} {
+		if !strings.Contains(adr7, required) {
+			t.Errorf("ADR 0007 is missing ADR 0003 supersession boundary %q", required)
+		}
+	}
+}
+
 func TestDurableTaskGroupLeadTitleGuidanceIsPresent(t *testing.T) {
 	t.Parallel()
 	workflow := readSkillFile(t, repoRoot(t), filepath.Join("skills", "amux", "reference", "workflows.md"))

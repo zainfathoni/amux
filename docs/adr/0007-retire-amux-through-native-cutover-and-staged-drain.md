@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-12
 updated: 2026-08-13
-supersedes: 0005, 0006
+supersedes: 0003, 0005, 0006
 ---
 
 # Retire Amux through native cutover and staged drain
@@ -20,7 +20,7 @@ Retirement is a staged drain, not an immediate read-only freeze and not a new re
 5. remove writers after the freeze gate, retain a time-bounded read-only compatibility surface, then archive the lifecycle product; and
 6. preserve Git/worktree removal-safety guidance outside the Amux lifecycle (default docs-only retain at product archive) rather than as an Amux resource lifecycle.
 
-This decision supersedes ADR 0005's permanent maintained-lifecycle mission and ADR 0006's proposed Amux retirement-record/finalizer direction. Their useful invariants survive where this ADR names them: exact identity, no blind retry, preservation before destructive cleanup, independent authority for destructive actions, no implicit descendant mutation, and fail-closed handling of ambiguity. Their conclusion that those invariants require a permanent Amux orchestration substrate does not survive.
+This decision supersedes ADR 0003's native-create → `amux worker adopt` new-work workflow, ADR 0005's permanent maintained-lifecycle mission, and ADR 0006's proposed Amux retirement-record/finalizer direction. ADR 0003 remains only historical rationale and evidence; none of its operational instructions are current. New native children remain unmanaged by Amux. Only an exact persisted pre-cutover drain-eligible adoption operation may continue its exact allowed next transition. The useful invariants from the superseded ADRs survive where this ADR names them: exact identity, no blind retry, preservation before destructive cleanup, independent authority for destructive actions, no implicit descendant mutation, and fail-closed handling of ambiguity. Their conclusion that those invariants require native-to-Amux enrollment or a permanent Amux orchestration substrate does not survive.
 
 ### Accepted refinements (2026-08-13)
 
