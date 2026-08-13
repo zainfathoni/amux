@@ -59,6 +59,7 @@ type selectors struct {
 	NativeCapability                       string
 	LatestCursor                           string
 	PhysicalHost                           string
+	Generation                             string
 	OwnerAuthorizedProjectlessPhysicalHost bool
 	Reconcile                              bool
 }
@@ -154,6 +155,7 @@ func workerCommand() *commandSpec {
 		workerLeaf("remove", "Remove workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("adopt", "Adopt an exact native-created thread without message delivery", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--thread, -t <id>", "--group <id>  Optional exact durable member intent"),
 		workerSpawnCommand("amux worker spawn"),
+		workerCutoverCommand(),
 		workerLeaf("shelve", "Shelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("unshelve", "Unshelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("teardown", "Teardown workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
@@ -161,6 +163,14 @@ func workerCommand() *commandSpec {
 		workerLeaf("reconcile", "Reconcile workers", true, "--workspace, -w <name>", "--workdir, -d <path>", "--thread, -t <id>", "--current", "--all"),
 	}
 	return worker
+}
+
+func workerCutoverCommand() *commandSpec {
+	return &commandSpec{Name: "cutover", Summary: "Publish or inspect the immutable worker-family cutover", Usage: "amux worker cutover <command>", Children: []*commandSpec{
+		{Name: "publish", Summary: "Publish the one-shot manifest and workers/v2 downgrade fence", Usage: "amux worker cutover publish --generation <label>", Flags: []string{"--generation <label>"}, NeedsConfig: true, Mutating: true},
+		{Name: "status", Summary: "Inspect worker cutover integrity and classifications", Usage: "amux worker cutover status", NeedsConfig: true},
+		{Name: "export", Summary: "Export deterministic worker cutover classifications", Usage: "amux worker cutover export", NeedsConfig: true},
+	}}
 }
 
 func workerLeaf(name, summary string, mutating bool, flags ...string) *commandSpec {
@@ -404,7 +414,7 @@ func parseInvocation(args []string) (invocation, error) {
 	if !spec.FoundationOnly && len(parsed.Args) != 0 {
 		return parsed, fmt.Errorf("positional selectors were removed from %s; use named selectors shown by `amux help %s`", strings.Join(path, " "), strings.Join(path, " "))
 	}
-	if !spec.FoundationOnly && spec.Mutating && spec.Name != "launch" && !isMaintenancePath(path) && !hasResourceScope(parsed.Selectors) {
+	if !spec.FoundationOnly && spec.Mutating && spec.Name != "launch" && !isMaintenancePath(path) && !isWorkerCutoverPath(path) && !hasResourceScope(parsed.Selectors) {
 		return parsed, fmt.Errorf("%s requires a resource scope; use an explicit selector or --all", strings.Join(path, " "))
 	}
 	if isAggregateLifecycle(path) && parsed.Selectors.Thread != "" && parsed.Selectors.Workdir != "" {
@@ -560,7 +570,7 @@ func commandOptionRequiresValue(arg string) bool {
 	case "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--thread", "-t",
 		"--group", "--mode", "-m", "--title-prefix", "--work-item-id", "--worker-ordinal", "--shelf", "--idempotency-key",
 		"--report-id", "--pane", "--status", "--issue", "--reference", "--pr", "--summary",
-		"--message", "--message-file", "--prompt-file", "--physical-host", "--update-owner":
+		"--message", "--message-file", "--prompt-file", "--physical-host", "--generation", "--update-owner":
 		return true
 	default:
 		return false
@@ -766,7 +776,7 @@ func parseSelectors(args []string) (selectors, []string, error) {
 			if err := setSelector(&parsed.PromptFile, value, name); err != nil {
 				return parsed, nil, err
 			}
-		case "--assignment-phase", "--assignment-outcome", "--native-capability", "--latest-cursor", "--physical-host":
+		case "--assignment-phase", "--assignment-outcome", "--native-capability", "--latest-cursor", "--physical-host", "--generation":
 			value, next, err := selectorValue(args, i, name, inline, hasInline)
 			if err != nil {
 				return parsed, nil, err
@@ -778,6 +788,7 @@ func parseSelectors(args []string) (selectors, []string, error) {
 				"--native-capability":  &parsed.NativeCapability,
 				"--latest-cursor":      &parsed.LatestCursor,
 				"--physical-host":      &parsed.PhysicalHost,
+				"--generation":         &parsed.Generation,
 			}[name]
 			if err := setSelector(target, value, name); err != nil {
 				return parsed, nil, err
@@ -882,6 +893,7 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 		{"--native-capability", parsed.NativeCapability},
 		{"--latest-cursor", parsed.LatestCursor},
 		{"--physical-host", parsed.PhysicalHost},
+		{"--generation", parsed.Generation},
 	}
 	for _, test := range tests {
 		if test.value != "" && !commandAcceptsFlag(command, test.name) {
@@ -937,6 +949,11 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 	}
 	if parsed.PhysicalHost != "" {
 		if err := config.ValidateField("physical host", parsed.PhysicalHost); err != nil {
+			return err
+		}
+	}
+	if parsed.Generation != "" {
+		if err := config.ValidateField("generation", parsed.Generation); err != nil {
 			return err
 		}
 	}
@@ -1012,7 +1029,7 @@ func compactStrings(values []string) []string {
 }
 
 func selectorsEmpty(parsed selectors) bool {
-	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && parsed.WorkItemID == "" && parsed.WorkerOrdinal == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && parsed.PromptFile == "" && parsed.AssignmentPhase == "" && parsed.AssignmentOutcome == "" && parsed.NativeCapability == "" && parsed.LatestCursor == "" && parsed.PhysicalHost == "" && !parsed.OwnerAuthorizedProjectlessPhysicalHost && !parsed.Reconcile
+	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && parsed.WorkItemID == "" && parsed.WorkerOrdinal == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && parsed.PromptFile == "" && parsed.AssignmentPhase == "" && parsed.AssignmentOutcome == "" && parsed.NativeCapability == "" && parsed.LatestCursor == "" && parsed.PhysicalHost == "" && parsed.Generation == "" && !parsed.OwnerAuthorizedProjectlessPhysicalHost && !parsed.Reconcile
 }
 
 func isGroupPath(path []string) bool {
@@ -1025,6 +1042,10 @@ func isReportPath(path []string) bool {
 
 func isCallbackPath(path []string) bool {
 	return len(path) == 2 && path[0] == "callback"
+}
+
+func isWorkerCutoverPath(path []string) bool {
+	return len(path) == 3 && path[0] == "worker" && path[1] == "cutover"
 }
 
 func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
@@ -1072,7 +1093,7 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 		return a.executeMaintenance(parsed, dir)
 	}
 
-	if !parsed.Command.FoundationOnly && !isAggregateLifecycle(parsed.Path) && !isWorkspaceList(parsed.Path) && !isGroupPath(parsed.Path) && !isReportPath(parsed.Path) && !isCallbackPath(parsed.Path) && (len(parsed.Path) != 2 || parsed.Path[0] != "worker" && parsed.Path[0] != "runner") && !isWorkerConvenience(parsed.Path) {
+	if !parsed.Command.FoundationOnly && !isAggregateLifecycle(parsed.Path) && !isWorkspaceList(parsed.Path) && !isGroupPath(parsed.Path) && !isReportPath(parsed.Path) && !isCallbackPath(parsed.Path) && !isWorkerCutoverPath(parsed.Path) && (len(parsed.Path) != 2 || parsed.Path[0] != "worker" && parsed.Path[0] != "runner") && !isWorkerConvenience(parsed.Path) {
 		return nil, result.Preflight(fmt.Errorf("%s is reserved for its lifecycle implementation phase and is not available in the CLI foundations", strings.Join(parsed.Path, " ")))
 	}
 
@@ -1092,6 +1113,9 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 	}
 	if isCallbackPath(parsed.Path) {
 		return a.executeCallback(parsed, dir)
+	}
+	if isWorkerCutoverPath(parsed.Path) {
+		return a.executeWorkerCutover(parsed, dir)
 	}
 
 	switch parsed.Command.Name {

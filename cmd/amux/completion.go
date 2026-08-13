@@ -36,6 +36,11 @@ var completionCommands = []completionCommand{
 			{Name: "remove", Description: "Remove workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "adopt", Description: "Adopt a native-created thread", Flags: []string{"--workspace", "--window", "--workdir", "--thread", "--group", "-w", "-W", "-d", "-t"}},
 			{Name: "spawn", Description: "Drain an assignment or run the bounded projectless host exception", Flags: []string{"--workdir", "--workspace", "--window", "--group", "--mode", "--prompt-file", "--assignment-phase", "--assignment-outcome", "--native-capability", "--latest-cursor", "--physical-host", "--owner-authorized-projectless-physical-host", "--thread", "-d", "-w", "-W", "-m", "-t"}},
+			{Name: "cutover", Description: "Publish or inspect the worker-family cutover", Subcommands: []completionCommand{
+				{Name: "publish", Description: "Publish the manifest and downgrade fence", Flags: []string{"--generation"}},
+				{Name: "status", Description: "Inspect cutover status"},
+				{Name: "export", Description: "Export cutover classifications"},
+			}},
 			{Name: "shelve", Description: "Shelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "unshelve", Description: "Unshelve workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
 			{Name: "teardown", Description: "Teardown workers", Flags: []string{"--workspace", "--thread", "--current", "--all", "-w", "-t"}},
@@ -137,7 +142,7 @@ _amux_complete() {
       command="$word"
     elif [[ ( "$command" == worker || "$command" == runner || "$command" == workspace || "$command" == group || "$command" == callback || "$command" == report || "$command" == install ) && -z "$leaf" ]]; then
       leaf="$word"
-    elif [[ "$command" == runner && "$leaf" == maintenance && -z "$branch" ]]; then
+    elif [[ ( ( "$command" == runner && "$leaf" == maintenance ) || ( "$command" == worker && "$leaf" == cutover ) ) && -z "$branch" ]]; then
       branch="$word"
     fi
   done
@@ -149,9 +154,15 @@ _amux_complete() {
     worker)
       if [[ -z "$leaf" ]]; then
         COMPREPLY=( $(compgen -W "%s" -- "$cur") )
+      elif [[ "$leaf" == cutover ]]; then
+        if [[ -z "$branch" ]]; then
+          COMPREPLY=( $(compgen -W "publish status export" -- "$cur") )
+        elif [[ "$branch" == publish ]]; then
+          COMPREPLY=( $(compgen -W "--generation" -- "$cur") )
+        fi
       else
         case "$leaf" in
-		  adopt) COMPREPLY=( $(compgen -W "--workspace --window --workdir --thread --group -w -W -d -t" -- "$cur") ) ;;
+          adopt) COMPREPLY=( $(compgen -W "--workspace --window --workdir --thread --group -w -W -d -t" -- "$cur") ) ;;
           spawn) COMPREPLY=( $(compgen -W "--workdir --workspace --window --group --mode --prompt-file --assignment-phase --assignment-outcome --native-capability --latest-cursor --physical-host --owner-authorized-projectless-physical-host --thread -d -w -W -m -t" -- "$cur") ) ;;
           pin) COMPREPLY=( $(compgen -W "--workspace --window --workdir --thread --current -w -W -d -t" -- "$cur") ) ;;
           unpin) COMPREPLY=( $(compgen -W "--thread --current -t" -- "$cur") ) ;;
@@ -299,7 +310,7 @@ while (( i <= CURRENT )); do
     --config-dir|-c) (( i += 2 )); continue ;;
     --terminal-launcher) (( i += 2 )); continue ;;
     --config-dir=*|-c=*|--terminal-launcher=*|--json|-j|--dry-run|-n|--attach|--no-attach) (( i++ )); continue ;;
-    *) command=$word; (( i++ )); if [[ $command == worker || $command == runner || $command == workspace || $command == group || $command == callback || $command == report || $command == install ]]; then leaf=$words[$i]; fi; if [[ $command == runner && $leaf == maintenance ]]; then branch=$words[$(( i + 1 ))]; fi; break ;;
+    *) command=$word; (( i++ )); if [[ $command == worker || $command == runner || $command == workspace || $command == group || $command == callback || $command == report || $command == install ]]; then leaf=$words[$i]; fi; if [[ ( $command == runner && $leaf == maintenance ) || ( $command == worker && $leaf == cutover ) ]]; then branch=$words[$(( i + 1 ))]; fi; break ;;
   esac
 done`)
 	fmt.Fprintln(w)
@@ -328,9 +339,15 @@ case $state in
       worker)
         if [[ -z $leaf ]]; then
           _describe -t worker-commands 'worker command' worker_commands
+        elif [[ $leaf == cutover ]]; then
+          if [[ -z $branch ]]; then
+            _values 'worker cutover command' publish status export
+          elif [[ $branch == publish ]]; then
+            _arguments '--generation[immutable cutover generation]:generation:'
+          fi
         else
           case $leaf in
-		    adopt) _arguments '--workspace[workspace]:workspace:' '--window[window]:window:' '--workdir[working directory]:directory:_directories' '--thread[exact native-created thread id or URL]:thread:' '--group[optional exact durable group]:group:' '-w[workspace]:workspace:' '-W[window]:window:' '-d[working directory]:directory:_directories' '-t[thread id or URL]:thread:' ;;
+            adopt) _arguments '--workspace[workspace]:workspace:' '--window[window]:window:' '--workdir[working directory]:directory:_directories' '--thread[exact native-created thread id or URL]:thread:' '--group[optional exact durable group]:group:' '-w[workspace]:workspace:' '-W[window]:window:' '-d[working directory]:directory:_directories' '-t[thread id or URL]:thread:' ;;
             spawn) _arguments '--workdir[canonical physical workdir]:directory:_directories' '--workspace[assignment namespace]:workspace:' '--window[assignment key]:window:' '--group[pre-cutover drain group only]:group:' '--mode[exact mode]:mode:(low medium high ultra)' '--prompt-file[prompt path or -]:file:_files' '--assignment-phase[prepare arm or finalize]:phase:(prepare arm finalize)' '--assignment-outcome[native message outcome]:outcome:(rejected indeterminate authenticated_accepted)' '--native-capability[caller-confirmed capability]:capability:(existing-thread-message-v1)' '--latest-cursor[native acceptance cursor]:cursor:' '--physical-host[exact local hostname]:host:' '--owner-authorized-projectless-physical-host[owner authorized the bounded exception]' '--thread[exact thread]:thread:' '-d[canonical physical workdir]:directory:_directories' '-w[assignment namespace]:workspace:' '-W[assignment key]:window:' '-m[exact mode]:mode:(low medium high ultra)' '-t[exact thread]:thread:' ;;
             pin) _arguments '--workspace[workspace]:workspace:' '--window[window]:window:' '--workdir[working directory]:directory:_directories' '--thread[thread id or URL]:thread:' '--current[current worker]' '-w[workspace]:workspace:' '-W[window]:window:' '-d[working directory]:directory:_directories' '-t[thread id or URL]:thread:' ;;
             unpin) _arguments '--thread[thread id or URL]:thread:' '--current[current worker]' '-t[thread id or URL]:thread:' ;;
@@ -481,6 +498,14 @@ function __fish_amux_runner_leaf
     end
 end
 
+function __fish_amux_worker_cutover_command
+    set -l words (commandline -opc)
+    set -l index (contains -i -- cutover $words)
+    if test -n "$index"; and test (math $index + 1) -le (count $words)
+        echo $words[(math $index + 1)]
+    end
+end
+
 function __fish_amux_runner_maintenance_command
     set -l words (commandline -opc)
     set -l index (contains -i -- maintenance $words)
@@ -549,6 +574,16 @@ end`)
 				condition := fmt.Sprintf("test (__fish_amux_root_command) = worker; and test (__fish_amux_worker_leaf) = %s", subcommand.Name)
 				for _, flag := range subcommand.Flags {
 					writeFishFlag(w, condition, flag, flagDescription(flag), flagTakesValue(flag))
+				}
+				if subcommand.Name == "cutover" {
+					for _, cutoverCommand := range subcommand.Subcommands {
+						condition := "test (__fish_amux_root_command) = worker; and test (__fish_amux_worker_leaf) = cutover; and test -z (__fish_amux_worker_cutover_command)"
+						fmt.Fprintf(w, "complete -c amux -f -n %s -a %s -d %s\n", fishQuote(condition), fishQuote(cutoverCommand.Name), fishQuote(cutoverCommand.Description))
+						condition = fmt.Sprintf("test (__fish_amux_root_command) = worker; and test (__fish_amux_worker_leaf) = cutover; and test (__fish_amux_worker_cutover_command) = %s", cutoverCommand.Name)
+						for _, flag := range cutoverCommand.Flags {
+							writeFishFlag(w, condition, flag, flagDescription(flag), flagTakesValue(flag))
+						}
+					}
 				}
 			}
 		}
@@ -789,6 +824,8 @@ func flagDescription(flag string) string {
 		return "Native acceptance cursor"
 	case "--physical-host":
 		return "Exact local physical host"
+	case "--generation":
+		return "Immutable cutover generation"
 	case "--owner-authorized-projectless-physical-host":
 		return "Owner authorized the bounded projectless host exception"
 	case "--idempotency-key":
@@ -806,7 +843,7 @@ func flagDescription(flag string) string {
 
 func flagTakesValue(flag string) bool {
 	switch flag {
-	case "--config-dir", "-c", "--terminal-launcher", "--thread", "-t", "--group", "--pane", "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--shelf", "--mode", "-m", "--title-prefix", "--work-item-id", "--worker-ordinal", "--message", "--message-file", "--idempotency-key", "--report-id", "--status", "--issue", "--reference", "--pr", "--summary", "--update-owner", "--prompt-file", "--assignment-phase", "--assignment-outcome", "--native-capability", "--latest-cursor", "--physical-host":
+	case "--config-dir", "-c", "--terminal-launcher", "--thread", "-t", "--group", "--pane", "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--shelf", "--mode", "-m", "--title-prefix", "--work-item-id", "--worker-ordinal", "--message", "--message-file", "--idempotency-key", "--report-id", "--status", "--issue", "--reference", "--pr", "--summary", "--update-owner", "--prompt-file", "--assignment-phase", "--assignment-outcome", "--native-capability", "--latest-cursor", "--physical-host", "--generation":
 		return true
 	default:
 		return false
