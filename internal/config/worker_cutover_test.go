@@ -3,6 +3,7 @@ package config
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -439,6 +440,474 @@ func TestWorkerCutoverRejectsNonCanonicalSourceManifestAndFence(t *testing.T) {
 		}
 		if _, err := InspectWorkerCutover(dir); err == nil || !strings.Contains(err.Error(), "does not match") {
 			t.Fatalf("fence mismatch error=%v", err)
+		}
+	})
+}
+
+func setWorkerCutoverFilesystemTestHooks(t *testing.T, hook func(string), sync func(string, *os.File) error) {
+	t.Helper()
+	previousHook := workerCutoverFilesystemHook
+	previousSync := workerCutoverDirectorySync
+	workerCutoverFilesystemHook = hook
+	if sync != nil {
+		workerCutoverDirectorySync = sync
+	}
+	t.Cleanup(func() {
+		workerCutoverFilesystemHook = previousHook
+		workerCutoverDirectorySync = previousSync
+	})
+}
+
+func TestWorkerCutoverRejectsSourceIdentityReplacementBeforeDisplacement(t *testing.T) {
+	dir := Directory{Path: t.TempDir()}
+	source := []byte("# amux-schema: workers/v1\nalpha\tworker\t/tmp/a\tT-alpha\n")
+	if err := os.WriteFile(dir.WorkersPath(), source, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	originalPath := dir.WorkersPath() + ".original"
+	replaced := false
+	setWorkerCutoverFilesystemTestHooks(t, func(event string) {
+		if event != "before-workers-displace" || replaced {
+			return
+		}
+		replaced = true
+		if err := os.Rename(dir.WorkersPath(), originalPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dir.WorkersPath(), source, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir.WorkersPath(), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}, nil)
+
+	if _, err := PublishWorkerCutover(dir, workerCutoverTestGeneration); err == nil || !strings.Contains(err.Error(), "pathname identity changed") {
+		t.Fatalf("source identity replacement error=%v", err)
+	}
+	got, err := os.ReadFile(dir.WorkersPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, source) || bytes.Contains(got, []byte(WorkersSchemaV2)) {
+		t.Fatalf("replacement source was overwritten: %q", got)
+	}
+}
+
+func TestWorkerCutoverDoesNotOverwriteWriterArrivingAfterSourceDisplacement(t *testing.T) {
+	dir := Directory{Path: t.TempDir()}
+	source := []byte("# amux-schema: workers/v1\nalpha\tworker\t/tmp/a\tT-alpha\n")
+	manual := []byte("# amux-schema: workers/v1\nbeta\tworker\t/tmp/b\tT-beta\n")
+	if err := os.WriteFile(dir.WorkersPath(), source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wrote := false
+	setWorkerCutoverFilesystemTestHooks(t, func(event string) {
+		if event != "after-workers-displace" || wrote {
+			return
+		}
+		wrote = true
+		if err := os.WriteFile(dir.WorkersPath(), manual, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}, nil)
+
+	if _, err := PublishWorkerCutover(dir, workerCutoverTestGeneration); err == nil || !strings.Contains(err.Error(), "workers pathname changed") || !strings.Contains(err.Error(), "preserved workers/v1 source remains") {
+		t.Fatalf("stale overwrite prevention error=%v", err)
+	}
+	got, err := os.ReadFile(dir.WorkersPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, manual) {
+		t.Fatalf("manual writer was overwritten: got %q want %q", got, manual)
+	}
+	manifest, manifestData, err := loadWorkerCutoverManifest(dir.WorkerCutoverManifestPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	preserved, err := os.ReadFile(filepath.Join(dir.Path, workerCutoverPreservationName(sha256Digest(manifestData))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Workers.SourceSHA256 != sha256Digest(source) || !bytes.Equal(preserved, source) {
+		t.Fatalf("descriptor-validated source was not preserved: manifest=%+v preserved=%q", manifest.Workers, preserved)
+	}
+	if _, err := PublishWorkerCutover(dir, workerCutoverTestGeneration); err == nil || !strings.Contains(err.Error(), "alongside an unfenced workers pathname") {
+		t.Fatalf("replay did not fail closed over writer conflict: %v", err)
+	}
+}
+
+func TestWorkerCutoverRejectsSymlinksAndPinnedParentReplacement(t *testing.T) {
+	t.Run("workers symlink", func(t *testing.T) {
+		root := t.TempDir()
+		dir := Directory{Path: filepath.Join(root, "config")}
+		if err := os.Mkdir(dir.Path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(root, "workers-target")
+		if err := os.WriteFile(target, []byte(defaultConfig), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, dir.WorkersPath()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := PlanWorkerCutover(dir, workerCutoverTestGeneration); err == nil || !strings.Contains(err.Error(), "without following links") {
+			t.Fatalf("workers symlink error=%v", err)
+		}
+	})
+
+	t.Run("manifest symlink", func(t *testing.T) {
+		root := t.TempDir()
+		dir := Directory{Path: filepath.Join(root, "config")}
+		if err := os.Mkdir(dir.Path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(root, "manifest-target")
+		if err := os.WriteFile(target, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, dir.WorkerCutoverManifestPath()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := InspectWorkerCutover(dir); err == nil || !strings.Contains(err.Error(), "without following links") {
+			t.Fatalf("manifest symlink error=%v", err)
+		}
+	})
+
+	t.Run("ancestor symlink", func(t *testing.T) {
+		root := t.TempDir()
+		realParent := filepath.Join(root, "real")
+		if err := os.Mkdir(realParent, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		linkedParent := filepath.Join(root, "linked")
+		if err := os.Symlink(realParent, linkedParent); err != nil {
+			t.Fatal(err)
+		}
+		dir := Directory{Path: filepath.Join(linkedParent, "config")}
+		if _, err := PlanWorkerCutover(dir, workerCutoverTestGeneration); err == nil || !strings.Contains(err.Error(), "without following links") {
+			t.Fatalf("ancestor symlink error=%v", err)
+		}
+	})
+
+	t.Run("config path replaced before manifest commit", func(t *testing.T) {
+		root := t.TempDir()
+		dir := Directory{Path: filepath.Join(root, "config")}
+		if err := os.Mkdir(dir.Path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dir.WorkersPath(), []byte(defaultConfig), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		moved := filepath.Join(root, "moved-config")
+		swapped := false
+		setWorkerCutoverFilesystemTestHooks(t, func(event string) {
+			if event != "before-manifest-commit" || swapped {
+				return
+			}
+			swapped = true
+			if err := os.Rename(dir.Path, moved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(dir.Path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, nil)
+		if _, err := PublishWorkerCutover(dir, workerCutoverTestGeneration); err == nil || !strings.Contains(err.Error(), "path changed after it was pinned") {
+			t.Fatalf("config path replacement error=%v", err)
+		}
+		for _, path := range []string{dir.WorkerCutoverManifestPath(), filepath.Join(moved, WorkerCutoverManifestFile)} {
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("parent replacement published manifest %s: %v", path, err)
+			}
+		}
+	})
+
+	t.Run("config path replaced after source displacement", func(t *testing.T) {
+		root := t.TempDir()
+		dir := Directory{Path: filepath.Join(root, "config")}
+		if err := os.Mkdir(dir.Path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		source := []byte(defaultConfig)
+		if err := os.WriteFile(dir.WorkersPath(), source, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		moved := filepath.Join(root, "moved-config")
+		swapped := false
+		setWorkerCutoverFilesystemTestHooks(t, func(event string) {
+			if event != "after-workers-displace" || swapped {
+				return
+			}
+			swapped = true
+			if err := os.Rename(dir.Path, moved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(dir.Path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, nil)
+		if _, err := PublishWorkerCutover(dir, workerCutoverTestGeneration); err == nil || !strings.Contains(err.Error(), "path changed after it was pinned") {
+			t.Fatalf("post-displacement config path replacement error=%v", err)
+		}
+		restored, err := os.ReadFile(filepath.Join(moved, WorkersFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(restored, source) {
+			t.Fatalf("source was not restored inside pinned directory: %q", restored)
+		}
+		if _, err := os.Stat(dir.WorkersPath()); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("replacement config workers path was mutated: %v", err)
+		}
+	})
+}
+
+func TestWorkerCutoverValidatesOperationsEvidenceIdentityModeAndLinks(t *testing.T) {
+	t.Run("symlink", func(t *testing.T) {
+		root := t.TempDir()
+		dir := Directory{Path: filepath.Join(root, "config")}
+		if err := os.Mkdir(dir.Path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(root, "operations-target")
+		if err := os.WriteFile(target, []byte(`{"schema_version":1,"operations":[]}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, dir.OperationsPath()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := PlanWorkerCutover(dir, workerCutoverTestGeneration); err == nil || !strings.Contains(err.Error(), "without following links") {
+			t.Fatalf("operations symlink error=%v", err)
+		}
+	})
+
+	t.Run("mode", func(t *testing.T) {
+		dir := Directory{Path: t.TempDir()}
+		if err := os.WriteFile(dir.OperationsPath(), []byte(`{"schema_version":1,"operations":[]}`+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir.OperationsPath(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := PlanWorkerCutover(dir, workerCutoverTestGeneration); err == nil || !strings.Contains(err.Error(), "must have mode 0600") {
+			t.Fatalf("operations mode error=%v", err)
+		}
+	})
+
+	t.Run("identity replacement", func(t *testing.T) {
+		dir := Directory{Path: t.TempDir()}
+		if err := os.WriteFile(dir.WorkersPath(), []byte(defaultConfig), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		now := time.Date(2026, 8, 13, 2, 3, 4, 5, time.UTC)
+		operation := OperationRecord{Key: "worker-adopt:T-alpha", Kind: "worker-adopt", RequestHash: "alpha", State: OperationStarted, Resource: OperationResource{Kind: "worker", Thread: "T-alpha"}, CreatedAt: now, UpdatedAt: now}
+		if _, err := StoreOperation(dir.OperationsPath(), operation); err != nil {
+			t.Fatal(err)
+		}
+		original, err := os.ReadFile(dir.OperationsPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		replaced := false
+		setWorkerCutoverFilesystemTestHooks(t, func(event string) {
+			if event != "before-workers-commit" || replaced {
+				return
+			}
+			replaced = true
+			if err := os.Rename(dir.OperationsPath(), dir.OperationsPath()+".original"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(dir.OperationsPath(), original, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, nil)
+		if _, err := PublishWorkerCutover(dir, workerCutoverTestGeneration); err == nil || !strings.Contains(err.Error(), "operations evidence pathname identity changed") {
+			t.Fatalf("operations identity replacement error=%v", err)
+		}
+		workers, err := os.ReadFile(dir.WorkersPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(workers, []byte(WorkersSchemaV2)) {
+			t.Fatalf("operations identity mismatch committed fence: %q", workers)
+		}
+	})
+}
+
+func TestWorkerCutoverRejectsManifestIdentityReplacementDuringRecovery(t *testing.T) {
+	dir := Directory{Path: t.TempDir()}
+	if err := os.WriteFile(dir.WorkersPath(), []byte(defaultConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := prepareWorkerCutoverManifest(dir, workerCutoverTestGeneration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestData, err := canonicalWorkerCutoverManifestBytes(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeImmutableWorkerCutoverManifest(dir.WorkerCutoverManifestPath(), manifestData); err != nil {
+		t.Fatal(err)
+	}
+	replaced := false
+	setWorkerCutoverFilesystemTestHooks(t, func(event string) {
+		if event != "before-workers-displace" || replaced {
+			return
+		}
+		replaced = true
+		if err := os.Rename(dir.WorkerCutoverManifestPath(), dir.WorkerCutoverManifestPath()+".original"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dir.WorkerCutoverManifestPath(), manifestData, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}, nil)
+
+	if _, err := PublishWorkerCutover(dir, workerCutoverTestGeneration); err == nil || !strings.Contains(err.Error(), "manifest pathname identity changed") {
+		t.Fatalf("manifest identity replacement error=%v", err)
+	}
+	workers, err := os.ReadFile(dir.WorkersPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(workers, []byte(WorkersSchemaV2)) {
+		t.Fatalf("manifest identity mismatch committed fence: %q", workers)
+	}
+}
+
+func TestWorkerCutoverDurablyCreatesEveryMissingConfigAncestor(t *testing.T) {
+	root := t.TempDir()
+	dir := Directory{Path: filepath.Join(root, "one", "two", "config")}
+	var synced []string
+	setWorkerCutoverFilesystemTestHooks(t, nil, func(path string, directory *os.File) error {
+		synced = append(synced, filepath.Clean(path))
+		return directory.Sync()
+	})
+	if _, err := PublishWorkerCutover(dir, workerCutoverTestGeneration); err != nil {
+		t.Fatal(err)
+	}
+	wantPrefix := []string{root, filepath.Join(root, "one"), filepath.Join(root, "one", "two")}
+	if len(synced) < len(wantPrefix) {
+		t.Fatalf("directory syncs=%v, want prefix %v", synced, wantPrefix)
+	}
+	for index, want := range wantPrefix {
+		if synced[index] != want {
+			t.Fatalf("directory sync %d=%q, want %q; all=%v", index, synced[index], want, synced)
+		}
+	}
+}
+
+func TestWorkerCutoverFailsWhenNewAncestorDirectoryEntryCannotBeSynced(t *testing.T) {
+	root := t.TempDir()
+	dir := Directory{Path: filepath.Join(root, "one", "two", "config")}
+	failure := errors.New("injected ancestor fsync failure")
+	var synced []string
+	setWorkerCutoverFilesystemTestHooks(t, nil, func(path string, directory *os.File) error {
+		path = filepath.Clean(path)
+		synced = append(synced, path)
+		if path == filepath.Join(root, "one") {
+			return failure
+		}
+		return directory.Sync()
+	})
+	if _, err := PublishWorkerCutover(dir, workerCutoverTestGeneration); err == nil || !errors.Is(err, failure) || !strings.Contains(err.Error(), "durably create") {
+		t.Fatalf("ancestor sync failure=%v", err)
+	}
+	want := []string{root, filepath.Join(root, "one")}
+	if strings.Join(synced, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("directory sync ordering=%v, want %v", synced, want)
+	}
+	for _, path := range []string{dir.WorkerCutoverManifestPath(), dir.WorkersPath()} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("sync failure published %s: %v", path, err)
+		}
+	}
+}
+
+func TestWorkerCutoverRecoversDurablyPreservedSourceStates(t *testing.T) {
+	preparePreserved := func(t *testing.T) (Directory, []byte, string) {
+		t.Helper()
+		dir := Directory{Path: t.TempDir()}
+		source := []byte("# amux-schema: workers/v1\nalpha\tworker\t/tmp/a\tT-alpha\n")
+		if err := os.WriteFile(dir.WorkersPath(), source, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir.WorkersPath(), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		manifest, err := prepareWorkerCutoverManifest(dir, workerCutoverTestGeneration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		manifestData, err := canonicalWorkerCutoverManifestBytes(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := writeImmutableWorkerCutoverManifest(dir.WorkerCutoverManifestPath(), manifestData); err != nil {
+			t.Fatal(err)
+		}
+		preservation := filepath.Join(dir.Path, workerCutoverPreservationName(sha256Digest(manifestData)))
+		if err := os.Rename(dir.WorkersPath(), preservation); err != nil {
+			t.Fatal(err)
+		}
+		return dir, source, preservation
+	}
+
+	t.Run("source displaced before fence commit", func(t *testing.T) {
+		dir, _, preservation := preparePreserved(t)
+		status, err := InspectWorkerCutover(dir)
+		if err != nil || status.State != "recovery_required" {
+			t.Fatalf("status=%+v err=%v", status, err)
+		}
+		recovered, err := PublishWorkerCutover(dir, workerCutoverTestGeneration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if recovered.Action != WorkerCutoverRecoverFence || recovered.Export.State != "published" {
+			t.Fatalf("recovered=%+v", recovered)
+		}
+		if _, err := os.Stat(preservation); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("preserved source not cleaned after recovery: %v", err)
+		}
+	})
+
+	t.Run("fence committed before source cleanup", func(t *testing.T) {
+		dir, source, preservation := preparePreserved(t)
+		manifest, manifestData, err := loadWorkerCutoverManifest(dir.WorkerCutoverManifestPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		fenced, err := fencedWorkerRegistry(source, sha256Digest(manifestData))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dir.WorkersPath(), fenced, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		before, err := os.Stat(dir.WorkersPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		status, err := InspectWorkerCutover(dir)
+		if err != nil || status.State != "recovery_required" || status.ManifestSHA256 != sha256Digest(manifestData) || status.Generation != manifest.Generation {
+			t.Fatalf("status=%+v err=%v", status, err)
+		}
+		recovered, err := PublishWorkerCutover(dir, workerCutoverTestGeneration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		after, err := os.Stat(dir.WorkersPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if recovered.Action != WorkerCutoverRecoverFence || !os.SameFile(before, after) {
+			t.Fatalf("cleanup recovery rewrote fence: recovered=%+v same=%v", recovered, os.SameFile(before, after))
+		}
+		if _, err := os.Stat(preservation); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("preserved source not cleaned after fence recovery: %v", err)
 		}
 	})
 }

@@ -198,30 +198,24 @@ type workerRegistrySnapshot struct {
 	document workerRegistryDocument
 	present  bool
 	mode     os.FileMode
+	file     workerCutoverFileSnapshot
 }
 
-func readWorkerRegistrySnapshot(path string, absentAsV1 bool) (workerRegistrySnapshot, error) {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) && absentAsV1 {
+func readWorkerRegistrySnapshotPinned(directory *workerCutoverDirectory, name string, absentAsV1 bool) (workerRegistrySnapshot, error) {
+	file, err := directory.readRegularFile(name, "workers registry", absentAsV1, nil)
+	if err != nil {
+		return workerRegistrySnapshot{}, err
+	}
+	if !file.present && absentAsV1 {
 		data := []byte(defaultConfig)
 		document, parseErr := parseWorkerRegistry(data, true)
-		return workerRegistrySnapshot{data: data, document: document, mode: 0o600}, parseErr
+		return workerRegistrySnapshot{data: data, document: document, mode: 0o600, file: file}, parseErr
 	}
+	document, err := parseWorkerRegistry(file.data, true)
 	if err != nil {
 		return workerRegistrySnapshot{}, err
 	}
-	if !info.Mode().IsRegular() {
-		return workerRegistrySnapshot{}, fmt.Errorf("workers registry %s must be a regular file", path)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return workerRegistrySnapshot{}, err
-	}
-	document, err := parseWorkerRegistry(data, true)
-	if err != nil {
-		return workerRegistrySnapshot{}, err
-	}
-	return workerRegistrySnapshot{data: data, document: document, present: true, mode: info.Mode().Perm()}, nil
+	return workerRegistrySnapshot{data: file.data, document: document, present: true, mode: file.mode.Perm(), file: file}, nil
 }
 
 func workerRowsForManifest(rows []Row) []WorkerCutoverRow {
@@ -253,16 +247,29 @@ func prepareWorkerCutoverManifest(dir Directory, generation string) (WorkerCutov
 	if err := validateWorkerCutoverGeneration(generation); err != nil {
 		return WorkerCutoverManifest{}, err
 	}
-	snapshot, err := readWorkerRegistrySnapshot(dir.WorkersPath(), true)
+	directory, err := openWorkerCutoverDirectory(dir.Path, false)
 	if err != nil {
-		return WorkerCutoverManifest{}, fmt.Errorf("read deterministic workers/v1 source: %w", err)
+		return WorkerCutoverManifest{}, err
+	}
+	defer directory.Close()
+	manifest, _, _, _, err := prepareWorkerCutoverManifestPinned(directory, generation)
+	return manifest, err
+}
+
+func prepareWorkerCutoverManifestPinned(directory *workerCutoverDirectory, generation string) (WorkerCutoverManifest, workerRegistrySnapshot, []OperationRecord, workerCutoverFileSnapshot, error) {
+	if err := validateWorkerCutoverGeneration(generation); err != nil {
+		return WorkerCutoverManifest{}, workerRegistrySnapshot{}, nil, workerCutoverFileSnapshot{}, err
+	}
+	snapshot, err := readWorkerRegistrySnapshotPinned(directory, WorkersFile, true)
+	if err != nil {
+		return WorkerCutoverManifest{}, workerRegistrySnapshot{}, nil, workerCutoverFileSnapshot{}, fmt.Errorf("read deterministic workers/v1 source: %w", err)
 	}
 	if snapshot.document.Schema != WorkersSchemaV1 || snapshot.document.FenceDigest != "" {
-		return WorkerCutoverManifest{}, fmt.Errorf("worker cutover publication requires an unfenced %s registry, found %s", WorkersSchemaV1, snapshot.document.Schema)
+		return WorkerCutoverManifest{}, workerRegistrySnapshot{}, nil, workerCutoverFileSnapshot{}, fmt.Errorf("worker cutover publication requires an unfenced %s registry, found %s", WorkersSchemaV1, snapshot.document.Schema)
 	}
-	operations, err := LoadOperationsReadOnly(dir.OperationsPath())
+	operations, operationFile, err := readWorkerCutoverOperations(directory)
 	if err != nil {
-		return WorkerCutoverManifest{}, fmt.Errorf("read worker-adopt operations: %w", err)
+		return WorkerCutoverManifest{}, workerRegistrySnapshot{}, nil, workerCutoverFileSnapshot{}, fmt.Errorf("read worker-adopt operations: %w", err)
 	}
 	manifest := WorkerCutoverManifest{
 		SchemaVersion: WorkerCutoverManifestSchemaVersion,
@@ -277,9 +284,9 @@ func prepareWorkerCutoverManifest(dir Directory, generation string) (WorkerCutov
 		SpawnCutover:       spawnCutoverReference(),
 	}
 	if err := validateWorkerCutoverManifest(manifest); err != nil {
-		return WorkerCutoverManifest{}, err
+		return WorkerCutoverManifest{}, workerRegistrySnapshot{}, nil, workerCutoverFileSnapshot{}, err
 	}
-	return manifest, nil
+	return manifest, snapshot, operations, operationFile, nil
 }
 
 func validateWorkerCutoverManifest(manifest WorkerCutoverManifest) error {
@@ -355,41 +362,77 @@ func validateWorkerCutoverManifest(manifest WorkerCutoverManifest) error {
 }
 
 func loadWorkerCutoverManifest(path string) (WorkerCutoverManifest, []byte, error) {
-	info, err := os.Lstat(path)
+	directory, err := openWorkerCutoverDirectory(filepath.Dir(path), false)
 	if err != nil {
 		return WorkerCutoverManifest{}, nil, err
 	}
-	if !info.Mode().IsRegular() {
-		return WorkerCutoverManifest{}, nil, fmt.Errorf("worker cutover manifest %s must be a regular file", path)
-	}
-	if info.Mode().Perm() != 0o600 {
-		return WorkerCutoverManifest{}, nil, fmt.Errorf("worker cutover manifest %s must have mode 0600, found %04o", path, info.Mode().Perm())
-	}
-	data, err := os.ReadFile(path)
+	defer directory.Close()
+	manifest, data, _, err := loadWorkerCutoverManifestPinned(directory, filepath.Base(path), false)
+	return manifest, data, err
+}
+
+func loadWorkerCutoverManifestPinned(directory *workerCutoverDirectory, name string, allowMissing bool) (WorkerCutoverManifest, []byte, workerCutoverFileSnapshot, error) {
+	requiredMode := os.FileMode(0o600)
+	file, err := directory.readRegularFile(name, "worker cutover manifest", allowMissing, &requiredMode)
 	if err != nil {
-		return WorkerCutoverManifest{}, nil, err
+		return WorkerCutoverManifest{}, nil, workerCutoverFileSnapshot{}, err
 	}
+	if !file.present {
+		return WorkerCutoverManifest{}, nil, file, os.ErrNotExist
+	}
+	data := file.data
 	var manifest WorkerCutoverManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return manifest, data, fmt.Errorf("parse worker cutover manifest: %w", err)
+		return manifest, data, file, fmt.Errorf("parse worker cutover manifest: %w", err)
 	}
 	if err := validateWorkerCutoverManifest(manifest); err != nil {
-		return manifest, data, err
+		return manifest, data, file, err
 	}
 	canonical, err := canonicalWorkerCutoverManifestBytes(manifest)
 	if err != nil {
-		return manifest, data, err
+		return manifest, data, file, err
 	}
 	if !bytes.Equal(data, canonical) {
-		return manifest, data, errors.New("worker cutover manifest is not its exact canonical immutable encoding")
+		return manifest, data, file, errors.New("worker cutover manifest is not its exact canonical immutable encoding")
 	}
-	return manifest, data, nil
+	return manifest, data, file, nil
 }
 
-func currentWorkerAdoptions(path string) ([]OperationRecord, error) {
-	operations, err := LoadOperationsReadOnly(path)
+func readWorkerCutoverOperations(directory *workerCutoverDirectory) ([]OperationRecord, workerCutoverFileSnapshot, error) {
+	requiredMode := os.FileMode(0o600)
+	file, err := directory.readRegularFile(OperationsFile, "worker cutover operations evidence", true, &requiredMode)
 	if err != nil {
-		return nil, err
+		return nil, workerCutoverFileSnapshot{}, err
+	}
+	if !file.present {
+		return nil, file, nil
+	}
+	var operationsFile operationFile
+	if err := json.Unmarshal(file.data, &operationsFile); err != nil {
+		return nil, file, fmt.Errorf("parse operation records: %w", err)
+	}
+	if operationsFile.SchemaVersion != OperationSchemaVersion {
+		return nil, file, fmt.Errorf("unsupported operations file schema version %d", operationsFile.SchemaVersion)
+	}
+	seen := make(map[string]bool)
+	for i, operation := range operationsFile.Operations {
+		canonical, err := canonicalOperation(operation)
+		if err != nil {
+			return nil, file, fmt.Errorf("invalid operation record %d: %w", i+1, err)
+		}
+		if seen[canonical.Key] {
+			return nil, file, fmt.Errorf("duplicate idempotency key %q", canonical.Key)
+		}
+		seen[canonical.Key] = true
+		operationsFile.Operations[i] = canonical
+	}
+	return operationsFile.Operations, file, nil
+}
+
+func currentWorkerAdoptionsPinned(directory *workerCutoverDirectory) ([]OperationRecord, workerCutoverFileSnapshot, error) {
+	operations, file, err := readWorkerCutoverOperations(directory)
+	if err != nil {
+		return nil, workerCutoverFileSnapshot{}, err
 	}
 	out := make([]OperationRecord, 0)
 	for _, operation := range operations {
@@ -398,7 +441,7 @@ func currentWorkerAdoptions(path string) ([]OperationRecord, error) {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
-	return out, nil
+	return out, file, nil
 }
 
 func immutableAdoptionMatches(manifest WorkerCutoverAdoption, current OperationRecord) bool {
@@ -510,6 +553,29 @@ func classifyWorkerCutover(manifest *WorkerCutoverManifest, rows []Row, operatio
 // InspectWorkerCutover is a strictly read-only compatibility export. It reads
 // only workers.tsv, worker-adopt operation evidence, and the cutover manifest.
 func InspectWorkerCutover(dir Directory) (WorkerCutoverExport, error) {
+	directory, err := openWorkerCutoverDirectory(dir.Path, false)
+	if err != nil {
+		return WorkerCutoverExport{}, err
+	}
+	defer directory.Close()
+	return inspectWorkerCutoverPinned(dir, directory)
+}
+
+func workerCutoverPreservationName(manifestDigest string) string {
+	return "." + WorkersFile + ".worker-cutover-source." + strings.TrimPrefix(manifestDigest, "sha256:")
+}
+
+func validateWorkerCutoverSourceSnapshot(snapshot workerRegistrySnapshot, manifest WorkerCutoverManifest) error {
+	if snapshot.present != manifest.Workers.SourcePresent || sha256Digest(snapshot.data) != manifest.Workers.SourceSHA256 || fmt.Sprintf("%04o", snapshot.mode.Perm()) != manifest.Workers.SourceMode {
+		return errors.New("workers/v1 source mismatches the immutable worker cutover manifest in presence, content, or mode; downgrade fence recovery fails closed")
+	}
+	if snapshot.document.Schema != WorkersSchemaV1 || snapshot.document.FenceDigest != "" {
+		return fmt.Errorf("worker cutover source must remain an unfenced %s registry", WorkersSchemaV1)
+	}
+	return nil
+}
+
+func inspectWorkerCutoverPinned(dir Directory, directory *workerCutoverDirectory) (WorkerCutoverExport, error) {
 	export := WorkerCutoverExport{
 		SchemaVersion:      WorkerCutoverManifestSchemaVersion,
 		State:              "not_published",
@@ -519,66 +585,117 @@ func InspectWorkerCutover(dir Directory) (WorkerCutoverExport, error) {
 		AdoptionOperations: make([]WorkerCutoverAdoptionClassification, 0),
 		Blockers:           make([]string, 0),
 	}
-	manifest, manifestData, manifestErr := loadWorkerCutoverManifest(dir.WorkerCutoverManifestPath())
+	manifest, manifestData, manifestFile, manifestErr := loadWorkerCutoverManifestPinned(directory, WorkerCutoverManifestFile, true)
 	manifestPresent := manifestErr == nil
 	if manifestErr != nil && !errors.Is(manifestErr, os.ErrNotExist) {
 		return export, manifestErr
 	}
-	snapshot, registryErr := readWorkerRegistrySnapshot(dir.WorkersPath(), !manifestPresent)
-	if registryErr != nil {
-		if errors.Is(registryErr, os.ErrNotExist) && manifestPresent && !manifest.Workers.SourcePresent {
-			snapshot, registryErr = readWorkerRegistrySnapshot(dir.WorkersPath(), true)
-		} else {
-			return export, registryErr
-		}
-	}
+	visible, registryErr := readWorkerRegistrySnapshotPinned(directory, WorkersFile, true)
 	if registryErr != nil {
 		return export, registryErr
 	}
-	export.Registry.Schema = snapshot.document.Schema
-	export.Registry.FenceSHA256 = snapshot.document.FenceDigest
-	export.Registry.Mode = fmt.Sprintf("%04o", snapshot.mode.Perm())
-	export.Registry.SourcePresent = snapshot.present
-	operations, err := currentWorkerAdoptions(dir.OperationsPath())
+	export.Registry.Schema = visible.document.Schema
+	export.Registry.FenceSHA256 = visible.document.FenceDigest
+	export.Registry.Mode = fmt.Sprintf("%04o", visible.mode.Perm())
+	export.Registry.SourcePresent = visible.present
+	operations, operationFile, err := currentWorkerAdoptionsPinned(directory)
 	if err != nil {
 		return export, fmt.Errorf("read worker-adopt operations: %w", err)
 	}
+	requiredPrivateMode := os.FileMode(0o600)
+	verifyInputs := func(preservation *workerRegistrySnapshot) error {
+		if err := directory.verifyPathIdentity(); err != nil {
+			return err
+		}
+		if err := directory.verifyFileSnapshot(manifestFile, "worker cutover manifest", &requiredPrivateMode); err != nil {
+			return err
+		}
+		if err := directory.verifyFileSnapshot(visible.file, "workers registry", nil); err != nil {
+			return err
+		}
+		if err := directory.verifyFileSnapshot(operationFile, "worker cutover operations evidence", &requiredPrivateMode); err != nil {
+			return err
+		}
+		if preservation != nil {
+			if err := directory.verifyFileSnapshot(preservation.file, "preserved workers/v1 cutover source", nil); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	if !manifestPresent {
-		if snapshot.document.Schema != WorkersSchemaV1 || snapshot.document.FenceDigest != "" {
+		if visible.document.Schema != WorkersSchemaV1 || visible.document.FenceDigest != "" {
 			return export, errors.New("workers/v2 downgrade fence exists without its immutable worker cutover manifest")
 		}
-		export.Workers, export.AdoptionOperations, export.Blockers, err = classifyWorkerCutover(nil, snapshot.document.Rows, operations, false)
-		return export, err
+		export.Workers, export.AdoptionOperations, export.Blockers, err = classifyWorkerCutover(nil, visible.document.Rows, operations, false)
+		if err != nil {
+			return export, err
+		}
+		return export, verifyInputs(nil)
 	}
 	export.Generation = manifest.Generation
 	export.Manifest = &manifest
 	export.ManifestSHA256 = sha256Digest(manifestData)
-	switch snapshot.document.Schema {
+	preservation, preservationErr := readWorkerRegistrySnapshotPinned(directory, workerCutoverPreservationName(export.ManifestSHA256), true)
+	if preservationErr != nil {
+		return export, fmt.Errorf("read preserved workers/v1 cutover source: %w", preservationErr)
+	}
+	if preservation.present {
+		if !manifest.Workers.SourcePresent {
+			return export, errors.New("preserved workers/v1 source exists for a manifest that records an absent source")
+		}
+		if err := validateWorkerCutoverSourceSnapshot(preservation, manifest); err != nil {
+			return export, fmt.Errorf("preserved workers/v1 source: %w", err)
+		}
+	}
+	effective := visible
+	if !visible.present && preservation.present {
+		effective = preservation
+	}
+	switch visible.document.Schema {
 	case WorkersSchemaV1:
-		if snapshot.present != manifest.Workers.SourcePresent || sha256Digest(snapshot.data) != manifest.Workers.SourceSHA256 || fmt.Sprintf("%04o", snapshot.mode.Perm()) != manifest.Workers.SourceMode {
-			return export, errors.New("workers/v1 source mismatches the immutable worker cutover manifest in presence, content, or mode; downgrade fence recovery fails closed")
+		if visible.present && preservation.present {
+			return export, errors.New("preserved workers/v1 source exists alongside an unfenced workers pathname; downgrade fence recovery fails closed")
+		}
+		if err := validateWorkerCutoverSourceSnapshot(effective, manifest); err != nil {
+			return export, err
 		}
 		if err := validateFenceRecoveryAdoptions(manifest, operations); err != nil {
 			return export, err
 		}
 		export.State = "recovery_required"
 	case WorkersSchemaV2:
-		if snapshot.document.FenceDigest != export.ManifestSHA256 {
+		if !visible.present || visible.document.FenceDigest != export.ManifestSHA256 {
 			return export, errors.New("workers/v2 downgrade fence does not match the immutable worker cutover manifest")
 		}
-		export.State = "published"
+		if preservation.present {
+			if err := validateFenceRecoveryAdoptions(manifest, operations); err != nil {
+				return export, err
+			}
+			export.State = "recovery_required"
+		} else {
+			export.State = "published"
+		}
 	default:
-		return export, fmt.Errorf("unsupported workers registry schema %q", snapshot.document.Schema)
+		return export, fmt.Errorf("unsupported workers registry schema %q", visible.document.Schema)
 	}
-	export.Workers, export.AdoptionOperations, export.Blockers, err = classifyWorkerCutover(&manifest, snapshot.document.Rows, operations, export.State == "published")
-	return export, err
+	export.Workers, export.AdoptionOperations, export.Blockers, err = classifyWorkerCutover(&manifest, effective.document.Rows, operations, visible.document.Schema == WorkersSchemaV2)
+	if err != nil {
+		return export, err
+	}
+	return export, verifyInputs(&preservation)
 }
 
 func PlanWorkerCutover(dir Directory, generation string) (WorkerCutoverPublication, error) {
 	if err := validateWorkerCutoverGeneration(generation); err != nil {
 		return WorkerCutoverPublication{}, err
 	}
-	inspected, err := InspectWorkerCutover(dir)
+	directory, err := openWorkerCutoverDirectory(dir.Path, false)
+	if err != nil {
+		return WorkerCutoverPublication{}, err
+	}
+	defer directory.Close()
+	inspected, err := inspectWorkerCutoverPinned(dir, directory)
 	if err != nil {
 		return WorkerCutoverPublication{}, err
 	}
@@ -592,7 +709,7 @@ func PlanWorkerCutover(dir Directory, generation string) (WorkerCutoverPublicati
 		}
 		return WorkerCutoverPublication{Action: action, Export: inspected}, nil
 	}
-	manifest, err := prepareWorkerCutoverManifest(dir, generation)
+	manifest, source, operationRecords, operations, err := prepareWorkerCutoverManifestPinned(directory, generation)
 	if err != nil {
 		return WorkerCutoverPublication{}, err
 	}
@@ -603,38 +720,61 @@ func PlanWorkerCutover(dir Directory, generation string) (WorkerCutoverPublicati
 	inspected.Generation = generation
 	inspected.Manifest = &manifest
 	inspected.ManifestSHA256 = sha256Digest(manifestData)
+	inspected.Registry.Schema = source.document.Schema
+	inspected.Registry.FenceSHA256 = source.document.FenceDigest
+	inspected.Registry.Mode = fmt.Sprintf("%04o", source.mode.Perm())
+	inspected.Registry.SourcePresent = source.present
+	currentAdoptions := make([]OperationRecord, 0)
+	for _, operation := range operationRecords {
+		if operation.Kind == "worker-adopt" {
+			currentAdoptions = append(currentAdoptions, operation)
+		}
+	}
+	inspected.Workers, inspected.AdoptionOperations, inspected.Blockers, err = classifyWorkerCutover(nil, source.document.Rows, currentAdoptions, false)
+	if err != nil {
+		return WorkerCutoverPublication{}, err
+	}
+	requiredPrivateMode := os.FileMode(0o600)
+	if err := directory.verifyPathIdentity(); err != nil {
+		return WorkerCutoverPublication{}, err
+	}
+	if err := directory.verifyFileSnapshot(source.file, "workers registry", nil); err != nil {
+		return WorkerCutoverPublication{}, err
+	}
+	if err := directory.verifyFileSnapshot(operations, "worker cutover operations evidence", &requiredPrivateMode); err != nil {
+		return WorkerCutoverPublication{}, err
+	}
 	return WorkerCutoverPublication{Action: WorkerCutoverPublishNew, Export: inspected}, nil
 }
 
 func writeImmutableWorkerCutoverManifest(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	file, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp.")
+	directory, err := openWorkerCutoverDirectory(filepath.Dir(path), true)
 	if err != nil {
 		return err
 	}
-	tmp := file.Name()
-	defer os.Remove(tmp)
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
+	defer directory.Close()
+	return writeImmutableWorkerCutoverManifestPinned(directory, filepath.Base(path), data)
+}
+
+func writeImmutableWorkerCutoverManifestPinned(directory *workerCutoverDirectory, name string, data []byte) error {
+	if err := directory.verifyPathIdentity(); err != nil {
 		return err
 	}
-	if _, err := file.Write(data); err != nil {
-		_ = file.Close()
+	tmp, err := directory.createTemp("."+name+".tmp.", data, 0o600)
+	if err != nil {
 		return err
 	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = directory.unlink(tmp)
+		}
+	}()
+	if err := directory.renameNoReplace(tmp, name); err != nil {
 		return err
 	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if err := os.Link(tmp, path); err != nil {
-		return err
-	}
-	return syncDirectory(filepath.Dir(path))
+	committed = true
+	return directory.sync()
 }
 
 func fencedWorkerRegistry(source []byte, manifestDigest string) ([]byte, error) {
@@ -652,119 +792,258 @@ func fencedWorkerRegistry(source []byte, manifestDigest string) ([]byte, error) 
 	return []byte(strings.Replace(string(source), workerSchemaHeaderV1, replacement, 1)), nil
 }
 
-func writeFencedWorkerRegistry(path string, data []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	file, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp.")
-	if err != nil {
-		return err
-	}
-	tmp := file.Name()
-	defer os.Remove(tmp)
-	if err := file.Chmod(mode.Perm()); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if _, err := file.Write(data); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return err
-	}
-	return syncDirectory(filepath.Dir(path))
-}
-
-func syncDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return directory.Sync()
-}
-
-func installWorkerCutoverFence(dir Directory, manifest WorkerCutoverManifest, manifestData []byte) error {
-	snapshot, err := readWorkerRegistrySnapshot(dir.WorkersPath(), !manifest.Workers.SourcePresent)
+func installWorkerCutoverFencePinned(directory *workerCutoverDirectory, manifest WorkerCutoverManifest, manifestData []byte, manifestFile workerCutoverFileSnapshot, boundSource *workerRegistrySnapshot, boundOperations *workerCutoverFileSnapshot) error {
+	visible, err := readWorkerRegistrySnapshotPinned(directory, WorkersFile, true)
 	if err != nil {
 		return err
 	}
 	manifestDigest := sha256Digest(manifestData)
-	if snapshot.document.Schema == WorkersSchemaV2 {
-		if snapshot.document.FenceDigest != manifestDigest {
-			return errors.New("existing workers/v2 downgrade fence does not match the immutable manifest")
-		}
-		return nil
+	preservationName := workerCutoverPreservationName(manifestDigest)
+	preservation, err := readWorkerRegistrySnapshotPinned(directory, preservationName, true)
+	if err != nil {
+		return fmt.Errorf("read preserved workers/v1 cutover source: %w", err)
 	}
-	if snapshot.present != manifest.Workers.SourcePresent || sha256Digest(snapshot.data) != manifest.Workers.SourceSHA256 || fmt.Sprintf("%04o", snapshot.mode.Perm()) != manifest.Workers.SourceMode {
-		return errors.New("workers/v1 source changed after immutable manifest creation; fence installation fails closed")
-	}
-	operations, err := currentWorkerAdoptions(dir.OperationsPath())
+	operations, operationFile, err := currentWorkerAdoptionsPinned(directory)
 	if err != nil {
 		return err
 	}
 	if err := validateFenceRecoveryAdoptions(manifest, operations); err != nil {
 		return err
 	}
-	fenced, err := fencedWorkerRegistry(snapshot.data, manifestDigest)
+	requiredPrivateMode := os.FileMode(0o600)
+	verifyBoundInputs := func() error {
+		if err := directory.verifyPathIdentity(); err != nil {
+			return err
+		}
+		if err := directory.verifyFileSnapshot(manifestFile, "worker cutover manifest", &requiredPrivateMode); err != nil {
+			return err
+		}
+		if boundOperations != nil {
+			if err := directory.verifyFileSnapshot(*boundOperations, "worker cutover operations evidence", &requiredPrivateMode); err != nil {
+				return err
+			}
+		} else if err := directory.verifyFileSnapshot(operationFile, "worker cutover operations evidence", &requiredPrivateMode); err != nil {
+			return err
+		}
+		return nil
+	}
+	if visible.document.Schema == WorkersSchemaV2 {
+		if !visible.present || visible.document.FenceDigest != manifestDigest {
+			return errors.New("existing workers/v2 downgrade fence does not match the immutable manifest")
+		}
+		if !preservation.present {
+			return nil
+		}
+		if err := validateWorkerCutoverSourceSnapshot(preservation, manifest); err != nil {
+			return fmt.Errorf("preserved workers/v1 source: %w", err)
+		}
+		if workerCutoverFilesystemHook != nil {
+			workerCutoverFilesystemHook("before-workers-cleanup")
+		}
+		if err := verifyBoundInputs(); err != nil {
+			return err
+		}
+		if err := directory.verifyFileSnapshot(visible.file, "workers registry", nil); err != nil {
+			return err
+		}
+		if err := directory.verifyFileSnapshot(preservation.file, "preserved workers/v1 cutover source", nil); err != nil {
+			return err
+		}
+		if err := directory.unlink(preservationName); err != nil {
+			return err
+		}
+		return directory.sync()
+	}
+	if visible.present && preservation.present {
+		return errors.New("preserved workers/v1 source exists alongside an unfenced workers pathname; fence installation fails closed")
+	}
+	source := visible
+	if preservation.present {
+		source = preservation
+	}
+	if err := validateWorkerCutoverSourceSnapshot(source, manifest); err != nil {
+		return errors.New("workers/v1 source changed after immutable manifest creation; fence installation fails closed: " + err.Error())
+	}
+	if boundSource != nil {
+		if preservation.present || source.present != boundSource.present {
+			return errors.New("workers/v1 source pathname changed after immutable manifest creation; fence installation fails closed")
+		}
+		if source.present && !os.SameFile(source.file.info, boundSource.file.info) {
+			return errors.New("workers/v1 source pathname identity changed after immutable manifest creation; fence installation fails closed")
+		}
+		if source.mode.Perm() != boundSource.mode.Perm() || !bytes.Equal(source.data, boundSource.data) {
+			return errors.New("workers/v1 source content or mode changed after immutable manifest creation; fence installation fails closed")
+		}
+	}
+	fenced, err := fencedWorkerRegistry(source.data, manifestDigest)
 	if err != nil {
 		return err
 	}
-	return writeFencedWorkerRegistry(dir.WorkersPath(), fenced, snapshot.mode)
+	tmp, err := directory.createTemp("."+WorkersFile+".fence.", fenced, source.mode)
+	if err != nil {
+		return err
+	}
+	tmpPresent := true
+	defer func() {
+		if tmpPresent {
+			_ = directory.unlink(tmp)
+		}
+	}()
+	preserved := preservation.present
+	restore := func(cause error) error {
+		if !preserved {
+			return cause
+		}
+		if restoreErr := directory.renameNoReplace(preservationName, WorkersFile); restoreErr != nil {
+			return fmt.Errorf("%w; preserved workers/v1 source remains at %s because restoration failed: %v", cause, filepath.Join(directory.path, preservationName), restoreErr)
+		}
+		preserved = false
+		if syncErr := directory.sync(); syncErr != nil {
+			return fmt.Errorf("%w; restored workers/v1 source but could not sync its directory entry: %v", cause, syncErr)
+		}
+		return cause
+	}
+	if source.present && !preservation.present {
+		if workerCutoverFilesystemHook != nil {
+			workerCutoverFilesystemHook("before-workers-displace")
+		}
+		if err := verifyBoundInputs(); err != nil {
+			return err
+		}
+		if err := directory.verifyFileSnapshot(source.file, "workers registry", nil); err != nil {
+			return err
+		}
+		if err := directory.renameNoReplace(WorkersFile, preservationName); err != nil {
+			return err
+		}
+		preserved = true
+		if workerCutoverFilesystemHook != nil {
+			workerCutoverFilesystemHook("after-workers-displace")
+		}
+		displaced, err := readWorkerRegistrySnapshotPinned(directory, preservationName, false)
+		if err != nil {
+			return restore(err)
+		}
+		if !os.SameFile(source.file.info, displaced.file.info) || source.mode.Perm() != displaced.mode.Perm() || !bytes.Equal(source.data, displaced.data) {
+			return restore(errors.New("displaced workers registry is not the exact descriptor-validated source; fence installation fails closed"))
+		}
+		preservation = displaced
+		if err := directory.sync(); err != nil {
+			return restore(fmt.Errorf("durably preserve descriptor-validated workers/v1 source: %w", err))
+		}
+	}
+	if workerCutoverFilesystemHook != nil {
+		workerCutoverFilesystemHook("before-workers-commit")
+	}
+	if err := verifyBoundInputs(); err != nil {
+		return restore(err)
+	}
+	if preserved {
+		if err := directory.verifyFileSnapshot(preservation.file, "preserved workers/v1 cutover source", nil); err != nil {
+			return restore(err)
+		}
+	} else if err := directory.verifyFileSnapshot(source.file, "workers registry", nil); err != nil {
+		return err
+	}
+	if err := directory.renameNoReplace(tmp, WorkersFile); err != nil {
+		return restore(fmt.Errorf("workers pathname changed before descriptor-validated fence commit: %w", err))
+	}
+	tmpPresent = false
+	if err := directory.sync(); err != nil {
+		return fmt.Errorf("durably commit workers/v2 downgrade fence: %w", err)
+	}
+	if preserved {
+		if err := directory.unlink(preservationName); err != nil {
+			return err
+		}
+		preserved = false
+		if err := directory.sync(); err != nil {
+			return fmt.Errorf("durably remove preserved workers/v1 source after fence commit: %w", err)
+		}
+	}
+	return nil
 }
 
 func PublishWorkerCutover(dir Directory, generation string) (WorkerCutoverPublication, error) {
-	plan, err := PlanWorkerCutover(dir, generation)
+	if err := validateWorkerCutoverGeneration(generation); err != nil {
+		return WorkerCutoverPublication{}, err
+	}
+	directory, err := openWorkerCutoverDirectory(dir.Path, false)
 	if err != nil {
 		return WorkerCutoverPublication{}, err
 	}
-	if plan.Action == WorkerCutoverPublishDuplicate {
-		return plan, nil
+	if !directory.present {
+		_ = directory.Close()
+		directory, err = openWorkerCutoverDirectory(dir.Path, true)
+		if err != nil {
+			return WorkerCutoverPublication{}, err
+		}
+	}
+	defer directory.Close()
+	inspected, err := inspectWorkerCutoverPinned(dir, directory)
+	if err != nil {
+		return WorkerCutoverPublication{}, err
+	}
+	action := WorkerCutoverPublishNew
+	if inspected.Manifest != nil {
+		if inspected.Generation != generation {
+			return WorkerCutoverPublication{}, fmt.Errorf("worker cutover is immutably bound to generation %q, not %q", inspected.Generation, generation)
+		}
+		if inspected.State == "published" {
+			return WorkerCutoverPublication{Action: WorkerCutoverPublishDuplicate, Export: inspected}, nil
+		}
+		action = WorkerCutoverRecoverFence
 	}
 	var manifest WorkerCutoverManifest
 	var manifestData []byte
-	if plan.Action == WorkerCutoverPublishNew {
-		manifest = *plan.Export.Manifest
+	var manifestFile workerCutoverFileSnapshot
+	var boundSource *workerRegistrySnapshot
+	var boundOperations *workerCutoverFileSnapshot
+	if action == WorkerCutoverPublishNew {
+		var source workerRegistrySnapshot
+		var operations workerCutoverFileSnapshot
+		manifest, source, _, operations, err = prepareWorkerCutoverManifestPinned(directory, generation)
+		if err != nil {
+			return WorkerCutoverPublication{}, err
+		}
 		manifestData, err = canonicalWorkerCutoverManifestBytes(manifest)
 		if err != nil {
 			return WorkerCutoverPublication{}, err
 		}
-		// Rebuild immediately before the first durable write so stale plans never
-		// turn changed worker or operation state into pre-cutover evidence.
-		revalidated, err := prepareWorkerCutoverManifest(dir, generation)
-		if err != nil {
+		if workerCutoverFilesystemHook != nil {
+			workerCutoverFilesystemHook("before-manifest-commit")
+		}
+		requiredPrivateMode := os.FileMode(0o600)
+		if err := directory.verifyPathIdentity(); err != nil {
 			return WorkerCutoverPublication{}, err
 		}
-		revalidatedData, err := canonicalWorkerCutoverManifestBytes(revalidated)
-		if err != nil {
+		if err := directory.verifyFileSnapshot(source.file, "workers registry", nil); err != nil {
 			return WorkerCutoverPublication{}, err
 		}
-		if !bytes.Equal(manifestData, revalidatedData) {
-			return WorkerCutoverPublication{}, errors.New("worker cutover inputs changed before immutable publication")
+		if err := directory.verifyFileSnapshot(operations, "worker cutover operations evidence", &requiredPrivateMode); err != nil {
+			return WorkerCutoverPublication{}, err
 		}
-		if err := writeImmutableWorkerCutoverManifest(dir.WorkerCutoverManifestPath(), manifestData); err != nil {
+		if err := writeImmutableWorkerCutoverManifestPinned(directory, WorkerCutoverManifestFile, manifestData); err != nil {
 			return WorkerCutoverPublication{}, fmt.Errorf("durably publish immutable worker cutover manifest: %w", err)
 		}
+		_, _, manifestFile, err = loadWorkerCutoverManifestPinned(directory, WorkerCutoverManifestFile, false)
+		if err != nil {
+			return WorkerCutoverPublication{}, err
+		}
+		boundSource = &source
+		boundOperations = &operations
 	} else {
-		manifest, manifestData, err = loadWorkerCutoverManifest(dir.WorkerCutoverManifestPath())
+		manifest, manifestData, manifestFile, err = loadWorkerCutoverManifestPinned(directory, WorkerCutoverManifestFile, false)
 		if err != nil {
 			return WorkerCutoverPublication{}, err
 		}
 	}
-	if err := installWorkerCutoverFence(dir, manifest, manifestData); err != nil {
+	if err := installWorkerCutoverFencePinned(directory, manifest, manifestData, manifestFile, boundSource, boundOperations); err != nil {
 		return WorkerCutoverPublication{}, fmt.Errorf("durably install workers/v2 downgrade fence: %w", err)
 	}
-	inspected, err := InspectWorkerCutover(dir)
+	inspected, err = inspectWorkerCutoverPinned(dir, directory)
 	if err != nil {
 		return WorkerCutoverPublication{}, err
 	}
-	return WorkerCutoverPublication{Action: plan.Action, Export: inspected}, nil
+	return WorkerCutoverPublication{Action: action, Export: inspected}, nil
 }
