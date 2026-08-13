@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lesson 1 — Mailbox, bukan CCTV</title>
+  <meta name="description" content="Bagaimana amux dan /amux-tycho memberi tahu coordinator bahwa subagent selesai tanpa polling session.">
+  <meta property="og:title" content="Mailbox, bukan CCTV — async reporting di amux">
+  <meta property="og:description" content="Durable report, cheap wake-up, dan boundary integrasi Tycho ke Amp.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://amux.zainf.dev/learn/amux-async-reporting/">
+  <meta name="theme-color" content="#0d3f31">
+  <link rel="canonical" href="https://amux.zainf.dev/learn/amux-async-reporting/">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="lesson.css">
+</head>
+<body>
+<a class="skip" href="#lesson-main">Lewati ke isi lesson</a>
+<main id="lesson-main">
+  <p class="eyebrow">Lesson 1 · Amux async reporting</p>
+  <h1>Mailbox, bukan CCTV</h1>
+  <p class="sub">Cara coordinator tahu subagent sudah selesai tanpa terus membuka session yang masih berjalan.</p>
+
+  <p class="lead">Mas <code>firewalker06</code>, problemnya valid: kemampuan membaca session kapan saja bukan mekanisme completion. Itu seperti PM yang berkali-kali membuka layar engineer. Yang dibutuhkan adalah <strong>durable mailbox</strong> untuk hasil dan <strong>doorbell</strong> murah untuk membangunkan coordinator.</p>
+
+  <div class="verdict">
+    <strong>Jawaban pendek:</strong> iya, pola yang dibangun di <code>amux</code> memang menyelesaikan kelas masalah itu. Subagent menulis report lebih dulu, lalu callback hanya membangunkan agent. Tetapi untuk work Amp baru, kami sekarang memilih native parent/child reply routing; report/group Amux sedang menjadi jalur kompatibilitas untuk state lama. <code>/amux-tycho</code> tetap eksperimen khusus executor eksternal.
+  </div>
+
+  <h2>Kontrak intinya: simpan dulu, bunyikan bel kemudian</h2>
+  <div class="flow" role="img" aria-label="Subagent menyimpan report ke durable store, callback membangunkan coordinator, lalu coordinator membaca dan memverifikasi report">
+    <div class="flow-box"><b>1 · Subagent</b>Selesai atau blocked, lalu submit report terstruktur.</div>
+    <div class="arrow" aria-hidden="true">→</div>
+    <div class="flow-box"><b>2 · Durable store</b>Report menjadi sumber kebenaran yang tahan restart.</div>
+    <div class="arrow" aria-hidden="true">→</div>
+    <div class="flow-box"><b>3 · Coordinator</b>Terbangun, membaca pending/history, lalu memverifikasi.</div>
+  </div>
+
+  <p>Urutannya sengaja ketat: <strong>persist report sebelum callback</strong>. Jadi jika callback gagal, report tidak hilang. Jika callback terkirim dua kali, token kedua tidak boleh mengubah state. Dan acknowledgement hanya berarti “sudah diterima”, bukan “boleh merge atau cleanup”.</p>
+
+  <p class="source-line">Kontrak sumber (lokal · pinned):
+    <a class="chip vsc" href="vscode://file/home/user/workspace/repo/skills/amux/reference/commands.md:88" aria-label="Buka commands.md baris 88 di VS Code">commands.md:88–96</a>
+    <a class="chip gh" href="https://github.com/zainfathoni/amux/blob/891cd39606791993e5dc040aa5c28432250f23ee/skills/amux/reference/commands.md#L88-L96" aria-label="Buka commands.md baris 88 sampai 96 di GitHub">GitHub↗</a>
+  </p>
+
+  <h2>Coba sendiri: polling versus durable report</h2>
+  <section class="simulator" aria-labelledby="sim-heading">
+    <h3 id="sim-heading">Micro-world: satu coordinator, satu subagent</h3>
+    <div class="simulator-grid">
+      <div>
+        <div class="status-grid" aria-live="polite">
+          <div class="status-card"><span>Subagent</span><strong id="worker-status">running</strong></div>
+          <div class="status-card"><span>Durable report</span><strong id="report-status">absent</strong></div>
+          <div class="status-card"><span>Wake-up</span><strong id="bell-status">none</strong></div>
+          <div class="status-card"><span>Wasted polls</span><strong id="poll-count">0</strong></div>
+        </div>
+        <div class="controls">
+          <button type="button" id="poll">Baca session sekarang</button>
+          <button type="button" id="finish">Finish + report + callback</button>
+          <button type="button" class="danger" id="finish-fail">Finish + callback gagal</button>
+          <button type="button" id="inspect">Baca durable pending</button>
+          <button type="button" id="ack">Acknowledge</button>
+          <button type="button" class="secondary" id="reset">Reset</button>
+        </div>
+        <p class="things"><strong>Things to try:</strong> tekan “Baca session” dua kali saat masih running. Reset, lalu pilih “callback gagal”. Perhatikan bahwa bel gagal tetapi report tetap bisa ditemukan melalui durable pending.</p>
+      </div>
+      <pre class="log" id="event-log" aria-label="Log kejadian simulator">00 · Coordinator menugaskan subagent. Subagent running.</pre>
+    </div>
+  </section>
+
+  <h2>Lalu apa bedanya dengan <code>/amux-tycho</code>?</h2>
+  <p>Karena Mas pembuat Tycho, framing yang paling tepat: <code>/amux-tycho</code> bukan orchestrator pengganti Tycho. Ia adalah <strong>adapter delivery di sisi Amp</strong> yang menerapkan ide serupa untuk hasil dari exact Tycho route, dengan boundary lebih ketat. Tycho tetap bebas mengorkestrasi provider di dalam domainnya, tetapi pada boundary ini Tycho hanya menjadi producer dengan authority <code>report_only</code>; Amp thread asli tetap coordinator, consumer, dan acknowledger.</p>
+
+  <table>
+    <thead><tr><th>Lapisan</th><th>State flow</th><th>Yang bukan bukti selesai</th></tr></thead>
+    <tbody>
+      <tr><td>Amux report lama</td><td><code>ready|blocked → acknowledged → authorized → merged</code></td><td>Callback, pane text, atau timeout</td></tr>
+      <tr><td><code>/amux-tycho</code></td><td><code>created → valid_report → delivered → acknowledged</code></td><td>Process exit, log, hook, atau prose</td></tr>
+      <tr><td>Target Tycho berikutnya</td><td>Satu direct structured <code>complete|blocked</code> return</td><td>Side inbox atau transcript mining</td></tr>
+    </tbody>
+  </table>
+
+  <p class="source-line">Boundary Tycho (lokal · pinned):
+    <a class="chip vsc" href="vscode://file/home/user/workspace/repo/skills/amux-tycho/SKILL.md:6" aria-label="Buka SKILL.md amux-tycho baris 6 di VS Code">amux-tycho/SKILL.md:6–52</a>
+    <a class="chip gh" href="https://github.com/zainfathoni/amux/blob/891cd39606791993e5dc040aa5c28432250f23ee/skills/amux-tycho/SKILL.md#L6-L52" aria-label="Buka SKILL.md amux-tycho baris 6 sampai 52 di GitHub">GitHub↗</a>
+  </p>
+
+  <div class="callout">
+    <strong>Kenapa receipt bridge lebih kompleks?</strong> Bukan karena kami tidak mempercayai orchestration internal Tycho, tetapi karena boundary lintas sistem butuh bukti delivery sendiri. Kami mengikat origin Amp, exact Tycho route, dan digest task/artifact agar process exit atau prose dari log tidak disalahartikan sebagai report untuk request yang salah.
+  </div>
+
+  <h3>Seam yang ingin kami capai bersama Tycho</h3>
+  <p>Idealnya, satu request Amp ke exact Tycho route mengembalikan tepat satu object terautentikasi pada turn yang sama: <code>status</code>, <code>summary</code>, <code>findings</code>, <code>blockers</code>, dan <code>verification</code>. Object itu harus correlated ke Amp thread/request dan task/artifact identity; tanpa fallback, transcript mining, side inbox, atau automatic retry. Kalau field run membuktikan seam ini, receipt + <code>consume</code> + <code>acknowledge</code> compatibility bridge tidak perlu dibuat untuk work baru.</p>
+
+  <h2>Nuansa 2026: desainnya berhasil, produknya sedang cutover</h2>
+  <p>Kami belajar bahwa mailbox + doorbell adalah pola yang benar. Tetapi native Amp kini sudah punya parent/child association, authenticated messaging, reply routing, dan waiting. Karena itu kami tidak ingin membuat database bayangan baru di Amux untuk setiap child baru.</p>
+
+  <table>
+    <thead><tr><th>Kasusmu</th><th>Pilihan sekarang</th></tr></thead>
+    <tbody>
+      <tr><td>Agent dan subagent sama-sama native Amp</td><td>Pakai native child creation + reply routing/waiting. Jangan onboard ke group/report Amux baru.</td></tr>
+      <tr><td>Sudah punya durable group/report Amux lama</td><td>Drain lewat report, pending/history, acknowledge, verifikasi, dan finish authorization yang ada.</td></tr>
+      <tr><td>Executor eksternal melalui Tycho</td><td><code>/amux-tycho</code> bisa dipakai secara explicit-only dan conditional; Tycho hanya mengirim typed report.</td></tr>
+      <tr><td>Orchestrator buatan sendiri</td><td>Ambil kontraknya: durable report + cheap wake-up + idempotency + coordinator-owned verification. Tidak harus mengadopsi seluruh Amux.</td></tr>
+    </tbody>
+  </table>
+
+  <p class="source-line">Arah staged drain (lokal · pinned):
+    <a class="chip vsc" href="vscode://file/home/user/workspace/repo/docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md:37" aria-label="Buka ADR 0007 baris 37 di VS Code">ADR 0007:37–73</a>
+    <a class="chip gh" href="https://github.com/zainfathoni/amux/blob/891cd39606791993e5dc040aa5c28432250f23ee/docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md#L37-L73" aria-label="Buka ADR 0007 baris 37 sampai 73 di GitHub">GitHub↗</a>
+  </p>
+
+  <div class="cold">
+    <b>Cold-recall defense, satu napas:</b><br>
+    “Amux memisahkan <code>durable truth</code> dari <code>wake-up</code>: subagent persist report dulu, agent dibangunkan kemudian, lalu agent sendiri membaca, memverifikasi, dan acknowledge. Jadi callback boleh gagal tanpa kehilangan hasil.”
+  </div>
+
+  <h2>Jawaban yang bisa langsung dikirim ke temanmu</h2>
+  <blockquote>
+    “Iya, Mas—secara pattern ini persis problem yang kami pecahkan di Amux. Daripada agent polling session subagent, subagent persist report saat ready/blocked, lalu mengirim wake-up kecil. Wake-up bukan datanya; kalau notifikasinya gagal, agent tetap bisa recover dari pending report. Agent kemudian baca, verify, dan acknowledge sendiri.<br><br>
+    Di <code>/amux-tycho</code>, kami adaptasi pattern itu untuk output dari Tycho. Bukan mengganti orchestration Tycho: Tycho tetap mengatur agent/provider-nya, sedangkan boundary ke Amp hanya memberi Tycho authority <code>report_only</code>. Receipt mengikat Amp origin, exact Tycho route, dan task/artifact digest; hanya typed <code>complete/blocked</code> submit yang dianggap hasil—bukan process exit atau log.<br><br>
+    Nuansanya, ini compatibility bridge yang masih experimental. Target akhirnya justru lebih simpel: exact Tycho route return satu structured result langsung ke invoking Amp turn, authenticated dan correlated. Kalau seam itu terbukti, side receipt/consume/ack tidak diperlukan untuk work baru. Untuk Amp-to-Amp sendiri kami sekarang pakai native parent/child reply routing, jadi group/report Amux lama sedang kami drain, bukan diperluas.”
+  </blockquote>
+
+  <h2>Cek pemahaman</h2>
+  <form class="quiz" id="quiz">
+    <fieldset class="question">
+      <legend>1. Callback gagal tepat setelah report berhasil disimpan. Apa sumber kebenarannya?</legend>
+      <label><input type="radio" name="q1" value="a"> Session text subagent</label>
+      <label><input type="radio" name="q1" value="b"> Durable pending report</label>
+      <label><input type="radio" name="q1" value="c"> Callback retry count</label>
+      <label><input type="radio" name="q1" value="d"> Coordinator pane state</label>
+    </fieldset>
+    <fieldset class="question">
+      <legend>2. Tycho process exit tanpa structured submit berarti apa?</legend>
+      <label><input type="radio" name="q2" value="a"> Report dianggap delivered</label>
+      <label><input type="radio" name="q2" value="b"> Report dianggap blocked</label>
+      <label><input type="radio" name="q2" value="c"> Report diambil dari log</label>
+      <label><input type="radio" name="q2" value="d"> Belum ada report sah</label>
+    </fieldset>
+    <fieldset class="question">
+      <legend>3. Untuk work Amp-to-Amp baru, jalur default saat ini apa?</legend>
+      <label><input type="radio" name="q3" value="a"> Native parent-child routing</label>
+      <label><input type="radio" name="q3" value="b"> Group Amux baru</label>
+      <label><input type="radio" name="q3" value="c"> Receipt Tycho baru</label>
+      <label><input type="radio" name="q3" value="d"> Session polling loop</label>
+    </fieldset>
+    <button type="submit">Periksa jawaban</button>
+    <p class="feedback" id="quiz-feedback" aria-live="polite"></p>
+  </form>
+
+  <h2>Primary source</h2>
+  <p>Baca <a href="https://github.com/zainfathoni/amux/blob/891cd39606791993e5dc040aa5c28432250f23ee/docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md">ADR 0007: Retire Amux through native cutover and staged drain</a> (~8 menit) untuk memahami mengapa desain report tetap berguna tetapi tidak lagi menjadi default bagi work baru.</p>
+
+  <h2>Diskusi asal</h2>
+  <p>Lesson ini lahir dari <a href="https://ampcode.com/threads/T-019ff8aa-b9e5-749e-abea-ddfe1a44d7ca">thread publik Amp tentang amux, Tycho, dan completion reporting</a>. Baca thread tersebut untuk konteks pertanyaan asli dan proses penyusunan jawabannya.</p>
+
+  <p class="ask">Tanyakan follow-up kapan saja—terutama jika ingin memetakan pola ini ke orchestrator temanmu sendiri.</p>
+  <p class="foot">Lesson 1 · amux.zainf.dev · menjelaskan completion reporting tanpa polling session.</p>
+</main>
+
+<script>
+(() => {
+  const state = { worker: 'running', report: 'absent', bell: 'none', polls: 0, seen: false, step: 0 };
+  const $ = (id) => document.getElementById(id);
+  const log = (message) => {
+    state.step += 1;
+    $('event-log').textContent += `\n${String(state.step).padStart(2, '0')} · ${message}`;
+    $('event-log').scrollTop = $('event-log').scrollHeight;
+  };
+  const render = () => {
+    $('worker-status').textContent = state.worker;
+    $('report-status').textContent = state.report;
+    $('bell-status').textContent = state.bell;
+    $('poll-count').textContent = String(state.polls);
+  };
+  $('poll').addEventListener('click', () => {
+    if (state.worker === 'running') {
+      state.polls += 1;
+      log('Coordinator membaca session: masih running. Satu poll terbuang.');
+    } else {
+      log('Coordinator membaca session setelah selesai, tetapi durable report lebih terstruktur.');
+    }
+    render();
+  });
+  $('finish').addEventListener('click', () => {
+    if (state.worker !== 'running') return log('Subagent sudah terminal; duplicate finish tidak mengubah state.');
+    state.worker = 'finished';
+    state.report = 'pending';
+    state.bell = 'notified';
+    log('Subagent persist report=ready. Baru setelah itu callback membunyikan bel.');
+    render();
+  });
+  $('finish-fail').addEventListener('click', () => {
+    if (state.worker !== 'running') return log('Subagent sudah terminal; duplicate finish tidak mengubah state.');
+    state.worker = 'finished';
+    state.report = 'pending';
+    state.bell = 'failed';
+    log('Subagent persist report=ready. Callback gagal, tetapi durable report tetap pending.');
+    render();
+  });
+  $('inspect').addEventListener('click', () => {
+    if (state.report === 'absent') return log('Pending kosong. Coordinator tidak menyimpulkan selesai dari ketiadaan bel.');
+    state.seen = true;
+    log(`Coordinator membaca pending: report=${state.report}. Delivery ditemukan tanpa membaca session.`);
+  });
+  $('ack').addEventListener('click', () => {
+    if (!state.seen) return log('Ditolak: baca/consume report dulu sebelum acknowledge.');
+    if (state.report === 'acknowledged') return log('Duplicate acknowledgement aman dan tidak mengubah state.');
+    state.report = 'acknowledged';
+    log('Coordinator acknowledge receipt. Ini belum memberi authority untuk merge atau cleanup.');
+    render();
+  });
+  $('reset').addEventListener('click', () => {
+    Object.assign(state, { worker: 'running', report: 'absent', bell: 'none', polls: 0, seen: false, step: 0 });
+    $('event-log').textContent = '00 · Coordinator menugaskan subagent. Subagent running.';
+    render();
+  });
+
+  $('quiz').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const selected = [data.get('q1'), data.get('q2'), data.get('q3')];
+    const key = ['b', 'd', 'a'];
+    const misses = selected.map((answer, i) => answer === key[i] ? null : i + 1).filter(Boolean);
+    const feedback = $('quiz-feedback');
+    if (!misses.length) {
+      feedback.textContent = '3/3 — tepat. Kamu sudah membedakan durable truth, notification, dan jalur default baru.';
+      feedback.className = 'feedback ok';
+    } else {
+      feedback.textContent = `Belum tepat di nomor ${misses.join(', ')}. Ingat: report—notifikasi; submit—process exit; native—work baru.`;
+      feedback.className = 'feedback no';
+    }
+  });
+  render();
+})();
+</script>
+</body>
+</html>
