@@ -53,11 +53,12 @@ npx skills add zainfathoni/amux --skill amux-tycho --global</code></pre>
           <pre><code>AMUX_REPO="$HOME/Code/GitHub/zainfathoni/amux"
 git -C "$AMUX_REPO" pull --ff-only origin main
 curl -fsSL https://amux.zainf.dev/install.sh | AMUX_SKILLS_SOURCE="$AMUX_REPO" sh</code></pre>
-          <p>The installer does not update the checkout. It preserves replaced installations as timestamped backups and creates absolute links under <code>~/.agents/skills</code>. Pull again and reload Amp (or start a new thread) after <code>main</code> changes. Core <code>/amux</code> stays thin: workers read <code>reference/contract-v1.md</code> once; deadlines use <code>reference/deadline-v1.md</code> without reloading the full skill. Experimental Tycho/Claude/Pi routes are separate skills.</p>
+          <p>The installer does not update the checkout. It preserves replaced installations as timestamped backups and creates absolute links under <code>~/.agents/skills</code>. Pull again and reload Amp (or start a new thread) after <code>main</code> changes. Core <code>/amux</code> stays thin: only an already-bound pre-cutover Amux worker whose persisted provenance proves it drain-eligible reads <code>reference/contract-v1.md</code>; only an existing pre-cutover deadline uses <code>reference/deadline-v1.md</code>. Native-created work receives neither. Experimental Tycho/Claude/Pi routes are separate skills.</p>
 
           <h2 id="model">Terminology</h2>
           <ul><li><strong>Worker:</strong> interactive TUI client identified by canonical Amp thread ID.</li><li><strong>Runner:</strong> non-interactive <code>amp --no-tui</code> client identified by canonical workdir. It enables remote work but does not own remote agent threads.</li><li><strong>Workspace:</strong> worker/runner lifecycle group represented by one same-named tmux session.</li></ul>
           <p>Top-level <code>list</code>, <code>launch</code>, <code>park</code>, <code>restart</code>, <code>remove</code>, <code>doctor</code>, and <code>reconcile</code> aggregate both modes. The <code>worker</code> and <code>runner</code> namespaces narrow scope. Pin/unpin always require a mode namespace.</p>
+          <p class="note">Amux work groups, reports, callback leases, deadlines, and finish authorization are pre-cutover compatibility/drain state only. Native child threads use native parent/reply routing and acquire none of that lifecycle.</p>
 
           <h2 id="routing">Trigger routing</h2>
           <table><thead><tr><th>Say</th><th>Agent route</th><th>Effect</th></tr></thead><tbody>
@@ -77,17 +78,21 @@ curl -fsSL https://amux.zainf.dev/install.sh | AMUX_SKILLS_SOURCE="$AMUX_REPO" s
 
           <h2 id="sprawl">Skill-only sprawl</h2>
           <p><code>/amux sprawl</code> uses authenticated native Amp creation. Before side effects, the agent reads every issue and native dependency relationship, checks likely file/API overlap, and sequences anything dependent or conflicting.</p>
-          <pre><code># Create once on the exact Workspace Project/Orb or exact live runner/workdir.
-# Deliver the task-only assignment in that authenticated native request.
-# Keep the native parent/child route; do not run amux worker adopt.</code></pre>
+          <pre data-native-create-prompt><code>Task: &lt;bounded issue task and why it matters&gt;
+Acceptance criteria: &lt;observable outcome and scope boundary&gt;
+Relevant context and constraints: &lt;files, repository, safety limits, settled decisions&gt;
+Validation: &lt;checks to run&gt;
+Expected result: complete the task and reply to the parent with changed files, checks, and blockers.</code></pre>
           <p>Every accepted issue gets one narrow assignment and dedicated branch/worktree. Physical worktrees require the exact live runner rooted at that canonical workdir; there is no Orb/runner fallback. Native-created children remain unmanaged by Amux: no worker, group, report, callback, shelf, or pane state. With known linked ChatGPT routing and target-mode availability, use Low for small mechanical work, Medium for ordinary implementation, or High for difficult architecture, debugging, or review; otherwise use Medium. Ultra and special modes remain owner-explicit.</p>
 
-          <h2 id="coordination">Native issue-worker coordination</h2>
-          <p>New coordination uses Amp's authenticated parent/child creation, reply routing, messaging, and waiting. Each child is created directly on its exact executor/workdir and receives the task in that request. No Amux group, adoption, callback, or report is created for it.</p>
-          <pre><code># Create each child natively on its exact executor/workdir.
-# Receive its authenticated reply or wait on that exact native child.
-# Do not dual-write an Amux lifecycle representation.</code></pre>
-          <p>Existing pre-cutover durable groups and reports remain drain-only through their already-bound members and exact next transitions. Do not add a replacement member or new task merely to finish old state.</p>
+          <h2 id="coordination">Native child-thread coordination</h2>
+          <p>New coordination uses Amp's authenticated <code>create_thread</code>, parent/child identity, reply routing, messaging, and waiting. Each child is created directly on its exact executor/workdir and receives only a lean task prompt. No contract path, receipt, report, callback, adoption, group, deadline, finish authorization, or other Amux lifecycle state is created for it.</p>
+          <pre data-native-create-prompt><code>Task: &lt;bounded coordination task and why it matters&gt;
+Acceptance criteria: &lt;observable outcome and scope boundary&gt;
+Relevant context and constraints: &lt;files, repository, safety limits, settled decisions&gt;
+Validation: &lt;checks to run&gt;
+Expected result: complete the task and reply to the parent with changed files, checks, and blockers.</code></pre>
+          <p>Existing pre-cutover durable groups, reports, callback leases, deadlines, and finish authorization remain compatibility/drain-only only when exact persisted provenance proves their already-bound identity and exact allowed next transition. Contract and lifecycle instructions stay inside that boundary. Do not add a replacement member or new task merely to finish old state.</p>
           <p class="note">Exit 2 lock contention writes nothing: wait, then retry the identical operation and report ID. Missing, stale, recycled, duplicate, reordered, and restarted callbacks fail closed or recover from durable state. Never retry into a suspected busy composer; inspect pending/history directly. Never guess a pane, force-delete, auto-release, or infer finish from a wake-up.</p>
           <p>Existing pre-cutover report deadlines retain their exact size and generation: Small 30m, Medium 1h, or Large 2h; XL should already have been split. Stale is 15m, review warns after 10m, demonstrated external CI alerts after 20m, and authorized finish alerts after 10m. Only demonstrated external waits pause active time. One existing extension may add at most half the original budget under a new generation; expiry is diagnostic only. Native-created work gets no new Amux deadline state. The coordinator owns one nearest-deadline queue, not a timer process per child; never edit <code>reports.json</code> directly.</p>
 
@@ -96,7 +101,7 @@ curl -fsSL https://amux.zainf.dev/install.sh | AMUX_SKILLS_SOURCE="$AMUX_REPO" s
           <p>After updating main, finish removes the clean worktree without force and preserves squash-merge branch safety: <code>git branch -d</code> first; no automatic <code>-D</code>. Worker teardown runs last. A ready callback never authorizes cleanup; finish requires independently verified merge and explicit authorization.</p>
 
           <h2 id="contracts">Agent contracts</h2>
-          <ul><li>Use long canonical selectors and current contextual help.</li><li>Use <code>--dry-run</code> before mutation and <code>--json</code> for parsing.</li><li>JSON v1 separates <code>planned</code>, <code>successful</code>, <code>skipped</code>, and <code>failed</code>.</li><li>Exit 2 rejects before mutation; exit 1 may represent partial runtime success.</li><li>Ordinary new threads are created and coordinated natively on the exact executor/workdir, with no automatic Amux adoption or lifecycle state.</li><li>The projectless physical-host exception requires exact owner authorization and fails closed without retry or fallback.</li><li>Health, coordinator orchestration, sprawl, and finish are not <code>amux</code> subcommands.</li></ul>
+          <ul><li>Use long canonical selectors and current contextual help.</li><li>Use <code>--dry-run</code> before mutation and <code>--json</code> for parsing.</li><li>JSON v1 separates <code>planned</code>, <code>successful</code>, <code>skipped</code>, and <code>failed</code>.</li><li>Exit 2 rejects before mutation; exit 1 may represent partial runtime success.</li><li>Ordinary new threads are created with native <code>create_thread</code>, lean task prompts, and native parent/reply routing only.</li><li>Contract and lifecycle instructions apply only to proven pre-cutover Amux-managed drains.</li><li>The projectless physical-host exception requires exact owner authorization and fails closed without retry or fallback.</li><li>Health, coordinator orchestration, sprawl, and finish are not <code>amux</code> subcommands.</li></ul>
         </main>
       </div>
     </div>

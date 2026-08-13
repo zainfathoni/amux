@@ -4,7 +4,7 @@ This is the progressively disclosed policy for issue #175. It does not make amux
 
 ## Supported surface
 
-The legacy generalized automatic `/amux spawn` policy tuple is retired and cannot authorize new work. Ordinary work uses authenticated native creation directly on one exact Workspace Project/Orb or exact live runner/workdir and creates no Amux lifecycle representation. The resolver remains compatibility-only for installed historical skill material; an `allow` result does not bypass the CLI cutover.
+The legacy generalized automatic `/amux spawn` policy tuple is retired and cannot authorize new work. Ordinary work uses authenticated native `create_thread` directly on one exact Workspace Project/Orb or exact live runner/workdir, sends a lean task prompt, retains native parent/reply routing only, and creates no Amux contract or lifecycle representation. The resolver remains compatibility-only for installed historical skill material; an `allow` result does not bypass the CLI cutover.
 
 The sole CLI exception is an exact owner-authorized projectless physical-host placement that native project-backed creation cannot express. The caller must supply the explicit authorization flag, byte-exact local hostname, canonical workdir, and authenticated existing-thread message capability. Prepare writes a schema-2 exact-host/workdir binding before one local create and no other Amux state; arm consumes one message-attempt authority; finalize updates only the assignment record. Preserve all ambiguity as indeterminate. Never retry, fall back, reroute, rebind, adopt, paste, press Enter, clean up, archive, search, reconcile, or use another receiver.
 

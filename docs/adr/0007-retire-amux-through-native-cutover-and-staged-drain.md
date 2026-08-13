@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-08-12
 updated: 2026-08-13
-supersedes: 0005, 0006
+supersedes: 0003, 0005, 0006
 ---
 
 # Retire Amux through native cutover and staged drain
@@ -20,7 +20,7 @@ Retirement is a staged drain, not an immediate read-only freeze and not a new re
 5. remove writers after the freeze gate, retain a time-bounded read-only compatibility surface, then archive the lifecycle product; and
 6. preserve Git/worktree removal-safety guidance outside the Amux lifecycle (default docs-only retain at product archive) rather than as an Amux resource lifecycle.
 
-This decision supersedes ADR 0005's permanent maintained-lifecycle mission and ADR 0006's proposed Amux retirement-record/finalizer direction. Their useful invariants survive where this ADR names them: exact identity, no blind retry, preservation before destructive cleanup, independent authority for destructive actions, no implicit descendant mutation, and fail-closed handling of ambiguity. Their conclusion that those invariants require a permanent Amux orchestration substrate does not survive.
+This decision supersedes ADR 0003's native-create → `amux worker adopt` new-work workflow, ADR 0005's permanent maintained-lifecycle mission, and ADR 0006's proposed Amux retirement-record/finalizer direction. ADR 0003 remains only historical rationale and evidence; none of its operational instructions are current. New native children remain unmanaged by Amux. Only an exact persisted pre-cutover drain-eligible adoption operation may continue its exact allowed next transition. The useful invariants from the superseded ADRs survive where this ADR names them: exact identity, no blind retry, preservation before destructive cleanup, independent authority for destructive actions, no implicit descendant mutation, and fail-closed handling of ambiguity. Their conclusion that those invariants require native-to-Amux enrollment or a permanent Amux orchestration substrate does not survive.
 
 ### Accepted refinements (2026-08-13)
 
@@ -47,6 +47,7 @@ Amux still has evidence that native Amp does not replace directly: historical th
 After the owning implementation change cuts over an operation family, no command, skill, migration, or recovery path may create a new resource in that family. In particular:
 
 - native authenticated Amp thread creation is the default for all new work and must select the exact intended Orb or live runner and workdir directly; generalized `amux spawn` is not a new-work route;
+- native `create_thread` receives a lean task prompt and retains Amp's parent/reply route only; it receives no `contract-v1.md` path, receipt, report, callback, adoption, group, deadline, finish authorization, or other Amux lifecycle requirement, and active guidance calls it a native child/thread rather than an Amux worker;
 - a native-created thread is not automatically passed through `amux worker adopt`, pinned, grouped, shelved, or assigned an Amux report merely for local representation; if its workdir conflicts with an existing same-directory Amux ownership claim, Amux leaves it unmanaged rather than adopting, rebinding, or manufacturing exclusive ownership;
 - no new Amux runner is pinned or maintenance schedule installed; local Amp runner processes move to explicit native runner IDs and owner-selected operating-system supervision;
 - no new group, callback lease, deadline, finish authorization, or general report is created; and
@@ -55,6 +56,8 @@ After the owning implementation change cuts over an operation family, no command
 The only retained new-work exception is an explicit owner-authorized projectless physical-host route where native project-backed Orb/runner creation cannot express the requested placement. It is not a generalized spawn fallback: it must bind one exact physical host and workdir before launch, create no group or unrelated lifecycle state, and remain fail-closed on any identity, placement, ownership, launch, or delivery ambiguity. An indeterminate attempt is preserved as indeterminate and is never retried, adopted, rebound, or rerouted through another host, Orb, runner, or transport. Remove this exception when native authenticated creation can represent the same projectless physical-host placement.
 
 Cutover is per operation family, not one global flag. The implementation and release notes must publish the exact cutover generation for each family. A client that cannot prove whether the target record predates that generation fails closed.
+
+`contract-v1.md` and all Amux lifecycle instructions are drain-only compatibility material. They may be supplied only to an exact existing Amux-managed spawn, adoption, or group flow whose persisted provenance proves both pre-cutover admission and an allowed next drain transition. Native creation, the post-cutover projectless-host exception, ambiguous records, and unrecorded work do not qualify.
 
 ### Temporary Tycho admission exception
 

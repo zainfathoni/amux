@@ -1,16 +1,22 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0007
 ---
 
-# Use native Amp thread creation followed by explicit amux adoption
+# Historical: native Amp thread creation followed by explicit Amux adoption
 
-## Decision
+> [!CAUTION]
+> **Historical only — superseded by [ADR 0007](0007-retire-amux-through-native-cutover-and-staged-drain.md).** This file preserves the rationale and evidence behind the former native-create → Amux-adopt design. Every command, workflow step, preflight, ordering or recovery action, failure-matrix behavior, migration gate, and other imperative statement below is superseded and non-current; do not use it as operational guidance.
+>
+> **Current boundary:** New native children remain unmanaged by Amux and retain native parent/reply routing only. Only an exact persisted pre-cutover drain-eligible adoption operation may continue its exact allowed next transition under ADR 0007. Do not native-create then adopt, group, report, or otherwise enroll new work into Amux.
 
-### Projectless physical-host exception (issue #297)
+## Historical decision (superseded; non-current)
+
+### Historical projectless physical-host exception (issue #297)
 
 Issue #327 narrows this exception around the Amp coordinator's authenticated existing-thread message tool. Core amux does not call or emulate that server tool. The coordinator capability-checks it before mutation, then uses durable `prepare`, `arm`, and `finalize` CLI boundaries around exactly one native message to the exact locally created thread. `prepare` runs one local projectless `amp threads new` in the canonical cwd and retains ownership without presenting a pane; `arm` makes interruption indeterminate and non-retryable; finalize records explicit rejection, indeterminate outcome, or authenticated acceptance with `latestCursor` before a presentation-only client is created. The prompt is never persisted or transported through tmux; only a binding digest is stored. Native success proves exact-thread acceptance/queueing only, not message ID, inference, physical executor/workdir affinity, or execution. The command does not register a project, dispatch to an Orb, require an amux Runner, inspect an optional local `--runner-id`, search for another receiver, or clean up uncertain state. Existing `retained_indeterminate` rows remain unchanged and are never upgraded. `amux worker spawn` remains an exact alias.
 
-Worker assignment becomes a two-owner protocol:
+The superseded decision modeled worker assignment as a two-owner protocol:
 
 1. Amp's authenticated native thread-creation tool, invoked by the `/amux` skill, owns the single creation invocation and submission of its initial prompt. The skill must choose an explicit executor (`orb`, local execution where supported, or one exact Amp runner ID) and an explicit mode under the current invocation policy. Omission remains backward-compatible `medium`; known linked ChatGPT routing plus known target-mode availability permits task-shaped `low`, `medium`, or `high`, while `ultra` and special modes remain owner-explicit. It never silently falls back to another executor or mode.
 2. `amux worker adopt` accepts the exact already-created thread and owns only deterministic local adoption: workspace/session, semantic window, an admission-canonicalized workdir for the new row, tmux client, worker catalog, and optional exact durable group-member intent.
@@ -19,7 +25,7 @@ Native creation owns intended execution placement. Adoption does not re-home, mi
 
 The amux CLI does not invoke, wrap, or pretend to invoke an Amp server tool. Adoption sends no message, presses no Enter, parses no composer or box-drawing frame, and reads no transcript. At the time of this decision, legacy `amux spawn` and `amux worker spawn` became deterministic, non-mutating exit-2 migration tombstones; the issue #297 exception above later restored only the lean historical local route.
 
-The prototype command is:
+The non-current prototype command was:
 
 ```sh
 amux worker adopt --thread <exact-id-or-url> --workspace <workspace> \
@@ -27,9 +33,9 @@ amux worker adopt --thread <exact-id-or-url> --workspace <workspace> \
   [--group <one-exact-group>] [--dry-run] [--json]
 ```
 
-JSON identifies the exact thread as the worker resource and reports workspace, window, workdir, local state, and receipt source `amp_native_create_thread`. New adoption canonicalizes its owner-supplied workdir before persistence, pane identity, and output. Doctor reports the authoritative catalog spelling unchanged; a preserved legacy relative value is not canonicalized against the invoking directory and is not a physical-location claim. Adoption and doctor report native executor, native runner ID, and execution affinity as `unknown`, because amux has no authoritative source for them. The local workspace, window, workdir, and local-state fields describe only local ownership. The receipt source names caller-side provenance; it is not proof of fields absent from the native receipt contract.
+In that historical contract, JSON identified the exact thread as the worker resource and reported workspace, window, workdir, local state, and receipt source `amp_native_create_thread`. New adoption canonicalized its owner-supplied workdir before persistence, pane identity, and output. Doctor reported the authoritative catalog spelling unchanged; a preserved legacy relative value was not canonicalized against the invoking directory and was not a physical-location claim. Adoption and doctor reported native executor, native runner ID, and execution affinity as `unknown`, because amux had no authoritative source for them. The local workspace, window, workdir, and local-state fields described only local ownership. The receipt source named caller-side provenance; it was not proof of fields absent from the native receipt contract.
 
-## Trust boundary
+## Historical trust boundary (superseded; non-current)
 
 The native creation receipt is deliberately two-part: the authenticated request supplied by the coordinator and the successful tool result returned for that one invocation. The current `create_thread` contract binds the complete initial prompt, project, explicit executor, exact Amp runner ID when `runner`, and explicit agent mode; success returns the created thread ID and URL and echoes the selected project, executor, mode, and runner ID where applicable. Those request fields plus the successful result are trusted caller-side receipt data. The coordinator issues one invocation and, if its result is indeterminate, preserves the invocation evidence rather than guessing or retrying. Amp owns handling of the initial prompt within that invocation; message delivery and inference completion are neither separate receipt fields nor facts re-proven by amux.
 
@@ -39,7 +45,7 @@ For a physical runner, the coordinator selects one exact live runner immediately
 
 If physical state matters—including a dirty worktree that exists only on one machine—the native creation request, retained caller-side receipt, and assignment name the exact physical runner ID and canonical workdir. amux adoption and doctor still report native runner identity and affinity as `unknown`. Recovery creates the worker on that exact runner, or uses a separate explicit handoff that leaves immutable worktree ownership with the physical worker. It never creates in an Orb and adopts physically to imply migration. If the native API cannot authoritatively report current affinity, the value remains `unknown`; thread environment, local panes, and adoption state must not be used to infer it.
 
-For a new adoption path, amux locally revalidates all facts it owns:
+For the historical adoption path, amux locally revalidated all facts it owned:
 
 - thread ID/URL canonicalization and current active status through bounded `amp threads list --json` inventories;
 - existing canonical workdir directory;
@@ -51,9 +57,9 @@ For a new adoption path, amux locally revalidates all facts it owns:
 
 Adoption does not export, search, continue semantically, or otherwise read the thread. Consequently it cannot locally prove the native thread's remote workdir or initial message. A future richer native receipt must be documented before those become adoption inputs. The skill must pass the exact returned thread and the intended local workdir without claiming that amux revalidated a remote workdir.
 
-An exact Amp runner ID is native dispatch identity: it selects one live Amp `--no-tui --runner-id` process for server-owned thread creation. An amux Runner is a separate local lifecycle resource whose identity is a canonical workdir and whose tmux window is generated. Neither identity implies, maps to, or owns the other. Adoption rejects canonical-workdir overlap with an amux Runner but never treats its workspace or generated window as an Amp runner ID.
+An exact Amp runner ID was native dispatch identity: it selected one live Amp `--no-tui --runner-id` process for server-owned thread creation. An amux Runner was a separate local lifecycle resource whose identity was a canonical workdir and whose tmux window was generated. Neither identity implied, mapped to, or owned the other. The historical adoption path rejected canonical-workdir overlap with an amux Runner but never treated its workspace or generated window as an Amp runner ID.
 
-## Preflight, ordering, and recovery
+## Historical preflight, ordering, and recovery (superseded; non-current)
 
 One machine mutation lock covers adoption. Before mutation, amux loads and validates worker, Runner, group, Amp active/archive, and tmux ownership state. Every known conflict rejects with exit `2`; no catalog, group, tmux, label, message, or remote-thread mutation occurs.
 
@@ -70,9 +76,11 @@ This is intent-before-side-effect ordering. Interruption after any persistence s
 
 An exact repeat is idempotent: exact catalog, group, and tmux state returns a skipped result and performs no external label or message action. A partial exact repeat completes only missing later phases. Any changed thread, workspace/window, canonical workdir, Runner ownership, group, or tmux identity is a conflict rather than a rebind.
 
-## Failure matrix
+## Historical failure matrix (superseded; non-current)
 
-| Native/adoption state | Required behavior |
+The behaviors in this table record the former contract and are not current instructions for native work.
+
+| Native/adoption state | Historical required behavior (non-current) |
 | --- | --- |
 | Native creation succeeds with exact ID/URL | Invoke adoption once with that exact identity; never create another thread to “confirm” it. |
 | Native creation fails before a receipt | Stop. The native tool/runtime owns whether retry is safe; amux has nothing to adopt. |
@@ -92,9 +100,9 @@ An exact repeat is idempotent: exact catalog, group, and tmux state returns a sk
 
 A creation receipt never authorizes merge, finish, archive, teardown, cleanup, report acknowledgement, or finish authorization. Existing group/report/callback/shelf/restart/finish semantics remain unchanged after adoption.
 
-## Migration and removal gate
+## Historical migration and removal gate (superseded; non-current)
 
-The `/amux` skill uses native create → adopt for new workers. Existing workers, groups, reports, callbacks, shelves, restart, and finish remain compatible. Legacy operation records remain readable, immutable diagnostic evidence through v0.3.x: they are never reinterpreted, retried, deleted, converted, or marked successful.
+At the time of this superseded decision, the `/amux` skill used native create → adopt for new workers. That route is no longer current: new native children remain unmanaged, and only exact persisted pre-cutover drain-eligible adoption operations may continue their exact allowed next transition under ADR 0007. The former decision kept existing workers, groups, reports, callbacks, shelves, restart, and finish compatible. Legacy operation records remained readable, immutable diagnostic evidence through v0.3.x: they were never reinterpreted, retried, deleted, converted, or marked successful.
 
 Compatibility spawn may be removed only in a later explicit change after all of the following are recorded:
 
@@ -107,6 +115,6 @@ Compatibility spawn may be removed only in a later explicit change after all of 
 
 The migration window keeps deprecated compatibility spawn in v0.2.x and targets v0.3.0 for a reject-only, non-mutating tombstone before later schema cleanup. During v0.3.x, legacy operation files remain readable and diagnosable but never auto-convert, retry, delete, or become successful. Before release, rollback may revert the v0.3 tombstone/removal only while retaining #259's fail-closed legacy-operation disposition. After release, downgrade is permitted only to a pinned v0.2.x build containing or backporting that disposition; if no such build exists, rollback is a forward fix rather than a binary downgrade. No rollback path may resubmit an indeterminate operation. The complete implementation boundary and acceptance criteria live in #272.
 
-## Consequences
+## Historical consequences
 
 Assignment delivery no longer depends on terminal size, composer geometry, pane text, or Enter safety in the preferred architecture. amux remains a deterministic local lifecycle manager rather than a remote model router. Native request/result semantics and physical creation parity are now recorded without expanding amux's trust boundary: absent digest, acknowledgement, transcript, installation, and remote-workdir fields remain absent rather than fabricated. Legacy TUI removal proceeds only through the explicit migration in #272.

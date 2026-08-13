@@ -21,6 +21,9 @@ _Avoid_: Worker, background worker
 **Thread** — The conversation identity underlying Amp work, independent of whether or how a local client is running.
 _Avoid_: Worker when referring to the local TUI client
 
+**Native child thread** — Work created directly with Amp `create_thread`, using a lean task prompt plus native parent/reply routing. It has no Amux contract or lifecycle identity unless exact persisted pre-cutover records independently prove an existing drain-eligible flow.
+_Avoid_: Amux worker, spawned worker, automatically adopted thread
+
 **Remote agent thread** — An Amp thread whose execution is enabled by a runner but whose lifecycle is owned by Amp or Agents Anywhere, not by the runner or amux.
 _Avoid_: Runner-managed thread
 

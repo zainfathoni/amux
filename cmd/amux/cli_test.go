@@ -79,6 +79,36 @@ func TestExecuteProvidesContextualHelpAndStableSelectorFlags(t *testing.T) {
 	}
 }
 
+func TestWorkerAdoptHelpAndCompletionArePreCutoverDrainOnly(t *testing.T) {
+	const summary = "Continue an exact persisted pre-cutover drain-eligible adoption operation"
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).execute([]string{"help", "worker", "adopt"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{summary, "Exact persisted pre-cutover member intent only"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("worker adopt help is missing %q:\n%s", want, stdout.String())
+		}
+	}
+
+	for _, shell := range []string{"zsh", "fish"} {
+		t.Run(shell, func(t *testing.T) {
+			stdout.Reset()
+			if err := (app{stdout: &stdout}).execute([]string{"completion", shell}); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(stdout.String(), summary) {
+				t.Errorf("%s completion is missing pre-cutover drain-only adopt description", shell)
+			}
+			for _, forbidden := range []string{"Adopt a native-created thread", "exact native-created thread id"} {
+				if strings.Contains(stdout.String(), forbidden) {
+					t.Errorf("%s completion advertises native-to-Amux adoption with %q", shell, forbidden)
+				}
+			}
+		})
+	}
+}
+
 func TestCompletionRootSurfaceMatchesAuthoritativeHelp(t *testing.T) {
 	var help bytes.Buffer
 	if err := (app{stdout: &help}).execute([]string{"help"}); err != nil {

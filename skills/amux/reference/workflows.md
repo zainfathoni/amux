@@ -4,11 +4,25 @@ These are skill workflows. Only commands beginning with literal `amux` are CLI c
 
 ## Create fresh native work
 
-For ordinary new work, make one authenticated native Amp thread-creation call and deliver the complete task-only assignment in that request. Select an explicit mode: with a known linked ChatGPT subscription and known target-mode availability, use `low` for small mechanical work, `medium` for ordinary implementation, or `high` for hard architecture, debugging, or review; otherwise use `medium`. Keep `ultra`, plugin, and other special modes owner-explicit.
+For ordinary new work, make one authenticated native Amp `create_thread` call and deliver the complete task-only assignment in that request. Select an explicit mode: with a known linked ChatGPT subscription and known target-mode availability, use `low` for small mechanical work, `medium` for ordinary implementation, or `high` for hard architecture, debugging, or review; otherwise use `medium`. Keep `ultra`, plugin, and other special modes owner-explicit.
 
-Select the exact Workspace Project and Orb, or list live runners immediately before creation and select one exact runner ID whose working directory is the intended canonical workdir. Do not silently fall back between Orb and runner, between runner IDs, or between workdirs. When physical files or local state matter, use that exact live runner; an Orb is not a substitute. Include one line naming the absolute path to the loaded skill's `reference/contract-v1.md` for a one-time read.
+Select the exact Workspace Project and Orb, or list live runners immediately before creation and select one exact runner ID whose working directory is the intended canonical workdir. Do not silently fall back between Orb and runner, between runner IDs, or between workdirs. When physical files or local state matter, use that exact live runner; an Orb is not a substitute.
 
-Preserve the authenticated native request, exact returned thread, parent/child route, and reply route. Do not automatically invoke `amux worker adopt`, pin, group, shelve, report, or create any Amux lifecycle representation. Same-directory Amux ownership remains separate and unmanaged. If native creation is rejected, indeterminate, or loses tool connectivity, stop without retry, fallback, search, adoption, or alternate creation.
+Keep the child prompt lean: task, acceptance criteria, relevant context and constraints, validation, and the expected result. Preserve the authenticated native request, exact returned thread, parent/child route, and reply route. Do not put Amux policy or exclusions in the prompt. Native-created work has no Amux contract path, receipt, report, callback, group, deadline, finish authorization, or automatic adoption; create no Amux lifecycle representation for it. Same-directory Amux ownership remains separate and unmanaged. If native creation is rejected, indeterminate, or loses tool connectivity, stop without retry, fallback, search, adoption, or alternate creation.
+
+### Lean native `create_thread` prompt example
+
+```text
+Task: <bounded task and why it matters>
+Acceptance criteria:
+- <observable outcome>
+- <required scope boundary>
+Relevant context and constraints: <files, repository, safety limits, and settled decisions>
+Validation: <checks to run>
+Expected result: complete the task and reply to the parent with changed files, checks, and blockers.
+```
+
+Use this shape for fresh work, sprawl, and new issue coordination. The parent owns executor selection and native routing; the child does not need orchestration policy.
 
 Only when an exact owner instruction authorizes one projectless physical-host placement that native project-backed Orb/runner creation cannot express, run the bounded local exception on that host. Determine its byte-exact local hostname first; do not infer or alias it:
 
@@ -19,31 +33,39 @@ amux --json spawn --assignment-phase arm --owner-authorized-projectless-physical
 amux --json spawn --assignment-phase finalize --owner-authorized-projectless-physical-host --physical-host <same-hostname> --assignment-outcome <rejected|indeterminate|authenticated_accepted> [--latest-cursor <successful-tool-latestCursor>] --native-capability existing-thread-message-v1 --thread <exact-prepared-thread> --workdir <same-path> --workspace <same-namespace> --window <same-key> --mode medium --prompt-file -
 ```
 
-Before `prepare`, require the authenticated native existing-thread message action; otherwise stop before Amux or thread mutation. The command checks the requested hostname equals the local hostname and writes schema-2 admission `spawn-native-cutover-v1/projectless-physical-host-exception`, host, canonical workdir, mode, assignment key, and prompt digest before one local `amp threads new`. It creates no worker, group, operation, shelf, pane, or adoption state. `arm` verifies the unchanged boundary and durably records assignment as indeterminate before the one native message. `finalize` updates only `spawn-assignments.json`. Success/latestCursor proves acceptance/queueing only, never execution. Any ambiguity preserves indeterminacy; never retry, fall back, reroute, rebind, adopt, search, clean up, or use another transport.
+Before `prepare`, require the authenticated native existing-thread message action; otherwise stop before Amux or thread mutation. The unchanged assignment uses the same lean task shape above and receives no contract or lifecycle instructions. The command checks the requested hostname equals the local hostname and writes schema-2 admission `spawn-native-cutover-v1/projectless-physical-host-exception`, host, canonical workdir, mode, assignment key, and prompt digest before one local `amp threads new`. It creates no worker, group, operation, shelf, pane, or adoption state. `arm` verifies the unchanged boundary and durably records assignment as indeterminate before the one native message. `finalize` updates only `spawn-assignments.json`. Success/latestCursor proves acceptance/queueing only, never execution. Any ambiguity preserves indeterminacy; never retry, fall back, reroute, rebind, adopt, search, clean up, or use another transport.
 
-Pre-cutover schema-1 assignments are drain-only. Never run `prepare` for them. A prepared exact record may arm once and receive its one message; an already armed record may only finalize without resend. Supply the unchanged legacy group flag when the record contains one, but do not add or change group intent. Drain transitions write only the existing assignment store and create no pane or native replacement state.
+Pre-cutover schema-1 assignments are drain-only. Never run `prepare` for them. A prepared exact record may arm once and receive its one message; an already armed record may only finalize without resend. Supply the unchanged legacy group flag when the record contains one, but do not add or change group intent. Drain transitions write only the existing assignment store and create no pane or native replacement state. Only an exact existing spawn, adoption, or group record with persisted pre-cutover provenance can establish drain eligibility; ambiguity blocks. `contract-v1.md` and Amux lifecycle instructions are permitted only inside that proven legacy boundary and only when the existing binding requires them.
+
+### Proven legacy drain-only prompt example
+
+```text
+Legacy Amux drain only: exact pre-cutover group, member, and report records <identities> were verified drain-eligible.
+Read once: /absolute/path/to/installed/amux/reference/contract-v1.md
+Continue only the already-bound assignment and exact existing group/report/callback identities. Create or rebind nothing.
+```
 
 Runner identity is exact: Amp-native `runner(id)` selects that runner, while amux Runner means the separately configured local `amp --no-tui` process. Never substitute one for the other or fall back between them. Native creation currently provides no durable workdir/message receipt that amux can independently verify; retain the returned identity and stop on an indeterminate result.
 
 Preserve the Read Thread discrepancy fence. Only after an authorized `/amux` lifecycle or coordination operation names a concrete local/GitHub discrepancy, deterministic evidence is exhausted, and durable/local/GitHub evidence independently establishes the exact relationship may one narrow query target that exact thread. Then block rather than widening or chaining.
 
-## Sprawl independent issue workers
+## Sprawl independent issue threads
 
-Fetch `origin/main`; inspect every requested issue, comment, native dependency, active branch, PR, worktree, and likely file/API overlap before side effects. Sequence blocked or overlapping work. Give each independent issue one dedicated branch/worktree and one authenticated native-created thread.
+Fetch `origin/main`; inspect every requested issue, comment, native dependency, active branch, PR, worktree, and likely file/API overlap before side effects. Sequence blocked or overlapping work. Give each independent issue one dedicated branch/worktree and one authenticated native-created thread. These are native child threads, not Amux workers or spawned workers.
 
-Use an issue-bearing branch/worktree and an issue-unprefixed semantic title. Create the worktree from fresh `origin/main`, compose a task-only assignment with issue ownership, acceptance criteria, tests, PR requirements, and the absolute contract path, then create once natively with explicit executor and mode. For a physical worktree, the exact selected live runner must already be rooted at that canonical workdir. Verify the native returned thread, executor selection, worktree, branch, and assignment; do not create an Amux worker/group/report representation. Never infer delivery from pane text or search for an alternate receiver.
+Use an issue-bearing branch/worktree and an issue-unprefixed semantic title. Create the worktree from fresh `origin/main`, compose the lean task-only assignment above with issue ownership, acceptance criteria, tests, PR requirements, and expected reply, then create once natively with explicit executor and mode. For a physical worktree, the exact selected live runner must already be rooted at that canonical workdir. Verify the native returned thread, executor selection, worktree, branch, and assignment; create no Amux lifecycle representation. Never infer delivery from pane text or search for an alternate receiver.
 
-## Coordinate a durable issue work group
+## Coordinate native child threads and drain a durable work group
 
-For **new** issue coordination, use Amp's native parent/child association, authenticated child creation, reply routing, messaging, and waiting. Select every child's exact executor/workdir at creation, deliver a task-only assignment naming the absolute path to `contract-v1.md`, and leave it unmanaged by Amux. Do not declare an Amux group, adopt a worker, register a callback, or create an Amux report for native-created work.
+For **new** issue coordination, use Amp's native parent/child association, authenticated `create_thread`, reply routing, messaging, and waiting. Select every child's exact executor/workdir at creation, deliver the lean task-only assignment above, and leave it unmanaged by Amux. The parent uses only native identity and reply routing; it does not require any Amux lifecycle action from the child.
 
-The procedure below is compatibility-only for a durable group, member worker, callback, and report identity that already exist and need to drain. Durable group, report, and callback stores—not tmux text—remain authoritative for that pre-cutover state. Do not add a new member, task, group, report, or callback scope.
+The procedure below is compatibility-only for a durable group, member worker, callback, and report identity that already exist and need to drain. Enter it only when exact persisted provenance proves the flow predates cutover and its next transition is drain-eligible. Durable group, report, and callback stores—not tmux text—remain authoritative for that pre-cutover state. Do not add a new member, task, group, report, or callback scope.
 
 Every durable task-group Lead title starts with `🎖️ `. Reserve that prefix for Leads and never deliberately apply it to member workers. The task Lead is the exact thread coordinating this task, independent of the group's authoritative coordinator role. The marker is presentation only: it conveys neither executor placement nor authoritative group role. Apply this convention independently of executor choice.
 
 ### 1. Preflight existing authoritative state
 
-Read the existing group, member, callback, and report records and verify the exact thread/workdir bindings. Resolve the loaded skill's `reference/contract-v1.md` to an absolute path only for an already-bound worker that still needs it. Verify current help contains the drain commands; do not bootstrap by creating a replacement worker or editing registries. If any exact identity or pre-cutover provenance is absent, stop.
+Read the existing group, member, callback, and report records and verify the exact thread/workdir bindings. Resolve the loaded skill's `reference/contract-v1.md` to an absolute path only for an already-bound pre-cutover Amux worker whose records prove both drain eligibility and a remaining need for the contract. Verify current help contains the drain commands; do not bootstrap by creating a replacement worker or editing registries. If any exact identity or pre-cutover provenance is absent, stop.
 
 Do not rename a thread merely to drain it. Existing presentation metadata conveys no new authority.
 
@@ -174,7 +196,7 @@ This workflow performs no fetch, cleanup, reconciliation, removal, unlock, prune
 
 ## Finish a merged worker
 
-Finish is worker-only post-merge orchestration. It never removes a runner implicitly and never treats `status=ready` as cleanup authority.
+Finish is compatibility/drain-only post-merge orchestration for an existing pre-cutover worker. It never applies to native-created work, removes a runner implicitly, or treats `status=ready` as cleanup authority.
 
 1. Re-verify the exact PR lifecycle with `gh pr view <pr> --json state,mergedAt,headRefName,headRefOid`, and verify the reported head commit with the ref-coverage check below. An open PR, null `mergedAt`, mismatched head, or unavailable/ambiguous GitHub evidence blocks finish. Neither `already_stopped` nor a covering branch proves that review is finished.
 2. Fail closed on unexpected runner ownership **before worktree removal**. List runner configuration first:
