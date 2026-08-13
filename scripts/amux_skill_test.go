@@ -403,7 +403,7 @@ func TestInvocationPolicyIsProgressivelyDisclosedWithoutChangingClaudeRoutes(t *
 			t.Errorf("invocation policy is missing %q", required)
 		}
 	}
-	for _, required := range []string{"exact Workspace Project and Orb", "known linked ChatGPT subscription", "small mechanical work", "ordinary implementation", "hard architecture", "one exact runner ID", "parent/child route", "Do not automatically invoke `amux worker adopt`"} {
+	for _, required := range []string{"exact Workspace Project and Orb", "known linked ChatGPT subscription", "small mechanical work", "ordinary implementation", "hard architecture", "one exact runner ID", "parent/child route", "automatic adoption"} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("native creation workflow is missing %q", required)
 		}
@@ -423,9 +423,9 @@ func TestNativeCreationDoesNotAdoptOrClaimExecutorMigration(t *testing.T) {
 		contents string
 		required []string
 	}{
-		"workflow": {workflow, []string{"exact Workspace Project and Orb", "one exact runner ID", "Do not automatically invoke `amux worker adopt`", "Same-directory Amux ownership remains separate and unmanaged", "stop without retry"}},
+		"workflow": {workflow, []string{"exact Workspace Project and Orb", "one exact runner ID", "automatic adoption", "Same-directory Amux ownership remains separate and unmanaged", "stop without retry"}},
 		"ADR 0003": {adr, []string{"Adoption does not re-home, migrate, or retarget", "does not verify continued affinity", "admission-canonicalized workdir", "authoritative catalog spelling unchanged", "execution affinity as `unknown`"}},
-		"README":   {readme, []string{"exact intended Workspace Project and Orb", "one exact live runner", "do **not** automatically run `amux worker adopt`", "do not fall back between executors", "stop without retrying"}},
+		"README":   {readme, []string{"exact intended Workspace Project and Orb", "one exact live runner", "do not call it automatically", "do not fall back between executors", "stop without retrying"}},
 	} {
 		for _, required := range check.required {
 			if !strings.Contains(check.contents, required) {
@@ -476,7 +476,7 @@ func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
 		last = at
 	}
 	for _, required := range []string{
-		"native parent/child association", "authenticated child creation", "exact executor/workdir", "task-only assignment", "leave it unmanaged by Amux", "compatibility-only", "Do not add a new member", "--group <durable-issue-group>",
+		"native parent/child association", "authenticated `create_thread`", "exact executor/workdir", "task-only assignment", "leave it unmanaged by Amux", "compatibility-only", "Do not add a new member", "--group <durable-issue-group>",
 		"amux report submit --report-id <stable-report-id>", "amux report pending --group <durable-issue-group>", "amux report acknowledge --report-id <stable-report-id>",
 		"PR URL, head branch/SHA", "amux report authorize-finish --report-id <stable-report-id>", "post-merge CI", "--status merged", "amux teardown --thread <member-thread>", "Group membership and report history survive teardown",
 	} {
@@ -491,12 +491,12 @@ func TestIssueCoordinationUsesNativeIdentityAndDrainsExistingDurableIdentity(t *
 	root := repoRoot(t)
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
 	readme := readSkillFile(t, root, "README.md")
-	for _, required := range []string{"issue-bearing branch/worktree", "issue-unprefixed semantic title", "authenticated native-created thread", "Do not declare an Amux group", "already-recorded member thread", "stable report ID"} {
+	for _, required := range []string{"issue-bearing branch/worktree", "issue-unprefixed semantic title", "authenticated native-created thread", "native identity and reply routing", "already-recorded member thread", "stable report ID"} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("workflow is missing native/drain identity rule %q", required)
 		}
 	}
-	for _, required := range []string{"spawn-native-cutover-v1", "do **not** automatically run `amux worker adopt`", "remain drain-writable only", "worker-family cutover"} {
+	for _, required := range []string{"spawn-native-cutover-v1", "do not call it automatically", "remain drain-writable only", "worker-family cutover"} {
 		if !strings.Contains(readme, required) {
 			t.Errorf("README is missing native/drain cutover rule %q", required)
 		}
@@ -1853,10 +1853,10 @@ func TestBoundedSpawnExceptionCommandsUseExplicitMode(t *testing.T) {
 	}
 }
 
-func TestSprawlContractUsesDedicatedSemanticWorkers(t *testing.T) {
+func TestSprawlUsesDedicatedNativeIssueThreads(t *testing.T) {
 	t.Parallel()
 	workflow := readSkillFile(t, repoRoot(t), filepath.Join("skills", "amux", "reference", "workflows.md"))
-	sprawlAt := strings.Index(workflow, "## Sprawl independent issue workers")
+	sprawlAt := strings.Index(workflow, "## Sprawl independent issue threads")
 	coordinateAt := strings.Index(workflow, "## Coordinate a durable issue work group")
 	if sprawlAt < 0 || coordinateAt <= sprawlAt {
 		t.Fatal("sprawl workflow section is missing")
@@ -1869,7 +1869,7 @@ func TestSprawlContractUsesDedicatedSemanticWorkers(t *testing.T) {
 		"task-only assignment",
 		"authenticated native-created thread",
 		"exact selected live runner",
-		"do not create an Amux worker/group/report representation",
+		"create no Amux lifecycle representation",
 	} {
 		if !strings.Contains(sprawl, required) {
 			t.Errorf("sprawl workflow is missing %q", required)
@@ -3183,7 +3183,61 @@ func scanLines(t *testing.T, path string, check func(lineNumber int, line string
 	}
 }
 
-func TestContractV1IsProgressivelyDisclosedForWorkers(t *testing.T) {
+func textFenceAfter(t *testing.T, contents, marker string) string {
+	t.Helper()
+	markerAt := strings.Index(contents, marker)
+	if markerAt < 0 {
+		t.Fatalf("missing prompt marker %q", marker)
+	}
+	remainder := contents[markerAt+len(marker):]
+	start := strings.Index(remainder, "```text\n")
+	if start < 0 {
+		t.Fatalf("missing text fence after %q", marker)
+	}
+	remainder = remainder[start+len("```text\n"):]
+	end := strings.Index(remainder, "\n```")
+	if end < 0 {
+		t.Fatalf("unterminated text fence after %q", marker)
+	}
+	return remainder[:end]
+}
+
+func TestNativeCreatePromptExamplesExcludeAmuxLifecycle(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	type promptExample struct {
+		name   string
+		prompt string
+	}
+	examples := []promptExample{
+		{name: "workflow", prompt: textFenceAfter(t, workflow, "### Lean native `create_thread` prompt example")},
+	}
+	publicPage := readSkillFile(t, root, filepath.Join("docs", "skill", "index.html"))
+	htmlExamples := regexp.MustCompile(`(?s)<pre data-native-create-prompt><code>(.*?)</code></pre>`).FindAllStringSubmatch(publicPage, -1)
+	if len(htmlExamples) != 2 {
+		t.Fatalf("public skill page has %d native create prompt examples, want 2", len(htmlExamples))
+	}
+	for index, match := range htmlExamples {
+		examples = append(examples, promptExample{name: fmt.Sprintf("public-page-%d", index+1), prompt: match[1]})
+	}
+
+	for _, example := range examples {
+		lower := strings.ToLower(example.prompt)
+		for _, forbidden := range []string{"amux", "contract-v1", "receipt", "report", "callback", "adopt", "group", "deadline", "finish authoriz", "spawned worker"} {
+			if strings.Contains(lower, forbidden) {
+				t.Errorf("native create prompt example %s contains forbidden lifecycle marker %q:\n%s", example.name, forbidden, example.prompt)
+			}
+		}
+		for _, required := range []string{"task", "acceptance criteria", "relevant context and constraints", "validation", "expected result", "reply to the parent"} {
+			if !strings.Contains(lower, required) {
+				t.Errorf("native create prompt example %s is missing lean task field %q:\n%s", example.name, required, example.prompt)
+			}
+		}
+	}
+}
+
+func TestContractV1IsLimitedToProvenLegacyDrainWorkers(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
@@ -3194,17 +3248,19 @@ func TestContractV1IsProgressivelyDisclosedForWorkers(t *testing.T) {
 	}
 	for _, required := range []string{
 		"amux-contract: v1",
+		"Compatibility protocol for a pre-cutover Amux-managed spawn, adoption, or durable group flow",
 		"read this file once",
 		"absolute path",
 		"never a bare relative path",
+		"persisted provenance proves that flow is drain-eligible",
+		"Native Amp `create_thread` work never reads this file",
+		"lean task prompt and native parent/reply routing only",
+		"no Amux receipt, report, callback, adoption, group, deadline, or finish-authorization requirement",
 		"ready",
 		"blocked",
 		"merged",
 		"never authorize finish",
 		"/amux-claude",
-		"known linked ChatGPT subscription",
-		"small mechanical tasks",
-		"premium or special modes require an exact owner request",
 		"Do not Read Thread",
 		"Oracle must not Read Thread",
 	} {
@@ -3217,41 +3273,52 @@ func TestContractV1IsProgressivelyDisclosedForWorkers(t *testing.T) {
 			t.Errorf("SKILL.md must surface credit default %q", required)
 		}
 	}
-	if !strings.Contains(workflow, "contract-v1.md") || !strings.Contains(workflow, "task-only") {
-		t.Error("workflows must require task-only prompts and contract-v1 read-once")
-	}
-	for _, required := range []string{"absolute path", "one-time read"} {
-		if !strings.Contains(workflow, required) {
-			t.Errorf("spawn message template must resolve the contract path for the worker: missing %q", required)
-		}
-	}
-	for _, required := range []string{
-		"path to the loaded skill",
-		"never a bare relative path",
-	} {
+	for _, required := range []string{"compatibility-only", "pre-cutover Amux-managed spawn, adopt, or group flow", "proves it is drain-eligible", "Never put its path or lifecycle instructions in a native `create_thread` prompt"} {
 		if !strings.Contains(skill, required) {
-			t.Errorf("SKILL.md spawn routing must require absolute contract path: missing %q", required)
+			t.Errorf("SKILL.md is missing contract admission fence %q", required)
 		}
 	}
-	// The coordinator work-group route is linked directly from SKILL.md, so it must
-	// carry the mandatory contract read line itself rather than relying on a reader
-	// having scrolled through the sprawl section's message requirements.
-	coordinateAt := strings.Index(workflow, "## Coordinate a durable issue work group")
-	if coordinateAt < 0 {
-		t.Fatal("coordinator work-group workflow is missing")
+	if strings.Contains(contract, "Spawned workers must") || strings.Contains(contract, "Every native child creation") {
+		t.Error("contract-v1 still admits native-created work as an Amux contract worker")
 	}
-	coordinate := workflow[coordinateAt:]
-	if healthAt := strings.Index(coordinate, "## Health workers and runners"); healthAt > 0 {
-		coordinate = coordinate[:healthAt]
-	}
-	for _, required := range []string{"contract-v1.md", "task-only assignment", "leave it unmanaged by Amux"} {
-		if !strings.Contains(coordinate, required) {
-			t.Errorf("coordinator work-group spawn must carry the contract read requirement: missing %q", required)
+	legacyExample := textFenceAfter(t, workflow, "### Proven legacy drain-only prompt example")
+	for _, required := range []string{"Legacy Amux drain only", "pre-cutover", "verified drain-eligible", "/absolute/path/to/installed/amux/reference/contract-v1.md", "exact existing group/report/callback identities", "Create or rebind nothing"} {
+		if !strings.Contains(legacyExample, required) {
+			t.Errorf("legacy drain prompt example is missing %q:\n%s", required, legacyExample)
 		}
+	}
+	if !strings.Contains(workflow, "contract-v1.md` and Amux lifecycle instructions are permitted only inside that proven legacy boundary") {
+		t.Error("workflow does not fence contract-v1 to the proven legacy drain boundary")
 	}
 	triggers := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md"))
-	if !strings.Contains(triggers, "absolute contract-v1 path") {
-		t.Error("trigger checklist must require absolute contract-v1 path on spawn")
+	if strings.Contains(triggers, "absolute contract-v1 path") || !strings.Contains(triggers, "lean task prompt and native parent/reply routing only") {
+		t.Error("trigger checklist still injects the legacy contract into native work")
+	}
+}
+
+func TestGlobalAgentsSnippetSeparatesNativeWorkFromLegacyDrain(t *testing.T) {
+	t.Parallel()
+	snippet := readSkillFile(t, repoRoot(t), filepath.Join("docs", "snippets", "global-agents-amux-prefs.md"))
+	for _, required := range []string{
+		"Use native Amp `create_thread` for ordinary delegated work",
+		"retain the native parent/reply route",
+		"Keep native child prompts lean",
+		"Never include an Amux `reference/contract-v1.md` path",
+		"exact persisted records prove an existing pre-cutover Amux-managed spawn, adoption, or group flow is drain-eligible",
+		"Generalized Amux spawn admission is closed",
+		"never automatically adopt it",
+	} {
+		if !strings.Contains(snippet, required) {
+			t.Errorf("global AGENTS replacement snippet is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"Use Amux for local Amp/tmux lifecycle, exact adoption/recovery, and when native creation is unavailable",
+		"task, acceptance criteria, and the absolute path to the loaded `/amux` skill's `reference/contract-v1.md`",
+	} {
+		if strings.Contains(snippet, forbidden) {
+			t.Errorf("global AGENTS replacement snippet retains generic injection policy %q", forbidden)
+		}
 	}
 }
 

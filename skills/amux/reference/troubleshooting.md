@@ -25,7 +25,7 @@ Exit `1` means mutation may have started. Inspect `successful`, `skipped`, and `
 Health first; `no-response` alone does not authorize replacement. After explicit approval:
 
 1. Preserve the old remote thread unless archival was requested.
-2. Create and assign one replacement thread with authenticated native creation on the exact intended Orb or live runner/workdir. Do not adopt, pin, group, or otherwise create Amux state for it.
+2. Create and assign one replacement thread with authenticated native `create_thread` on the exact intended Orb or live runner/workdir. Send only a lean task prompt and retain native parent/reply routing; include no contract path or Amux lifecycle requirement, and do not adopt it.
 3. Verify the authenticated native result and exact executor/workdir selection before removing the old local worker. If creation is indeterminate, keep the old worker and stop.
 4. Use `amux worker remove --thread <old-id>` to stop/delete old local configuration without archiving. Use teardown only when archival is explicitly intended.
 5. On interruption, report exact old/new thread, config, pane, and worktree state. Never retry native creation; retry another transition only when its operation-specific drain contract permits the identical request.
