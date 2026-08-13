@@ -153,7 +153,7 @@ func workerCommand() *commandSpec {
 		workerLeaf("park", "Park workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("restart", "Restart workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
 		workerLeaf("remove", "Remove workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
-		workerLeaf("adopt", "Adopt an exact native-created thread without message delivery", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--thread, -t <id>", "--group <id>  Optional exact durable member intent"),
+		workerLeaf("adopt", "Continue an exact persisted pre-cutover drain-eligible adoption operation", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--thread, -t <id>", "--group <id>  Exact persisted pre-cutover member intent only"),
 		workerSpawnCommand("amux worker spawn"),
 		workerCutoverCommand(),
 		workerLeaf("shelve", "Shelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),

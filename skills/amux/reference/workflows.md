@@ -55,7 +55,7 @@ Fetch `origin/main`; inspect every requested issue, comment, native dependency, 
 
 Use an issue-bearing branch/worktree and an issue-unprefixed semantic title. Create the worktree from fresh `origin/main`, compose the lean task-only assignment above with issue ownership, acceptance criteria, tests, PR requirements, and expected reply, then create once natively with explicit executor and mode. For a physical worktree, the exact selected live runner must already be rooted at that canonical workdir. Verify the native returned thread, executor selection, worktree, branch, and assignment; create no Amux lifecycle representation. Never infer delivery from pane text or search for an alternate receiver.
 
-## Coordinate a durable issue work group
+## Coordinate native child threads and drain a durable work group
 
 For **new** issue coordination, use Amp's native parent/child association, authenticated `create_thread`, reply routing, messaging, and waiting. Select every child's exact executor/workdir at creation, deliver the lean task-only assignment above, and leave it unmanaged by Amux. The parent uses only native identity and reply routing; it does not require any Amux lifecycle action from the child.
 
@@ -196,7 +196,7 @@ This workflow performs no fetch, cleanup, reconciliation, removal, unlock, prune
 
 ## Finish a merged worker
 
-Finish is worker-only post-merge orchestration. It never removes a runner implicitly and never treats `status=ready` as cleanup authority.
+Finish is compatibility/drain-only post-merge orchestration for an existing pre-cutover worker. It never applies to native-created work, removes a runner implicitly, or treats `status=ready` as cleanup authority.
 
 1. Re-verify the exact PR lifecycle with `gh pr view <pr> --json state,mergedAt,headRefName,headRefOid`, and verify the reported head commit with the ref-coverage check below. An open PR, null `mergedAt`, mismatched head, or unavailable/ambiguous GitHub evidence blocks finish. Neither `already_stopped` nor a covering branch proves that review is finished.
 2. Fail closed on unexpected runner ownership **before worktree removal**. List runner configuration first:

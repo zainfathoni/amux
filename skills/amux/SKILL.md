@@ -1,6 +1,6 @@
 ---
 name: amux
-description: "Drains existing local Amux worker, runner, workspace, and work-group lifecycle state and routes new Amp work to native thread creation. Use for pin/unpin/park/restart/shelve/unshelve/launch, bounded projectless host placement, doctor, teardown, /amux health, /amux sprawl, the one-time staged-drain /amux sweep, /amux finish, issue-worker coordination, 'forget this on restore', 'hide it for now', 'defer this workspace', 'Show shelved work', and 'Restore my workspace'. Experimental Tycho, Claude, or Pi routes remain separate explicit-only skills."
+description: "Drains existing local Amux worker, runner, and workspace state plus proven pre-cutover compatibility/drain state for work groups, reports, callback leases, deadlines, and finish authorization, while routing new Amp work to native child threads. Use for pin/unpin/park/restart/shelve/unshelve/launch, bounded projectless host placement, doctor, teardown, /amux health, /amux sprawl, the one-time staged-drain /amux sweep, pre-cutover /amux finish, child-thread coordination, 'forget this on restore', 'hide it for now', 'defer this workspace', 'Show shelved work', and 'Restore my workspace'. Experimental Tycho, Claude, or Pi routes remain separate explicit-only skills."
 ---
 
 # amux
@@ -21,7 +21,7 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 - Before automatic mode selection, creating a native Amp child, reading another Amp thread, or sending a native child message, load [`reference/amp-invocation-policy.md`](reference/amp-invocation-policy.md). Never bypass a binding `ask` or `reject`. Read Thread remains instruction-only until a promoted gate exists—still do not use it without explicit permission.
 - `/amux health`, `/amux sprawl`, `/amux sweep`, and `/amux finish` are skill-only. Never invoke `amux health|sprawl|sweep|finish` as CLI commands.
 - Prefer `--dry-run` and `--json`. Exit `2` = preflight rejection; exit `1` = runtime failure. Use the projectless physical-host exception only after one exact owner authorization and only when native project-backed Orb/runner creation cannot express the placement. Bind `--owner-authorized-projectless-physical-host`, byte-exact `--physical-host`, and canonical `--workdir` before prepare; create no group. Repeat the authorization/host flags for arm/finalize, issue exactly one authenticated native message after arm, and never retry, fall back, reroute, rebind, adopt, paste, press Enter, clean up, archive, search, reconcile, or use another receiver.
-- Work-group reports and wake-ups never authorize finish. A `ready` report is not cleanup authority.
+- Pre-cutover work-group reports, callback leases, and finish authorization are compatibility/drain state only. Their wake-ups never authorize finish, and a `ready` report is not cleanup authority.
 
 ## Route triggers
 
@@ -35,12 +35,12 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 - **Restore my workspace**: `amux launch --workspace <name>` (or bare `amux` for all workers).
 - **Doctor amux**: `amux doctor --all` or scoped doctor.
 - **Spawn a worker for ...**: treat this wording as a request for a native child thread, not an Amux spawn or worker. Load [`reference/workflows.md`](reference/workflows.md), make one authenticated native `create_thread` call on the exact intended Orb or exact live runner/workdir, send only the lean task prompt, and leave the returned thread unmanaged by Amux. For an exact owner-authorized projectless physical-host placement only, follow the capability-gated exception workflow.
-- **Coordinate issue workers**: load [`reference/workflows.md`](reference/workflows.md#coordinate-a-durable-issue-work-group).
+- **Coordinate child threads**: load [`reference/workflows.md`](reference/workflows.md#coordinate-native-child-threads-and-drain-a-durable-work-group).
 - **Teardown this worker**: load [`reference/workflows.md`](reference/workflows.md#teardown-a-worker). If `/amux-claude` pairs may exist, run that skill's paired lifecycle preflight first; then `amux teardown` last.
 - **/amux health**: [`workflows.md`](reference/workflows.md#health-workers-and-runners).
 - **/amux sprawl**: [`workflows.md`](reference/workflows.md#sprawl-independent-issue-threads).
 - **/amux sweep**: one-time staged-drain inventory only; [`workflows.md`](reference/workflows.md#sweep-worktree-inventory).
-- **/amux finish**: [`workflows.md`](reference/workflows.md#finish-a-merged-worker).
+- **/amux finish**: pre-cutover existing-worker compatibility/drain only; [`workflows.md`](reference/workflows.md#finish-a-merged-worker).
 - **Before any worktree remove or prune path**: load [`reference/removal-safety.md`](reference/removal-safety.md).
 
 Deadlines (compatibility only): load [`reference/deadline-v1.md`](reference/deadline-v1.md) only when handling an existing pre-cutover deadline wake-up—not on every `/amux` load and never to create deadline state for native work.

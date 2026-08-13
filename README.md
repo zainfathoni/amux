@@ -205,9 +205,9 @@ amux teardown --thread T-example
 - Remove stops a worker and deletes local configuration without archiving. Unpin only deletes configuration and does not stop it.
 - Reconcile explicitly synchronizes worker shelf/remote drift or repairs stale runner ownership. Launch never performs hidden reconciliation.
 
-## Durable work groups
+## Pre-cutover durable work-group compatibility
 
-Work groups are explicit, durable many-to-many associations between Amp thread IDs and byte-preserving group IDs. Declare a group with one coordinator, then add any worker, archived, recovered, evidence, duplicate, or runner-managed thread by its canonical ID:
+Existing work groups are explicit, durable many-to-many associations between Amp thread IDs and byte-preserving group IDs. The commands below are compatibility/drain surfaces for exact persisted pre-cutover identity, not a route to declare a new group, coordinator, or member:
 
 This section documents existing identity and recovery contracts during the staged drain, not a recommendation to create new coordinators or groups. Use these surfaces only to finish state that predates the applicable cutover generation. See [ADR 0007](docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md).
 
@@ -225,17 +225,17 @@ amux group remove --group amux-131 --thread T-worker
 
 Group IDs map byte-for-byte to Amp labels and must match `^[a-z0-9]+(?:-[a-z0-9]+)*$`. Generic `amux group` commands never normalize or infer them from titles, branches, issue numbers, or existing labels. Local `groups.tsv` intent is authoritative and survives worker/tmux/worktree lifecycle changes. `group list` and `group show` are deterministic local-only reads.
 
-The bundled issue-coordination workflow uses explicit durable identity. For this repository, issue `#131` uses group/Amp label `amux-131`, and its first worker uses report ID `amux-131-worker-1`; another repository may use an explicit equivalent lowercase, group-safe repository slug. This workflow convention does not narrow the generic group-ID contract. Existing `amux-*`, repository-slug, `issue-*`, purpose-specific groups such as `pr-181-review`, and explicit groups remain valid and are never migrated, renamed, removed externally, or rewritten.
+The pre-cutover compatibility workflow uses explicit durable identity. For this repository, issue `#131` uses group/Amp label `amux-131`, and its first worker uses report ID `amux-131-worker-1`; another repository may use an explicit equivalent lowercase, group-safe repository slug. This workflow convention does not narrow the generic group-ID contract. Existing `amux-*`, repository-slug, `issue-*`, purpose-specific groups such as `pr-181-review`, and explicit groups remain valid and are never migrated, renamed, removed externally, or rewritten.
 
 Worker adoption accepts one exact `--group <id>` for compatibility with existing explicit adoption operations. Active guidance uses it only to continue an already-persisted pre-cutover operation whose exact state proves the next transition is drain-eligible; it is not native-thread onboarding. It persists local member intent before add-only label synchronization.
 
-Ordinary native-created threads are no longer adopted into Amux at `spawn-native-cutover-v1`. `amux worker adopt` remains a separate compatibility admission path pending the worker-family cutover; do not call it automatically or use it in new-work workflows. See [ADR 0007](docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md) and the [spawn cutover inventory](docs/spawn-cutover-inventory.md).
+Ordinary native-created threads are no longer adopted into Amux at `spawn-native-cutover-v1`. `amux worker adopt` is a compatibility/drain surface only for an exact persisted pre-cutover adoption operation whose next transition is proven drain-eligible; do not call it automatically or use it in new-work workflows. See [ADR 0007](docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md) and the [spawn cutover inventory](docs/spawn-cutover-inventory.md).
 
 External synchronization is deliberately add-only and member-only. Coordinator identity remains authoritative local metadata and is not projected to an Amp label, so a long-lived coordinator does not accumulate labels for every group it supervises. Member add, worker adoption, and reconcile use Amp's additive label command only after a version and exact semantic-help capability check; reconcile reports coordinator memberships as skipped. Additive failures retain local intent as visible drift. Local removal cannot remove an existing Amp label, succeeds with a warning that the external label may remain indefinitely, and never claims exact synchronization. Promoting an already-labelled member to coordinator cannot remove its prior label. Use `--dry-run` to preflight and inspect any group mutation.
 
-### Durable worker reports and finish authorization
+### Pre-cutover reports, callback leases, and finish authorization
 
-Reports are persisted locally before callback notification. A stable report ID can progress between `ready` and `blocked`; `merged` is terminal and is accepted only after the group coordinator records a separate durable finish authorization. Acknowledgement never implies authorization, and neither `ready`, `blocked`, callback success, nor deadline expiry authorizes cleanup.
+For an exact persisted pre-cutover drain, reports are persisted locally before callback notification. A stable report ID can progress between `ready` and `blocked`; `merged` is terminal and is accepted only after the group coordinator records a separate durable finish authorization. Acknowledgement never implies authorization, and neither `ready`, `blocked`, callback success, nor deadline expiry authorizes cleanup. Native-created threads receive no report, callback lease, deadline, or finish authorization.
 
 ```sh
 amux report submit --report-id amux-133-worker-1 --group amux-133 --thread T-worker \

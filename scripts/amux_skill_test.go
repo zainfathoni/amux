@@ -496,7 +496,7 @@ func TestIssueCoordinationUsesNativeIdentityAndDrainsExistingDurableIdentity(t *
 			t.Errorf("workflow is missing native/drain identity rule %q", required)
 		}
 	}
-	for _, required := range []string{"spawn-native-cutover-v1", "do not call it automatically", "remain drain-writable only", "worker-family cutover"} {
+	for _, required := range []string{"spawn-native-cutover-v1", "do not call it automatically", "remain drain-writable only", "compatibility/drain surface only for an exact persisted pre-cutover adoption operation whose next transition is proven drain-eligible"} {
 		if !strings.Contains(readme, required) {
 			t.Errorf("README is missing native/drain cutover rule %q", required)
 		}
@@ -1857,7 +1857,7 @@ func TestSprawlUsesDedicatedNativeIssueThreads(t *testing.T) {
 	t.Parallel()
 	workflow := readSkillFile(t, repoRoot(t), filepath.Join("skills", "amux", "reference", "workflows.md"))
 	sprawlAt := strings.Index(workflow, "## Sprawl independent issue threads")
-	coordinateAt := strings.Index(workflow, "## Coordinate a durable issue work group")
+	coordinateAt := strings.Index(workflow, "## Coordinate native child threads and drain a durable work group")
 	if sprawlAt < 0 || coordinateAt <= sprawlAt {
 		t.Fatal("sprawl workflow section is missing")
 	}
@@ -3202,6 +3202,77 @@ func textFenceAfter(t *testing.T, contents, marker string) string {
 	return remainder[:end]
 }
 
+func TestActivePublicSurfacesLabelLegacyLifecycleAndNativeChildren(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	surfaces := map[string]string{
+		"homepage":           readSkillFile(t, root, filepath.Join("docs", "index.html")),
+		"public skill guide": readSkillFile(t, root, filepath.Join("docs", "skill", "index.html")),
+		"README":             readSkillFile(t, root, "README.md"),
+		"skill metadata":     readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md")),
+		"trigger checklist":  readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md")),
+		"workflow source":    readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md")),
+	}
+	for name, contents := range surfaces {
+		lower := strings.ToLower(contents)
+		for _, forbidden := range []string{
+			"coordinate issue workers",
+			"coordinated issue workers",
+			"native issue-worker coordination",
+			"issue-worker coordination",
+			"issue worker coordination",
+			"adopt a native-created thread",
+			"adopt an exact native-created thread",
+		} {
+			if strings.Contains(lower, forbidden) {
+				t.Errorf("%s retains active native/Amux terminology %q", name, forbidden)
+			}
+		}
+	}
+
+	requiredBySurface := map[string][]string{
+		"homepage": {
+			"Current new work uses native child threads. The pre-cutover lifecycle cards below describe compatibility/drain support retained by this release, not new-work features.",
+			"<code>pre-cutover group drain</code>",
+			"<code>pre-cutover report drain</code>",
+			"<code>pre-cutover callback drain</code>",
+			"Coordinate child threads",
+			"coordinated native child threads",
+		},
+		"public skill guide": {
+			"Amux work groups, reports, callback leases, deadlines, and finish authorization are pre-cutover compatibility/drain state only",
+			"Native child-thread coordination",
+			"exact allowed next transition",
+		},
+		"README": {
+			"Pre-cutover durable work-group compatibility",
+			"Pre-cutover reports, callback leases, and finish authorization",
+			"`amux worker adopt` is a compatibility/drain surface only for an exact persisted pre-cutover adoption operation whose next transition is proven drain-eligible",
+		},
+		"skill metadata": {
+			"proven pre-cutover compatibility/drain state for work groups, reports, callback leases, deadlines, and finish authorization",
+			"routing new Amp work to native child threads",
+			"pre-cutover existing-worker compatibility/drain only",
+		},
+		"trigger checklist": {
+			"`Coordinate child threads`",
+			"Skill-only pre-cutover compatibility/drain",
+		},
+		"workflow source": {
+			"Coordinate native child threads and drain a durable work group",
+			"compatibility-only for a durable group, member worker, callback, and report identity that already exist",
+			"Finish is compatibility/drain-only post-merge orchestration for an existing pre-cutover worker",
+		},
+	}
+	for name, required := range requiredBySurface {
+		for _, want := range required {
+			if !strings.Contains(surfaces[name], want) {
+				t.Errorf("%s is missing active boundary %q", name, want)
+			}
+		}
+	}
+}
+
 func TestNativeCreatePromptExamplesExcludeAmuxLifecycle(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
@@ -3301,12 +3372,21 @@ func TestGlobalAgentsSnippetSeparatesNativeWorkFromLegacyDrain(t *testing.T) {
 	snippet := readSkillFile(t, repoRoot(t), filepath.Join("docs", "snippets", "global-agents-amux-prefs.md"))
 	for _, required := range []string{
 		"Use native Amp `create_thread` for ordinary delegated work",
+		"exact Workspace Project for Orb execution, or the exact live runner/workdir",
 		"retain the native parent/reply route",
+		"If native creation is unavailable, rejected, or indeterminate, stop",
+		"Do not retry, use an executor fallback, or create any Amux lifecycle state",
 		"Keep native child prompts lean",
 		"Never include an Amux `reference/contract-v1.md` path",
-		"exact persisted records prove an existing pre-cutover Amux-managed spawn, adoption, or group flow is drain-eligible",
+		"exact persisted records prove both an existing Amux-managed spawn, adoption, or group flow's pre-cutover admission and its exact allowed next drain transition",
 		"Generalized Amux spawn admission is closed",
 		"never automatically adopt it",
+		"Only an explicitly requested existing Tycho route may own its internal machine/provider routing",
+		"the real Amp thread remains coordinator and consume/ack authority, while Tycho remains report-only",
+		"`/amux-tycho` is the experimental explicit-only report bridge",
+		"receipt admission remains open only until the authenticated direct structured-return gate passes",
+		"Forgex is experimental and requires my explicit request",
+		"`/amux-claude` and `/amux-pi` remain experimental fallback/reference paths and require my explicit request",
 	} {
 		if !strings.Contains(snippet, required) {
 			t.Errorf("global AGENTS replacement snippet is missing %q", required)
@@ -3315,6 +3395,7 @@ func TestGlobalAgentsSnippetSeparatesNativeWorkFromLegacyDrain(t *testing.T) {
 	for _, forbidden := range []string{
 		"Use Amux for local Amp/tmux lifecycle, exact adoption/recovery, and when native creation is unavailable",
 		"task, acceptance criteria, and the absolute path to the loaded `/amux` skill's `reference/contract-v1.md`",
+		"Tycho may own machine/provider routing for Claude Code and Pi/Codex Spark",
 	} {
 		if strings.Contains(snippet, forbidden) {
 			t.Errorf("global AGENTS replacement snippet retains generic injection policy %q", forbidden)

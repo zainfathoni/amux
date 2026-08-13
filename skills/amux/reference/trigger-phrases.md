@@ -16,11 +16,11 @@ This table is the complete activation and routing contract for [`../SKILL.md`](.
 | `Unshelve this` | `amux unshelve --current` or `--thread <id>` | Unarchive, then remove intent; do not launch. |
 | `Restore my workspace` | `amux launch --workspace <name>` | Aggregate by default; worker route narrows. |
 | `Spawn a worker for` | interpret as authenticated native `create_thread` on the exact Orb or live runner/workdir; projectless host exception only with exact owner authorization | Native child thread, not Amux spawn/worker; lean task prompt and native parent/reply routing only; no Amux contract or lifecycle state. |
-| `Coordinate issue workers` | native parent/child creation, reply routing, messaging, and waiting; existing durable groups are proven drain-only | Lean task prompts and native routing only; contract/lifecycle instructions stay inside proven pre-cutover drain flows. |
+| `Coordinate child threads` | native parent/child creation, reply routing, messaging, and waiting; existing durable groups are proven drain-only | Lean task prompts and native routing only; contract/lifecycle instructions stay inside proven pre-cutover drain flows. |
 | `Teardown this worker` | [`workflows.md#teardown-a-worker`](workflows.md#teardown-a-worker), then `amux teardown` | Paired Claude preflight only if `/amux-claude` may apply; Amp teardown last. |
 | `Doctor amux` | aggregate or mode-specific `doctor` | Read-only diagnosis. |
 | `/amux health` | [`workflows.md#health-workers-and-runners`](workflows.md#health-workers-and-runners) | Skill-only aggregate, safe mode-specific probes. |
 | `/amux sprawl` | [`workflows.md#sprawl-independent-issue-threads`](workflows.md#sprawl-independent-issue-threads) | Skill-only native fan-out; no Amux adoption/lifecycle state. |
-| `/amux finish` | [`workflows.md#finish-a-merged-worker`](workflows.md#finish-a-merged-worker) | Skill-only; fail closed on runner ownership. |
+| `/amux finish` | [`workflows.md#finish-a-merged-worker`](workflows.md#finish-a-merged-worker) | Skill-only pre-cutover compatibility/drain; fail closed on runner ownership. |
 
 When editing a trigger, update the frontmatter description, top-level routing, this table, its linked workflow/reference, and consistency tests together.

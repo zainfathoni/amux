@@ -871,6 +871,7 @@
               </div>
               <a class="release-link" href="https://github.com/zainfathoni/amux/releases">All releases →</a>
             </div>
+            <p class="small-note">Current new work uses native child threads. The pre-cutover lifecycle cards below describe compatibility/drain support retained by this release, not new-work features.</p>
             <div class="api-grid">
               <article class="api-card">
                 <code>aggregate lifecycle</code>
@@ -881,16 +882,16 @@
                 <p>Stable machine-readable envelopes and mutation previews make agent operation inspectable before side effects.</p>
               </article>
               <article class="api-card">
-                <code>durable work groups</code>
-                <p>Explicit many-to-many thread groups and coordinator identity survive local lifecycle changes; add-only Amp labels project member roles without cluttering long-lived coordinators.</p>
+                <code>pre-cutover group drain</code>
+                <p>Compatibility-only durable work groups preserve exact persisted member and coordinator identity while already-bound pre-cutover flows drain; they are not a native new-work feature.</p>
               </article>
               <article class="api-card">
-                <code>reports + finish authorization</code>
-                <p>Durable worker reports separate acknowledgement from coordinator-owned authorization to finish.</p>
+                <code>pre-cutover report drain</code>
+                <p>Compatibility-only durable reports and finish authorization continue exact persisted pre-cutover obligations; native-created threads receive neither.</p>
               </article>
               <article class="api-card">
-                <code>verified callback leases</code>
-                <p>Exact pane and process identity is reverified before a best-effort wake-up; reports remain durable if delivery fails.</p>
+                <code>pre-cutover callback drain</code>
+                <p>Compatibility-only callback leases reverify the exact pane and process before waking an already-bound pre-cutover report flow; no callback lease is created for native work.</p>
               </article>
               <article class="api-card">
                 <code>runner maintenance</code>
@@ -926,10 +927,10 @@
               <div class="trigger-row"><span class="trigger-say">“Shelve this”</span><code class="trigger-run">amux shelve --thread …</code></div>
               <div class="trigger-row"><span class="trigger-say">“Restore my workspace”</span><code class="trigger-run">amux launch --workspace …</code></div>
               <div class="trigger-row"><span class="trigger-say">“Doctor amux”</span><code class="trigger-run">amux doctor --workspace … (read-only)</code></div>
-              <div class="trigger-row"><span class="trigger-say">“Coordinate issue workers”</span><code class="trigger-run">authenticated native creation on exact executor/workdir · native reply routing and waiting · no Amux adoption or lifecycle state</code></div>
+              <div class="trigger-row"><span class="trigger-say">“Coordinate child threads”</span><code class="trigger-run">authenticated native creation on exact executor/workdir · native reply routing and waiting · no Amux adoption or lifecycle state</code></div>
               <div class="trigger-row"><span class="trigger-say">“/amux health”</span><code class="trigger-run">skill-only · read-only responsiveness check</code></div>
-              <div class="trigger-row"><span class="trigger-say">“/amux sprawl”</span><code class="trigger-run">skill-only · coordinated issue workers</code></div>
-              <div class="trigger-row"><span class="trigger-say">“/amux finish”</span><code class="trigger-run">skill-only · authorized cleanup; teardown last</code></div>
+              <div class="trigger-row"><span class="trigger-say">“/amux sprawl”</span><code class="trigger-run">skill-only · coordinated native child threads</code></div>
+              <div class="trigger-row"><span class="trigger-say">“/amux finish”</span><code class="trigger-run">skill-only · pre-cutover existing-worker drain; teardown last</code></div>
             </div>
           </div>
         </section>
@@ -1039,10 +1040,10 @@
         },
         spawn: {
           label: "spawn",
-          desc: "Generalized Amux spawn is closed. Create ordinary work with authenticated native Amp creation on the exact Orb or live runner/workdir, without Amux adoption.",
+          desc: "Generalized Amux spawn is closed. Create ordinary work with authenticated native Amp creation on the exact Workspace Project for Orb execution or exact live runner/workdir, without Amux adoption.",
           domains: [3],
           note: "Only an owner-authorized projectless physical-host placement may use the exact host/workdir-bound Amux exception; existing schema-1 assignments are drain-only.",
-          script: [{ cmd: "native Amp thread creation: exact project + Orb, or exact live runner/workdir", out: ["native parent/child route retained; no Amux worker, group, report, shelf, operation, or pane state"] }],
+          script: [{ cmd: "native Amp thread creation: exact Workspace Project for Orb execution, or exact live runner/workdir", out: ["native parent/child route retained; no Amux worker, group, report, shelf, operation, or pane state"] }],
         },
         teardown: {
           label: "teardown",
