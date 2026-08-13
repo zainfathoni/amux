@@ -807,6 +807,10 @@ func TestWorkerCutoverRejectsManifestIdentityReplacementDuringRecovery(t *testin
 
 func TestWorkerCutoverDurablyCreatesEveryMissingConfigAncestor(t *testing.T) {
 	root := t.TempDir()
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	dir := Directory{Path: filepath.Join(root, "one", "two", "config")}
 	var synced []string
 	setWorkerCutoverFilesystemTestHooks(t, nil, func(path string, directory *os.File) error {
@@ -816,7 +820,7 @@ func TestWorkerCutoverDurablyCreatesEveryMissingConfigAncestor(t *testing.T) {
 	if _, err := PublishWorkerCutover(dir, workerCutoverTestGeneration); err != nil {
 		t.Fatal(err)
 	}
-	wantPrefix := []string{root, filepath.Join(root, "one"), filepath.Join(root, "one", "two")}
+	wantPrefix := []string{canonicalRoot, filepath.Join(canonicalRoot, "one"), filepath.Join(canonicalRoot, "one", "two")}
 	if len(synced) < len(wantPrefix) {
 		t.Fatalf("directory syncs=%v, want prefix %v", synced, wantPrefix)
 	}
@@ -829,13 +833,17 @@ func TestWorkerCutoverDurablyCreatesEveryMissingConfigAncestor(t *testing.T) {
 
 func TestWorkerCutoverFailsWhenNewAncestorDirectoryEntryCannotBeSynced(t *testing.T) {
 	root := t.TempDir()
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	dir := Directory{Path: filepath.Join(root, "one", "two", "config")}
 	failure := errors.New("injected ancestor fsync failure")
 	var synced []string
 	setWorkerCutoverFilesystemTestHooks(t, nil, func(path string, directory *os.File) error {
 		path = filepath.Clean(path)
 		synced = append(synced, path)
-		if path == filepath.Join(root, "one") {
+		if path == filepath.Join(canonicalRoot, "one") {
 			return failure
 		}
 		return directory.Sync()
@@ -843,7 +851,7 @@ func TestWorkerCutoverFailsWhenNewAncestorDirectoryEntryCannotBeSynced(t *testin
 	if _, err := PublishWorkerCutover(dir, workerCutoverTestGeneration); err == nil || !errors.Is(err, failure) || !strings.Contains(err.Error(), "durably create") {
 		t.Fatalf("ancestor sync failure=%v", err)
 	}
-	want := []string{root, filepath.Join(root, "one")}
+	want := []string{canonicalRoot, filepath.Join(canonicalRoot, "one")}
 	if strings.Join(synced, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("directory sync ordering=%v, want %v", synced, want)
 	}
