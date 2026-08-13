@@ -155,47 +155,109 @@ func LoadRunnersReadOnly(path string) ([]RunnerRow, error) {
 }
 
 func Parse(r io.Reader) ([]Row, error) {
-	scanner := bufio.NewScanner(r)
-	var rows []Row
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	document, err := parseWorkerRegistry(data, false)
+	if err != nil {
+		return nil, err
+	}
+	return document.Rows, nil
+}
+
+type workerRegistryDocument struct {
+	Schema      string
+	FenceDigest string
+	Rows        []Row
+}
+
+func parseWorkerRegistry(data []byte, requireSchema bool) (workerRegistryDocument, error) {
+	var document workerRegistryDocument
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	seenThreads := make(map[string]string)
 	seenWindows := make(map[string]bool)
 	lineNo := 0
 	for scanner.Scan() {
 		lineNo++
 		line := scanner.Text()
+		if strings.HasPrefix(strings.ToLower(line), "# amux-schema: workers/") {
+			if document.Schema != "" {
+				return document, fmt.Errorf("duplicate workers schema header on line %d", lineNo)
+			}
+			switch line {
+			case workerSchemaHeaderV1:
+				document.Schema = WorkersSchemaV1
+			case workerSchemaHeaderV2:
+				document.Schema = WorkersSchemaV2
+			default:
+				return document, fmt.Errorf("unsupported or non-canonical workers schema header %q on line %d", line, lineNo)
+			}
+			continue
+		}
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		fields := strings.Split(line, "\t")
-		if len(fields) != 4 && len(fields) != 5 {
-			return nil, fmt.Errorf("invalid row on line %d: expected 4 or 5 tab-separated fields", lineNo)
+		if isWorkerCutoverControlCandidate(line) {
+			if document.FenceDigest != "" {
+				return document, fmt.Errorf("duplicate workers/v2 downgrade fence on line %d", lineNo)
+			}
+			digest, err := parseWorkerCutoverControlLine(line)
+			if err != nil {
+				return document, fmt.Errorf("invalid workers/v2 downgrade fence on line %d: %w", lineNo, err)
+			}
+			document.FenceDigest = digest
+			continue
 		}
-		thread, err := CanonicalThreadID(fields[3])
+		row, err := parseWorkerRow(line, lineNo)
 		if err != nil {
-			return nil, fmt.Errorf("invalid row on line %d: %w", lineNo, err)
-		}
-		row := Row{Workspace: fields[0], Window: fields[1], Workdir: fields[2], Thread: thread}
-		if len(fields) == 5 {
-			row.AssignmentState = WorkerAssignmentState(fields[4])
-		}
-		if err := row.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid row on line %d: %w", lineNo, err)
+			return document, err
 		}
 		windowKey := row.Workspace + "\x00" + row.Window
 		if seenWindows[windowKey] {
-			return nil, fmt.Errorf("duplicate worker row %s/%s", row.Workspace, row.Window)
+			return document, fmt.Errorf("duplicate worker row %s/%s", row.Workspace, row.Window)
 		}
 		if previous, exists := seenThreads[row.Thread]; exists {
-			return nil, fmt.Errorf("worker thread %s is already configured as %s", row.Thread, previous)
+			return document, fmt.Errorf("worker thread %s is already configured as %s", row.Thread, previous)
 		}
 		seenWindows[windowKey] = true
 		seenThreads[row.Thread] = row.Workspace + "/" + row.Window
-		rows = append(rows, row)
+		document.Rows = append(document.Rows, row)
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return document, err
 	}
-	return rows, nil
+	if requireSchema && document.Schema == "" {
+		return document, errors.New("workers registry is missing its exact schema header")
+	}
+	if document.Schema == "" {
+		document.Schema = WorkersSchemaV1
+	}
+	if document.Schema == WorkersSchemaV1 && document.FenceDigest != "" {
+		return document, errors.New("workers/v1 registry must not contain a downgrade fence")
+	}
+	if document.Schema == WorkersSchemaV2 && document.FenceDigest == "" {
+		return document, errors.New("workers/v2 registry is missing its downgrade fence")
+	}
+	return document, nil
+}
+func parseWorkerRow(line string, lineNo int) (Row, error) {
+	fields := strings.Split(line, "\t")
+	if len(fields) != 4 && len(fields) != 5 {
+		return Row{}, fmt.Errorf("invalid row on line %d: expected 4 or 5 tab-separated fields", lineNo)
+	}
+	thread, err := CanonicalThreadID(fields[3])
+	if err != nil {
+		return Row{}, fmt.Errorf("invalid row on line %d: %w", lineNo, err)
+	}
+	row := Row{Workspace: fields[0], Window: fields[1], Workdir: fields[2], Thread: thread}
+	if len(fields) == 5 {
+		row.AssignmentState = WorkerAssignmentState(fields[4])
+	}
+	if err := row.Validate(); err != nil {
+		return Row{}, fmt.Errorf("invalid row on line %d: %w", lineNo, err)
+	}
+	return row, nil
 }
 
 func ParseRunners(r io.Reader) ([]RunnerRow, error) {
@@ -264,9 +326,12 @@ func Store(path string, row Row) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if _, err := Parse(strings.NewReader(strings.Join(lines, "\n") + "\n")); err != nil {
+		return false, err
+	}
 	replaced := false
 	for i, line := range lines {
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" || strings.HasPrefix(line, "#") || isWorkerCutoverControlCandidate(line) {
 			continue
 		}
 		fields := strings.Split(line, "\t")
@@ -344,10 +409,13 @@ func Remove(path, workspace, window string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if _, err := Parse(strings.NewReader(strings.Join(lines, "\n") + "\n")); err != nil {
+		return false, err
+	}
 	kept := lines[:0]
 	removed := false
 	for _, line := range lines {
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" || strings.HasPrefix(line, "#") || isWorkerCutoverControlCandidate(line) {
 			kept = append(kept, line)
 			continue
 		}
@@ -436,10 +504,13 @@ func RemoveRows(path string, shouldRemove func(Row) bool) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if _, err := Parse(strings.NewReader(strings.Join(lines, "\n") + "\n")); err != nil {
+		return 0, err
+	}
 	kept := lines[:0]
 	removed := 0
 	for _, line := range lines {
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" || strings.HasPrefix(line, "#") || isWorkerCutoverControlCandidate(line) {
 			kept = append(kept, line)
 			continue
 		}
