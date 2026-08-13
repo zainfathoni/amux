@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -820,6 +821,9 @@ func TestWorkerCutoverDurablyCreatesEveryMissingConfigAncestor(t *testing.T) {
 	if _, err := PublishWorkerCutover(dir, workerCutoverTestGeneration); err != nil {
 		t.Fatal(err)
 	}
+	synced = slices.DeleteFunc(synced, func(path string) bool {
+		return path != canonicalRoot && !strings.HasPrefix(path, canonicalRoot+string(filepath.Separator))
+	})
 	wantPrefix := []string{canonicalRoot, filepath.Join(canonicalRoot, "one"), filepath.Join(canonicalRoot, "one", "two")}
 	if len(synced) < len(wantPrefix) {
 		t.Fatalf("directory syncs=%v, want prefix %v", synced, wantPrefix)
@@ -831,34 +835,102 @@ func TestWorkerCutoverDurablyCreatesEveryMissingConfigAncestor(t *testing.T) {
 	}
 }
 
-func TestWorkerCutoverFailsWhenNewAncestorDirectoryEntryCannotBeSynced(t *testing.T) {
+func TestWorkerCutoverRetrySyncsExistingAncestorEdgeBeforePublication(t *testing.T) {
 	root := t.TempDir()
 	canonicalRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	dir := Directory{Path: filepath.Join(root, "one", "two", "config")}
+	canonicalConfig := filepath.Join(canonicalRoot, "one", "two", "config")
 	failure := errors.New("injected ancestor fsync failure")
-	var synced []string
-	setWorkerCutoverFilesystemTestHooks(t, nil, func(path string, directory *os.File) error {
+	attempt := 1
+	events := map[int][]string{1: {}, 2: {}}
+	syncedOneOnRetry := false
+	setWorkerCutoverFilesystemTestHooks(t, func(event string) {
+		if strings.HasPrefix(event, "directory-created:"+canonicalRoot) {
+			events[attempt] = append(events[attempt], event)
+		}
+		if attempt == 2 && event == "directory-created:"+canonicalConfig {
+			if !syncedOneOnRetry {
+				t.Fatal("retry descended through the existing two edge before fsyncing one")
+			}
+			if _, err := os.Stat(dir.WorkerCutoverManifestPath()); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("retry published before ancestor traversal completed: %v", err)
+			}
+		}
+	}, func(path string, directory *os.File) error {
 		path = filepath.Clean(path)
-		synced = append(synced, path)
-		if path == filepath.Join(canonicalRoot, "one") {
+		if path == canonicalRoot || strings.HasPrefix(path, canonicalRoot+string(filepath.Separator)) {
+			events[attempt] = append(events[attempt], "sync:"+path)
+		}
+		if attempt == 2 && path == filepath.Join(canonicalRoot, "one") {
+			syncedOneOnRetry = true
+		}
+		if attempt == 1 && path == filepath.Join(canonicalRoot, "one") {
 			return failure
 		}
 		return directory.Sync()
 	})
-	if _, err := PublishWorkerCutover(dir, workerCutoverTestGeneration); err == nil || !errors.Is(err, failure) || !strings.Contains(err.Error(), "durably create") {
+	if _, err := PublishWorkerCutover(dir, workerCutoverTestGeneration); err == nil || !errors.Is(err, failure) || !strings.Contains(err.Error(), "durably traverse") {
 		t.Fatalf("ancestor sync failure=%v", err)
 	}
-	want := []string{canonicalRoot, filepath.Join(canonicalRoot, "one")}
-	if strings.Join(synced, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("directory sync ordering=%v, want %v", synced, want)
+	wantFirst := []string{
+		"directory-created:" + filepath.Join(canonicalRoot, "one"),
+		"sync:" + canonicalRoot,
+		"directory-created:" + filepath.Join(canonicalRoot, "one", "two"),
+		"sync:" + filepath.Join(canonicalRoot, "one"),
+	}
+	if strings.Join(events[1], "\n") != strings.Join(wantFirst, "\n") {
+		t.Fatalf("first-attempt durability ordering=%v, want %v", events[1], wantFirst)
+	}
+	if info, err := os.Stat(filepath.Join(dir.Path, "..")); err != nil || !info.IsDir() {
+		t.Fatalf("failed attempt did not leave the created two edge for retry: info=%v err=%v", info, err)
 	}
 	for _, path := range []string{dir.WorkerCutoverManifestPath(), dir.WorkersPath()} {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("sync failure published %s: %v", path, err)
 		}
+	}
+
+	// The first fsync failure may lose the already-created two entry on a
+	// crash. A successful retry therefore cannot trust EEXIST: it must fsync
+	// one's dirfd again before descending through two or publishing anything.
+	attempt = 2
+	if _, err := PublishWorkerCutover(dir, workerCutoverTestGeneration); err != nil {
+		t.Fatal(err)
+	}
+	wantRetryPrefix := []string{
+		"sync:" + canonicalRoot,
+		"sync:" + filepath.Join(canonicalRoot, "one"),
+		"directory-created:" + canonicalConfig,
+		"sync:" + filepath.Join(canonicalRoot, "one", "two"),
+	}
+	if len(events[2]) < len(wantRetryPrefix) || strings.Join(events[2][:len(wantRetryPrefix)], "\n") != strings.Join(wantRetryPrefix, "\n") {
+		t.Fatalf("retry durability ordering=%v, want prefix %v", events[2], wantRetryPrefix)
+	}
+	if !syncedOneOnRetry {
+		t.Fatal("retry did not fsync one's dirfd for the existing two edge")
+	}
+	if _, err := os.Stat(dir.WorkerCutoverManifestPath()); err != nil {
+		t.Fatalf("retry did not publish after durable traversal: %v", err)
+	}
+}
+
+func TestWorkerCutoverReadOnlyTraversalDoesNotSyncDirectories(t *testing.T) {
+	dir := Directory{Path: filepath.Join(t.TempDir(), "config")}
+	if err := os.Mkdir(dir.Path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setWorkerCutoverFilesystemTestHooks(t, nil, func(path string, _ *os.File) error {
+		t.Fatalf("read-only traversal synced directory %s", path)
+		return nil
+	})
+	if _, err := InspectWorkerCutover(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PlanWorkerCutover(dir, workerCutoverTestGeneration); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -66,10 +66,6 @@ func openWorkerCutoverDirectory(path string, create bool) (*workerCutoverDirecto
 				if mkdirErr == nil && workerCutoverFilesystemHook != nil {
 					workerCutoverFilesystemHook("directory-created:" + nextPath)
 				}
-				if syncErr := workerCutoverDirectorySync(currentPath, current); syncErr != nil {
-					_ = current.Close()
-					return nil, fmt.Errorf("durably create worker cutover config directory %s: sync parent %s: %w", nextPath, currentPath, syncErr)
-				}
 			}
 			fd, openErr = unix.Openat(int(current.Fd()), component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		}
@@ -80,6 +76,16 @@ func openWorkerCutoverDirectory(path string, create bool) (*workerCutoverDirecto
 		if openErr != nil {
 			_ = current.Close()
 			return nil, fmt.Errorf("open pinned worker cutover config directory %s without following links: %w", nextPath, openErr)
+		}
+		if create {
+			// A failed attempt can leave mkdirat's child visible without making
+			// its parent entry durable. Sync every traversed edge, including an
+			// already-existing child on retry, before descending through it.
+			if syncErr := workerCutoverDirectorySync(currentPath, current); syncErr != nil {
+				_ = unix.Close(fd)
+				_ = current.Close()
+				return nil, fmt.Errorf("durably traverse worker cutover config directory %s: sync parent %s: %w", nextPath, currentPath, syncErr)
+			}
 		}
 		next := os.NewFile(uintptr(fd), nextPath)
 		if next == nil {
