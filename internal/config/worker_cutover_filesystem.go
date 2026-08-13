@@ -21,10 +21,11 @@ var workerCutoverDirectorySync = func(path string, directory *os.File) error {
 }
 
 type workerCutoverDirectory struct {
-	path    string
-	file    *os.File
-	info    os.FileInfo
-	present bool
+	path          string
+	requestedPath string
+	file          *os.File
+	info          os.FileInfo
+	present       bool
 }
 
 func openWorkerCutoverDirectory(path string, create bool) (*workerCutoverDirectory, error) {
@@ -33,6 +34,10 @@ func openWorkerCutoverDirectory(path string, create bool) (*workerCutoverDirecto
 		return nil, fmt.Errorf("resolve worker cutover config directory: %w", err)
 	}
 	abs = filepath.Clean(abs)
+	canonical, err := canonicalWorkerCutoverDirectoryPath(abs)
+	if err != nil {
+		return nil, err
+	}
 	rootFD, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open filesystem root for worker cutover: %w", err)
@@ -43,7 +48,7 @@ func openWorkerCutoverDirectory(path string, create bool) (*workerCutoverDirecto
 		return nil, errors.New("open filesystem root for worker cutover")
 	}
 	currentPath := string(filepath.Separator)
-	relative := strings.TrimPrefix(abs, string(filepath.Separator))
+	relative := strings.TrimPrefix(canonical, string(filepath.Separator))
 	components := make([]string, 0)
 	if relative != "" && relative != "." {
 		components = strings.Split(relative, string(filepath.Separator))
@@ -70,7 +75,7 @@ func openWorkerCutoverDirectory(path string, create bool) (*workerCutoverDirecto
 		}
 		if errors.Is(openErr, unix.ENOENT) && !create {
 			_ = current.Close()
-			return &workerCutoverDirectory{path: abs}, nil
+			return &workerCutoverDirectory{path: canonical, requestedPath: abs}, nil
 		}
 		if openErr != nil {
 			_ = current.Close()
@@ -89,13 +94,34 @@ func openWorkerCutoverDirectory(path string, create bool) (*workerCutoverDirecto
 	info, err := current.Stat()
 	if err != nil {
 		_ = current.Close()
-		return nil, fmt.Errorf("fstat pinned worker cutover config directory %s: %w", abs, err)
+		return nil, fmt.Errorf("fstat pinned worker cutover config directory %s: %w", canonical, err)
 	}
 	if !info.IsDir() {
 		_ = current.Close()
-		return nil, fmt.Errorf("worker cutover config path %s must be a directory", abs)
+		return nil, fmt.Errorf("worker cutover config path %s must be a directory", canonical)
 	}
-	return &workerCutoverDirectory{path: abs, file: current, info: info, present: true}, nil
+	return &workerCutoverDirectory{path: canonical, requestedPath: abs, file: current, info: info, present: true}, nil
+}
+
+func canonicalWorkerCutoverDirectoryPath(path string) (string, error) {
+	existing := path
+	missing := make([]string, 0)
+	for {
+		resolved, err := filepath.EvalSymlinks(existing)
+		if err == nil {
+			components := append([]string{resolved}, missing...)
+			return filepath.Clean(filepath.Join(components...)), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("resolve worker cutover config directory %s without an unstable symlink traversal: %w", path, err)
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			return "", fmt.Errorf("resolve existing ancestor of worker cutover config directory %s: %w", path, err)
+		}
+		missing = append([]string{filepath.Base(existing)}, missing...)
+		existing = parent
+	}
 }
 
 func (d *workerCutoverDirectory) Close() error {
@@ -109,12 +135,12 @@ func (d *workerCutoverDirectory) verifyPathIdentity() error {
 	if d == nil {
 		return errors.New("worker cutover config directory is unavailable")
 	}
-	reopened, err := openWorkerCutoverDirectory(d.path, false)
+	reopened, err := openWorkerCutoverDirectory(d.requestedPath, false)
 	if err != nil {
 		return err
 	}
 	defer reopened.Close()
-	if reopened.present != d.present || d.present && !os.SameFile(d.info, reopened.info) {
+	if reopened.present != d.present || d.present && !os.SameFile(d.info, reopened.info) || !d.present && reopened.path != d.path {
 		return errors.New("worker cutover config directory path changed after it was pinned")
 	}
 	return nil

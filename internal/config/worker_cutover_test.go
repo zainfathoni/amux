@@ -575,10 +575,19 @@ func TestWorkerCutoverRejectsSymlinksAndPinnedParentReplacement(t *testing.T) {
 		}
 	})
 
-	t.Run("ancestor symlink", func(t *testing.T) {
+	t.Run("ancestor symlink target replaced", func(t *testing.T) {
 		root := t.TempDir()
 		realParent := filepath.Join(root, "real")
-		if err := os.Mkdir(realParent, 0o700); err != nil {
+		replacementParent := filepath.Join(root, "replacement")
+		for _, parent := range []string{realParent, replacementParent} {
+			if err := os.Mkdir(parent, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(parent, "config"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(realParent, "config", WorkersFile), []byte(defaultConfig), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		linkedParent := filepath.Join(root, "linked")
@@ -586,8 +595,26 @@ func TestWorkerCutoverRejectsSymlinksAndPinnedParentReplacement(t *testing.T) {
 			t.Fatal(err)
 		}
 		dir := Directory{Path: filepath.Join(linkedParent, "config")}
-		if _, err := PlanWorkerCutover(dir, workerCutoverTestGeneration); err == nil || !strings.Contains(err.Error(), "without following links") {
-			t.Fatalf("ancestor symlink error=%v", err)
+		swapped := false
+		setWorkerCutoverFilesystemTestHooks(t, func(event string) {
+			if event != "before-manifest-commit" || swapped {
+				return
+			}
+			swapped = true
+			if err := os.Remove(linkedParent); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(replacementParent, linkedParent); err != nil {
+				t.Fatal(err)
+			}
+		}, nil)
+		if _, err := PublishWorkerCutover(dir, workerCutoverTestGeneration); err == nil || !strings.Contains(err.Error(), "path changed after it was pinned") {
+			t.Fatalf("ancestor symlink target replacement error=%v", err)
+		}
+		for _, parent := range []string{realParent, replacementParent} {
+			if _, err := os.Stat(filepath.Join(parent, "config", WorkerCutoverManifestFile)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("ancestor symlink replacement published manifest under %s: %v", parent, err)
+			}
 		}
 	})
 
