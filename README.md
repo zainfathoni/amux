@@ -94,7 +94,7 @@ curl -fsSL https://amux.zainf.dev/install.sh | AMUX_SKILLS_SOURCE="$AMUX_REPO" s
 
 This opt-in mode creates absolute links under `~/.agents/skills`. Existing real installations and same-name legacy duplicates are preserved as timestamped sibling backups rather than deleted. The skill migration is sequential: a later filesystem failure exits nonzero without rolling back already reported links or backups. Future skill updates need only another fast-forward pull followed by an Amp reload or a new thread; the `amux` binary still updates separately.
 
-`/amux` teaches canonical selectors, side-effect boundaries, skill-only health/sprawl/finish workflows, and progressive disclosure via `reference/contract-v1.md` (workers read once) and `reference/deadline-v1.md` (deadlines only). Do not paste full protocol into spawn messages or reload the full skill on wake-ups. See the [dedicated skill guide](https://amux.zainf.dev/skill/).
+`/amux` teaches canonical selectors, side-effect boundaries, skill-only health/sprawl/finish workflows, and progressive disclosure via `reference/contract-v1.md` (workers read once) and `reference/deadline-v1.md` (existing deadlines only). Do not paste the full protocol into native assignments or bounded exception messages, and do not reload the full skill on wake-ups. See the [dedicated skill guide](https://amux.zainf.dev/skill/).
 
 `/amux-tycho` is the separate unstable external-executor bridge for explicitly owner-selected existing Tycho agent/project/harness/model routes. Tycho may route Claude or Pi, but it is a report-only producer; the current real Amp thread retains coordination, consumption, and acknowledgement authority. `/amux-claude` and `/amux-pi` remain separate provider-specific fallback/reference skills. None installs with core `/amux` unless requested through skills.sh; the opt-in local-checkout installer links all bundled skills. Consult the [provider executor readiness matrix](docs/provider-executor-readiness.md) before selecting a route; helper or CLI support alone does not prove model, runtime, or mutation readiness.
 
@@ -173,27 +173,23 @@ Removed aliases and positional forms fail with remediation. In particular, do no
 
 ## Worker-only lifecycle
 
-`spawn`, `shelve`, `unshelve`, and `teardown` are worker-only and have concise top-level routes. `amux worker spawn` is an exact alias of the primary lean `amux spawn` implementation.
+`shelve`, `unshelve`, and `teardown` remain worker-only concise routes. At cutover generation `spawn-native-cutover-v1`, `amux spawn` and its exact `amux worker spawn` alias stopped admitting generalized new work.
 
-For an Amp Workspace Project, create the thread and deliver its initial assignment with Amp's native thread creation, then adopt the exact returned identity:
+For ordinary new work, use Amp's authenticated native thread creation directly. Select the exact intended Workspace Project and Orb, or select one exact live runner whose working directory is the intended canonical workdir; do not fall back between executors or create elsewhere and try to re-home the thread later. Deliver the complete task assignment in that one native creation request. Keep the returned native parent/child and reply route, and do **not** automatically run `amux worker adopt`, pin, group, shelve, report, or create any other Amux lifecycle state for the thread. If the native result is indeterminate, stop without retrying or searching for a substitute.
 
-```sh
-amux worker adopt --thread <thread> --workspace <workspace> --window <window> --workdir <workdir>
-```
-
-Native creation owns execution placement; adoption owns only local catalog, group, workdir, and tmux state. Adoption never re-homes the thread or proves where future turns run. New adoption canonicalizes its owner-supplied workdir before storing or launching it. `worker doctor` reports preserved catalog spelling unchanged, so a legacy relative value is not a canonical or physical-location claim. Adoption and doctor report native executor, runner ID, and execution affinity as `unknown` rather than inferring them from the local pane. Create directly on the exact executor/workdir required for future work, and name an exact physical runner ID and owner-supplied canonical workdir whenever physical state matters. Orb-create → physical-adopt is not migration.
-
-For the projectless physical-host exception, use the historical local route explicitly:
+The sole new-work exception is an exact owner-authorized projectless physical-host placement that native project-backed Orb/runner creation cannot express. Run it on that physical host, pass the byte-exact local hostname and canonical workdir, and create no group:
 
 ```sh
-amux spawn --mode medium --assignment-phase prepare --native-capability existing-thread-message-v1 \
+amux spawn --mode medium --assignment-phase prepare \
+  --owner-authorized-projectless-physical-host --physical-host <exact-local-hostname> \
+  --native-capability existing-thread-message-v1 \
   --workdir <canonical-path> --workspace <workspace> \
-  --window <semantic-window> [--group <existing-group>] --prompt-file <path|->
+  --window <assignment-key> --prompt-file <path|->
 ```
 
-Executor selection routes this command to the intended physical host; `amux spawn` itself is local by construction and canonicalizes the requested workdir. The `/amux` coordinator first capability-checks its authenticated native existing-thread message action. It then uses three durable CLI phases around exactly one native message: `prepare` runs `amp threads new --mode ...` once in that cwd and retains the exact ID without opening a pane; `arm` makes interruption/message uncertainty durably indeterminate; after one native message addressed to that exact ID, `finalize` records rejected, indeterminate, or authenticated accepted before opening a presentation-only exact continue pane. Successful native tool return plus `latestCursor` proves only exact-thread acceptance/queueing—not message ID, inference, execution, or physical executor/workdir affinity. Prompt text is not persisted; a digest binds unchanged phase input but proves nothing. Tmux never transports assignment bytes: there is no load/paste/Enter or TUI fallback. Human and JSON outcomes report creation, local ownership, local presentation, assignment, and execution separately. Armed uncertainty, tool connection failures, and failed success finalization are never automatically retried; accepted truth survives later presentation failure.
+The coordinator first capability-checks its authenticated native existing-thread message action. `prepare` writes one schema-2 assignment record containing admission `spawn-native-cutover-v1/projectless-physical-host-exception`, exact host, canonical workdir, mode, key, and prompt digest before it runs `amp threads new` once in that cwd. It writes no worker, group, operation, shelf, or tmux state. Repeat the owner-authorization and exact-host flags on `arm` and `finalize`; `arm` makes the one message attempt indeterminate before the coordinator sends exactly one unchanged native message, and `finalize` records its result without opening a pane or dual-writing another Amux store. Any host, identity, placement, ownership, launch, or delivery ambiguity remains indeterminate with no retry, fallback, reroute, rebind, adoption, search, or cleanup.
 
-The command never registers a project or falls back to an Orb, and it does not require or inspect the optional local `amp --no-tui --runner-id` argv alias. It never reads pane text, thread history, or previews, searches for another receiver, archives, or cleans up uncertain state. Existing legacy 4-column worker rows and 5-column `retained_indeterminate` rows remain byte/semantic-compatible and are never automatically upgraded. Preserved legacy spawn operation records remain immutable diagnostic evidence and are never retried or reconciled.
+Pre-cutover schema-1 assignment records remain drain-writable only through their exact existing boundary: a prepared record may arm once and an armed record may finalize without resend. Those transitions update only `spawn-assignments.json`; they do not update `workers.tsv`, create a pane, or write native replacement state. Records whose schema cannot prove pre-cutover admission or the exact bounded exception fail closed. Existing legacy worker rows and operation records remain unchanged.
 
 ```sh
 amux shelve --thread T-example
@@ -231,9 +227,9 @@ Group IDs map byte-for-byte to Amp labels and must match `^[a-z0-9]+(?:-[a-z0-9]
 
 The bundled issue-coordination workflow uses explicit durable identity. For this repository, issue `#131` uses group/Amp label `amux-131`, and its first worker uses report ID `amux-131-worker-1`; another repository may use an explicit equivalent lowercase, group-safe repository slug. This workflow convention does not narrow the generic group-ID contract. Existing `amux-*`, repository-slug, `issue-*`, purpose-specific groups such as `pr-181-review`, and explicit groups remain valid and are never migrated, renamed, removed externally, or rewritten.
 
-Worker adoption accepts one exact `--group <id>`. It persists local member intent for the exact native-created thread before add-only label synchronization.
+Worker adoption accepts one exact `--group <id>` for compatibility with existing explicit adoption operations. It persists local member intent before add-only label synchronization.
 
-New workers use Amp's native thread creation and initial-message delivery followed by explicit local adoption: `amux worker adopt --thread <exact-id> --workspace <workspace> --window <window> --workdir <path> [--group <id>]`. Adoption verifies active thread and local ownership, persists catalog/group intent before creating the tmux client, and never sends input or reads a transcript. See [ADR 0003](docs/adr/0003-native-thread-creation-and-explicit-adoption.md).
+Ordinary native-created threads are no longer adopted into Amux at `spawn-native-cutover-v1`. `amux worker adopt` remains a separate compatibility admission path pending the worker-family cutover; do not call it automatically or use it in new-work workflows. See [ADR 0007](docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md) and the [spawn cutover inventory](docs/spawn-cutover-inventory.md).
 
 External synchronization is deliberately add-only and member-only. Coordinator identity remains authoritative local metadata and is not projected to an Amp label, so a long-lived coordinator does not accumulate labels for every group it supervises. Member add, worker adoption, and reconcile use Amp's additive label command only after a version and exact semantic-help capability check; reconcile reports coordinator memberships as skipped. Additive failures retain local intent as visible drift. Local removal cannot remove an existing Amp label, succeeds with a warning that the external label may remain indefinitely, and never claims exact synchronization. Promoting an already-labelled member to coordinator cannot remove its prior label. Use `--dry-run` to preflight and inspect any group mutation.
 
@@ -265,7 +261,7 @@ Identical replay is a benign durable-state skip that may retry notification; con
 
 ### Task-scoped coordinator workflow
 
-The bundled `/amux` skill provides a bounded coordinator procedure for cases where durable group/report identity or finish authorization is useful. Worker assignments stay concise and task-scoped. In summary: inspect native dependencies and active PR/branch/worktree/API overlap; fetch and create dedicated worktrees from fresh `origin/main`; use semantic issue-unprefixed windows and an explicit mode (`low` for small mechanical work, `medium` for ordinary implementation, or `high` for difficult architecture/debugging/review when a linked ChatGPT route and target-mode availability are known; otherwise `medium`); declare the group and register the exact verified coordinator pane; then create the thread directly on its required executor/workdir and adopt its exact returned identity with `--group`. `ultra`, plugin, and other special modes remain owner-explicit. This role ends with the task or explicitly bounded workflow; it is not a permanent Lead persona or hierarchy. The skill's `reference/workflows.md` retains the presentation-only task-group title convention for the coordinating thread; it conveys neither executor placement nor authoritative group role.
+The bundled `/amux` skill directs ordinary new coordination to authenticated native parent/child creation, messaging, reply routing, and waiting on the exact executor/workdir. It creates no Amux worker or group representation for those threads. The legacy durable group/report procedure remains documented only to drain members and reports that already existed before their family cutover; it is not a new-thread onboarding route.
 
 Workers use one stable report ID for `blocked`, `ready`, and terminal `merged`. `ready` means implementation, tests, one review, PR, and normal CI are complete. A callback token only wakes the coordinator. The coordinator acknowledges receipt separately, independently verifies PR URL/head/scope/mergeability/closing issue, worktree and CI, merges only with separate authority, verifies post-merge CI (and Pages when triggered), and records durable finish authorization. The child then submits `merged` with the same binding/payload and runs `/amux finish` only when explicitly directed; worktree/Git safety comes first and `amux teardown` is last. Group/report history survives finish.
 
@@ -284,7 +280,7 @@ Coordinator soft budgets to `ready` are Small 30m, Medium 1h (default), Large 2h
 | `park` / `restart` | preserve | preserve | stop/restart verified | none |
 | `remove` | remove worker/shelf | remove runner | stop verified | none |
 | `shelve` / `unshelve` | preserve worker; mutate intent | none | shelve parks only | archive/unarchive |
-| `spawn` | durable prepare/arm/finalize state plus exact ownership | reject without native message capability or on ownership overlap | presentation-only exact client after finalization; no prompt input | one empty local create plus one coordinator-native exact-thread message; execution/affinity unproven |
+| `spawn` | generalized admission rejected; exact assignment-store drain or owner-authorized schema-2 host/workdir exception only | no worker/group/operation/shelf writes | none | exception only: one empty exact-host local create plus one coordinator-native exact-thread message; execution unproven |
 | `teardown` | remove worker/shelf | none | stop verified worker | archive |
 | `reconcile` | synchronize shelf/archive drift; remove only proven-missing safe worker bindings | repair stale ownership | verified repairs only | worker sync only for present bindings |
 | `callback register` / `clear` | none; mutate machine runtime lease only | none | inspect exact pane/process | none |

@@ -16,7 +16,7 @@ Do not treat a tmux server command, name similarity, or stale output as ownershi
 
 ## Partial success and retries
 
-Exit `1` means mutation may have started. Inspect `successful`, `skipped`, and `failed`, then inspect only state authorized by the command-specific contract before any deliberate owner action. Exit `2` means request/preflight rejection before mutation. Projectless spawn persists `creation_armed`, `prepared`, `armed`, and `finalized` boundaries in `spawn-assignments.json`. `creation_armed` forbids another create; `armed` is assignment-indeterminate and forbids another message. After one native message call, explicitly finalize rejected, indeterminate, or authenticated accepted; if accepted finalization or later presentation fails, preserve the durable phase/outcome and never resend. The presentation-only pane never proves execution. Never paste, press Enter, archive, clean up, search, inspect pane/transcript/thread/preview state, reconcile, or use an alternate receiver. Existing `retained_indeterminate` rows and preserved legacy spawn operation records remain immutable and are never upgraded, retried, reconciled, converted, deleted, or marked successful.
+Exit `1` means mutation may have started. Inspect `successful`, `skipped`, and `failed`, then inspect only state authorized by the command-specific contract before any deliberate owner action. Exit `2` means request/preflight rejection before mutation. Generalized spawn prepare is closed. The owner-authorized projectless physical-host exception persists schema-2 `creation_armed`, `prepared`, `armed`, and `finalized` boundaries in `spawn-assignments.json`, bound to one exact host/workdir and no group. `creation_armed` forbids another create; `armed` forbids another message. Finalize updates only that assignment record and creates no pane or lifecycle state. Pre-cutover schema-1 records may only drain through their exact next transition. Never retry, fall back, reroute, rebind, adopt, paste, press Enter, archive, clean up, search, inspect pane/transcript/thread/preview state, reconcile, or use an alternate receiver. Existing worker rows and legacy operation records remain unchanged.
 
 `shelve` records intent before remote archive and local park. `unshelve` removes intent only after remote unarchive. Visible partial synchronization is retryable desired state, not a reason to roll back by hand.
 
@@ -25,15 +25,10 @@ Exit `1` means mutation may have started. Inspect `successful`, `skipped`, and `
 Health first; `no-response` alone does not authorize replacement. After explicit approval:
 
 1. Preserve the old remote thread unless archival was requested.
-2. Preflight a new semantic window and stable key with the explicit mode selected under the spawn policy:
-
-   ```sh
-   amux --dry-run worker adopt --thread <native-created-thread> --workspace <workspace> --window <replacement-slug> --workdir <path>
-   ```
-
-3. Create and assign the new thread natively, adopt it, and verify its worker row, tmux pane, workdir, and assignment before removing the old local worker.
+2. Create and assign one replacement thread with authenticated native creation on the exact intended Orb or live runner/workdir. Do not adopt, pin, group, or otherwise create Amux state for it.
+3. Verify the authenticated native result and exact executor/workdir selection before removing the old local worker. If creation is indeterminate, keep the old worker and stop.
 4. Use `amux worker remove --thread <old-id>` to stop/delete old local configuration without archiving. Use teardown only when archival is explicitly intended.
-5. On interruption, report exact old/new thread, config, pane, and worktree state before any retry.
+5. On interruption, report exact old/new thread, config, pane, and worktree state. Never retry native creation; retry another transition only when its operation-specific drain contract permits the identical request.
 
 Reuse the task-appropriate mode selection rule; replacement urgency alone does not justify `high`, and replacement work never authorizes `ultra` or a special mode.
 
@@ -54,6 +49,6 @@ All mutations and scheduled maintenance share one bounded machine-level lock. Ex
 - **Conflicting report ID:** exit `2` means the ID is bound to another immutable request or payload. Do not choose a new ID to evade the conflict. Inspect history and resolve the discrepancy.
 - **Coordinator restart:** group membership, reports, acknowledgement, authorization, and history survive. The old runtime lease fails closed. Re-register the verified new process/pane; do not reconstruct durable state from tmux.
 - **Add-only label drift (member labels only):** a failed member add/reconcile retains local membership and exits `1`; retry add-only ensure later. Reconcile skips coordinator roles because coordinator identity is local-only. Reassigning a coordinator demotes the prior one to member, which reports `additive_ensure_required` drift `label_may_be_missing`; run `group reconcile` to add-only ensure that member label. Removal exits `0` locally but an existing Amp label may remain indefinitely, including after a labelled member is promoted to coordinator. Never use all-label replacement or claim exact external equality.
-- **Bootstrap mismatch:** if installed help lacks `group`, `report`, `callback`, or `worker adopt`, use the exact bootstrap sequence in the coordinator workflow. Keep invoking the verified absolute binary path for every subsequent operation; do not fall back to stale bare `amux`. For an already-created worker, explicitly add or adopt the verified authoritative thread; do not respawn, infer membership, edit registries, or attach a provisioned/abandoned identity.
+- **Drain-command mismatch:** if installed help lacks a command required by an existing group/report/callback/adoption drain, stop and report the exact compatibility blocker. Do not bootstrap a replacement, fall back to another binary, create or adopt a thread, infer membership, edit registries, or attach a provisioned/abandoned identity.
 
 No recovery path may force-delete a branch, auto-release, infer finish from a late callback, or erase durable group history. Only an authorized `/amux` lifecycle or coordination operation may, after naming a concrete local/GitHub discrepancy, exhausting deterministic evidence, and separately establishing the exact relationship with durable/local/GitHub evidence, make one narrow query of that exact related thread. If that query fails, block rather than widening or chaining reads; report blocked and remain alive.

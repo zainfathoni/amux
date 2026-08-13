@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,31 +13,59 @@ import (
 
 	"github.com/zainfathoni/amux/internal/config"
 	"github.com/zainfathoni/amux/internal/result"
-	"github.com/zainfathoni/amux/internal/tmux"
 )
 
-func TestNativeSpawnAcceptedFlowUsesOneExactCreateAndOneCoordinatorMessageWithoutTUIInput(t *testing.T) {
-	dir, workdir, log := setupNativeSpawnTest(t, "")
-	createCalls := 0
+const testPhysicalHost = "host-exact"
+
+func TestGeneralizedSpawnAdmissionIsClosedBeforeMutation(t *testing.T) {
+	dir, workdir := setupSpawnCutoverTest(t)
+	creates := 0
+	spawnCreateThread = func(string, string) (string, error) {
+		creates++
+		return "T-unexpected", nil
+	}
+	args := spawnArgs(dir, workdir, "prepare", "", "", "", false)
+	args = removeFlag(args, "--native-capability", true)
+	env, err := executeSpawnResult(args, "ordinary work")
+	if err == nil || result.ExitCode(err) != result.ExitRejected {
+		t.Fatalf("error=%v envelope=%+v", err, env)
+	}
+	for _, want := range []string{config.SpawnCutoverGeneration, "authenticated native Amp thread creation", "exact intended Orb or live runner and workdir", "without amux adoption"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("rejection lacks %q: %v", want, err)
+		}
+	}
+	if creates != 0 {
+		t.Fatalf("generalized rejection created %d threads", creates)
+	}
+	assertConfigDirEmpty(t, dir)
+}
+
+func TestProjectlessPhysicalHostExceptionBindsExactlyAndCreatesNoLifecycleState(t *testing.T) {
+	dir, workdir := setupSpawnCutoverTest(t)
+	creates := 0
 	spawnCreateThread = func(gotWorkdir, mode string) (string, error) {
-		createCalls++
+		creates++
 		if gotWorkdir != workdir || mode != "high" {
-			t.Fatalf("create cwd/mode=%q/%q", gotWorkdir, mode)
+			t.Fatalf("create workdir/mode=%q/%q", gotWorkdir, mode)
 		}
 		return "T-exact", nil
 	}
-	setReadyNativeSpawnPane(t, workdir, "T-exact")
 	prompt := "exact private assignment\nsecond line"
-
-	prepared := executeNativeSpawn(t, dir, workdir, prompt, "prepare", "", "", "", true)
-	if len(prepared.Successful) != 1 || prepared.Successful[0].Resource.Thread != "T-exact" || prepared.Successful[0].Assignment == nil || prepared.Successful[0].Assignment.Creation != "exact_thread_allocated" || prepared.Successful[0].Assignment.LocalPresentation != "absent" || prepared.Successful[0].Assignment.Assignment != "not_attempted" || prepared.Successful[0].Assignment.Execution != "unproven" {
+	prepared := executeSpawnSuccess(t, spawnArgs(dir, workdir, "prepare", "", "", "", true), prompt)
+	if len(prepared.Successful) != 1 || prepared.Successful[0].Resource.Thread != "T-exact" || prepared.Successful[0].Assignment == nil || prepared.Successful[0].Assignment.LocalOwnership != "absent" || prepared.Successful[0].Assignment.LocalPresentation != "absent" {
 		t.Fatalf("prepare=%+v", prepared)
 	}
-	armed := executeNativeSpawn(t, dir, workdir, prompt, "arm", "T-exact", "", "", true)
+	record := loadOnlySpawnAssignment(t, dir)
+	if record.SchemaVersion != config.SpawnAssignmentProjectlessHostSchemaVersion || record.Admission != config.SpawnAssignmentProjectlessHostAdmission || record.PhysicalHost != testPhysicalHost || record.Workdir != workdir || record.Group != "" || record.Thread != "T-exact" || record.Phase != config.SpawnAssignmentPrepared {
+		t.Fatalf("prepared record=%+v", record)
+	}
+	assertOnlySpawnAssignmentStore(t, dir)
+
+	armed := executeSpawnSuccess(t, spawnArgs(dir, workdir, "arm", "T-exact", "", "", true), prompt)
 	if len(armed.Successful) != 1 || armed.Successful[0].Assignment.Assignment != "indeterminate" {
 		t.Fatalf("arm=%+v", armed)
 	}
-
 	messageCalls := 0
 	nativeMessage := func(thread, message string) string {
 		messageCalls++
@@ -45,216 +75,367 @@ func TestNativeSpawnAcceptedFlowUsesOneExactCreateAndOneCoordinatorMessageWithou
 		return "cursor-after-acceptance"
 	}
 	cursor := nativeMessage("T-exact", prompt)
-	finalized := executeNativeSpawn(t, dir, workdir, prompt, "finalize", "T-exact", "authenticated_accepted", cursor, true)
-	if len(finalized.Successful) != 1 || finalized.Successful[0].Assignment == nil || finalized.Successful[0].Assignment.Assignment != "authenticated_accepted" || finalized.Successful[0].Assignment.Receipt != "native_latest_cursor" || finalized.Successful[0].Assignment.LocalPresentation != "exact_client_established" || finalized.Successful[0].Assignment.Execution != "unproven" {
+	finalized := executeSpawnSuccess(t, spawnArgs(dir, workdir, "finalize", "T-exact", "authenticated_accepted", cursor, true), prompt)
+	if len(finalized.Successful) != 1 || finalized.Successful[0].Assignment.Assignment != "authenticated_accepted" || finalized.Successful[0].Assignment.LocalOwnership != "absent" || finalized.Successful[0].Assignment.LocalPresentation != "absent" || finalized.Successful[0].Assignment.Receipt != "native_latest_cursor" {
 		t.Fatalf("finalize=%+v", finalized)
 	}
-	if createCalls != 1 || messageCalls != 1 {
-		t.Fatalf("creates=%d messages=%d", createCalls, messageCalls)
+	if creates != 1 || messageCalls != 1 {
+		t.Fatalf("creates=%d messages=%d", creates, messageCalls)
 	}
-	assertNativeSpawnTransport(t, log, 1)
+	record = loadOnlySpawnAssignment(t, dir)
+	if record.Phase != config.SpawnAssignmentFinalized || record.Outcome != config.SpawnAssignmentAuthenticatedAccepted || record.ReceiptCursor != cursor {
+		t.Fatalf("finalized record=%+v", record)
+	}
+	if strings.Contains(mustRead(t, filepath.Join(dir, config.SpawnAssignmentsFile)), prompt) {
+		t.Fatal("spawn assignment store leaked prompt")
+	}
+	assertOnlySpawnAssignmentStore(t, dir)
+}
+
+func TestProjectlessPhysicalHostExceptionFailsClosedBeforeCreate(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		mutateArgs func([]string) []string
+		want       string
+	}{
+		{name: "authorization absent", mutateArgs: func(args []string) []string {
+			return removeFlag(args, "--owner-authorized-projectless-physical-host", false)
+		}, want: "generalized amux spawn admission closed"},
+		{name: "host absent", mutateArgs: func(args []string) []string { return removeFlag(args, "--physical-host", true) }, want: "generalized amux spawn admission closed"},
+		{name: "host mismatch", mutateArgs: func(args []string) []string { return replaceFlagValue(args, "--physical-host", "other-host") }, want: "exact physical host mismatch"},
+		{name: "group forbidden", mutateArgs: func(args []string) []string { return append(args, "--group", "existing") }, want: "creates no Amux group"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir, workdir := setupSpawnCutoverTest(t)
+			creates := 0
+			spawnCreateThread = func(string, string) (string, error) { creates++; return "T-no", nil }
+			_, err := executeSpawnResult(test.mutateArgs(spawnArgs(dir, workdir, "prepare", "", "", "", true)), "prompt")
+			if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), test.want) || creates != 0 {
+				t.Fatalf("error=%v creates=%d", err, creates)
+			}
+			assertConfigDirEmpty(t, dir)
+		})
+	}
+}
+
+func TestProjectlessPhysicalHostPrepareFailsClosedWhenLocalHostIsUnavailable(t *testing.T) {
+	dir, workdir := setupSpawnCutoverTest(t)
+	spawnPhysicalHost = func() (string, error) { return "", errors.New("hostname unavailable") }
+	creates := 0
+	spawnCreateThread = func(string, string) (string, error) { creates++; return "T-no", nil }
+	_, err := executeSpawnResult(spawnArgs(dir, workdir, "prepare", "", "", "", true), "prompt")
+	if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), "determine exact local physical host") || creates != 0 {
+		t.Fatalf("error=%v creates=%d", err, creates)
+	}
+	assertConfigDirEmpty(t, dir)
+}
+
+func TestProjectlessPhysicalHostCreationIndeterminacyIsPreservedAndNeverRetried(t *testing.T) {
+	dir, workdir := setupSpawnCutoverTest(t)
+	creates := 0
+	spawnCreateThread = func(string, string) (string, error) {
+		creates++
+		return "unparseable", errors.New("connection lost")
+	}
+	args := spawnArgs(dir, workdir, "prepare", "", "", "", true)
+	_, firstErr := executeSpawnResult(args, "prompt")
+	if firstErr == nil || result.ExitCode(firstErr) != result.ExitRuntimeFailure || !strings.Contains(firstErr.Error(), "indeterminate") {
+		t.Fatalf("first error=%v", firstErr)
+	}
 	record := loadOnlySpawnAssignment(t, dir)
-	if record.Thread != "T-exact" || record.Phase != config.SpawnAssignmentFinalized || record.Outcome != config.SpawnAssignmentAuthenticatedAccepted || record.ReceiptCursor != cursor || strings.Contains(mustRead(t, filepath.Join(dir, config.SpawnAssignmentsFile)), prompt) {
+	if record.Phase != config.SpawnAssignmentCreationArmed || record.PhysicalHost != testPhysicalHost || record.Workdir != workdir {
 		t.Fatalf("record=%+v", record)
 	}
-	rows, err := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
-	if err != nil || len(rows) != 1 || rows[0].AssignmentState != config.WorkerAssignmentAuthenticatedAccepted {
-		t.Fatalf("workers=%+v err=%v", rows, err)
+	_, replayErr := executeSpawnResult(args, "prompt")
+	if replayErr == nil || result.ExitCode(replayErr) != result.ExitRejected || !strings.Contains(replayErr.Error(), "will not be retried") || creates != 1 {
+		t.Fatalf("replay error=%v creates=%d", replayErr, creates)
 	}
 }
 
-func TestNativeSpawnHumanOutputSeparatesCreationOwnershipPresentationAssignmentAndExecution(t *testing.T) {
-	dir, workdir, _ := setupNativeSpawnTest(t, "")
-	spawnCreateThread = func(string, string) (string, error) { return "T-human", nil }
-	setReadyNativeSpawnPane(t, workdir, "T-human")
-	prompt := "private human prompt"
-	run := func(phase, thread, outcome, cursor string) string {
-		args := nativeSpawnArgs(dir, workdir, phase, thread, outcome, cursor)
-		args = args[1:] // remove --json
-		var stdout bytes.Buffer
-		if err := (app{stdin: strings.NewReader(prompt), stdout: &stdout}).execute(args); err != nil {
-			t.Fatalf("phase %s: %v", phase, err)
-		}
-		if strings.Contains(stdout.String(), prompt) {
-			t.Fatalf("phase %s leaked prompt: %s", phase, stdout.String())
-		}
-		return stdout.String()
-	}
-	prepared := run("prepare", "", "", "")
-	if !strings.Contains(prepared, "creation=exact_thread_allocated") || !strings.Contains(prepared, "local-ownership=retained") || !strings.Contains(prepared, "local-presentation=absent") || !strings.Contains(prepared, "assignment=not_attempted") || !strings.Contains(prepared, "execution=unproven") {
-		t.Fatalf("prepare output=%q", prepared)
-	}
-	run("arm", "T-human", "", "")
-	finalized := run("finalize", "T-human", "authenticated_accepted", "cursor")
-	if !strings.Contains(finalized, "local-presentation=exact_client_established") || !strings.Contains(finalized, "assignment=authenticated_accepted") || !strings.Contains(finalized, "execution=unproven") {
-		t.Fatalf("finalize output=%q", finalized)
-	}
-}
-
-func TestNativeSpawnCapabilityUnavailableRejectsBeforeCreateOrTmuxMutation(t *testing.T) {
-	dir, workdir, log := setupNativeSpawnTest(t, "")
-	createCalls := 0
-	spawnCreateThread = func(string, string) (string, error) { createCalls++; return "T-no", nil }
-	args := nativeSpawnArgs(dir, workdir, "prepare", "", "", "")
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--native-capability" {
-			args = append(args[:i], args[i+2:]...)
-			break
-		}
-	}
-	err := (app{stdin: strings.NewReader("prompt")}).execute(args)
-	if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), "capability") || createCalls != 0 {
-		t.Fatalf("err=%v creates=%d", err, createCalls)
-	}
-	if data, readErr := os.ReadFile(log); readErr == nil && len(data) != 0 || readErr != nil && !os.IsNotExist(readErr) {
-		t.Fatalf("capability rejection touched tmux: %q err=%v", data, readErr)
-	}
-	if _, statErr := os.Stat(filepath.Join(dir, config.SpawnAssignmentsFile)); !os.IsNotExist(statErr) {
-		t.Fatalf("capability rejection persisted state: %v", statErr)
-	}
-}
-
-func TestNativeSpawnBindsExactTargetPromptModeAndProjectlessCanonicalCWD(t *testing.T) {
-	dir, workdir, log := setupNativeSpawnTest(t, "")
+func TestProjectlessPhysicalHostContinuationRequiresSameAuthorizedHostAndBoundary(t *testing.T) {
+	dir, workdir := setupSpawnCutoverTest(t)
 	spawnCreateThread = func(string, string) (string, error) { return "T-bound", nil }
-	executeNativeSpawn(t, dir, workdir, "prompt", "prepare", "", "", "", true)
+	prompt := "prompt"
+	executeSpawnSuccess(t, spawnArgs(dir, workdir, "prepare", "", "", "", true), prompt)
 
 	for _, test := range []struct {
 		name   string
-		thread string
+		args   []string
 		prompt string
+		want   string
 	}{
-		{name: "thread", thread: "T-other", prompt: "prompt"},
-		{name: "prompt", thread: "T-bound", prompt: "changed"},
+		{name: "authorization omitted", args: spawnArgs(dir, workdir, "arm", "T-bound", "", "", false), prompt: prompt, want: "renewed explicit owner authorization"},
+		{name: "host changed", args: replaceFlagValue(spawnArgs(dir, workdir, "arm", "T-bound", "", "", true), "--physical-host", "other-host"), prompt: prompt, want: "host binding does not exactly match"},
+		{name: "thread changed", args: spawnArgs(dir, workdir, "arm", "T-other", "", "", true), prompt: prompt, want: "does not exactly match"},
+		{name: "prompt changed", args: spawnArgs(dir, workdir, "arm", "T-bound", "", "", true), prompt: "changed", want: "does not exactly match"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			err := executeNativeSpawnError(dir, workdir, test.prompt, "arm", test.thread, "", "")
-			if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), "does not exactly match") {
+			_, err := executeSpawnResult(test.args, test.prompt)
+			if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error=%v", err)
 			}
-		})
-	}
-	if got := mustRead(t, log); strings.Contains(got, "new-session") || strings.Contains(got, "new-window") {
-		t.Fatalf("prepare presented a client before assignment: %s", got)
-	}
-}
-
-func TestNativeSpawnRejectedAndIndeterminateOutcomesStayOrthogonal(t *testing.T) {
-	for _, outcome := range []string{"rejected", "indeterminate"} {
-		t.Run(outcome, func(t *testing.T) {
-			dir, workdir, log := setupNativeSpawnTest(t, "")
-			spawnCreateThread = func(string, string) (string, error) { return "T-" + outcome, nil }
-			setReadyNativeSpawnPane(t, workdir, "T-"+outcome)
-			executeNativeSpawn(t, dir, workdir, "prompt", "prepare", "", "", "", true)
-			executeNativeSpawn(t, dir, workdir, "prompt", "arm", "T-"+outcome, "", "", true)
-			env, err := executeNativeSpawnResult(dir, workdir, "prompt", "finalize", "T-"+outcome, outcome, "")
-			if err == nil || result.ExitCode(err) != result.ExitRuntimeFailure || len(env.Failed) != 1 || env.Failed[0].Assignment == nil || env.Failed[0].Assignment.Assignment != outcome || env.Failed[0].Assignment.LocalPresentation != "exact_client_established" || env.Failed[0].Assignment.Execution != "unproven" {
-				t.Fatalf("env=%+v err=%v", env, err)
-			}
-			assertNativeSpawnTransport(t, log, 1)
-			record := loadOnlySpawnAssignment(t, dir)
-			if string(record.Outcome) != outcome || record.ReceiptCursor != "" {
-				t.Fatalf("record=%+v", record)
+			if record := loadOnlySpawnAssignment(t, dir); record.Phase != config.SpawnAssignmentPrepared {
+				t.Fatalf("record mutated on rejected continuation: %+v", record)
 			}
 		})
 	}
 }
 
-func TestNativeSpawnInterruptionBoundariesNeverRetryCreateOrArmedMessage(t *testing.T) {
-	t.Run("before creation arm persistence", func(t *testing.T) {
-		dir, workdir, _ := setupNativeSpawnTest(t, "")
-		creates := 0
-		spawnCreateThread = func(string, string) (string, error) { creates++; return "T-no", nil }
-		spawnStoreAssignment = func(string, config.SpawnAssignmentRecord) error { return errors.New("disk") }
-		err := executeNativeSpawnError(dir, workdir, "prompt", "prepare", "", "", "")
-		if err == nil || creates != 0 {
-			t.Fatalf("err=%v creates=%d", err, creates)
-		}
-	})
+func TestProjectlessPhysicalHostContinuationFailsClosedWhenCurrentHostCannotProveBinding(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		host func() (string, error)
+		want string
+	}{
+		{name: "host changed", host: func() (string, error) { return "different-host", nil }, want: "exact physical host mismatch"},
+		{name: "host unavailable", host: func() (string, error) { return "", errors.New("hostname unavailable") }, want: "determine exact local physical host"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir, workdir := setupSpawnCutoverTest(t)
+			spawnCreateThread = func(string, string) (string, error) { return "T-host-bound", nil }
+			prompt := "prompt"
+			executeSpawnSuccess(t, spawnArgs(dir, workdir, "prepare", "", "", "", true), prompt)
+			spawnPhysicalHost = test.host
 
-	t.Run("creation armed", func(t *testing.T) {
-		dir, workdir, _ := setupNativeSpawnTest(t, "")
-		creates := 0
-		spawnCreateThread = func(string, string) (string, error) { creates++; return "unparseable", errors.New("interrupted") }
-		if err := executeNativeSpawnError(dir, workdir, "prompt", "prepare", "", "", ""); err == nil {
-			t.Fatal("missing creation-indeterminate error")
-		}
-		err := executeNativeSpawnError(dir, workdir, "prompt", "prepare", "", "", "")
-		if err == nil || result.ExitCode(err) != result.ExitRejected || creates != 1 {
-			t.Fatalf("replay err=%v creates=%d", err, creates)
-		}
-	})
-
-	t.Run("exact create before prepared persistence", func(t *testing.T) {
-		dir, workdir, _ := setupNativeSpawnTest(t, "")
-		creates, stores := 0, 0
-		spawnCreateThread = func(string, string) (string, error) { creates++; return "T-late", nil }
-		realStore := config.StoreSpawnAssignment
-		spawnStoreAssignment = func(path string, record config.SpawnAssignmentRecord) error {
-			stores++
-			if stores == 2 {
-				return errors.New("interrupted")
+			_, err := executeSpawnResult(spawnArgs(dir, workdir, "arm", "T-host-bound", "", "", true), prompt)
+			if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v", err)
 			}
-			return realStore(path, record)
-		}
-		if err := executeNativeSpawnError(dir, workdir, "prompt", "prepare", "", "", ""); err == nil || !strings.Contains(err.Error(), "T-late") {
-			t.Fatalf("error=%v", err)
-		}
-		spawnStoreAssignment = realStore
-		if err := executeNativeSpawnError(dir, workdir, "prompt", "prepare", "", "", ""); err == nil || creates != 1 {
-			t.Fatalf("replay err=%v creates=%d", err, creates)
-		}
-	})
-
-	t.Run("armed is indeterminate and cannot be armed twice", func(t *testing.T) {
-		dir, workdir, _ := setupNativeSpawnTest(t, "")
-		spawnCreateThread = func(string, string) (string, error) { return "T-armed", nil }
-		executeNativeSpawn(t, dir, workdir, "prompt", "prepare", "", "", "", true)
-		executeNativeSpawn(t, dir, workdir, "prompt", "arm", "T-armed", "", "", true)
-		err := executeNativeSpawnError(dir, workdir, "prompt", "arm", "T-armed", "", "")
-		if err == nil || result.ExitCode(err) != result.ExitRejected || loadOnlySpawnAssignment(t, dir).Outcome != config.SpawnAssignmentIndeterminate {
-			t.Fatalf("error=%v", err)
-		}
-	})
+			if record := loadOnlySpawnAssignment(t, dir); record.Phase != config.SpawnAssignmentPrepared {
+				t.Fatalf("record mutated on unprovable host: %+v", record)
+			}
+		})
+	}
 }
 
-func TestNativeSpawnAcceptedThenFinalizationOrPresentationFailurePreservesTruthWithoutResend(t *testing.T) {
-	t.Run("finalization persistence failure remains indeterminate", func(t *testing.T) {
-		dir, workdir, _ := setupNativeSpawnTest(t, "")
-		spawnCreateThread = func(string, string) (string, error) { return "T-finalize", nil }
-		executeNativeSpawn(t, dir, workdir, "prompt", "prepare", "", "", "", true)
-		executeNativeSpawn(t, dir, workdir, "prompt", "arm", "T-finalize", "", "", true)
-		messageCalls := 1 // one native tool success happened outside core
-		spawnStoreAssignment = func(string, config.SpawnAssignmentRecord) error { return errors.New("disk full") }
-		err := executeNativeSpawnError(dir, workdir, "prompt", "finalize", "T-finalize", "authenticated_accepted", "cursor")
-		if err == nil || !strings.Contains(err.Error(), "remains indeterminate") || messageCalls != 1 {
-			t.Fatalf("err=%v messages=%d", err, messageCalls)
-		}
-		spawnStoreAssignment = config.StoreSpawnAssignment
-		if record := loadOnlySpawnAssignment(t, dir); record.Phase != config.SpawnAssignmentArmed || record.Outcome != config.SpawnAssignmentIndeterminate {
-			t.Fatalf("record=%+v", record)
-		}
-	})
+func TestProjectlessPhysicalHostExceptionRejectsExistingOwnershipAndAssignmentOverlap(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T, dir, workdir string)
+		want  string
+	}{
+		{name: "worker", setup: func(t *testing.T, dir, workdir string) {
+			if _, err := config.Store(filepath.Join(dir, config.WorkersFile), config.Row{Workspace: "owned", Window: "worker", Workdir: workdir, Thread: "T-owner"}); err != nil {
+				t.Fatal(err)
+			}
+		}, want: "already owned by worker"},
+		{name: "worker with unprovable relative workdir", setup: func(t *testing.T, dir, _ string) {
+			if err := os.WriteFile(filepath.Join(dir, config.WorkersFile), []byte("owned\tworker\trelative\tT-owner\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, want: "unprovable non-canonical workdir ownership"},
+		{name: "runner", setup: func(t *testing.T, dir, workdir string) {
+			if _, err := config.StoreRunner(filepath.Join(dir, config.RunnersFile), config.RunnerRow{Workspace: "owned", Workdir: workdir}); err != nil {
+				t.Fatal(err)
+			}
+		}, want: "already owned by Amux Runner"},
+		{name: "runner with unprovable relative workdir", setup: func(t *testing.T, dir, _ string) {
+			if err := os.WriteFile(filepath.Join(dir, config.RunnersFile), []byte("owned\trelative\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, want: "unprovable non-canonical workdir ownership"},
+		{name: "assignment", setup: func(t *testing.T, dir, workdir string) {
+			record := config.SpawnAssignmentRecord{
+				SchemaVersion: config.SpawnAssignmentSchemaVersion,
+				Workspace:     "owned",
+				Window:        "assignment",
+				Workdir:       workdir,
+				Thread:        "T-owner",
+				Mode:          "high",
+				PromptDigest:  spawnPromptDigest("existing"),
+				Phase:         config.SpawnAssignmentPrepared,
+				Outcome:       config.SpawnAssignmentNotAttempted,
+			}
+			if err := config.StoreSpawnAssignment(filepath.Join(dir, config.SpawnAssignmentsFile), record); err != nil {
+				t.Fatal(err)
+			}
+		}, want: "already bound to spawn assignment"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir, workdir := setupSpawnCutoverTest(t)
+			test.setup(t, dir, workdir)
+			creates := 0
+			spawnCreateThread = func(string, string) (string, error) { creates++; return "T-no", nil }
+			_, err := executeSpawnResult(spawnArgs(dir, workdir, "prepare", "", "", "", true), "prompt")
+			if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), test.want) || creates != 0 {
+				t.Fatalf("error=%v creates=%d", err, creates)
+			}
+		})
+	}
+}
 
-	t.Run("accepted before presentation failure", func(t *testing.T) {
-		dir, workdir, log := setupNativeSpawnTest(t, "create")
-		spawnCreateThread = func(string, string) (string, error) { return "T-present", nil }
-		executeNativeSpawn(t, dir, workdir, "prompt", "prepare", "", "", "", true)
-		executeNativeSpawn(t, dir, workdir, "prompt", "arm", "T-present", "", "", true)
-		err := executeNativeSpawnError(dir, workdir, "prompt", "finalize", "T-present", "authenticated_accepted", "cursor")
-		if err == nil || !strings.Contains(err.Error(), "truth is preserved") || !strings.Contains(err.Error(), "must not be resent") {
-			t.Fatalf("error=%v", err)
+func TestProjectlessPhysicalHostExactCreatePersistenceFailureStaysArmedAndNeverRetries(t *testing.T) {
+	dir, workdir := setupSpawnCutoverTest(t)
+	creates, stores := 0, 0
+	spawnCreateThread = func(string, string) (string, error) {
+		creates++
+		return "T-created", nil
+	}
+	realStore := config.StoreSpawnAssignment
+	spawnStoreAssignment = func(path string, record config.SpawnAssignmentRecord) error {
+		stores++
+		if stores == 2 {
+			return errors.New("persistence interrupted")
 		}
-		record := loadOnlySpawnAssignment(t, dir)
-		if record.Outcome != config.SpawnAssignmentAuthenticatedAccepted || record.ReceiptCursor != "cursor" {
-			t.Fatalf("record=%+v", record)
+		return realStore(path, record)
+	}
+	args := spawnArgs(dir, workdir, "prepare", "", "", "", true)
+	_, firstErr := executeSpawnResult(args, "prompt")
+	if firstErr == nil || result.ExitCode(firstErr) != result.ExitRuntimeFailure || !strings.Contains(firstErr.Error(), "creation is indeterminate") {
+		t.Fatalf("first error=%v", firstErr)
+	}
+	spawnStoreAssignment = realStore
+	if record := loadOnlySpawnAssignment(t, dir); record.Phase != config.SpawnAssignmentCreationArmed || record.Thread != "" {
+		t.Fatalf("record=%+v", record)
+	}
+	_, replayErr := executeSpawnResult(args, "prompt")
+	if replayErr == nil || result.ExitCode(replayErr) != result.ExitRejected || !strings.Contains(replayErr.Error(), "will not be retried") || creates != 1 {
+		t.Fatalf("replay error=%v creates=%d", replayErr, creates)
+	}
+}
+
+func TestPreCutoverSpawnDrainsInItsExistingStoreWithoutResendOrDualWrite(t *testing.T) {
+	dir, workdir := setupSpawnCutoverTest(t)
+	prompt := "legacy exact prompt"
+	record := config.SpawnAssignmentRecord{
+		SchemaVersion: config.SpawnAssignmentSchemaVersion,
+		Workspace:     "alpha",
+		Window:        "worker",
+		Workdir:       workdir,
+		Thread:        "T-legacy",
+		Mode:          "high",
+		Group:         "legacy-group",
+		PromptDigest:  spawnPromptDigest(prompt),
+		Phase:         config.SpawnAssignmentPrepared,
+		Outcome:       config.SpawnAssignmentNotAttempted,
+	}
+	if err := config.StoreSpawnAssignment(filepath.Join(dir, config.SpawnAssignmentsFile), record); err != nil {
+		t.Fatal(err)
+	}
+	otherStores := map[string]string{
+		config.WorkersFile:    "alpha\tworker\t" + workdir + "\tT-legacy\n",
+		config.GroupsFile:     "legacy-group\tT-legacy\tmember\n",
+		config.OperationsFile: "{\"sentinel\":true}\n",
+	}
+	for name, contents := range otherStores {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
 		}
-		rows, _ := config.LoadReadOnly(filepath.Join(dir, config.WorkersFile))
-		if len(rows) != 1 || rows[0].AssignmentState != config.WorkerAssignmentAuthenticatedAccepted {
-			t.Fatalf("rows=%+v", rows)
+	}
+
+	armArgs := spawnArgs(dir, workdir, "arm", "T-legacy", "", "", false)
+	armArgs = append(armArgs, "--group", "legacy-group")
+	executeSpawnSuccess(t, armArgs, prompt)
+	if record := loadOnlySpawnAssignment(t, dir); record.SchemaVersion != config.SpawnAssignmentSchemaVersion || record.Phase != config.SpawnAssignmentArmed || record.Outcome != config.SpawnAssignmentIndeterminate {
+		t.Fatalf("armed legacy record=%+v", record)
+	}
+
+	finalizeArgs := spawnArgs(dir, workdir, "finalize", "T-legacy", "authenticated_accepted", "cursor", false)
+	finalizeArgs = append(finalizeArgs, "--group", "legacy-group")
+	executeSpawnSuccess(t, finalizeArgs, prompt)
+	if record := loadOnlySpawnAssignment(t, dir); record.Phase != config.SpawnAssignmentFinalized || record.Outcome != config.SpawnAssignmentAuthenticatedAccepted || record.ReceiptCursor != "cursor" {
+		t.Fatalf("finalized legacy record=%+v", record)
+	}
+	for name, want := range otherStores {
+		if got := mustRead(t, filepath.Join(dir, name)); got != want {
+			t.Errorf("%s changed during drain\ngot:  %q\nwant: %q", name, got, want)
 		}
-		assertNativeSpawnTransport(t, log, 1)
-	})
+	}
+}
+
+func TestAlreadyArmedPreCutoverSpawnFinalizesWithoutCreateArmOrLifecycleWrite(t *testing.T) {
+	dir, workdir := setupSpawnCutoverTest(t)
+	prompt := "already sent legacy prompt"
+	record := config.SpawnAssignmentRecord{
+		SchemaVersion: config.SpawnAssignmentSchemaVersion,
+		Workspace:     "alpha",
+		Window:        "worker",
+		Workdir:       workdir,
+		Thread:        "T-armed-legacy",
+		Mode:          "high",
+		PromptDigest:  spawnPromptDigest(prompt),
+		Phase:         config.SpawnAssignmentArmed,
+		Outcome:       config.SpawnAssignmentIndeterminate,
+	}
+	if err := config.StoreSpawnAssignment(filepath.Join(dir, config.SpawnAssignmentsFile), record); err != nil {
+		t.Fatal(err)
+	}
+	spawnCreateThread = func(string, string) (string, error) {
+		t.Fatal("already-armed drain attempted replacement creation")
+		return "", nil
+	}
+	finalizeArgs := spawnArgs(dir, workdir, "finalize", record.Thread, "authenticated_accepted", "existing-message-cursor", false)
+	executeSpawnSuccess(t, finalizeArgs, prompt)
+
+	finalized := loadOnlySpawnAssignment(t, dir)
+	if finalized.Phase != config.SpawnAssignmentFinalized || finalized.Outcome != config.SpawnAssignmentAuthenticatedAccepted || finalized.ReceiptCursor != "existing-message-cursor" {
+		t.Fatalf("finalized record=%+v", finalized)
+	}
+	assertOnlySpawnAssignmentStore(t, dir)
+}
+
+func TestPreCutoverDrainRejectsPostCutoverFlagsAndUnprovableSchema(t *testing.T) {
+	legacy := config.SpawnAssignmentRecord{SchemaVersion: config.SpawnAssignmentSchemaVersion}
+	if err := validateSpawnContinuationAdmission(legacy, selectors{PhysicalHost: testPhysicalHost, OwnerAuthorizedProjectlessPhysicalHost: true}); err == nil || !strings.Contains(err.Error(), "unchanged legacy boundary") {
+		t.Fatalf("legacy flags error=%v", err)
+	}
+	if err := validateSpawnContinuationAdmission(config.SpawnAssignmentRecord{}, selectors{}); err == nil || !strings.Contains(err.Error(), "cannot prove pre-cutover") {
+		t.Fatalf("unprovable schema error=%v", err)
+	}
+}
+
+func TestSpawnContinuationRejectsAmbiguousStoredProvenanceBeforeMutation(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		provenance string
+		exception  bool
+		want       string
+	}{
+		{name: "duplicate shadowed schema", provenance: `"schema_version":1,"schema_version":2,"admission":"` + config.SpawnAssignmentProjectlessHostAdmission + `","physical_host":"` + testPhysicalHost + `"`, want: `duplicate JSON member "schema_version"`},
+		{name: "duplicate shadowed admission", provenance: `"schema_version":2,"admission":"wrong","admission":"` + config.SpawnAssignmentProjectlessHostAdmission + `","physical_host":"` + testPhysicalHost + `"`, exception: true, want: `duplicate JSON member "admission"`},
+		{name: "case variant schema", provenance: `"Schema_Version":1`, want: `non-canonical spawn provenance member "Schema_Version"`},
+		{name: "case variant host", provenance: `"schema_version":2,"admission":"` + config.SpawnAssignmentProjectlessHostAdmission + `","Physical_Host":"` + testPhysicalHost + `"`, exception: true, want: `non-canonical spawn provenance member "Physical_Host"`},
+		{name: "legacy explicit empty admission", provenance: `"schema_version":1,"admission":""`, want: `must not contain "admission"`},
+		{name: "legacy explicit null admission", provenance: `"schema_version":1,"admission":null`, want: `must not contain "admission"`},
+		{name: "legacy explicit empty host", provenance: `"schema_version":1,"physical_host":""`, want: `must not contain "physical_host"`},
+		{name: "legacy explicit null host", provenance: `"schema_version":1,"physical_host":null`, want: `must not contain "physical_host"`},
+		{name: "mixed legacy and exception provenance", provenance: `"schema_version":1,"admission":"` + config.SpawnAssignmentProjectlessHostAdmission + `","physical_host":"` + testPhysicalHost + `"`, want: `must not contain "admission"`},
+		{name: "schema 2 missing host", provenance: `"schema_version":2,"admission":"` + config.SpawnAssignmentProjectlessHostAdmission + `"`, exception: true, want: "missing schema-2 physical_host"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir, workdir := setupSpawnCutoverTest(t)
+			prompt := "unchanged malformed provenance prompt"
+			contents := rawSpawnAssignmentDocument(workdir, prompt, test.provenance)
+			path := filepath.Join(dir, config.SpawnAssignmentsFile)
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			creates, stores := 0, 0
+			spawnCreateThread = func(string, string) (string, error) { creates++; return "T-no", nil }
+			spawnStoreAssignment = func(string, config.SpawnAssignmentRecord) error { stores++; return nil }
+			_, err := executeSpawnResult(spawnArgs(dir, workdir, "arm", "T-malformed", "", "", test.exception), prompt)
+			if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v, want %q", err, test.want)
+			}
+			if creates != 0 || stores != 0 {
+				t.Fatalf("rejected continuation creates=%d stores=%d", creates, stores)
+			}
+			if got := mustRead(t, path); got != contents {
+				t.Fatalf("rejected continuation changed store\ngot:  %s\nwant: %s", got, contents)
+			}
+		})
+	}
+}
+
+func TestSpawnDryRunAppliesAdmissionAndExactStateChecksWithoutWriting(t *testing.T) {
+	dir, workdir := setupSpawnCutoverTest(t)
+	spawnCreateThread = func(string, string) (string, error) { t.Fatal("dry-run created a thread"); return "", nil }
+	args := append(spawnArgs(dir, workdir, "prepare", "", "", "", true), "--dry-run")
+	env := executeSpawnSuccess(t, args, "prompt")
+	if len(env.Planned) != 1 || env.Planned[0].Assignment.LocalOwnership != "absent" {
+		t.Fatalf("dry-run=%+v", env)
+	}
+	assertConfigDirEmpty(t, dir)
 }
 
 func TestCreateLocalAmpThreadUsesCanonicalCWDAndExactModeOnce(t *testing.T) {
@@ -276,47 +457,25 @@ func TestSpawnPromptIsBounded(t *testing.T) {
 	}
 }
 
-func setupNativeSpawnTest(t *testing.T, fail string) (dir, workdir, log string) {
+func setupSpawnCutoverTest(t *testing.T) (dir, workdir string) {
 	t.Helper()
 	dir, workdir = t.TempDir(), t.TempDir()
-	bin := t.TempDir()
-	log = filepath.Join(bin, "tmux.log")
-	script := `#!/bin/sh
-printf '%s\n' "$*" >> ` + shellSingleQuote(log) + `
-case "$1" in
-  has-session) exit 1 ;;
-  new-session) test "` + fail + `" = create && exit 1; printf 'alpha\tworker\t@1\t%%1\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-esac
-exit 77
-`
-	writeExecutable(t, filepath.Join(bin, "tmux"), script)
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-	oldCreate, oldStore := spawnCreateThread, spawnStoreAssignment
-	oldInspect, oldSettle := spawnInspectPaneByID, spawnReadinessSettle
+	oldCreate, oldStore, oldHost := spawnCreateThread, spawnStoreAssignment, spawnPhysicalHost
 	spawnCreateThread = func(string, string) (string, error) { t.Fatal("unexpected create"); return "", nil }
 	spawnStoreAssignment = config.StoreSpawnAssignment
-	spawnReadinessSettle = 0
+	spawnPhysicalHost = func() (string, error) { return testPhysicalHost, nil }
 	t.Cleanup(func() {
-		spawnCreateThread, spawnStoreAssignment = oldCreate, oldStore
-		spawnInspectPaneByID, spawnReadinessSettle = oldInspect, oldSettle
+		spawnCreateThread, spawnStoreAssignment, spawnPhysicalHost = oldCreate, oldStore, oldHost
 	})
-	return dir, workdir, log
+	return dir, workdir
 }
 
-func setReadyNativeSpawnPane(t *testing.T, workdir, thread string) {
-	t.Helper()
-	command := tmux.ContinueCommandWithEnv(workdir, thread, map[string]string{
-		"AMUX_WORKSPACE": "alpha", "AMUX_SESSION": "alpha", "AMUX_WINDOW": "worker", "AMUX_THREAD_ID": thread, "AMUX_WORKDIR": workdir,
-	})
-	spawnInspectPaneByID = func(string) (tmux.WindowPane, error) {
-		return tmux.WindowPane{Session: "alpha", Window: "worker", WindowID: "@1", PaneID: "%1", Path: workdir, Command: "amp", StartCommand: command}, nil
-	}
-}
-
-func nativeSpawnArgs(dir, workdir, phase, thread, outcome, cursor string) []string {
+func spawnArgs(dir, workdir, phase, thread, outcome, cursor string, exception bool) []string {
 	args := []string{"--json", "--config-dir", dir, "spawn", "--assignment-phase", phase, "--native-capability", "existing-thread-message-v1", "--workdir", workdir, "--workspace", "alpha", "--window", "worker", "--mode", "high", "--prompt-file", "-"}
+	if exception {
+		args = append(args, "--owner-authorized-projectless-physical-host", "--physical-host", testPhysicalHost)
+	}
 	if thread != "" {
 		args = append(args, "--thread", thread)
 	}
@@ -329,28 +488,23 @@ func nativeSpawnArgs(dir, workdir, phase, thread, outcome, cursor string) []stri
 	return args
 }
 
-func executeNativeSpawn(t *testing.T, dir, workdir, prompt, phase, thread, outcome, cursor string, wantSuccess bool) result.Envelope {
+func executeSpawnSuccess(t *testing.T, args []string, prompt string) result.Envelope {
 	t.Helper()
-	env, err := executeNativeSpawnResult(dir, workdir, prompt, phase, thread, outcome, cursor)
-	if wantSuccess && err != nil {
-		t.Fatalf("phase %s: %v", phase, err)
+	env, err := executeSpawnResult(args, prompt)
+	if err != nil {
+		t.Fatalf("execute %v: %v", args, err)
 	}
 	return env
 }
 
-func executeNativeSpawnResult(dir, workdir, prompt, phase, thread, outcome, cursor string) (result.Envelope, error) {
+func executeSpawnResult(args []string, prompt string) (result.Envelope, error) {
 	var stdout bytes.Buffer
-	err := (app{stdin: strings.NewReader(prompt), stdout: &stdout}).execute(nativeSpawnArgs(dir, workdir, phase, thread, outcome, cursor))
+	err := (app{stdin: strings.NewReader(prompt), stdout: &stdout}).execute(args)
 	var env result.Envelope
 	if decodeErr := json.NewDecoder(&stdout).Decode(&env); decodeErr != nil {
-		return env, decodeErr
+		return env, fmt.Errorf("decode result %q: %w", stdout.String(), decodeErr)
 	}
 	return env, err
-}
-
-func executeNativeSpawnError(dir, workdir, prompt, phase, thread, outcome, cursor string) error {
-	_, err := executeNativeSpawnResult(dir, workdir, prompt, phase, thread, outcome, cursor)
-	return err
 }
 
 func loadOnlySpawnAssignment(t *testing.T, dir string) config.SpawnAssignmentRecord {
@@ -362,17 +516,59 @@ func loadOnlySpawnAssignment(t *testing.T, dir string) config.SpawnAssignmentRec
 	return records[0]
 }
 
-func assertNativeSpawnTransport(t *testing.T, log string, wantCreates int) {
+func assertOnlySpawnAssignmentStore(t *testing.T, dir string) {
 	t.Helper()
-	got := mustRead(t, log)
-	if strings.Count(got, "new-session ") != wantCreates {
-		t.Fatalf("presentation creates=%d want=%d log=%s", strings.Count(got, "new-session "), wantCreates, got)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, forbidden := range []string{"load-buffer", "paste-buffer", "send-keys", "capture-pane", "threads search", "threads export", "kill-window", "archive"} {
-		if strings.Contains(got, forbidden) {
-			t.Fatalf("native route used forbidden %q: %s", forbidden, got)
+	if len(entries) != 1 || entries[0].Name() != config.SpawnAssignmentsFile {
+		t.Fatalf("exception created unrelated lifecycle state: %+v", entries)
+	}
+}
+
+func assertConfigDirEmpty(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("rejected/dry-run spawn wrote config: %+v", entries)
+	}
+}
+
+func spawnPromptDigest(prompt string) string {
+	return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(prompt)))
+}
+
+func rawSpawnAssignmentDocument(workdir, prompt, provenance string) string {
+	return fmt.Sprintf(`{"schema_version":1,"assignments":[{%s,"workspace":"alpha","window":"worker","workdir":%q,"thread":"T-malformed","mode":"high","prompt_digest":%q,"phase":"prepared","assignment":"not_attempted"}]}`, provenance, workdir, spawnPromptDigest(prompt))
+}
+
+func removeFlag(args []string, name string, hasValue bool) []string {
+	for i, arg := range args {
+		if arg != name {
+			continue
+		}
+		end := i + 1
+		if hasValue {
+			end++
+		}
+		return append(append([]string{}, args[:i]...), args[end:]...)
+	}
+	return args
+}
+
+func replaceFlagValue(args []string, name, value string) []string {
+	args = append([]string{}, args...)
+	for i := range args {
+		if args[i] == name {
+			args[i+1] = value
+			return args
 		}
 	}
+	return args
 }
 
 func mustRead(t *testing.T, path string) string {

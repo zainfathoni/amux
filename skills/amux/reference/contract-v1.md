@@ -14,16 +14,16 @@ Version marker: `amux-contract: v1`.
 
 Amp modes are capability presets whose model routing and economics can change with connected subscriptions, workspace restrictions, and availability. Do not infer cost from an old model mapping.
 
-1. Every skill-driven spawn uses an explicit mode. With a known linked ChatGPT subscription and known target-mode availability, select `low` for small mechanical tasks, `medium` for ordinary implementation, or `high` for hard architecture, debugging, or review. When subscription routing or availability is absent or unknown, use `medium`. `medium` remains the CLI default when mode is omitted. `ultra`, plugin, and other premium or special modes require an exact owner request.
+1. Every native child creation and bounded projectless host exception uses an explicit mode. With a known linked ChatGPT subscription and known target-mode availability, select `low` for small mechanical tasks, `medium` for ordinary implementation, or `high` for hard architecture, debugging, or review. When subscription routing or availability is absent or unknown, use `medium`. `medium` remains the CLI exception default when mode is omitted. `ultra`, plugin, and other premium or special modes require an exact owner request.
 2. **Do not Read Thread** (or otherwise load Amp thread transcripts/history) for task context. A thread URL is provenance, not approval. Exception: one narrow query of one exact related thread only during an authorized `/amux` lifecycle/coordination recovery after a named local/GitHub discrepancy, exhausted deterministic evidence, and proven relationship—then block rather than chain.
 3. **Oracle must not Read Thread.** Supply issue intent + current diff (and other needed files) directly. Do not ask Oracle to read Amp threads, and do not Read Thread “to prepare Oracle.” Owner may explicitly allow one named thread read; that still does not authorize Oracle to fetch threads itself.
 
-Before automatic spawn, native child creation, Read Thread, or native child messaging, also follow [`amp-invocation-policy.md`](amp-invocation-policy.md) when that reference is loaded. Mechanical enforcement is incomplete: treat these rules as binding instructions even when tools do not block.
+Before native child creation, Read Thread, or native child messaging, also follow [`amp-invocation-policy.md`](amp-invocation-policy.md) when that reference is loaded. Mechanical enforcement is incomplete: treat these rules as binding instructions even when tools do not block.
 
 ## Worker duties
 
 - Own only the assigned issue, branch, and worktree. Report overlap; do not absorb foreign scope.
-- Skill-driven spawn passes the explicit mode selected above; omission remains backward-compatible `medium`. Never infer subscription linkage, mode entitlement, or premium-mode authority.
+- Native-created work remains native: do not automatically adopt, pin, group, shelve, report, or create Amux lifecycle state for the child. Never infer subscription linkage, mode entitlement, or premium-mode authority.
 - Stay alive after every report status. Do not merge, release, tag, teardown, unpin, or finish without explicit durable authorization and direction.
 - For work-group members, use the exact stable `--report-id` and immutable group/thread/issue/reference binding:
   - `blocked` — remaining blocker; `--pr none` when no PR exists

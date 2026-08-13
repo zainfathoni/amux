@@ -2130,6 +2130,15 @@ func TestCanonicalWorkerCompletionsAreLeafSpecific(t *testing.T) {
 					t.Fatalf("%s completion missing %q\n%s", shell, want, output)
 				}
 			}
+			cutoverFlags := []string{"--physical-host", "--owner-authorized-projectless-physical-host"}
+			if shell == "fish" {
+				cutoverFlags = []string{"-l 'physical-host'", "-l 'owner-authorized-projectless-physical-host'"}
+			}
+			for _, want := range cutoverFlags {
+				if !completionLineContains(output, "spawn", want) {
+					t.Fatalf("%s spawn completion missing cutover flag %q\n%s", shell, want, output)
+				}
+			}
 			for _, removed := range []string{"--idempotency-key", "--message-file", "--title-prefix"} {
 				if completionLineContains(output, "spawn", removed) {
 					t.Fatalf("%s spawn completion retains removed flag %q\n%s", shell, removed, output)

@@ -2,29 +2,26 @@
 
 These are skill workflows. Only commands beginning with literal `amux` are CLI commands; `/amux health`, `/amux sprawl`, and `/amux finish` are orchestration labels.
 
-## Spawn a fresh worker
+## Create fresh native work
 
-For an Amp Workspace Project, create one thread with Amp's authenticated native creation, delivering the complete task-only assignment in that creation request. Select an explicit mode: with a known linked ChatGPT subscription and known target-mode availability, use `low` for small mechanical work, `medium` for ordinary implementation, or `high` for hard architecture, debugging, or review; otherwise use `medium`. Keep `ultra`, plugin, and other special modes owner-explicit. Select `orb`, local execution where supported, or one exact Amp runner ID without fallback. Create it directly on the executor and workdir intended for the work. When physical files or local state matter, the assignment names the exact physical runner ID and canonical workdir; do not use Orb creation followed by physical adoption as migration. Adoption neither changes nor verifies continued affinity. Include one line naming the absolute path to the loaded skill's `reference/contract-v1.md` for a one-time read.
+For ordinary new work, make one authenticated native Amp thread-creation call and deliver the complete task-only assignment in that request. Select an explicit mode: with a known linked ChatGPT subscription and known target-mode availability, use `low` for small mechanical work, `medium` for ordinary implementation, or `high` for hard architecture, debugging, or review; otherwise use `medium`. Keep `ultra`, plugin, and other special modes owner-explicit.
 
-Then adopt the exact returned thread:
+Select the exact Workspace Project and Orb, or list live runners immediately before creation and select one exact runner ID whose working directory is the intended canonical workdir. Do not silently fall back between Orb and runner, between runner IDs, or between workdirs. When physical files or local state matter, use that exact live runner; an Orb is not a substitute. Include one line naming the absolute path to the loaded skill's `reference/contract-v1.md` for a one-time read.
 
-```sh
-amux --dry-run --json worker adopt --thread <exact-native-thread> --workspace <workspace> --window <semantic-slug> --workdir <path> [--group <exact-group>]
-amux --json worker adopt --thread <exact-native-thread> --workspace <workspace> --window <semantic-slug> --workdir <path> [--group <exact-group>]
-```
+Preserve the authenticated native request, exact returned thread, parent/child route, and reply route. Do not automatically invoke `amux worker adopt`, pin, group, shelve, report, or create any Amux lifecycle representation. Same-directory Amux ownership remains separate and unmanaged. If native creation is rejected, indeterminate, or loses tool connectivity, stop without retry, fallback, search, adoption, or alternate creation.
 
-The coordinator makes one native creation invocation and preserves its authenticated request plus successful returned thread identity as the bounded receipt. Native creation does not return a prompt digest or separate delivery acknowledgement, so do not claim exactly-once delivery or independently re-prove it through amux. amux adoption owns only local catalog/group/tmux state: it sends no message, presses no Enter, parses no composer, reads no transcript, and does not re-home native execution. New adoption canonicalizes the owner-supplied workdir; doctor preserves legacy catalog spelling and never promotes a relative legacy value into a location claim. Adoption/doctor report native executor, runner ID, and execution affinity as `unknown` because those facts are not in amux's local source of truth; never infer them from its pane or workdir. If native creation is indeterminate, stop rather than creating another thread.
-
-For a projectless repository that is not an Amp Workspace Project, select the intended physical executor and use the lean local exception there:
+Only when an exact owner instruction authorizes one projectless physical-host placement that native project-backed Orb/runner creation cannot express, run the bounded local exception on that host. Determine its byte-exact local hostname first; do not infer or alias it:
 
 ```sh
-amux --json spawn --assignment-phase prepare --native-capability existing-thread-message-v1 --workdir <canonical-path> --workspace <workspace> --window <semantic-slug> [--group <existing-group>] --mode medium --prompt-file -
-amux --json spawn --assignment-phase arm --native-capability existing-thread-message-v1 --thread <exact-prepared-thread> --workdir <same-path> --workspace <same-workspace> --window <same-slug> [--group <same-group>] --mode medium --prompt-file -
+amux --json spawn --assignment-phase prepare --owner-authorized-projectless-physical-host --physical-host <exact-local-hostname> --native-capability existing-thread-message-v1 --workdir <canonical-path> --workspace <assignment-namespace> --window <assignment-key> --mode medium --prompt-file -
+amux --json spawn --assignment-phase arm --owner-authorized-projectless-physical-host --physical-host <same-hostname> --native-capability existing-thread-message-v1 --thread <exact-prepared-thread> --workdir <same-path> --workspace <same-namespace> --window <same-key> --mode medium --prompt-file -
 # issue one thread_interact action=message call to the exact prepared thread with the unchanged prompt
-amux --json spawn --assignment-phase finalize --assignment-outcome <rejected|indeterminate|authenticated_accepted> [--latest-cursor <successful-tool-latestCursor>] --native-capability existing-thread-message-v1 --thread <exact-prepared-thread> --workdir <same-path> --workspace <same-workspace> --window <same-slug> [--group <same-group>] --mode medium --prompt-file -
+amux --json spawn --assignment-phase finalize --owner-authorized-projectless-physical-host --physical-host <same-hostname> --assignment-outcome <rejected|indeterminate|authenticated_accepted> [--latest-cursor <successful-tool-latestCursor>] --native-capability existing-thread-message-v1 --thread <exact-prepared-thread> --workdir <same-path> --workspace <same-namespace> --window <same-key> --mode medium --prompt-file -
 ```
 
-Before `prepare`, require that this coordinator exposes the authenticated native existing-thread `thread_interact` message action; otherwise stop before amux, thread creation, or tmux mutation. Each phase re-reads and bounds the complete prompt and binds it by digest without persisting prompt text. `prepare` durably arms creation, invokes local `amp threads new --mode <exact-mode>` exactly once in the canonical cwd, retains its exact returned ID and ownership, but creates no pane. `arm` verifies exact thread/cwd/mode/group/digest equality and durably records assignment as indeterminate before remote mutation. Only after successful arm, call `thread_interact` once with `action: message`, `thread: <exact-prepared-ID>`, and the unchanged prompt. Explicit rejection finalizes `rejected`; tool connection, undocumented, or uncertain results finalize `indeterminate`; success plus returned `latestCursor` finalizes `authenticated_accepted`. Finalize persists assignment truth before a presentation-only exact pane. It performs no load-buffer, paste-buffer, Enter, capture, search, export, alternate receiver, cleanup, or archive. Success/latestCursor proves only authenticated exact-thread acceptance/queueing, never message ID, inference, execution, or physical executor/workdir affinity. Do not automatically retry any creation or armed message. Executor selection—not an Orb fallback or amux Runner—routes the local command to the intended physical host.
+Before `prepare`, require the authenticated native existing-thread message action; otherwise stop before Amux or thread mutation. The command checks the requested hostname equals the local hostname and writes schema-2 admission `spawn-native-cutover-v1/projectless-physical-host-exception`, host, canonical workdir, mode, assignment key, and prompt digest before one local `amp threads new`. It creates no worker, group, operation, shelf, pane, or adoption state. `arm` verifies the unchanged boundary and durably records assignment as indeterminate before the one native message. `finalize` updates only `spawn-assignments.json`. Success/latestCursor proves acceptance/queueing only, never execution. Any ambiguity preserves indeterminacy; never retry, fall back, reroute, rebind, adopt, search, clean up, or use another transport.
+
+Pre-cutover schema-1 assignments are drain-only. Never run `prepare` for them. A prepared exact record may arm once and receive its one message; an already armed record may only finalize without resend. Supply the unchanged legacy group flag when the record contains one, but do not add or change group intent. Drain transitions write only the existing assignment store and create no pane or native replacement state.
 
 Runner identity is exact: Amp-native `runner(id)` selects that runner, while amux Runner means the separately configured local `amp --no-tui` process. Never substitute one for the other or fall back between them. Native creation currently provides no durable workdir/message receipt that amux can independently verify; retain the returned identity and stop on an indeterminate result.
 
@@ -32,41 +29,31 @@ Preserve the Read Thread discrepancy fence. Only after an authorized `/amux` lif
 
 ## Sprawl independent issue workers
 
-Fetch `origin/main`; inspect every requested issue, comment, native dependency, active branch, PR, worktree, and likely file/API overlap before side effects. Sequence blocked or overlapping work. Give each independent issue one dedicated branch/worktree and one native-created thread.
+Fetch `origin/main`; inspect every requested issue, comment, native dependency, active branch, PR, worktree, and likely file/API overlap before side effects. Sequence blocked or overlapping work. Give each independent issue one dedicated branch/worktree and one authenticated native-created thread.
 
-Use an issue-bearing branch/worktree and an issue-unprefixed semantic window. Create the worktree from fresh `origin/main`, compose a task-only assignment with issue ownership, acceptance criteria, tests, PR requirements, exact group/report identity when coordinating, and the absolute contract path. Create once natively with explicit executor and mode, then use `worker adopt` as above. Verify the returned thread, worker row, tmux pane, worktree, branch, and assignment. Never infer delivery from pane text or search for an alternate receiver.
+Use an issue-bearing branch/worktree and an issue-unprefixed semantic title. Create the worktree from fresh `origin/main`, compose a task-only assignment with issue ownership, acceptance criteria, tests, PR requirements, and the absolute contract path, then create once natively with explicit executor and mode. For a physical worktree, the exact selected live runner must already be rooted at that canonical workdir. Verify the native returned thread, executor selection, worktree, branch, and assignment; do not create an Amux worker/group/report representation. Never infer delivery from pane text or search for an alternate receiver.
 
 ## Coordinate a durable issue work group
 
-Durable group, report, and callback stores—not tmux text—are authoritative.
+For **new** issue coordination, use Amp's native parent/child association, authenticated child creation, reply routing, messaging, and waiting. Select every child's exact executor/workdir at creation, deliver a task-only assignment naming the absolute path to `contract-v1.md`, and leave it unmanaged by Amux. Do not declare an Amux group, adopt a worker, register a callback, or create an Amux report for native-created work.
+
+The procedure below is compatibility-only for a durable group, member worker, callback, and report identity that already exist and need to drain. Durable group, report, and callback stores—not tmux text—remain authoritative for that pre-cutover state. Do not add a new member, task, group, report, or callback scope.
 
 Every durable task-group Lead title starts with `🎖️ `. Reserve that prefix for Leads and never deliberately apply it to member workers. The task Lead is the exact thread coordinating this task, independent of the group's authoritative coordinator role. The marker is presentation only: it conveys neither executor placement nor authoritative group role. Apply this convention independently of executor choice.
 
-### 1. Preflight authoritative state and bootstrap the CLI
+### 1. Preflight existing authoritative state
 
-Fetch `origin/main`; read issue bodies/comments and native parent/sub-issue/blocked-by/blocking relationships; compare active branches, PRs, worktrees, and likely file/API overlap. Establish one exact durable group and stable report ID before mutation. Resolve the loaded skill's `reference/contract-v1.md` to an absolute path (including installed roots such as `~/.agents/skills/amux`, `~/.config/agents/skills/amux`, or `~/.config/amp/skills/amux`); never send an unresolved relative path. Verify current help contains `group`, `callback`, `report`, and `worker adopt`; if not, build one absolute CLI path from a fresh `origin/main` archive and use it consistently—do not fall back to stale bare `amux`. Do not hand-edit registries. Treat the resolved group/report identity as immutable coordination input. No thread, worktree, group, callback, label, or report mutation may precede this step. Create branches/worktrees only after identity is fixed, and serialize mutations protected by the machine lock.
+Read the existing group, member, callback, and report records and verify the exact thread/workdir bindings. Resolve the loaded skill's `reference/contract-v1.md` to an absolute path only for an already-bound worker that still needs it. Verify current help contains the drain commands; do not bootstrap by creating a replacement worker or editing registries. If any exact identity or pre-cutover provenance is absent, stop.
 
-After this preflight succeeds, set the exact durable task-group Lead title with `amp threads rename <lead-thread> "🎖️ <task-title>"`; do not rely on a generated title. If rename fails, preserve the exact native thread identity and caller-side receipt, create no replacement, and stop before group or adoption mutations.
+Do not rename a thread merely to drain it. Existing presentation metadata conveys no new authority.
 
-### 2. Declare the group and register the verified coordinator lease
+### 2. Revalidate the existing coordinator lease
 
-```sh
-amux --json group declare --group <durable-issue-group> --thread <coordinator-thread>
-amux --json callback register --group <durable-issue-group> --thread <coordinator-thread> --pane <coordinator-pane>
-```
+Inspect the existing group coordinator and callback. Re-register only the same exact pre-cutover coordinator/group scope when recovery of that existing report workflow requires a new lease generation; never guess a pane or register one for new work.
 
-Independently verify the coordinator pane and returned lease identity. A restart or identity change requires explicit registration of a new generation; never guess a pane.
+### 3. Continue only the existing member
 
-### 3. Native-create and adopt the authoritative thread
-
-Create a dedicated worktree from fresh `origin/main`. Native-create one thread on the executor/workdir intended for the work, with the task-only assignment naming any required physical runner ID and canonical workdir, explicit mode, exact group/report binding, and the absolute path to `reference/contract-v1.md`. Then adopt the exact returned identity; adoption neither changes nor verifies continued affinity. For dirty physical-worktree recovery, create on that exact physical runner or make a separate explicit handoff that preserves immutable physical-worker ownership; never imply that Orb-create → physical-adopt migrates execution.
-
-```sh
-amux --dry-run --json worker adopt --thread <member-thread> --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --group <durable-issue-group>
-amux --json worker adopt --thread <member-thread> --workspace <workspace> --window <semantic-window> --workdir <dedicated-worktree> --group <durable-issue-group>
-```
-
-Give the child the stable report ID and exact group/thread/issue/reference binding. Require the child to remain alive after every status. `ready` means implementation, focused tests/checks, one review with findings addressed, PR, and normal CI are complete. A blocker uses the same report identity and `--pr none` when no PR exists. The task-only assignment must state that `reference/contract-v1.md` is the worker's only protocol source and grants no merge, release, finish, or cleanup authority.
+Use only the already-recorded member thread, workdir, group, and stable report ID. Do not native-create a replacement, adopt, rebind, or add membership. The existing child remains alive after every status. `ready`, `blocked`, and `merged` retain their current meanings and exact immutable binding.
 
 ### 4. Persist ready, wake, acknowledge, and independently verify
 
@@ -113,7 +100,7 @@ Run the final park/remove/teardown from a verified independent executor, never f
 
 ### 7. Coordinator-owned deadline queue
 
-Soft budgets to `ready` are Small 30m, Medium 1h (default), Large 2h; split XL before spawning. Stale is 15m; one review warns after 10m; demonstrated external CI waits alert after 20m; authorized finish alerts after 10m. Expiry is diagnostic and non-destructive. Use one nearest-deadline queue, not one timer process per child. Never force-delete a branch, auto-release, or erase group history.
+Retain the exact size and generation already assigned to each pre-cutover report: Small 30m, Medium 1h (default), or Large 2h; any XL work should already have been split before its original assignment. Do not add deadline state for native-created work. Stale is 15m; one review warns after 10m; demonstrated external CI waits alert after 20m; authorized finish alerts after 10m. Expiry is diagnostic and non-destructive. Use one nearest-deadline queue, not one timer process per child. Never force-delete a branch, auto-release, or erase group history.
 
 Load the full procedure only when arming, firing, or reconciling deadlines: [`deadline-v1.md`](deadline-v1.md). The current CLI exposes no command to create or update deadline records. Do not edit `reports.json` directly. Schedule wake-ups must **not** load the full `/amux` skill; they follow `deadline-v1` and re-read durable `amux report pending/history` state.
 
