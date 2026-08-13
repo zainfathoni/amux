@@ -384,6 +384,49 @@ func TestPreCutoverDrainRejectsPostCutoverFlagsAndUnprovableSchema(t *testing.T)
 	}
 }
 
+func TestSpawnContinuationRejectsAmbiguousStoredProvenanceBeforeMutation(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		provenance string
+		exception  bool
+		want       string
+	}{
+		{name: "duplicate shadowed schema", provenance: `"schema_version":1,"schema_version":2,"admission":"` + config.SpawnAssignmentProjectlessHostAdmission + `","physical_host":"` + testPhysicalHost + `"`, want: `duplicate JSON member "schema_version"`},
+		{name: "duplicate shadowed admission", provenance: `"schema_version":2,"admission":"wrong","admission":"` + config.SpawnAssignmentProjectlessHostAdmission + `","physical_host":"` + testPhysicalHost + `"`, exception: true, want: `duplicate JSON member "admission"`},
+		{name: "case variant schema", provenance: `"Schema_Version":1`, want: `non-canonical spawn provenance member "Schema_Version"`},
+		{name: "case variant host", provenance: `"schema_version":2,"admission":"` + config.SpawnAssignmentProjectlessHostAdmission + `","Physical_Host":"` + testPhysicalHost + `"`, exception: true, want: `non-canonical spawn provenance member "Physical_Host"`},
+		{name: "legacy explicit empty admission", provenance: `"schema_version":1,"admission":""`, want: `must not contain "admission"`},
+		{name: "legacy explicit null admission", provenance: `"schema_version":1,"admission":null`, want: `must not contain "admission"`},
+		{name: "legacy explicit empty host", provenance: `"schema_version":1,"physical_host":""`, want: `must not contain "physical_host"`},
+		{name: "legacy explicit null host", provenance: `"schema_version":1,"physical_host":null`, want: `must not contain "physical_host"`},
+		{name: "mixed legacy and exception provenance", provenance: `"schema_version":1,"admission":"` + config.SpawnAssignmentProjectlessHostAdmission + `","physical_host":"` + testPhysicalHost + `"`, want: `must not contain "admission"`},
+		{name: "schema 2 missing host", provenance: `"schema_version":2,"admission":"` + config.SpawnAssignmentProjectlessHostAdmission + `"`, exception: true, want: "missing schema-2 physical_host"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir, workdir := setupSpawnCutoverTest(t)
+			prompt := "unchanged malformed provenance prompt"
+			contents := rawSpawnAssignmentDocument(workdir, prompt, test.provenance)
+			path := filepath.Join(dir, config.SpawnAssignmentsFile)
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			creates, stores := 0, 0
+			spawnCreateThread = func(string, string) (string, error) { creates++; return "T-no", nil }
+			spawnStoreAssignment = func(string, config.SpawnAssignmentRecord) error { stores++; return nil }
+			_, err := executeSpawnResult(spawnArgs(dir, workdir, "arm", "T-malformed", "", "", test.exception), prompt)
+			if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v, want %q", err, test.want)
+			}
+			if creates != 0 || stores != 0 {
+				t.Fatalf("rejected continuation creates=%d stores=%d", creates, stores)
+			}
+			if got := mustRead(t, path); got != contents {
+				t.Fatalf("rejected continuation changed store\ngot:  %s\nwant: %s", got, contents)
+			}
+		})
+	}
+}
+
 func TestSpawnDryRunAppliesAdmissionAndExactStateChecksWithoutWriting(t *testing.T) {
 	dir, workdir := setupSpawnCutoverTest(t)
 	spawnCreateThread = func(string, string) (string, error) { t.Fatal("dry-run created a thread"); return "", nil }
@@ -497,6 +540,10 @@ func assertConfigDirEmpty(t *testing.T, dir string) {
 
 func spawnPromptDigest(prompt string) string {
 	return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(prompt)))
+}
+
+func rawSpawnAssignmentDocument(workdir, prompt, provenance string) string {
+	return fmt.Sprintf(`{"schema_version":1,"assignments":[{%s,"workspace":"alpha","window":"worker","workdir":%q,"thread":"T-malformed","mode":"high","prompt_digest":%q,"phase":"prepared","assignment":"not_attempted"}]}`, provenance, workdir, spawnPromptDigest(prompt))
 }
 
 func removeFlag(args []string, name string, hasValue bool) []string {

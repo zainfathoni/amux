@@ -1,11 +1,13 @@
 package config
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,6 +73,9 @@ func LoadSpawnAssignments(path string) ([]SpawnAssignmentRecord, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validateSpawnAssignmentJSON(data); err != nil {
+		return nil, fmt.Errorf("parse spawn assignments: %w", err)
+	}
 	var file spawnAssignmentFile
 	if err := json.Unmarshal(data, &file); err != nil {
 		return nil, fmt.Errorf("parse spawn assignments: %w", err)
@@ -90,6 +95,215 @@ func LoadSpawnAssignments(path string) ([]SpawnAssignmentRecord, error) {
 		seen[key] = true
 	}
 	return file.Assignments, nil
+}
+
+type spawnJSONMember struct {
+	name  string
+	value json.RawMessage
+}
+
+func validateSpawnAssignmentJSON(data []byte) error {
+	members, err := decodeSpawnJSONObject(data, "spawn assignment file")
+	if err != nil {
+		return err
+	}
+	var schema, assignments json.RawMessage
+	for _, member := range members {
+		canonical, provenance := canonicalSpawnProvenanceName(member.name)
+		if provenance && member.name != canonical {
+			return fmt.Errorf("non-canonical spawn provenance member %q; use %q", member.name, canonical)
+		}
+		if canonical, known := canonicalSpawnFileMemberName(member.name); known && member.name != canonical {
+			return fmt.Errorf("non-canonical spawn assignment file member %q; use %q", member.name, canonical)
+		}
+		switch member.name {
+		case "schema_version":
+			schema = member.value
+		case "assignments":
+			assignments = member.value
+		case "admission", "physical_host":
+			return fmt.Errorf("spawn provenance member %q is valid only inside an assignment record", member.name)
+		}
+	}
+	fileSchema, err := decodeSpawnJSONInt(schema, "file schema_version")
+	if err != nil {
+		return err
+	}
+	if fileSchema != SpawnAssignmentSchemaVersion {
+		return fmt.Errorf("unsupported spawn assignment schema version %d", fileSchema)
+	}
+	if len(assignments) == 0 {
+		return errors.New("missing assignments member")
+	}
+	var records []json.RawMessage
+	if err := json.Unmarshal(assignments, &records); err != nil || len(bytes.TrimSpace(assignments)) == 0 || bytes.TrimSpace(assignments)[0] != '[' {
+		if err == nil {
+			err = errors.New("must be an array")
+		}
+		return fmt.Errorf("invalid assignments member: %w", err)
+	}
+	for i, raw := range records {
+		if err := validateSpawnAssignmentProvenance(raw); err != nil {
+			return fmt.Errorf("invalid spawn assignment %d provenance: %w", i+1, err)
+		}
+	}
+	return nil
+}
+
+func validateSpawnAssignmentProvenance(data []byte) error {
+	members, err := decodeSpawnJSONObject(data, "spawn assignment record")
+	if err != nil {
+		return err
+	}
+	provenance := make(map[string]json.RawMessage, 3)
+	for _, member := range members {
+		canonical, isProvenance := canonicalSpawnProvenanceName(member.name)
+		if !isProvenance {
+			if canonical, known := canonicalSpawnRecordMemberName(member.name); known && member.name != canonical {
+				return fmt.Errorf("non-canonical spawn assignment record member %q; use %q", member.name, canonical)
+			}
+			continue
+		}
+		if member.name != canonical {
+			return fmt.Errorf("non-canonical spawn provenance member %q; use %q", member.name, canonical)
+		}
+		provenance[canonical] = member.value
+	}
+	schema, err := decodeSpawnJSONInt(provenance["schema_version"], "record schema_version")
+	if err != nil {
+		return err
+	}
+	switch schema {
+	case SpawnAssignmentSchemaVersion:
+		for _, forbidden := range []string{"admission", "physical_host"} {
+			if _, present := provenance[forbidden]; present {
+				return fmt.Errorf("legacy schema-1 spawn assignment must not contain %q, including empty or null values", forbidden)
+			}
+		}
+	case SpawnAssignmentProjectlessHostSchemaVersion:
+		admission, err := decodeSpawnJSONString(provenance["admission"], "schema-2 admission")
+		if err != nil {
+			return err
+		}
+		if admission != SpawnAssignmentProjectlessHostAdmission {
+			return fmt.Errorf("schema-2 admission must be exactly %q", SpawnAssignmentProjectlessHostAdmission)
+		}
+		host, err := decodeSpawnJSONString(provenance["physical_host"], "schema-2 physical_host")
+		if err != nil {
+			return err
+		}
+		if err := validateField("physical host", host); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported spawn assignment record schema version %d", schema)
+	}
+	return nil
+}
+
+func decodeSpawnJSONObject(data []byte, context string) ([]spawnJSONMember, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '{' {
+		return nil, fmt.Errorf("%s must be a JSON object", context)
+	}
+	seen := make(map[string]bool)
+	var members []spawnJSONMember
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		name, ok := token.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s contains a non-string member name", context)
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("duplicate JSON member %q in %s", name, context)
+		}
+		seen[name] = true
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, err
+		}
+		members = append(members, spawnJSONMember{name: name, value: value})
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, err
+	}
+	if token, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("trailing JSON data after %s: %v", context, token)
+	}
+	return members, nil
+}
+
+func canonicalSpawnProvenanceName(name string) (string, bool) {
+	normalized := strings.NewReplacer("_", "", "-", "").Replace(name)
+	switch {
+	case strings.EqualFold(normalized, "schemaversion"):
+		return "schema_version", true
+	case strings.EqualFold(normalized, "admission"):
+		return "admission", true
+	case strings.EqualFold(normalized, "physicalhost"):
+		return "physical_host", true
+	default:
+		return "", false
+	}
+}
+
+func canonicalSpawnFileMemberName(name string) (string, bool) {
+	for _, canonical := range []string{"schema_version", "assignments"} {
+		if strings.EqualFold(name, canonical) {
+			return canonical, true
+		}
+	}
+	return "", false
+}
+
+func canonicalSpawnRecordMemberName(name string) (string, bool) {
+	for _, canonical := range []string{
+		"schema_version", "admission", "physical_host", "workspace", "window", "workdir",
+		"thread", "mode", "group", "prompt_digest", "phase", "assignment", "receipt_cursor",
+	} {
+		if strings.EqualFold(name, canonical) {
+			return canonical, true
+		}
+	}
+	return "", false
+}
+
+func decodeSpawnJSONInt(data json.RawMessage, name string) (int, error) {
+	if len(data) == 0 {
+		return 0, fmt.Errorf("missing %s", name)
+	}
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return 0, fmt.Errorf("%s must not be null", name)
+	}
+	var value int
+	if err := json.Unmarshal(data, &value); err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return value, nil
+}
+
+func decodeSpawnJSONString(data json.RawMessage, name string) (string, error) {
+	if len(data) == 0 {
+		return "", fmt.Errorf("missing %s", name)
+	}
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return "", fmt.Errorf("%s must not be null", name)
+	}
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return "", fmt.Errorf("%s must be a string: %w", name, err)
+	}
+	return value, nil
 }
 
 func StoreSpawnAssignment(path string, record SpawnAssignmentRecord) error {

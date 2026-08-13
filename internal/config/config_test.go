@@ -270,9 +270,61 @@ func TestSpawnAssignmentLoadRejectsMissingRecordCutoverProvenance(t *testing.T) 
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadSpawnAssignments(path); err == nil || !strings.Contains(err.Error(), "unsupported spawn assignment schema version 0") {
+	if _, err := LoadSpawnAssignments(path); err == nil || !strings.Contains(err.Error(), "missing record schema_version") {
 		t.Fatalf("missing record schema error=%v", err)
 	}
+}
+
+func TestSpawnAssignmentLoadStrictlyValidatesProvenanceBeforeStructDecode(t *testing.T) {
+	legacy := spawnAssignmentTestRecord(`"schema_version":1`)
+	exception := `"schema_version":2,"admission":"` + SpawnAssignmentProjectlessHostAdmission + `","physical_host":"host-exact"`
+	for _, test := range []struct {
+		name     string
+		contents string
+		want     string
+	}{
+		{name: "duplicate file schema shadows contradictory value", contents: `{"schema_version":1,"schema_version":2,"assignments":[` + legacy + `]}`, want: `duplicate JSON member "schema_version"`},
+		{name: "duplicate record schema shadows contradictory value", contents: spawnAssignmentTestDocument(spawnAssignmentTestRecord(`"schema_version":1,"schema_version":2,"admission":"` + SpawnAssignmentProjectlessHostAdmission + `","physical_host":"host-exact"`)), want: `duplicate JSON member "schema_version"`},
+		{name: "duplicate admission shadows contradictory value", contents: spawnAssignmentTestDocument(spawnAssignmentTestRecord(`"schema_version":2,"admission":"wrong","admission":"` + SpawnAssignmentProjectlessHostAdmission + `","physical_host":"host-exact"`)), want: `duplicate JSON member "admission"`},
+		{name: "duplicate host shadows contradictory value", contents: spawnAssignmentTestDocument(spawnAssignmentTestRecord(exception + `,"physical_host":"other-host"`)), want: `duplicate JSON member "physical_host"`},
+		{name: "case variant file schema", contents: `{"Schema_Version":1,"assignments":[` + legacy + `]}`, want: `non-canonical spawn provenance member "Schema_Version"`},
+		{name: "case variant assignments shadows validated records", contents: `{"schema_version":1,"assignments":[` + legacy + `],"Assignments":[` + spawnAssignmentTestRecord(`"schema_version":1,"admission":null`) + `]}`, want: `non-canonical spawn assignment file member "Assignments"`},
+		{name: "case variant record schema", contents: spawnAssignmentTestDocument(spawnAssignmentTestRecord(`"Schema_Version":1`)), want: `non-canonical spawn provenance member "Schema_Version"`},
+		{name: "unicode case-fold variant record schema", contents: spawnAssignmentTestDocument(spawnAssignmentTestRecord(`"ſchema_version":1`)), want: `non-canonical spawn provenance member "ſchema_version"`},
+		{name: "case variant admission", contents: spawnAssignmentTestDocument(spawnAssignmentTestRecord(`"schema_version":2,"Admission":"` + SpawnAssignmentProjectlessHostAdmission + `","physical_host":"host-exact"`)), want: `non-canonical spawn provenance member "Admission"`},
+		{name: "noncanonical host alias", contents: spawnAssignmentTestDocument(spawnAssignmentTestRecord(`"schema_version":2,"admission":"` + SpawnAssignmentProjectlessHostAdmission + `","physicalHost":"host-exact"`)), want: `non-canonical spawn provenance member "physicalHost"`},
+		{name: "case variant workspace shadows validated boundary", contents: spawnAssignmentTestDocument(strings.Replace(spawnAssignmentTestRecord(`"schema_version":1`), `"workspace":"alpha"`, `"workspace":"alpha","Workspace":"shadow"`, 1)), want: `non-canonical spawn assignment record member "Workspace"`},
+		{name: "schema 1 explicit empty admission", contents: spawnAssignmentTestDocument(spawnAssignmentTestRecord(`"schema_version":1,"admission":""`)), want: `must not contain "admission"`},
+		{name: "schema 1 explicit null admission", contents: spawnAssignmentTestDocument(spawnAssignmentTestRecord(`"schema_version":1,"admission":null`)), want: `must not contain "admission"`},
+		{name: "schema 1 explicit empty host", contents: spawnAssignmentTestDocument(spawnAssignmentTestRecord(`"schema_version":1,"physical_host":""`)), want: `must not contain "physical_host"`},
+		{name: "schema 1 explicit null host", contents: spawnAssignmentTestDocument(spawnAssignmentTestRecord(`"schema_version":1,"physical_host":null`)), want: `must not contain "physical_host"`},
+		{name: "schema 2 empty admission", contents: spawnAssignmentTestDocument(spawnAssignmentTestRecord(`"schema_version":2,"admission":"","physical_host":"host-exact"`)), want: "schema-2 admission must be exactly"},
+		{name: "schema 2 null admission", contents: spawnAssignmentTestDocument(spawnAssignmentTestRecord(`"schema_version":2,"admission":null,"physical_host":"host-exact"`)), want: "schema-2 admission must not be null"},
+		{name: "schema 2 empty host", contents: spawnAssignmentTestDocument(spawnAssignmentTestRecord(`"schema_version":2,"admission":"` + SpawnAssignmentProjectlessHostAdmission + `","physical_host":""`)), want: "missing physical host"},
+		{name: "schema 2 null host", contents: spawnAssignmentTestDocument(spawnAssignmentTestRecord(`"schema_version":2,"admission":"` + SpawnAssignmentProjectlessHostAdmission + `","physical_host":null`)), want: "schema-2 physical_host must not be null"},
+		{name: "mixed legacy schema with exception provenance", contents: spawnAssignmentTestDocument(spawnAssignmentTestRecord(`"schema_version":1,"admission":"` + SpawnAssignmentProjectlessHostAdmission + `","physical_host":"host-exact"`)), want: `must not contain "admission"`},
+		{name: "schema 2 missing admission", contents: spawnAssignmentTestDocument(spawnAssignmentTestRecord(`"schema_version":2,"physical_host":"host-exact"`)), want: "missing schema-2 admission"},
+		{name: "schema 2 missing host", contents: spawnAssignmentTestDocument(spawnAssignmentTestRecord(`"schema_version":2,"admission":"` + SpawnAssignmentProjectlessHostAdmission + `"`)), want: "missing schema-2 physical_host"},
+		{name: "schema 2 wrong admission", contents: spawnAssignmentTestDocument(spawnAssignmentTestRecord(`"schema_version":2,"admission":"legacy","physical_host":"host-exact"`)), want: "schema-2 admission must be exactly"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), SpawnAssignmentsFile)
+			if err := os.WriteFile(path, []byte(test.contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadSpawnAssignments(path); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func spawnAssignmentTestDocument(record string) string {
+	return `{"schema_version":1,"assignments":[` + record + `]}`
+}
+
+func spawnAssignmentTestRecord(provenance string) string {
+	return `{` + provenance + `,"workspace":"alpha","window":"worker","workdir":"/tmp","thread":"T-exact","mode":"high","prompt_digest":"sha256:` + strings.Repeat("a", 64) + `","phase":"prepared","assignment":"not_attempted"}`
 }
 
 func TestSpawnAssignmentLoadRejectsNonCanonicalWorkdirBinding(t *testing.T) {
