@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-08-12
+updated: 2026-08-13
 supersedes: 0005, 0006
 ---
 
@@ -17,9 +18,21 @@ Retirement is a staged drain, not an immediate read-only freeze and not a new re
 3. retain narrowly bounded drain-only mutations for durable state that existed before that operation family's cutover;
 4. export and freeze each store only after every record is terminal, explicitly retained with an exact recovery owner and next action, or preserved as immutable indeterminate evidence;
 5. remove writers after the freeze gate, retain a time-bounded read-only compatibility surface, then archive the lifecycle product; and
-6. preserve Git/worktree removal safety as a small standalone safety capability rather than as an Amux resource lifecycle.
+6. preserve Git/worktree removal-safety guidance outside the Amux lifecycle (default docs-only retain at product archive) rather than as an Amux resource lifecycle.
 
 This decision supersedes ADR 0005's permanent maintained-lifecycle mission and ADR 0006's proposed Amux retirement-record/finalizer direction. Their useful invariants survive where this ADR names them: exact identity, no blind retry, preservation before destructive cleanup, independent authority for destructive actions, no implicit descendant mutation, and fail-closed handling of ambiguity. Their conclusion that those invariants require a permanent Amux orchestration substrate does not survive.
+
+### Accepted refinements (2026-08-13)
+
+Owner-accepted product refinements recorded in [the staged-drain disposition ledger](../staged-drain-disposition.md#owner-decisions-accepted-2026-08-13). They tighten destination language without reopening the staged-drain mission. These refinements establish contract and sequencing only; they do not themselves authorize code, skill publication, runtime or store changes, push/merge, issue mutation, or other shared-state mutation.
+
+1. **Shelve replacement is Archive/Unarchive, not Hide/Unhide.** After shelf admission closes, deferred remote thread visibility uses native Amp archive and unarchive (`amp threads archive` and `amp threads archive --unarchive`). Amux shelf intent (`shelves.tsv`) is drain-only migration state while Amux launch still exists; it is not a permanent product and must not become a second visibility store. Do not treat `find_thread` `hidden:` / `snoozed:` as a mutation API or document “Hide/Unhide replaces shelve” unless a distinct hide mutation surface is later proven different from archive. Existing shelf rows drain in place under this ADR; there is no bulk migrate-to-hidden path.
+
+2. **Tycho long-term home is personal User Skills `amp-tycho`.** The only intentional post-core-admission compatibility producer remains the explicit report-only Tycho binding. After the direct structured-return field gate in this ADR passes, new work uses that route without Amux receipts, consume, or acknowledge. Existing receipts continue only through `created → valid_report → delivered → acknowledged|abandoned`. The long-term skill name/directory is `amp-tycho` in the owner's personal User Skills repository, to be published only after or atomic with that gate and only under separate owner authorization; keep `/amux-tycho` and original helper, state, custody, and abandonment paths stable until receipts are terminal, explicitly retained, or indeterminate-preserved. A thin load-name shim is optional; two helpers or two state machines are not.
+
+3. **Direct return is same-turn Amp-visible structured delivery.** The accepted response shape is one schema-valid bounded `complete` or `blocked` object (`status`, `summary`, `findings`, `blockers`, `verification`) returned as an authenticated structured result on the invoking Amp turn, correlated to that request/thread and task/artifact identity, through one exact owner-selected Tycho route with no fallback, side inbox, log mining, or automatic retry. Amp alone verifies findings and alone performs shared mutation. Concrete API naming and field-cycle acceptance remain release follow-ups in the disposition ledger.
+
+4. **Worktree safety defaults to docs-only retain at Amux archive.** Git/worktree removal-safety guidance remains outside the Amux lifecycle (below), not an Amux resource product. Unless a later owner decision extracts a separately named skill because worktree removal without Amux remains routine, retain the guidance in historical documentation when the orchestration product is archived.
 
 ## Why the destination changed
 
@@ -57,7 +70,7 @@ The authenticated direct structured-return acceptance gate requires one ordinary
 6. the Amp caller independently verifies any finding and remains the only authority for GitHub or other shared mutation; and
 7. interruption and no-response behavior produce no finding and no automatic retry.
 
-The target response contains only `status`, `summary`, `findings`, `blockers`, and `verification`, with reviewed bounds. Returning that authenticated structured response directly to the invoking caller establishes delivery; the replacement uses no Amux receipt, consume, or acknowledge step. Once this single field gate is accepted, new Tycho receipt creation stops at a published generation. Existing receipts drain only through their current exact lifecycle, `created → valid_report → delivered → acknowledged|abandoned`. `acknowledged` and `abandoned` are terminal receipt states; notification uncertainty and terminal capability-cleanup status remain separate metadata and never become receipt states. The old and new routes never run for the same task.
+The target response contains only `status`, `summary`, `findings`, `blockers`, and `verification`, with reviewed bounds. Returning that authenticated structured response directly to the invoking caller on the same turn establishes delivery; the replacement uses no Amux receipt, consume, acknowledge step, or side inbox. Once this single field gate is accepted, new Tycho receipt creation stops at a published generation. Existing receipts drain only through their current exact lifecycle, `created → valid_report → delivered → acknowledged|abandoned`. `acknowledged` and `abandoned` are terminal receipt states; notification uncertainty and terminal capability-cleanup status remain separate metadata and never become receipt states. The old and new routes never run for the same task. After the gate, the durable skill home for the binding is personal User Skills `amp-tycho` as specified in Accepted refinements above; `/amux-tycho` remains the drain path for pre-gate receipts until freeze.
 
 ## Drain-only mutation contract
 
@@ -109,7 +122,7 @@ Only after old absence is proven may the owner start a native runner with a stab
 
 PR #363 is retained transition safety. Backup refs, ref-coverage classification, separate branch deletion, untracked and ignored-precious inspection, stash reporting, purpose/PR checks, ownership checks, and adjacent revalidation remain required before worktree removal. These rules survive Amux because Git and native Amp do not make filesystem deletion safe automatically.
 
-The safety surface must not grow into a retirement ledger, provider reconciler, or durable worktree owner. A backup ref preserves Git objects; it does not authorize worktree removal, branch deletion, provider cleanup, or Amp lifecycle mutation.
+The removal-safety guidance must not grow into a retirement ledger, provider reconciler, or durable worktree owner. A backup ref preserves Git objects; it does not authorize worktree removal, branch deletion, provider cleanup, or Amp lifecycle mutation. At Amux product archive, default disposition is docs-only retain of this guidance in historical documentation; extract a separately named skill only on a later explicit owner decision if removal without Amux remains routine.
 
 ## Rollout sequence
 
@@ -128,7 +141,7 @@ The safety surface must not grow into a retirement ledger, provider reconciler, 
 
 The staged drain is slower than deleting the CLI immediately, but it avoids stranding the exact recovery evidence Amux was built to preserve. It is materially smaller than implementing the symmetric-retirement roadmap: no new retirement stream, attachment generation, six-class planner, provider assertion framework, finalizer, or second database is introduced.
 
-Native Amp becomes the ordinary execution and coordination layer. Amux temporarily remains capable of finishing its own already-recorded operations, then becomes a reader, then ends. Worktree safety and the minimal Tycho structured-response contract may survive as independent skills without retaining the Amux lifecycle model.
+Native Amp becomes the ordinary execution and coordination layer. Amux temporarily remains capable of finishing its own already-recorded operations, then becomes a reader, then ends. The minimal Tycho structured-response contract survives as personal User Skills `amp-tycho` after the direct-return gate without retaining the Amux lifecycle model. Worktree safety guidance defaults to docs-only retain at product archive unless later extracted as a separately named skill. Deferred remote visibility after shelf drain is native archive/unarchive, not an Amux shelf product and not an unproven Hide/Unhide API.
 
 ## Non-goals
 

@@ -1,12 +1,12 @@
 ---
 status: proposed-actions
 decision: adr-0007
-as-of: 2026-08-12
+as-of: 2026-08-13
 ---
 
 # Amux staged-drain disposition ledger
 
-This ledger translates [ADR 0007](adr/0007-retire-amux-through-native-cutover-and-staged-drain.md) into concrete recommendations. It does not close an issue, merge or close a pull request, archive a thread, publish a release, mutate runtime state, or authorize destructive cleanup.
+This ledger translates [ADR 0007](adr/0007-retire-amux-through-native-cutover-and-staged-drain.md) into concrete recommendations. It does not close an issue, merge or close a pull request, archive a thread, publish a release, mutate runtime state, publish a skill, or authorize destructive cleanup.
 
 ## Pull requests
 
@@ -53,7 +53,7 @@ This ledger translates [ADR 0007](adr/0007-retire-amux-through-native-cutover-an
 
 | Issue | Exact recommendation |
 | --- | --- |
-| [#328](https://github.com/zainfathoni/amux/issues/328) | Rewrite around one exact direct structured `complete|blocked` return, independent Amp verification, and Amp-only shared mutation. Until its field gate passes, use the current `/amux-tycho` bridge unchanged; never run both routes for one task. |
+| [#328](https://github.com/zainfathoni/amux/issues/328) | Rewrite around one exact [direct structured `complete|blocked` return](#owner-decisions-accepted-2026-08-13) (same-turn Amp-visible authenticated delivery), independent Amp verification, and Amp-only shared mutation. Until its field gate passes, use the current `/amux-tycho` bridge unchanged; never run both routes for one task. |
 | [#356](https://github.com/zainfathoni/amux/issues/356) | Do not port the receipt helper to Bun. Keep Python only for compatibility fixes necessary to drain safely; close after direct return is validated and receipt admission closes. |
 | [#206](https://github.com/zainfathoni/amux/issues/206) | Close as out of Amux scope; any continuing Pi/Spark validation belongs to Tycho or a separately owned provider skill. |
 | [#221](https://github.com/zainfathoni/amux/issues/221) | Narrow to drain of already-bound pairs only; admit no new paired shelving protocol. Close when those pairs are terminal or retained. |
@@ -79,8 +79,8 @@ This ledger translates [ADR 0007](adr/0007-retire-amux-through-native-cutover-an
 | Worker/spawn | Native authenticated Amp creation on the exact intended Orb/runner/workdir is the default. Reject generalized new `pin`, `adopt`, `spawn`, launch configuration, and group attachment after the worker cutover generation. Never automatically adopt native-created threads; same-directory ownership conflicts remain unmanaged by Amux. The sole new-work exception is the explicit projectless physical-host route bound to one exact host/workdir, with no retry or fallback and indeterminate outcomes preserved. | Exact finalize of pre-cutover spawn state without resend; park/remove/teardown existing workers; complete already-recorded shelf transitions; exact reconcile removal where current evidence proves it. The narrow projectless exception creates no group or unrelated lifecycle state. | Every pre-cutover `workers.tsv`, `shelves.tsv`, `operations.json`, and `spawn-assignments.json` record is terminal, retained with owner/next action, or immutable indeterminate; native creation has replaced the projectless exception before that final writer is removed. |
 | Runner/maintenance | Reject new runner pin/launch configuration and maintenance install after #232 migration support lands. | Park/remove exact configured runners; uninstall existing scheduler state; reconcile only proven absence. | Joined inventory proves no unmanaged catalog-live process and all runner/maintenance records are terminal or retained. |
 | Group/report/callback/deadline | Reject new groups, reports, callbacks, deadlines, and finish authorizations after their cutover generation. | Submit/acknowledge/authorize/finish only already-bound report workflows; clear existing callback leases; no new task membership. | No pending/open obligation lacks an owner; histories exported; callback transport no longer required by a live report. |
-| Tycho bridge | Remains admission-open only until ADR 0007's authenticated direct structured-return gate passes. Then close receipt creation atomically with enabling the direct route; that route has no Amux consume/ack step. | Existing receipts only: `created → valid_report → delivered → acknowledged|abandoned` through current submit/consume/acknowledge/abandon operations. Notification uncertainty and terminal cleanup status stay separate from receipt state. | Every receipt is terminal (`acknowledged|abandoned`), explicitly retained, or preserved indeterminate; owner-private stores are exported before helper removal. |
-| Git/worktree safety | No Amux resource admission. | Owner-authorized backup refs and non-force removal safety remain independent operations. | Not tied to Amux archive; generic safety guidance may remain permanently. |
+| Tycho bridge | Remains admission-open only until ADR 0007's authenticated direct structured-return gate passes. Then close receipt creation atomically with enabling the direct route; that route has no Amux consume/ack step. Long-term skill home after that gate: personal User Skills `amp-tycho` (see [Owner decisions accepted](#owner-decisions-accepted-2026-08-13)). | Existing receipts only: `created → valid_report → delivered → acknowledged|abandoned` through current submit/consume/acknowledge/abandon operations. Notification uncertainty and terminal cleanup status stay separate from receipt state. Keep `/amux-tycho` helper paths and original state/custody/abandonment directories stable until freeze. | Every receipt is terminal (`acknowledged|abandoned`), explicitly retained, or preserved indeterminate; owner-private stores are exported before helper removal. |
+| Git/worktree safety | No Amux resource admission. | Owner-authorized backup refs and non-force removal safety remain independent operations. | Not tied to Amux archive; default at product archive is docs-only retain of safety guidance unless a later owner decision extracts a separately named skill. |
 
 ## Thread dispositions
 
@@ -89,16 +89,31 @@ This ledger translates [ADR 0007](adr/0007-retire-amux-through-native-cutover-an
 | [Direction thread](https://ampcode.com/threads/T-019fe3d2-4119-75ad-bf74-90ea8f0c7033) | Owner/coordinator record for the retirement decision. It owns acceptance or revision of ADR 0007 and any later shared-action authorization. Keep active until the ADR/disposition branch is reviewed; it gains no merge, issue-mutation, or runtime-cleanup authority implicitly. |
 | [Independent Grok review](https://ampcode.com/threads/T-019ff6fa-17a7-7660-8776-c25234c923fc) | Evidence-only challenge that established the drain-only-write correction. No continuing implementation or decision authority. Archive only on an explicit owner request after its findings are linked from the direction thread. |
 | [ADR implementation thread](https://ampcode.com/threads/T-019ff6f0-862e-753b-887d-82b5ef8b9425) | Owns only this reviewable documentation branch and verification. After handoff it should perform no issue/PR mutation, runtime drain, push, merge, or unrelated repository work without a new explicit request. |
+| [Shelf/Tycho destination grill](https://ampcode.com/threads/T-019ff865-243d-774d-bf74-87551642ad37) | Evidence-only architecture challenge of the owner proposal to retire Amux entirely, replace shelving with native visibility, and retain only the Tycho binding as personal User Skills `amp-tycho`. Established the Archive/Unarchive (not Hide/Unhide) mapping and the accepted refinements below. No implementation, merge, skill-publish, or runtime authority. |
 
 New implementation threads should each own one disjoint cutover family or read-only migration artifact. Their prompts must name the cutover generation, allowed preexisting records, forbidden new resources, freeze gate, validation, and explicit non-goals. No child thread may independently advance another family's store or perform shared GitHub actions.
 
+## Owner decisions accepted (2026-08-13)
+
+Owner accepted the following refinements of ADR 0007 on 2026-08-13 (direction thread plus [shelf/Tycho destination grill](https://ampcode.com/threads/T-019ff865-243d-774d-bf74-87551642ad37)). They do not authorize code, skill publication, push/merge, issue mutation, or runtime/store changes by themselves.
+
+| ID | Decision |
+| --- | --- |
+| **Visibility (Q1)** | After shelf admission closes, the remote half of former Amux shelve is **native Archive/Unarchive** only (`amp threads archive` / `amp threads archive --unarchive`). Do **not** document or implement “Hide/Unhide replaces shelve” as product language. `find_thread` `hidden:` / `snoozed:` remain search/index filters only until a distinct hide mutation API is proven different from archive. Amux `shelves.tsv` intent remains **drain-only** migration state (launch gate + reconcile truth while Amux launch exists); there is no bulk migrate-to-hidden and no second Amux visibility store. |
+| **Direct return shape (Q2)** | The post-gate Tycho path returns one schema-valid bounded complete or blocked result as an **Amp-visible authenticated structured response on the same invoking turn**, correlated to that Amp request/thread and the intended task/artifact identity, through one exact owner-selected Tycho route with no fallback. No side inbox and no Amux receipt/consume/ack on the new route. Payload fields remain only `status`, `summary`, `findings`, `blockers`, and `verification` (reviewed bounds). Provider exit, logs, pane text, memory, and unbound prose are never the response. Amp independently verifies findings and remains the only authority for GitHub or other shared mutation. Interrupt or no-response yields no finding and no automatic retry. Old and new routes never run for the same task. |
+| **Tycho skill home (Q3)** | Long-term home is the owner's **personal User Skills** repository as skill name/directory **`amp-tycho`**. Publish that skill **after or atomic with** acceptance of the ADR 0007 direct-return field gate. Until then keep **`/amux-tycho`** and its helper paths stable for receipt create (while admission remains open) and for drain of existing receipts. A thin one-release `amux-tycho` → `amp-tycho` load-name shim is optional only if load-name pain is high; never run two helpers or two state machines. Pre-split and in-flight receipts keep original state, custody, and abandonment directories byte-stable at their original paths. |
+| **Worktree safety home (Q4)** | **Default at Amux product archive: docs-only retain** of Git/worktree removal-safety guidance (and #363 lineage) in historical documentation. Extract to a **separately named** skill only on a later explicit owner decision if worktree removal without Amux remains routine. Do not keep a permanent Amux lifecycle product to host this safety surface. |
+
+**Shelf drain note:** Existing shelf rows still classify and drain under ADR 0007 (intent × remote active|archived|missing × worker row × pane). No bulk archive/unarchive migration script. After worker admission is closed and Amux launch is gone, deferred work uses native archive (and optional owner-local stop); clearing leftover shelf intent is bookkeeping only when remote state is known.
+
+**Tycho family note:** `#328` and related docs should describe the direct-return shape above. Concrete API/surface name and the one ordinary field-cycle acceptance remain open (see below). Receipt helper stays Python-only for drain; no Bun port.
+
 ## Owner decisions still required
 
-1. Approve ADR 0007 and whether #331 is rewritten in place or replaced by a new drain umbrella.
+1. Whether #331 is rewritten in place as the staged-drain umbrella or closed and replaced by one narrowly named drain umbrella (ADR 0007 itself is accepted).
 2. Choose the release/date expression for each operation-family cutover generation.
 3. Accept one #360 inventory or explicitly disposition it incomplete/error, confirm whether no repeat is required, and enforce deletion of its helper, sweep-only tests, and every `/amux sweep` route/reference before the next Amux release.
 4. Approve the #232 row-absent exact-evidence threshold and the OS supervision mechanism for replacement native runners.
-5. Select the Tycho direct structured-return owner/API and accept one field cycle before bridge admission closes.
+5. Name the concrete Amp/Tycho API or surface that will carry the accepted same-turn authenticated structured return, run one ordinary owner-authorized field cycle that meets all seven ADR 0007 gate bullets, and record acceptance before Tycho receipt admission closes.
 6. Choose the read-only compatibility duration and minimum retained reader release.
-7. Decide whether generic worktree safety remains in this repository after the Amux binary is archived or moves to a separately named skill.
-8. Separately authorize every push, merge, issue/PR close or rewrite, process stop, archive, receipt abandonment, worktree removal, and state-file deletion.
+7. Separately authorize every push, merge, issue/PR close or rewrite, process stop, archive, receipt abandonment, worktree removal, state-file deletion, and skill publication (including personal User Skills `amp-tycho`).

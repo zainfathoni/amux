@@ -47,15 +47,22 @@ _Avoid_: Session when referring to the configured lifecycle group
 
 **Park** — Stop local execution while preserving both the restore configuration and remote thread. Parked work can be launched again without first changing its remote state.
 
-**Shelf intent** — An explicit local record that a configured worker is deliberately deferred. Shelf intent is authoritative for whether amux may launch the worker; Amp archive state separately controls remote thread visibility.
+**Shelf intent** — An explicit local record that a configured worker is deliberately deferred. Shelf intent is authoritative for whether amux may launch the worker; Amp **archive** state separately controls remote thread visibility. Under [ADR 0007](docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md), shelf intent is **drain-only migration state**, not a permanent product: after shelf admission closes and Amux launch is gone, there is no Amux launch gate left for it to enforce.
+_Avoid_: Treating shelf intent as native Hide, or as a second long-lived visibility store beside Amp archive
 
-**Shelve** — Defer a worker by recording shelf intent, hiding its remote thread, and stopping local execution while preserving worker configuration. Shelved work must be unshelved before it can be launched.
+**Shelve** — Historical Amux composite: record shelf intent, **archive** the remote thread (`amp threads archive`), and park (stop) verified local execution while preserving worker configuration. Shelved work must be unshelved before Amux may launch it. This is not native “Hide/Unhide”; `find_thread` `hidden:` / `snoozed:` are search filters only unless a distinct hide mutation API is later proven. After Amux shelf admission closes, defer remote visibility with native archive/unarchive alone (optional owner-local stop); do not add bulk migrate-to-hidden tooling.
+_Avoid_: Hide, Unhide, snooze as synonyms for this operation
 
-**Unshelve** — Make a shelved remote thread active again without launching it locally.
+**Unshelve** — Historical Amux inverse: **unarchive** the remote thread (`amp threads archive --unarchive`), then remove shelf intent, without launching the local client.
 
-**Teardown** — Finish a worker by hiding its remote thread, removing its restore configuration, and stopping its verified local TUI client. Teardown never applies to a runner or implies teardown of remote agent threads.
+**Archive (native)** — Amp operation that removes a thread from the active list / thread switcher while leaving it viewable by URL and includable via `--include-archived` or `archived:` search. This is the supported native replacement for the **remote** leg of Amux shelve after cutover.
+_Avoid_: Hide when meaning this operation
 
-**Remove** — Stop a worker or runner and remove its local configuration without changing remote thread state. Worker teardown additionally hides the worker's remote thread; remove does not.
+**Unarchive (native)** — Amp inverse of archive; restores the thread to the active list without implying local Amux launch.
+
+**Teardown** — Finish a worker by **archiving** its remote thread, removing its restore configuration and shelf intent, and stopping its verified local TUI client. Teardown never applies to a runner or implies teardown of remote agent threads.
+
+**Remove** — Stop a worker or runner and remove its local configuration without changing remote thread state. Worker teardown additionally archives the worker's remote thread; remove does not.
 
 **Pin** — Add work to restore configuration without changing local execution or remote thread state.
 
