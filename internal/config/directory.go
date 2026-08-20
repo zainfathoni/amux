@@ -19,6 +19,7 @@ const (
 	ReportsFile                  = "reports.json"
 	MaintenanceFile              = "runner-maintenance.json"
 	MaintenanceResultFile        = "runner-maintenance-result.json"
+	RetirementRecordsDirectory   = "retirement-records"
 )
 
 // Directory is the complete on-disk configuration selected for one invocation.
