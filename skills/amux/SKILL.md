@@ -1,6 +1,6 @@
 ---
 name: amux
-description: "Drains existing local Amux worker, runner, and workspace state plus proven pre-cutover compatibility/drain state for work groups, reports, callback leases, deadlines, and finish authorization, while routing new Amp work to native child threads. Use for pin/unpin/park/restart/shelve/unshelve/launch, bounded projectless host placement, doctor, teardown, /amux health, /amux sprawl, the one-time staged-drain /amux sweep, pre-cutover /amux finish, child-thread coordination, ordinary issue and PR-review defaults, 'forget this on restore', 'hide it for now', 'defer this workspace', 'Show shelved work', and 'Restore my workspace'. Experimental Tycho, Claude, or Pi routes remain separate explicit-only skills."
+description: "Drains existing local Amux worker, runner, and workspace state plus proven pre-cutover compatibility/drain state for work groups, reports, callback leases, deadlines, and finish authorization, while routing new Amp work to native child threads. Use for pin/unpin/park/restart/shelve/unshelve/launch, bounded projectless host placement, doctor, teardown, /amux health, /amux sprawl, the one-time staged-drain /amux sweep, pre-cutover /amux finish, child-thread coordination, 'forget this on restore', 'hide it for now', 'defer this workspace', 'Show shelved work', and 'Restore my workspace'. Experimental Tycho, Claude, or Pi routes remain separate explicit-only skills."
 ---
 
 # amux
@@ -14,7 +14,7 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 - Canonical worker identity is `--thread`; runner identity is `--workdir`; `--workspace` selects a lifecycle group. Use long selectors.
 - Top-level `list`, `launch`, `park`, `restart`, `remove`, `doctor`, and `reconcile` aggregate both modes. Narrow with `amux worker ...` or `amux runner ...`.
 - Bare `amux` launches workers only. `amux launch` launches both. Other machine-wide mutations need explicit `--all`.
-- Generalized `amux spawn` admission closed at `spawn-native-cutover-v1`. Ordinary new work uses authenticated native Amp `create_thread` on the exact intended Workspace Project and Orb, or exact live runner and its intended workdir. Give the child a lean task prompt—task, acceptance criteria, relevant constraints, validation, and expected reply—and retain only native parent/reply routing. Do not call it an Amux worker or spawned worker.
+- Generalized `amux spawn` admission closed at `spawn-native-cutover-v1`. When delegated work needs a native child, use authenticated native Amp `create_thread` on the exact intended Workspace Project and Orb, or exact live runner and its intended workdir. Give the child a lean task prompt—task, acceptance criteria, relevant constraints, validation, and expected reply—and retain only native parent/reply routing. Do not call it an Amux worker or spawned worker. One coherent issue or PR review may run on the direct coordinator without a child.
 - Native-created work receives no Amux contract path, receipt, report, callback, group, deadline, finish authorization, or automatic adoption. Do not add these exclusions to the child prompt; enforce them in the parent by creating no Amux lifecycle state.
 - Every native creation and bounded exception uses an explicit mode. When a linked ChatGPT subscription and target-mode availability are known, choose `low` for small mechanical work, `medium` for ordinary implementation, or `high` for hard architecture, debugging, or review. Otherwise use `medium`. An explicitly requested mode always wins; `ultra`, plugin, and other special modes remain explicit-only.
 - **Invocation defaults:** mode labels are capability presets, not stable model or cost selectors. Preserve `medium` when mode or subscription routing is unknown; do not Read Thread for task context; give Oracle supplied diff/context only—never Read Thread to feed Oracle.
@@ -41,7 +41,6 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 - **/amux sprawl**: [`workflows.md`](reference/workflows.md#sprawl-independent-issue-threads).
 - **/amux sweep**: one-time staged-drain inventory only; [`workflows.md`](reference/workflows.md#sweep-worktree-inventory).
 - **/amux finish**: pre-cutover existing-worker compatibility/drain only; [`workflows.md`](reference/workflows.md#finish-a-merged-worker).
-- **Ordinary issue or PR review**: load [`reference/ordinary-issue-pr-checklist.md`](reference/ordinary-issue-pr-checklist.md) first—default direct coordinator + locked dedicated/exact-head worktree; optional native child only when justified.
 - **Before any worktree remove or prune path**: load [`reference/removal-safety.md`](reference/removal-safety.md).
 
 Deadlines (compatibility only): load [`reference/deadline-v1.md`](reference/deadline-v1.md) only when handling an existing pre-cutover deadline wake-up—not on every `/amux` load and never to create deadline state for native work.
@@ -52,7 +51,6 @@ Experimental external execution is explicit-only. Load **`/amux-tycho`** for the
 
 - Selectors, side effects, install: [`reference/commands.md`](reference/commands.md)
 - Spawn, health, sprawl, sweep, teardown, finish: [`reference/workflows.md`](reference/workflows.md)
-- Ordinary issue / PR-review defaults: [`reference/ordinary-issue-pr-checklist.md`](reference/ordinary-issue-pr-checklist.md)
 - Proven pre-cutover drain workers may read once: [`reference/contract-v1.md`](reference/contract-v1.md)
 - Coordinator deadlines: [`reference/deadline-v1.md`](reference/deadline-v1.md)
 - Stuck clients / recovery: [`reference/troubleshooting.md`](reference/troubleshooting.md)

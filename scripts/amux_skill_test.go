@@ -31,7 +31,6 @@ var publicSkillFiles = []string{
 	filepath.Join("skills", "amux", "reference", "contract-v1.md"),
 	filepath.Join("skills", "amux", "reference", "deadline-v1.md"),
 	filepath.Join("skills", "amux", "reference", "removal-safety.md"),
-	filepath.Join("skills", "amux", "reference", "ordinary-issue-pr-checklist.md"),
 	filepath.Join("skills", "amux-tycho", "SKILL.md"),
 	filepath.Join("skills", "amux-tycho", "reference", "tycho-report-bridge.md"),
 	filepath.Join("skills", "amux-tycho", "reference", "team-review-second-opinion.md"),
@@ -54,8 +53,8 @@ func TestTriggerChecklistMatchesSkillActivationAndRouting(t *testing.T) {
 
 	triggerPattern := regexp.MustCompile(`(?m)^\| \x60([^\x60]+)\x60 \|`)
 	matches := triggerPattern.FindAllStringSubmatch(checklist, -1)
-	if len(matches) != 19 {
-		t.Fatalf("trigger checklist has %d routes, want 19", len(matches))
+	if len(matches) != 18 {
+		t.Fatalf("trigger checklist has %d routes, want 18", len(matches))
 	}
 	for _, match := range matches {
 		trigger := match[1]
@@ -84,7 +83,6 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 				"deadline-v1.md",
 				"amp-invocation-policy.md",
 				"removal-safety.md",
-				"ordinary-issue-pr-checklist.md",
 			},
 		},
 		{
@@ -127,24 +125,57 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 	}
 }
 
-func TestOrdinaryIssuePRChecklistStaysLeanAndComposeOnly(t *testing.T) {
+func TestOrdinaryIssuePRChecklistStaysDocsOnlyAndLean(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
 	triggers := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md"))
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
-	checklist := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "ordinary-issue-pr-checklist.md"))
+	checklist := readSkillFile(t, root, filepath.Join("docs", "ordinary-issue-pr-checklist.md"))
 
-	for name, contents := range map[string]string{
-		"SKILL.md":          skill,
-		"trigger checklist": triggers,
-		"workflows.md":      workflow,
+	// ADR 0007: ordinary issue/PR guidance must not activate the retiring /amux drain skill.
+	frontmatterEnd := strings.Index(skill, "\n---\n")
+	if frontmatterEnd < 0 {
+		t.Fatal("SKILL.md missing frontmatter terminator")
+	}
+	frontmatter := skill[:frontmatterEnd]
+	for _, forbidden := range []string{
+		"ordinary issue and PR-review",
+		"ordinary issue or PR review",
+		"ordinary-issue-pr-checklist",
+		"Ordinary issue or PR review",
 	} {
-		if !strings.Contains(contents, "ordinary-issue-pr-checklist.md") {
-			t.Errorf("%s does not link ordinary-issue-pr-checklist.md", name)
+		if strings.Contains(frontmatter, forbidden) {
+			t.Errorf("/amux frontmatter must not claim ordinary issue/PR work (%q)", forbidden)
+		}
+		if strings.Contains(triggers, forbidden) {
+			t.Errorf("trigger-phrases must not route ordinary issue/PR work (%q)", forbidden)
 		}
 	}
+	if strings.Contains(skill, "ordinary-issue-pr-checklist") || strings.Contains(workflow, "ordinary-issue-pr-checklist") {
+		t.Error("/amux skill or workflows must not link ordinary-issue-pr-checklist as an activation surface")
+	}
+	if _, err := os.Stat(filepath.Join(root, "skills", "amux", "reference", "ordinary-issue-pr-checklist.md")); err == nil {
+		t.Error("checklist must not live under skills/amux/reference (docs-only under ADR 0007)")
+	}
+
+	// Child-creation guidance applies only when a child is needed; direct coordinator remains valid.
+	if !strings.Contains(skill, "When delegated work needs a native child") {
+		t.Error("SKILL.md must gate create_thread on needing a native child")
+	}
+	if !strings.Contains(skill, "may run on the direct coordinator without a child") {
+		t.Error("SKILL.md must allow direct coordinator execution without a child")
+	}
+	if !strings.Contains(workflow, "When ordinary work needs a native child thread") {
+		t.Error("workflows.md must scope fresh native work to cases that need a child")
+	}
+	if !strings.Contains(workflow, "may stay on the direct coordinator without creating a child") {
+		t.Error("workflows.md must allow direct coordinator execution without a child")
+	}
+
 	for _, required := range []string{
+		"ADR 0007",
+		"not** an `/amux` skill route",
 		"direct coordinator",
 		"native child",
 		"locked dedicated",
@@ -164,6 +195,7 @@ func TestOrdinaryIssuePRChecklistStaysLeanAndComposeOnly(t *testing.T) {
 		"No new Amux lifecycle",
 		"generalized `amux spawn`",
 		"permanent Lead",
+		"docs-only",
 	} {
 		if !strings.Contains(checklist, required) {
 			t.Errorf("ordinary issue/PR checklist is missing %q", required)
@@ -180,8 +212,8 @@ func TestOrdinaryIssuePRChecklistStaysLeanAndComposeOnly(t *testing.T) {
 		}
 	}
 	// Keep the checklist roughly one screen (issue #369).
-	if lines := strings.Count(checklist, "\n") + 1; lines > 45 {
-		t.Fatalf("ordinary issue/PR checklist is %d lines; want ≤45 for one-screen lean form", lines)
+	if lines := strings.Count(checklist, "\n") + 1; lines > 50 {
+		t.Fatalf("ordinary issue/PR checklist is %d lines; want ≤50 for one-screen lean form", lines)
 	}
 }
 

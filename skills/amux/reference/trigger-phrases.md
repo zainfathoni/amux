@@ -22,6 +22,5 @@ This table is the complete activation and routing contract for [`../SKILL.md`](.
 | `/amux health` | [`workflows.md#health-workers-and-runners`](workflows.md#health-workers-and-runners) | Skill-only aggregate, safe mode-specific probes. |
 | `/amux sprawl` | [`workflows.md#sprawl-independent-issue-threads`](workflows.md#sprawl-independent-issue-threads) | Skill-only native fan-out; no Amux adoption/lifecycle state. |
 | `/amux finish` | [`workflows.md#finish-a-merged-worker`](workflows.md#finish-a-merged-worker) | Skill-only pre-cutover compatibility/drain; fail closed on runner ownership. |
-| `Ordinary issue or PR review` | [`ordinary-issue-pr-checklist.md`](ordinary-issue-pr-checklist.md) | Direct coordinator + locked dedicated/exact-head worktree; optional native child only when justified; no new Amux lifecycle. |
 
 When editing a trigger, update the frontmatter description, top-level routing, this table, its linked workflow/reference, and consistency tests together.
