@@ -31,6 +31,7 @@ var publicSkillFiles = []string{
 	filepath.Join("skills", "amux", "reference", "contract-v1.md"),
 	filepath.Join("skills", "amux", "reference", "deadline-v1.md"),
 	filepath.Join("skills", "amux", "reference", "removal-safety.md"),
+	filepath.Join("skills", "amux", "reference", "ordinary-issue-pr-checklist.md"),
 	filepath.Join("skills", "amux-tycho", "SKILL.md"),
 	filepath.Join("skills", "amux-tycho", "reference", "tycho-report-bridge.md"),
 	filepath.Join("skills", "amux-tycho", "reference", "team-review-second-opinion.md"),
@@ -53,8 +54,8 @@ func TestTriggerChecklistMatchesSkillActivationAndRouting(t *testing.T) {
 
 	triggerPattern := regexp.MustCompile(`(?m)^\| \x60([^\x60]+)\x60 \|`)
 	matches := triggerPattern.FindAllStringSubmatch(checklist, -1)
-	if len(matches) != 18 {
-		t.Fatalf("trigger checklist has %d routes, want 18", len(matches))
+	if len(matches) != 19 {
+		t.Fatalf("trigger checklist has %d routes, want 19", len(matches))
 	}
 	for _, match := range matches {
 		trigger := match[1]
@@ -83,6 +84,7 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 				"deadline-v1.md",
 				"amp-invocation-policy.md",
 				"removal-safety.md",
+				"ordinary-issue-pr-checklist.md",
 			},
 		},
 		{
@@ -122,6 +124,64 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 				t.Errorf("%s/reference/%s is missing: %v", pkg.skillDir, name, err)
 			}
 		}
+	}
+}
+
+func TestOrdinaryIssuePRChecklistStaysLeanAndComposeOnly(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
+	triggers := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md"))
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
+	checklist := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "ordinary-issue-pr-checklist.md"))
+
+	for name, contents := range map[string]string{
+		"SKILL.md":          skill,
+		"trigger checklist": triggers,
+		"workflows.md":      workflow,
+	} {
+		if !strings.Contains(contents, "ordinary-issue-pr-checklist.md") {
+			t.Errorf("%s does not link ordinary-issue-pr-checklist.md", name)
+		}
+	}
+	for _, required := range []string{
+		"direct coordinator",
+		"native child",
+		"locked dedicated",
+		"exact-head",
+		"Exclusive write ownership",
+		"Thread isolation",
+		"Git worktree isolation",
+		"runtime isolation",
+		"no-change",
+		"no-findings",
+		"#238",
+		"#328",
+		"#344",
+		"#331",
+		"#339",
+		"#313",
+		"No new Amux lifecycle",
+		"generalized `amux spawn`",
+		"permanent Lead",
+	} {
+		if !strings.Contains(checklist, required) {
+			t.Errorf("ordinary issue/PR checklist is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"amux spawn admission",
+		"authorize-finish",
+		"/amux finish procedure",
+		"multi-phase closeout",
+	} {
+		if strings.Contains(checklist, forbidden) {
+			t.Errorf("ordinary issue/PR checklist contains out-of-scope material %q", forbidden)
+		}
+	}
+	// Keep the checklist roughly one screen (issue #369).
+	if lines := strings.Count(checklist, "\n") + 1; lines > 45 {
+		t.Fatalf("ordinary issue/PR checklist is %d lines; want ≤45 for one-screen lean form", lines)
 	}
 }
 

@@ -1,6 +1,6 @@
 ---
 name: amux
-description: "Drains existing local Amux worker, runner, and workspace state plus proven pre-cutover compatibility/drain state for work groups, reports, callback leases, deadlines, and finish authorization, while routing new Amp work to native child threads. Use for pin/unpin/park/restart/shelve/unshelve/launch, bounded projectless host placement, doctor, teardown, /amux health, /amux sprawl, the one-time staged-drain /amux sweep, pre-cutover /amux finish, child-thread coordination, 'forget this on restore', 'hide it for now', 'defer this workspace', 'Show shelved work', and 'Restore my workspace'. Experimental Tycho, Claude, or Pi routes remain separate explicit-only skills."
+description: "Drains existing local Amux worker, runner, and workspace state plus proven pre-cutover compatibility/drain state for work groups, reports, callback leases, deadlines, and finish authorization, while routing new Amp work to native child threads. Use for pin/unpin/park/restart/shelve/unshelve/launch, bounded projectless host placement, doctor, teardown, /amux health, /amux sprawl, the one-time staged-drain /amux sweep, pre-cutover /amux finish, child-thread coordination, ordinary issue and PR-review defaults, 'forget this on restore', 'hide it for now', 'defer this workspace', 'Show shelved work', and 'Restore my workspace'. Experimental Tycho, Claude, or Pi routes remain separate explicit-only skills."
 ---
 
 # amux
@@ -41,6 +41,7 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 - **/amux sprawl**: [`workflows.md`](reference/workflows.md#sprawl-independent-issue-threads).
 - **/amux sweep**: one-time staged-drain inventory only; [`workflows.md`](reference/workflows.md#sweep-worktree-inventory).
 - **/amux finish**: pre-cutover existing-worker compatibility/drain only; [`workflows.md`](reference/workflows.md#finish-a-merged-worker).
+- **Ordinary issue or PR review**: load [`reference/ordinary-issue-pr-checklist.md`](reference/ordinary-issue-pr-checklist.md) first—default direct coordinator + locked dedicated/exact-head worktree; optional native child only when justified.
 - **Before any worktree remove or prune path**: load [`reference/removal-safety.md`](reference/removal-safety.md).
 
 Deadlines (compatibility only): load [`reference/deadline-v1.md`](reference/deadline-v1.md) only when handling an existing pre-cutover deadline wake-up—not on every `/amux` load and never to create deadline state for native work.
@@ -51,6 +52,7 @@ Experimental external execution is explicit-only. Load **`/amux-tycho`** for the
 
 - Selectors, side effects, install: [`reference/commands.md`](reference/commands.md)
 - Spawn, health, sprawl, sweep, teardown, finish: [`reference/workflows.md`](reference/workflows.md)
+- Ordinary issue / PR-review defaults: [`reference/ordinary-issue-pr-checklist.md`](reference/ordinary-issue-pr-checklist.md)
 - Proven pre-cutover drain workers may read once: [`reference/contract-v1.md`](reference/contract-v1.md)
 - Coordinator deadlines: [`reference/deadline-v1.md`](reference/deadline-v1.md)
 - Stuck clients / recovery: [`reference/troubleshooting.md`](reference/troubleshooting.md)

@@ -4,7 +4,9 @@ These are skill workflows. Only commands beginning with literal `amux` are CLI c
 
 ## Create fresh native work
 
-For ordinary new work, make one authenticated native Amp `create_thread` call and deliver the complete task-only assignment in that request. Select an explicit mode: with a known linked ChatGPT subscription and known target-mode availability, use `low` for small mechanical work, `medium` for ordinary implementation, or `high` for hard architecture, debugging, or review; otherwise use `medium`. Keep `ultra`, plugin, and other special modes owner-explicit.
+For one coherent ordinary issue or PR review, load the short default first: [`ordinary-issue-pr-checklist.md`](ordinary-issue-pr-checklist.md). Prefer direct coordinator execution on a locked dedicated/exact-head worktree; use a native child only when justified.
+
+For ordinary new work that needs a child, make one authenticated native Amp `create_thread` call and deliver the complete task-only assignment in that request. Select an explicit mode: with a known linked ChatGPT subscription and known target-mode availability, use `low` for small mechanical work, `medium` for ordinary implementation, or `high` for hard architecture, debugging, or review; otherwise use `medium`. Keep `ultra`, plugin, and other special modes owner-explicit.
 
 Select the exact Workspace Project and Orb, or list live runners immediately before creation and select one exact runner ID whose working directory is the intended canonical workdir. Do not silently fall back between Orb and runner, between runner IDs, or between workdirs. When physical files or local state matter, use that exact live runner; an Orb is not a substitute.
 
