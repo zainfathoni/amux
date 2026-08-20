@@ -1,7 +1,7 @@
 ---
 status: proposed-actions
 decision: adr-0007
-as-of: 2026-08-13
+as-of: 2026-08-20
 ---
 
 # Amux staged-drain disposition ledger
@@ -36,9 +36,9 @@ This ledger translates [ADR 0007](adr/0007-retire-amux-through-native-cutover-an
 | [#337](https://github.com/zainfathoni/amux/issues/337) | Close after its preservation rules are confirmed present in the worktree-safety route; do not implement retirement records. |
 | [#338](https://github.com/zainfathoni/amux/issues/338) | Close as superseded; no dirty-disposable/provider-recovery-loss ledger. Exact destructive authorization remains outside ordinary drain. |
 | [#339](https://github.com/zainfathoni/amux/issues/339) | Rewrite as the rollout/documentation slice for ADR 0007: deprecation warnings, per-family cutover generations, export/freeze instructions, release gates, and compatibility sunset. |
-| [#344](https://github.com/zainfathoni/amux/issues/344) | Narrow to any reusable Git/worktree removal-safety gap not already covered by merged #360's read-only inventory and #363's backup behavior. Do not add a permanent Amux/Tycho reconciler, extend `/amux sweep`, or make sweep deletion wait on this issue. |
+| [#344](https://github.com/zainfathoni/amux/issues/344) | **Closed (Amux scope complete).** Increments shipped: #345/#357 teardown honesty, #346/#354 worker doctor workdir, #347/#355 classifier reference, #348/#358 finish removal gate, #349/#363 backup refs, #350/#359 stale-record reconcile, #351/#360 one-time sweep. No residual reusable Git/worktree gap beyond retained `removal-safety.md` + finish/backup paths. Do not add a permanent Amux/Tycho reconciler, extend `/amux sweep`, or hold sweep sunset on this issue. Default at Amux archive: docs-only retain of removal-safety guidance (ADR 0007 Q4). |
 | [#351](https://github.com/zainfathoni/amux/issues/351) | **Completed by merged #360.** Preserve its one-time inventory result and exact sunset: after one accepted or explicitly dispositioned incomplete/error inventory and owner confirmation of no repeat, delete the helper, sweep-only tests, and all `/amux sweep` routes/references before the next Amux release. |
-| [#352](https://github.com/zainfathoni/amux/issues/352) | Move any continuing drift diagnostic to Tycho ownership and keep it report-only. For Amux, include external rows only in the bounded migration snapshot, then close. |
+| [#352](https://github.com/zainfathoni/amux/issues/352) | **Closed for Amux scope.** Continuing `hq.yml` / purpose / phantom-key drift diagnostics belong to Tycho ownership and stay report-only. Amux does not join or mutate external project registries: teardown already emits `external_project_records=not_owned`; the one-time #360 sweep joins only Git worktrees, `workers.tsv`, validated reports, and explicit filesystem roots—never `hq.yml`. Do not extend `/amux sweep` into standing Tycho monitoring. |
 
 ### Correctness required before cutover
 
@@ -112,7 +112,7 @@ Owner accepted the following refinements of ADR 0007 on 2026-08-13 (direction th
 
 1. Whether #331 is rewritten in place as the staged-drain umbrella or closed and replaced by one narrowly named drain umbrella (ADR 0007 itself is accepted).
 2. Choose the release/date expression for each operation-family cutover generation.
-3. Accept one #360 inventory or explicitly disposition it incomplete/error, confirm whether no repeat is required, and enforce deletion of its helper, sweep-only tests, and every `/amux sweep` route/reference before the next Amux release.
+3. Accept one #360 inventory or explicitly disposition it incomplete/error, confirm whether no repeat is required, and enforce deletion of its helper, sweep-only tests, and every `/amux sweep` route/reference before the next Amux release. **Independent of closed #344/#352** — do not reopen those epics to hold the sunset.
 4. Approve the #232 row-absent exact-evidence threshold and the OS supervision mechanism for replacement native runners.
 5. Name the concrete Amp/Tycho API or surface that will carry the accepted same-turn authenticated structured return, run one ordinary owner-authorized field cycle that meets all seven ADR 0007 gate bullets, and record acceptance before Tycho receipt admission closes.
 6. Choose the read-only compatibility duration and minimum retained reader release.
