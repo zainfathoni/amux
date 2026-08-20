@@ -16,7 +16,7 @@ Compose-only operating guidance for one coherent issue or PR review after [ADR 0
 | --- | --- |
 | Review-only / no-PR finish | [#238](https://github.com/zainfathoni/amux/issues/238) |
 | Amp `/team-review` + optional `/amux-tycho` second opinion | [#328](https://github.com/zainfathoni/amux/issues/328); load `/amux-tycho` when explicitly requested |
-| Removal safety / retain-vs-remove disposition | [#344](https://github.com/zainfathoni/amux/issues/344), [#331](https://github.com/zainfathoni/amux/issues/331)–[#339](https://github.com/zainfathoni/amux/issues/339); [`skills/amux/reference/removal-safety.md`](../skills/amux/reference/removal-safety.md) |
+| Removal safety / retain-vs-remove (shipped; epic closed) | [`removal-safety.md`](../skills/amux/reference/removal-safety.md); closed [#344](https://github.com/zainfathoni/amux/issues/344); drain umbrella [#331](https://github.com/zainfathoni/amux/issues/331)–[#339](https://github.com/zainfathoni/amux/issues/339) |
 | Lifecycle/orchestration surface inventory | [#313](https://github.com/zainfathoni/amux/issues/313) |
 
 ## Non-goals
