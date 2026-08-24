@@ -1,15 +1,21 @@
 # Authoritative Amp `/team-review` with one Opus second opinion
 
-This `/amux-tycho` application workflow is the progressive-disclosure home for [#328](https://github.com/zainfathoni/amux/issues/328). It reuses the one canonical receipt helper and protocol in [`tycho-report-bridge.md`](tycho-report-bridge.md). It does not widen stable Amux core, formally promote `/amux-tycho`, alter closed [#323](https://github.com/zainfathoni/amux/issues/323), launch Tycho, or authorize a live field cycle from documentation alone.
+This `/amux-tycho` application workflow is the progressive-disclosure home for [#328](https://github.com/zainfathoni/amux/issues/328). It reuses the one canonical receipt helper and protocol in [`tycho-report-bridge.md`](tycho-report-bridge.md). It does not widen stable Amux core, formally promote `/amux-tycho`, alter closed [#323](https://github.com/zainfathoni/amux/issues/323), give the bridge Tycho lifecycle authority, or authorize a live field cycle from documentation alone.
 
-The generic `/amux-tycho` route is practically usable under its explicit owner-authorized contract. This narrower #328 workflow remains blocked on #327's newly spawned local-worker assignment requirement. Keep a real Amp thread as coordinator and consume/acknowledgement authority.
+The generic `/amux-tycho` route is practically usable under its explicit owner-authorized contract. Keep a real native Amp thread as coordinator and consume/acknowledgement authority. The historical #327 local-worker assignment gate was completed by merged PR #361 and is not a current prerequisite for this workflow; ordinary Amp review work stays on the direct coordinator or an authenticated native `create_thread` child. Exact #327 installation proof remains relevant only to a deliberately continued legacy projectless local-worker cycle, which is outside this workflow.
 
 ## Policy categories
 
-- **Route selection:** exact owner-selected host, Tycho agent/project/harness/model, and current availability determine where the review may run.
-- **Task-specific validation:** repository, head, tree, worktree, and PENDING-review checks validate this code-review task; they are not generic receipt requirements.
+- **Route selection:** exact owner-selected host, Tycho agent/project/harness/model, and current availability determine where the review may run. The route may already exist or be one owner-authorized prepared route created without provider execution.
+- **Task-specific validation:** repository, PR, full head SHA, full tree SHA, local attachment, immutable remote artifact, and PENDING-review checks validate this code-review task; they are not generic receipt requirements.
 - **Exceptional recovery:** provider stop without a report, notification uncertainty, custody loss, and cleanup replay use the bridge recovery procedure only when those failures occur.
 - **Optional formal promotion:** multi-cycle, natural-failure, supported-ingress, privacy, and ADR evidence do not gate ordinary `/amux-tycho` use or #323 closure.
+
+## Route availability and preparation
+
+Prefer an exact existing Tycho project/agent. When the owner explicitly authorizes a fresh project or agent, the Tycho lifecycle surface may create exactly one dormant project/agent as an **owner-authorized prepared route** without provider execution. Preparation must use the owner-named canonical workdir, harness, exact model, and project identity; agent creation must not start the provider. Immediately freeze and re-read the returned project key, agent key, initial task-message identity, workdir, harness, and model.
+
+If project or agent creation is rejected, ambiguous, or returns without enough identity to prove that no provider started, stop. When route creation is indeterminate, do not retry, search for an alternate agent, normalize a model alias, or choose fallback execution. Once preparation succeeds, create the immutable receipt before the first provider run. The `/amux-tycho` bridge still owns only report transport; `/tycho` owns the separately authorized route preparation and single execution.
 
 ## Settled design decisions
 
@@ -63,26 +69,37 @@ If the provider stops, is killed, times out, or exits without a successful durab
 
 Exact replay of an already-submitted report is duplicate-safe. Conflicting replay fails closed. There is no second submit with a different body under the same event ID.
 
-### 4. Task-specific validation: same-head proof across Amp and Tycho worktrees
+### 4. Task-specific validation: reviewed-artifact identity
 
-Path or directory-name equality is not identity. The bridge helper does **not** attest Git state; Amp (or the owner-operated coordinator) must prove attachment with ordinary `git`/`gh` reads outside the helper.
+Path or directory-name equality is not identity. The bridge helper does **not** attest Git state; Amp (or the owner-operated coordinator) must prove the reviewed artifact with ordinary `git`/`gh` reads outside the helper. Choose exactly one `artifact_mode` before receipt creation; there is no fallback between modes after the task digest is frozen.
 
 **When to prove (all mandatory):**
 
 - **Pre-create / pre-Tycho** — before receipt `create` and before Tycho starts.
 - **Post-Tycho / pre-consume** — after Tycho finishes (or fails to submit) and **before** `consume`, candidate acceptance, PENDING mutation, or any claim that the #328 cycle passed its task-specific checks.
 
-Each proof requires all of:
+Every proof, regardless of mode, requires:
 
-1. **Reviewed repository identity** — both Amp and Tycho worktrees resolve to the same remote repository the PR belongs to (normalize `git remote get-url origin` to `owner/repo`; reject mismatch).
-2. **Canonical workdir identity** — Amp worktree path and Tycho worktree path still equal the paths frozen in the task/receipt (Tycho path equals bound `workdir`). Path rename or substitute worktree fails closed.
-3. **Pinned head object** — both worktrees report the same full 40-character commit SHA, equal to the owner-pinned reviewed PR head, via `git rev-parse HEAD`. Short SHAs are insufficient.
-4. **Committed tree object identity** — both worktrees report the same `git rev-parse HEAD^{tree}` (full tree SHA), equal to the frozen tree. This binds the committed tree under `HEAD`; it does **not** detect dirty index or worktree content by itself.
-5. **Clean attachment on both worktrees** — default policy: both Amp and Tycho review worktrees must be clean for tracked content (`git status --porcelain` empty for staged and unstaged tracked changes). This cleanliness check is what detects local dirt; untracked files block unless the owner explicitly records a bounded allowlist of untracked paths that cannot affect the reviewed tree. Any non-allowlisted dirt blocks.
-6. **Distinct worktree paths are allowed** — Amp and Tycho paths may differ from each other. Bind the Tycho canonical absolute `workdir` into the receipt; never rebind to the Amp path or treat basename equality as proof.
-7. **Route and head are frozen in the task digest** — the bounded task bytes MUST include, as exact literal fields: repository `owner/repo`, PR number, full head SHA, full tree SHA, Amp worktree path, Tycho worktree path, Tycho agent key, project, harness, model (normally exact `claude-opus-5`), `producer_role`, and `report_only`. `task_digest` is SHA-256 of those exact task bytes. Changing head, model, project, harness, agent, or either worktree path requires a newly authorized receipt, never mutation of the old one.
+1. **Reviewed repository identity** — normalize `git remote get-url origin` for each local attachment to `owner/repo` and require equality with the PR repository.
+2. **Canonical workdir identity** — every local path still equals the path frozen in the task/receipt; the Tycho path equals bound `workdir`. A renamed or substituted path fails closed.
+3. **Pinned remote artifact** — freeze repository `owner/repo`, PR number, full head SHA, and full tree SHA. Short SHAs are insufficient. Before and after Tycho, re-read GitHub's current PR head and require the pinned full head SHA; verify that exact commit resolves to the frozen full tree SHA in the selected artifact source.
+4. **Clean local attachments** — every local attachment must be clean (`git status --porcelain` empty). Untracked files block unless the owner explicitly records a bounded allowlist that cannot affect review inputs.
+5. **Route and artifact are frozen in the task digest** — the bounded task bytes MUST include exact literal fields for `artifact_mode`, repository, PR number, full head SHA, full tree SHA, Amp worktree path, Tycho worktree path, Tycho agent key, project, harness, model (normally exact `claude-opus-5`), `producer_role`, and `report_only`. `task_digest` is SHA-256 of those exact task bytes. Changing artifact mode, head, tree, model, project, harness, agent, or either worktree path requires a newly authorized receipt, never mutation of the old one.
 
-If any pre-create check fails, do not create a receipt and do not start Tycho. If any post-Tycho/pre-consume check fails (including read failure), **reject the application payload**: do not treat candidates as usable review input, mutate GitHub, or claim the #328 cycle passed—even if a durable `valid_report` exists. The receipt may still be consumed/acknowledged for bridge hygiene with an explicit “application-rejected: attachment drift” handling record.
+#### `dual-local-attachment`
+
+Use this mode when both Amp and Tycho worktrees are intentionally checked out at the reviewed PR head. Both worktrees must report the pinned full head SHA through `git rev-parse HEAD` and the frozen committed tree through `git rev-parse HEAD^{tree}`. **Committed tree object identity** binds the exact committed content. Both Amp and Tycho review worktrees must be clean. The tree check does **not** detect dirty index or worktree content by itself; cleanliness supplies that proof. Distinct worktree paths are allowed and remain separately frozen.
+
+#### `immutable-remote`
+
+Use this mode when Tycho reviews a pinned immutable remote artifact while the coordinator worktree intentionally remains on a different comparison commit. In addition to the common proof:
+
+1. Record the coordinator comparison HEAD and `HEAD^{tree}` separately; revalidate both plus cleanliness before creation and before consumption. They are comparison context, not the reviewed artifact.
+2. Prove the exact pinned PR commit object and full tree SHA are available to the Tycho route through the frozen repository/object source. Do not rely on a moving branch name, a short SHA, a rendered diff without commit identity, or the coordinator worktree's current files.
+3. State in the task that Tycho must inspect the pinned commit/diff explicitly rather than treating worktree `HEAD` as the reviewed artifact. Findings must cite the pinned head or paths/lines derived from it.
+4. Freeze the comparison HEAD/tree and immutable artifact source identity in the task bytes. The Tycho worktree may equal the coordinator path for a read-only run, but any local mutation, HEAD drift, remote mismatch, missing commit/tree object, or PR-head drift rejects the application payload.
+
+If any pre-create check fails, do not create a receipt and do not start Tycho. If any post-Tycho/pre-consume check fails (including read failure), **reject the application payload**: do not treat candidates as usable review input, mutate GitHub, or claim the #328 cycle passed—even if a durable `valid_report` exists. The receipt may still be consumed/acknowledged for bridge hygiene with an explicit “application-rejected: reviewed-artifact drift” handling record.
 
 ### 5. Stale / concurrent PENDING-review generation protection
 
@@ -162,14 +179,14 @@ Immediately before **every** GitHub review or comment write—including the firs
 
 A useful provider opinion is not a complete #328 workflow. Count a #328 field run only when **all** of the following are recorded against the same receipt:
 
-1. **#328-specific #327 prerequisite** — do not run this newly spawned local-worker workflow until [#327](https://github.com/zainfathoni/amux/issues/327) has an **accepted and merged** solution and that exact accepted version is installed and verified on the host. Local, unmerged, draft, or merely “available” routes do not satisfy this #328 prerequisite. This does not block generic `/amux-tycho` use with an existing coordinator or alter closed #323.
-2. After the #327 gate clears: prove the authoritative Amp `/team-review` worker's initial assignment through that exact accepted merged delivery semantics (version/commit recorded).
-3. Owner authorization naming exact Tycho agent, project, harness, model, and worktree; adjacent revalidation that the route still matches.
-4. **Pre-Tycho** both-worktree repository, canonical workdir, full head SHA, full tree SHA, and cleanliness proofs from decision 4, plus frozen task bytes and recomputed `task_digest`.
+1. **Historical #327 gate disposition** — record that [#327](https://github.com/zainfathoni/amux/issues/327) was completed by merged PR #361 and that this run uses the real direct Amp coordinator or a native `create_thread`, not the superseded projectless local-worker assignment cycle. Do not require legacy installation proof for native work.
+2. Prove the authoritative Amp `/team-review` coordinator or native child identity and its independent first-pass completion before Tycho input.
+3. Owner authorization naming the exact existing or owner-authorized prepared Tycho agent, project, harness, model, and worktree; for a prepared route, record no-provider-execution creation plus adjacent revalidation that the route still matches.
+4. **Pre-Tycho** reviewed-artifact proof for the selected `dual-local-attachment` or `immutable-remote` mode, including repository, canonical workdir, full head SHA, full tree SHA, cleanliness, frozen task bytes, and recomputed `task_digest`.
 5. Immutable `create` before Tycho execution with every required binding and `report_only`.
 6. Separate-process recovery of the same receipt and owner capabilities from the original canonical directories is either performed in the cycle or already proven for that install and re-validated by `show` before consume.
 7. Exactly one producer/session/run/task-bound durable `valid_report` (`complete` or `blocked`) through the canonical helper—not logs or exit codes.
-8. **Post-Tycho / pre-consume** same-head proof (decision 4) on both Amp and Tycho attachments; failure rejects the application payload and the #328 cycle.
+8. **Post-Tycho / pre-consume** reviewed-artifact proof (decision 4) in the frozen mode; failure rejects the application payload and the #328 cycle.
 9. Explicit Amp-origin `consume` establishing `delivered` (bridge delivery only; application rejection may still follow).
 10. Amp independent verification of every candidate against the pinned head, with unsupported and application-invalid claims rejected.
 11. Amp-only reconciliation of at most one **owned** current-user PENDING review without publication unless separately authorized, including pre/post PENDING snapshots **and** per-write PR head equality checks (decision 5).
@@ -188,7 +205,7 @@ Natural-failure recovery without report loss may inform optional formal promotio
 | --- | --- | --- |
 | Authoritative Amp `/team-review` worker | Independently review the pinned head first; own the review conclusion; consume and assess the Tycho report; create/reconcile the single owned current-user PENDING review after verification | Treat Tycho output as authoritative; publish or finish without separate authorization; skip independent verification; overwrite unowned PENDING reviews |
 | Amp origin / coordinator | Create the receipt; hold custody; consume; acknowledge; optional wake-up schedule | Transfer coordinator identity to Tycho; treat notification as delivery |
-| Owner | Approve the exact existing Tycho agent/project/harness/model/worktree (normally exact `claude-opus-5`); designate owned PENDING review ID when reusing one; authorize publication/finish separately | Infer aliases, fallback models, new agents, or alternate heads |
+| Owner | Approve the exact existing route or one owner-authorized prepared route with project/agent/worktree/harness/model (normally exact `claude-opus-5`); select artifact mode; designate owned PENDING review ID when reusing one; authorize publication/finish separately | Imply route preparation from a generic review request; infer aliases, fallback models, extra agents, or alternate heads |
 | Tycho producer | Run the bounded second-opinion task; submit one typed `complete` or `blocked` report | Mutate GitHub reviews/comments; choose publication state; join Amux groups; receive callback/finish/lifecycle authority; mutate the reviewed head; become coordinator; turn exit/logs/state into delivery |
 
 ## Workflow
@@ -197,23 +214,22 @@ Perform steps in order. Stop on any failed check.
 
 ### A. Authoritative Amp first pass
 
-1. **#328-specific #327 prerequisite first:** stop this newly spawned local-worker workflow unless #327 is accepted, merged, and that exact accepted version is installed and verified. Local/unmerged routes are insufficient for this workflow only.
-2. Create or adopt the authoritative Amp `/team-review` worker on the exact review worktree.
-3. Prove initial assignment through the exact accepted merged #327 delivery semantics; record the installed version/commit.
-4. Pin the PR repository, full head SHA, and full tree SHA; prove Amp worktree cleanliness per decision 4.
-5. Complete an independent Amp first-pass review of that head **before** any Tycho input. Record that the first pass finished with no Tycho candidates consumed.
-6. If a PENDING review will be reused, obtain an explicit owner-designated review ID now; otherwise plan to create one only after verification.
+1. Keep the authoritative review on this real Amp coordinator or one authenticated native `create_thread` child. Do not create or adopt an Amux worker. Record the historical #327/PR #361 disposition only to show that no legacy assignment gate applies.
+2. Pin the PR repository, full head SHA, and full tree SHA; choose `dual-local-attachment` or `immutable-remote`; prove the applicable local cleanliness and artifact identity per decision 4.
+3. Complete an independent Amp first-pass review of the pinned head **before** any Tycho input. Record that the first pass finished with no Tycho candidates consumed.
+4. If a PENDING review will be reused, obtain an explicit owner-designated review ID now; otherwise plan to create one only after verification.
 
 ### B. Owner-select exact Tycho route
 
-1. Require explicit owner authorization naming the existing Tycho **agent**, **project**, **harness**, **model**, and **worktree**.
+1. Require explicit owner authorization naming either the existing route or one owner-authorized prepared Tycho **agent**, **project**, **harness**, **model**, and **worktree**.
 2. Normal model is exact `claude-opus-5` when the owner authorizes that exact identifier. No aliases, defaults, fallbacks, or alternate models.
-3. Adjacent-revalidate that the named route still exists and is the one selected. Missing, ambiguous, or unapproved selection blocks.
-4. Prove same-head attachment per decision 4. Do not create a Tycho agent/project or switch harness/model under this workflow.
+3. For a prepared route, use the separately authorized Tycho lifecycle to create exactly one dormant project/agent without provider execution. Do not use `--run`; stop on ambiguous creation. Freeze the returned agent and task-message identities.
+4. Adjacent-revalidate that the named route exists, has not run, and exactly matches the selected worktree, harness, and model. Missing, ambiguous, already-running, or unapproved selection blocks.
+5. Prove reviewed-artifact identity in the selected mode per decision 4. Route preparation never permits switching harness, model, worktree, artifact mode, or provider fallback.
 
 ### C. Freeze task and create one immutable receipt
 
-1. Write one bounded task containing at least the literal fields required by decision 4 item 7, plus second-opinion scope, acceptance criteria, report schema pointer (this document + bridge protocol), explicit `report_only` ban on GitHub mutation, producer-only submit instructions, and the requirement to submit one application-valid `complete` or `blocked` report before stop.
+1. Write one bounded task containing at least the literal fields required by decision 4, plus second-opinion scope, acceptance criteria, report schema pointer (this document + bridge protocol), explicit `report_only` ban on GitHub mutation, producer-only submit instructions, and the requirement to submit one application-valid `complete` or `blocked` report before stop.
 2. Compute `task_digest` as SHA-256 of the exact task bytes.
 3. Create the receipt **before** Tycho execution using the canonical helper, binding:
    - canonical Amp `origin_thread`;
@@ -229,11 +245,11 @@ Perform steps in order. Stop on any failed check.
 ### D. Tycho second opinion once
 
 1. Capture a pre-Tycho GitHub snapshot of current-user PENDING reviews/comments for later no-mutation proof.
-2. Run the bounded task once on the selected route. This skill does not launch or own the provider process.
+2. Run the bounded task once on the selected route through the separately authorized Tycho lifecycle. The bridge does not own the provider process and allows no fallback or automatic retry.
 3. Require exactly one durable `submit` of a typed `complete` or `blocked` report through the canonical bridge.
 4. If no valid submit arrives, retain the receipt, record “no Tycho finding,” and skip candidate consumption. Do not mine logs or state (decision 3).
 5. Capture a post-Tycho GitHub snapshot; any review/comment mutation during the Tycho phase is a compliance failure even if a report exists.
-6. **Post-Tycho / pre-consume same-head proof** (decision 4) on both Amp and Tycho attachments. On failure, reject the application payload and the #328 cycle.
+6. **Post-Tycho / pre-consume reviewed-artifact proof** (decision 4) in the frozen mode. On failure, reject the application payload and the #328 cycle.
 
 ### E. Explicit consume, independent verify, PENDING reconcile
 
@@ -263,11 +279,12 @@ Perform steps in order. Stop on any failed check.
 
 ## Troubleshooting
 
-- **#327 not accepted/merged/installed** — stop this #328 newly spawned local-worker workflow. This does not block generic `/amux-tycho` use with an existing coordinator or alter closed #323.
+- **Someone applies the old #327 gate** — verify merged PR #361 and use the current native coordinator/`create_thread` path. Require exact #327 installation only for an explicitly proven legacy projectless local-worker cycle, not this workflow.
+- **Prepared route creation is rejected or indeterminate** — stop before provider execution and receipt creation. Do not search, retry, infer the created agent, or use fallback.
 - **Tycho stopped / exit 143 / no submit** — `show` should remain without a new report. Do not reconstruct findings. Owner may authorize a **new** receipt and run only after re-validating head and route.
 - **`blocked` report consumed** — verify any partial findings independently; treat blockers as incomplete scope; do not publish solely because Tycho blocked.
 - **`complete` with blockers or empty verification** — application-invalid; consume, reject as finished second opinion, record handling, optionally acknowledge; do not treat blockers as accepted defects.
-- **Wrong head, tree mismatch, dirty Amp/Tycho tree, or post-Tycho attachment drift** — fail before `create`, or reject the application payload before consume/GitHub mutation; never rebind; the #328 cycle fails.
+- **Wrong head, tree mismatch, dirty local attachment, missing immutable remote artifact, or post-Tycho drift** — fail before `create`, or reject the application payload before consume/GitHub mutation; never rebind or switch artifact mode; the #328 cycle fails.
 - **PR head advanced before write** — conflict; leave GitHub untouched (create and reconcile paths alike).
 - **Producer asks for custody/ack/GitHub write credentials** — refuse; resupply only producer proof + state dir.
 - **Unowned or concurrent PENDING drift** — stop GitHub mutation; preserve receipt; report conflict.

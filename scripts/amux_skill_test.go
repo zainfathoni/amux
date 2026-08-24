@@ -962,7 +962,7 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 		"Bounded `complete` / `blocked` finding schema",
 		"Producer-only submit capability delivery",
 		"Truthful blocked-report behavior near provider stop",
-		"Task-specific validation: same-head proof across Amp and Tycho worktrees",
+		"Task-specific validation: reviewed-artifact identity",
 		"Stale / concurrent PENDING-review generation protection",
 		"Exact evidence required for the #328 workflow",
 		"Authoritative Amp first pass",
@@ -971,9 +971,9 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 		"Independently reproduce or reject **every** candidate",
 		"Tycho must never call GitHub review or comment mutation APIs",
 		"Path or directory-name equality is not identity",
-		"full 40-character commit SHA",
+		"full head SHA",
 		"HEAD^{tree}",
-		"both Amp and Tycho review worktrees must be clean",
+		"Both Amp and Tycho review worktrees must be clean",
 		"Stop rather than overwrite",
 		"Exit codes (including `143`)",
 		"no Tycho finding",
@@ -995,7 +995,7 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 		// Producer-only GitHub boundary.
 		"GitHub credentials intended for review mutation",
 		"no new GitHub write credentials",
-		// Same-head task freeze includes route identity.
+		// Artifact task freeze includes route identity.
 		"Tycho agent key, project, harness, model",
 		"task_digest` is SHA-256 of those exact task bytes",
 		// PENDING ownership + snapshot contract.
@@ -1010,16 +1010,16 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 		"Pinned PR head revalidation (every write)",
 		"baseline-none/create path and the existing-owned-review reconciliation path",
 		"PR head SHA ≠ pinned reviewed SHA, or PR head read failed",
-		// Same-head timing + helper non-attestation.
+		// Artifact timing + helper non-attestation.
 		"Post-Tycho / pre-consume",
 		"bridge helper does **not** attest Git state",
 		"reject the application payload",
-		// #328 evidence completeness without reopening #323 policy.
-		"#328-specific #327 prerequisite",
-		"accepted and merged",
-		"does not block generic `/amux-tycho` use with an existing coordinator or alter closed #323",
+		// #328 evidence completeness without reopening #323 policy or its historical #327 gate.
+		"Historical #327 gate",
+		"completed by merged PR #361",
+		"native `create_thread`",
 		"Pre-Tycho",
-		"Post-Tycho / pre-consume** same-head proof",
+		"Post-Tycho / pre-consume** reviewed-artifact proof",
 		"per-write PR head equality checks",
 		"Pre-Tycho and post-Tycho GitHub snapshots",
 		"Cleanup evidence from acknowledge output, not `show`",
@@ -1048,8 +1048,8 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 	if !strings.Contains(skill, "reference/team-review-second-opinion.md") {
 		t.Error("amux-tycho SKILL.md must progressively disclose the team-review workflow")
 	}
-	if !strings.Contains(skill, "#327") || !strings.Contains(skill, "scoped only to") || !strings.Contains(skill, "newly spawned local-worker assignment route") {
-		t.Error("amux-tycho SKILL.md must scope #327 to the #328 local-worker workflow")
+	if !strings.Contains(skill, "#327") || !strings.Contains(skill, "completed by merged PR #361") || !strings.Contains(skill, "native Amp coordinator") {
+		t.Error("amux-tycho SKILL.md must retire #327 as a current #328 blocker")
 	}
 	if !strings.Contains(triggers, "Authoritative Amp /team-review with one Opus second opinion") {
 		t.Error("amux-tycho triggers must route the team-review second-opinion phrase")
@@ -1060,11 +1060,10 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 	if !strings.Contains(matrix, "| `/amux-tycho` semantic-report receipt/inbox | Conditional |") || strings.Contains(matrix, "| `/amux-tycho` semantic-report receipt/inbox | Proven") {
 		t.Error("#328 must not formally promote the conditional /amux-tycho readiness row")
 	}
-	if !strings.Contains(matrix, "blocks only") ||
-		!strings.Contains(matrix, "#327") ||
-		!strings.Contains(matrix, "#328") ||
-		!strings.Contains(matrix, "not generic `/amux-tycho` use") {
-		t.Error("readiness matrix must scope #327 to #328 rather than generic use")
+	if !strings.Contains(matrix, "completed by merged PR #361") ||
+		!strings.Contains(matrix, "historical local-worker workflow") ||
+		!strings.Contains(matrix, "native Amp coordinator") {
+		t.Error("readiness matrix must retire #327 as a current #328 blocker")
 	}
 	// Reuse one canonical helper/schema rather than a duplicate implementation.
 	if strings.Contains(workflow, "tycho_report_bridge_v2") || strings.Contains(workflow, "second_opinion_bridge.py") {
@@ -1447,6 +1446,62 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 		accept := match(ac.amp, ac.pinnedRepo, ac.pinnedAmpWT) && match(ac.tycho, ac.pinnedRepo, ac.pinnedTychoWT)
 		if accept != ac.acceptApplication {
 			t.Fatalf("doc fixture post-tycho attachment %s: accept=%v want %v", ac.name, accept, ac.acceptApplication)
+		}
+	}
+}
+
+func TestTeamReviewSecondOpinionAllowsPreparedRouteAndImmutableRemoteArtifact(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "SKILL.md"))
+	workflow := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "reference", "team-review-second-opinion.md"))
+	triggers := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "reference", "trigger-phrases.md"))
+	matrix := readSkillFile(t, root, filepath.Join("docs", "provider-executor-readiness.md"))
+
+	for name, contents := range map[string]string{
+		"skill":             skill,
+		"workflow":          workflow,
+		"trigger checklist": triggers,
+		"readiness matrix":  matrix,
+	} {
+		for _, required := range []string{
+			"owner-authorized prepared route",
+			"without provider execution",
+			"no fallback",
+			"immutable remote artifact",
+			"full head SHA",
+			"full tree SHA",
+		} {
+			if !strings.Contains(contents, required) {
+				t.Errorf("%s is missing prepared-route/remote-artifact policy %q", name, required)
+			}
+		}
+	}
+
+	for _, required := range []string{
+		"create exactly one dormant project/agent",
+		"must not start the provider",
+		"create the immutable receipt before the first provider run",
+		"route creation is indeterminate",
+		"repository `owner/repo`, PR number, full head SHA, and full tree SHA",
+		"coordinator comparison HEAD",
+		"must inspect the pinned commit/diff explicitly rather than treating worktree `HEAD` as the reviewed artifact",
+		"dual-local-attachment",
+		"immutable-remote",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("team-review second-opinion workflow is missing %q", required)
+		}
+	}
+
+	for _, stale := range []string{
+		"remains blocked on #327",
+		"#327-specific #327 prerequisite",
+		"Do not create a Tycho agent/project",
+		"both worktrees report the same full 40-character commit SHA",
+	} {
+		if strings.Contains(workflow, stale) {
+			t.Errorf("team-review second-opinion workflow retains stale gate %q", stale)
 		}
 	}
 }
@@ -3524,7 +3579,7 @@ func TestGlobalAgentsSnippetSeparatesNativeWorkFromLegacyDrain(t *testing.T) {
 		"exact persisted records prove both an existing Amux-managed spawn, adoption, or group flow's pre-cutover admission and its exact allowed next drain transition",
 		"Generalized Amux spawn admission is closed",
 		"never automatically adopt it",
-		"Only an explicitly requested existing Tycho route may own its internal machine/provider routing",
+		"Only an explicitly requested exact existing Tycho route or one owner-authorized prepared route created without provider execution and bound before its first run may own internal machine/provider routing",
 		"the real Amp thread remains coordinator and consume/ack authority, while Tycho remains report-only",
 		"`/amux-tycho` is the experimental explicit-only report bridge",
 		"receipt admission remains open only until the authenticated direct structured-return gate passes",
