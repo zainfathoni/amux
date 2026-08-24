@@ -16,7 +16,7 @@ AGENTS.md or any machine-local copy.
 - Generalized Amux spawn admission is closed. Call native-created work a child or thread, not an Amux worker or spawned worker, and never automatically adopt it.
 - When my ChatGPT subscription is linked and the target mode is available, choose Amp `low` for small mechanical tasks, `medium` for ordinary implementation, and `high` for hard architecture, debugging, or review. If routing or availability is unknown, use `medium`. Keep `ultra`, plugin, and other premium/special modes explicit-only.
 - Do not Read Thread/history unless I explicitly approve that exact thread; a URL alone is not approval. For Oracle, supply diff/context only.
-- Provider execution is outside Amux's maintained core. Only an explicitly requested existing Tycho route may own its internal machine/provider routing; the real Amp thread remains coordinator and consume/ack authority, while Tycho remains report-only.
+- Provider execution is outside Amux's maintained core. Only an explicitly requested exact existing Tycho route or one owner-authorized prepared route created without provider execution and bound before its first run may own internal machine/provider routing; the real Amp thread remains coordinator and consume/ack authority, while Tycho remains report-only.
 - `/amux-tycho` is the experimental explicit-only report bridge. Its receipt admission remains open only until the authenticated direct structured-return gate passes; never run the bridge and direct route for the same task.
 - Forgex is experimental and requires my explicit request.
 - `/amux-claude` and `/amux-pi` remain experimental fallback/reference paths and require my explicit request.

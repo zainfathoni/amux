@@ -1,6 +1,6 @@
 ---
 name: amux-tycho
-description: "Experimental Tycho external-executor report bridge for amux. Use only after an explicit owner request to route a bounded task through an existing Tycho agent/project/harness/model and return one structured semantic report to the current Amp coordinator, including the authoritative Amp /team-review Opus second-opinion workflow. Tycho may route Claude or Pi but receives report-only authority, never Amp or provider identity."
+description: "Experimental Tycho external-executor report bridge for amux. Use only after an explicit owner request to route a bounded task through an exact existing or owner-authorized prepared Tycho route and return one structured semantic report to the current Amp coordinator, including the authoritative Amp /team-review Opus second-opinion workflow. Tycho may route Claude or Pi but receives report-only authority, never Amp or provider identity."
 ---
 
 # amux-tycho (experimental)
@@ -13,8 +13,8 @@ Before use, consult the [provider executor readiness matrix](https://github.com/
 
 ## Route triggers
 
-- **Route a bounded task through an existing Tycho agent**: follow [Explicit-only workflow](#explicit-only-workflow) and the canonical [bridge protocol](reference/tycho-report-bridge.md).
-- **Authoritative Amp `/team-review` with one Opus second opinion**: load [`reference/team-review-second-opinion.md`](reference/team-review-second-opinion.md). Amp finishes an independent first pass; owner approves one exact existing Tycho route (normally exact `claude-opus-5`); create one immutable receipt before Tycho; accept only one typed `complete`/`blocked` report; Amp alone verifies candidates and mutates the single current-user PENDING GitHub review.
+- **Route a bounded task through an exact Tycho route**: follow [Explicit-only workflow](#explicit-only-workflow) and the canonical [bridge protocol](reference/tycho-report-bridge.md). Use an existing route or, only when the owner explicitly requests it, one owner-authorized prepared route created without provider execution and bound before its first run.
+- **Authoritative Amp `/team-review` with one Opus second opinion**: load [`reference/team-review-second-opinion.md`](reference/team-review-second-opinion.md). Amp finishes an independent first pass; owner approves one exact existing or owner-authorized prepared route (normally exact `claude-opus-5`); create one immutable receipt before Tycho; accept only one typed `complete`/`blocked` report; Amp alone verifies candidates and mutates the single current-user PENDING GitHub review.
 - **Recover this `/amux-tycho` receipt**: [`reference/tycho-report-bridge.md`](reference/tycho-report-bridge.md#optional-notification-and-recovery).
 - **Abandon a created-only receipt with lost custody**: [`reference/tycho-report-bridge.md`](reference/tycho-report-bridge.md#created-only-lost-token-abandonment).
 
@@ -27,11 +27,11 @@ Before use, consult the [provider executor readiness matrix](https://github.com/
 
 ## Route selection
 
-With explicit owner authorization, select the exact existing Tycho agent/project/harness/model and host route. Route availability, model identity, entitlement, and host suitability decide where execution may run; they are not receipt fields or evidence of report delivery. Do not create a route, normalize aliases, infer provider identity, transfer credentials, accept fallback, or retry another provider under this skill.
+With explicit owner authorization, select the exact existing Tycho agent/project/harness/model and host route. When the owner instead explicitly authorizes a fresh route, `/tycho` may create exactly one owner-authorized prepared route without provider execution; freeze and adjacent-revalidate the returned project, agent, workdir, harness, and exact model before receipt creation, then create the immutable receipt before the first provider run. Route availability, model identity, entitlement, and host suitability decide where execution may run; they are not receipt fields or evidence of report delivery. Route preparation must not start the provider. If creation is rejected or indeterminate, stop with no retry, alias normalization, inferred provider identity, credential transfer, or fallback route.
 
 ## Task-specific validation
 
-Apply only checks required by the task. For example, a code or PR review may require repository, head, tree, and worktree-cleanliness checks before accepting findings. Those checks validate the reviewed artifact; they do not attest Tycho's model/host route and are not generic receipt ceremony. The #328 workflow owns its stricter review-specific checks.
+Apply only checks required by the task. For example, a code or PR review may use either same-head local attachments or an immutable remote artifact bound by repository, PR number, full head SHA, full tree SHA, and exact fetched content identity. Worktree-cleanliness checks still bind every local comparison attachment. Those checks validate the reviewed artifact; they do not attest Tycho's model/host route and are not generic receipt ceremony. The #328 workflow owns its stricter review-specific checks and permits no fallback from one artifact mode to another after receipt creation.
 
 ## Exceptional recovery
 
@@ -44,7 +44,7 @@ For a long Tycho run, the Amp coordinator may own a single one-time Amp schedule
 ## Optional formal promotion policy
 
 - Loading this skill never authorizes a provider run; every run requires explicit owner authorization and exact route selection.
-- [#327](https://github.com/zainfathoni/amux/issues/327) is scoped only to [#328](https://github.com/zainfathoni/amux/issues/328)'s newly spawned local-worker assignment route. It does not block ordinary `/amux-tycho` use with an existing Amp coordinator.
+- [#327](https://github.com/zainfathoni/amux/issues/327)'s historical local-worker assignment gate was completed by merged PR #361. It is not a current blocker for [#328](https://github.com/zainfathoni/amux/issues/328) with a native Amp coordinator; exact #327 installation proof applies only when deliberately draining that superseded local-worker workflow.
 - [#323](https://github.com/zainfathoni/amux/issues/323) closed after the accepted [Karsa/nix-home lifecycle](https://github.com/zainfathoni/nix-home/issues/13#issuecomment-5248690973) proved create, separate-process recovery, one typed report, consume, separate acknowledgement, and terminal cleanup.
 - Multiple cycles, natural-failure recovery, supported versioned ingress, privacy review, ADR work, and formal readiness promotion are optional formal-promotion policy—not ordinary-use or #323 closure gates.
 - Owner-only filesystem permissions protect against other OS users, not another process with the same UID. The helper does not confine Tycho.
