@@ -1116,10 +1116,10 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 		tree:  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		ampWT: "/tmp/amp-review", tychoWT: "/tmp/tycho-review",
 		immutableSource: "github:acme/widgets@refs/pull/11886/head",
-		comparisonPath: "/tmp/amp-comparison",
-		comparisonHead: "cccccccccccccccccccccccccccccccccccccccc",
-		comparisonTree: "dddddddddddddddddddddddddddddddddddddddd",
-		agent: "reviewer-1", project: "bta", harness: "claude", model: "claude-opus-5",
+		comparisonPath:  "/tmp/amp-comparison",
+		comparisonHead:  "cccccccccccccccccccccccccccccccccccccccc",
+		comparisonTree:  "dddddddddddddddddddddddddddddddddddddddd",
+		agent:           "reviewer-1", project: "bta", harness: "claude", model: "claude-opus-5",
 	}
 	taskDigest := func(f taskFields) string {
 		payload := strings.Join([]string{
