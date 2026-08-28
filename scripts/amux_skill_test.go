@@ -2299,7 +2299,8 @@ func TestFinishRemovalGateDocumentsEveryFailClosedInvariant(t *testing.T) {
 		"require every entry to be stage zero",
 		"rather than trusting the stat cache",
 		"Git owner-executable bit (`0100`)",
-		"hash-object --path=<git-path> -- <git-path>",
+		"hash-object --no-filters -- <git-path>",
+		"blocks a filtered, line-ending, encoding, or ident-transformed checkout",
 		"hash-object --stdin",
 		"unsupported modes (including gitlinks)",
 		"Normal removal can also silently delete ignored content",
@@ -2463,6 +2464,38 @@ func TestOrdinaryFinishGitSemantics(t *testing.T) {
 		}
 		if err := syntheticOrdinaryFinishState(worktree); err == nil || !strings.Contains(err.Error(), "content differs from index") {
 			t.Fatalf("index content check = %v, want false-clean content blocker", err)
+		}
+	})
+
+	t.Run("lossy clean filter cannot hide raw worktree bytes", func(t *testing.T) {
+		repo, _, _ := newRemovalSafetyRepo(t)
+		gitTest(t, repo, "config", "filter.lossy.clean", "sed 's/^LOCAL:/INDEX:/'")
+		gitTest(t, repo, "config", "filter.lossy.smudge", "cat")
+		gitTest(t, repo, "config", "filter.lossy.required", "true")
+		if err := os.WriteFile(filepath.Join(repo, ".gitattributes"), []byte("filtered.txt filter=lossy\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, "filtered.txt"), []byte("INDEX: unique worktree bytes\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, repo, "add", ".gitattributes", "filtered.txt")
+		gitTest(t, repo, "commit", "-m", "add lossy filtered file")
+
+		worktree := filepath.Join(t.TempDir(), "filtered-finish")
+		gitTest(t, repo, "worktree", "add", "-b", "finish-filtered", worktree, "HEAD")
+		if err := os.WriteFile(filepath.Join(worktree, "filtered.txt"), []byte("LOCAL: unique worktree bytes\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if status := gitTest(t, worktree, "status", "--porcelain=v1", "--untracked-files=all"); status != "" {
+			t.Fatalf("lossy-filter fixture unexpectedly appears in status: %q", status)
+		}
+		indexOID := strings.TrimSpace(gitTest(t, worktree, "rev-parse", ":filtered.txt"))
+		filteredOID := strings.TrimSpace(gitTest(t, worktree, "hash-object", "--path=filtered.txt", "--", "filtered.txt"))
+		if filteredOID != indexOID {
+			t.Fatalf("filtered worktree OID = %q, want deceptive index match %q", filteredOID, indexOID)
+		}
+		if err := syntheticOrdinaryFinishState(worktree); err == nil || !strings.Contains(err.Error(), "content differs from index") {
+			t.Fatalf("raw index content check = %v, want lossy-filter byte blocker", err)
 		}
 	})
 
@@ -4315,7 +4348,7 @@ func syntheticOrdinaryFinishIndexState(worktree string) error {
 			if (mode == "100755") != executable {
 				return fmt.Errorf("index path %q executable mode differs from index mode %s", path, mode)
 			}
-			hash = exec.Command("git", "-C", worktree, "hash-object", "--path="+path, "--", path)
+			hash = exec.Command("git", "-C", worktree, "hash-object", "--no-filters", "--", path)
 		case "120000":
 			if info.Mode()&os.ModeSymlink == 0 {
 				return fmt.Errorf("index path %q has symlink mode but worktree type %s", path, info.Mode().Type())
