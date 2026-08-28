@@ -34,6 +34,8 @@ var publicSkillFiles = []string{
 	filepath.Join("skills", "amux-tycho", "SKILL.md"),
 	filepath.Join("skills", "amux-tycho", "reference", "tycho-report-bridge.md"),
 	filepath.Join("skills", "amux-tycho", "reference", "team-review-second-opinion.md"),
+	filepath.Join("skills", "amux-tycho", "reference", "team-review-pending-reconciliation.md"),
+	filepath.Join("skills", "amux-tycho", "reference", "team-review-field-evidence.md"),
 	filepath.Join("skills", "amux-tycho", "reference", "trigger-phrases.md"),
 	filepath.Join("skills", "amux-claude", "SKILL.md"),
 	filepath.Join("skills", "amux-claude", "reference", "claude-local-tmux-adoption.md"),
@@ -802,8 +804,6 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 		"Route selection",
 		"Task-specific validation",
 		"Exceptional recovery",
-		"Optional formal promotion policy",
-		"Migrating pre-split receipts",
 		"a single one-time Amp schedule",
 		"only re-checks the exact bound local Tycho agent's status/result",
 		"Clear it as soon as the run reaches a terminal or recovered state",
@@ -811,9 +811,9 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 		"Do not turn it into a recurring watcher",
 		"Authoritative Amp `/team-review` with one Opus second opinion",
 		"reference/team-review-second-opinion.md",
-		"temporary compatibility transport",
-		"native authenticated structured delivery and separate acknowledgement",
-		"Only Amp mutates the PENDING GitHub review",
+		"Native Amp review is the default",
+		"Branch references",
+		"Compatibility migration activates only for a proven pre-split receipt",
 	} {
 		if !strings.Contains(skill, required) {
 			t.Errorf("amux-tycho workflow is missing %q", required)
@@ -826,7 +826,7 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 		"report_only",
 		"Authoritative Amp /team-review with one Opus second opinion",
 		"team-review-second-opinion.md",
-		"does not promote readiness",
+		"field-evidence ceremony disclose only when those branches activate",
 	} {
 		if !strings.Contains(triggers, required) {
 			t.Errorf("amux-tycho trigger checklist is missing %q", required)
@@ -865,6 +865,8 @@ func TestExperimentalTychoReportBridgeStaysReportOnly(t *testing.T) {
 		filepath.Join("skills", "amux-tycho", "experimental", "tycho-report-bridge", "tycho_report_bridge_test.go"),
 		filepath.Join("skills", "amux-tycho", "reference", "tycho-report-bridge.md"),
 		filepath.Join("skills", "amux-tycho", "reference", "team-review-second-opinion.md"),
+		filepath.Join("skills", "amux-tycho", "reference", "team-review-pending-reconciliation.md"),
+		filepath.Join("skills", "amux-tycho", "reference", "team-review-field-evidence.md"),
 		filepath.Join("skills", "amux-tycho", "reference", "trigger-phrases.md"),
 	} {
 		if _, err := os.Stat(filepath.Join(root, path)); err != nil {
@@ -914,9 +916,19 @@ func TestTychoPolicyCategoriesStaySeparate(t *testing.T) {
 			}
 		}
 	}
-	for _, required := range []string{"Route selection", "Task-specific validation", "Exceptional recovery", "Optional formal promotion"} {
-		if !strings.Contains(skill, "## "+required) || !strings.Contains(workflow, required) {
-			t.Errorf("Tycho policy does not consistently label category %q", required)
+	for _, required := range []string{"Route selection", "Task-specific validation", "Exceptional recovery", "Branch references"} {
+		if !strings.Contains(skill, "## "+required) {
+			t.Errorf("Tycho skill does not label category %q", required)
+		}
+	}
+	for _, pointer := range []string{"tycho-report-bridge.md", "team-review-pending-reconciliation.md", "team-review-field-evidence.md"} {
+		if !strings.Contains(workflow, pointer) {
+			t.Errorf("ordinary team-review lane is missing branch pointer %q", pointer)
+		}
+	}
+	for _, branchOnly := range []string{"Six PR #11886 gaps", "Canonical snapshot", "Multiple cycles, natural-failure recovery"} {
+		if strings.Contains(workflow, branchOnly) {
+			t.Errorf("ordinary team-review lane embeds branch-only ceremony %q", branchOnly)
 		}
 	}
 	for _, required := range []string{"temporary compatibility transport", "native authenticated structured report delivery", "no additional receipt field is required"} {
@@ -948,6 +960,8 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 	core := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "SKILL.md"))
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "reference", "team-review-second-opinion.md"))
+	pending := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "reference", "team-review-pending-reconciliation.md"))
+	fieldEvidence := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "reference", "team-review-field-evidence.md"))
 	contract := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "reference", "tycho-report-bridge.md"))
 	triggers := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "reference", "trigger-phrases.md"))
 	matrix := readSkillFile(t, root, filepath.Join("docs", "provider-executor-readiness.md"))
@@ -958,85 +972,89 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 	helperText := string(helper)
 
 	for _, required := range []string{
-		"Settled design decisions",
-		"Bounded `complete` / `blocked` finding schema",
-		"Producer-only submit capability delivery",
-		"Truthful blocked-report behavior near provider stop",
-		"Task-specific validation: reviewed-artifact identity",
-		"Stale / concurrent PENDING-review generation protection",
-		"Exact evidence required for the #328 workflow",
-		"Authoritative Amp first pass",
-		"Create the receipt **before** Tycho execution",
-		"exactly one durable `submit`",
-		"Independently reproduce or reject **every** candidate",
-		"Tycho must never call GitHub review or comment mutation APIs",
-		"Path or directory-name equality is not identity",
+		"Native Amp review is the default",
+		"material unresolved judgment",
+		"## Authority and privacy",
+		"## Ordinary review flow",
+		"Finish the native Amp review",
+		"Preflight one exact route and artifact",
+		"Freeze the task and create the receipt",
+		"Run once and require one durable report",
+		"Revalidate, consume, and decide",
+		"Acknowledge after handling",
+		"**Complete when:**",
+		"one owner-authorized prepared route",
+		"Create one immutable receipt with the canonical helper **before** provider execution",
+		"exactly one durable bridge-valid",
+		"bridge-valid `complete` or `blocked` report",
+		"Application validity is assessed after `consume`",
+		"independently reproduce or reject **every** candidate",
+		"Path equality alone is not identity",
 		"full head SHA",
 		"HEAD^{tree}",
-		"Both Amp and Tycho review worktrees must be clean",
-		"Stop rather than overwrite",
-		"Exit codes (including `143`)",
+		"both clean worktrees",
+		"frozen immutable-source identity",
+		"every local comparison attachment's canonical path and full HEAD/tree",
 		"no Tycho finding",
-		"normally exact `claude-opus-5`",
-		"Six PR #11886 gaps",
+		"normally `claude-opus-5`",
 		"promote `/amux-tycho`",
 		"alter closed [#323](https://github.com/zainfathoni/amux/issues/323)",
 		"does not widen stable Amux core",
 		"tycho-report-bridge.md",
 		"authority: \"report_only\"",
-		"Publication",
-		"Wake-ups and schedules never imply them",
-		"Desire to formally promote the transport",
-		"refused here",
-		// Application report invariants beyond generic bridge schema.
-		"`complete` must use `blockers: []`",
-		"non-empty for both statuses",
+		"Publication remains separately authorized",
+		"`complete` requires `blockers: []`",
+		"both statuses require non-empty `verification`",
 		"application-invalid",
-		// Producer-only GitHub boundary.
-		"GitHub credentials intended for review mutation",
-		"no new GitHub write credentials",
-		// Artifact task freeze includes route identity.
-		"Tycho agent key, project, harness, model",
-		"task_digest` is SHA-256 of those exact task bytes",
-		// PENDING ownership + snapshot contract.
-		"owns for this assignment",
-		"unowned pre-existing current-user PENDING review is always a conflict",
-		"Canonical PENDING snapshot",
-		"Comment canonicalization",
-		"Comment `updated_at`",
-		"Do **not** use review `submitted_at` as a freshness signal",
-		"does not provide atomic compare-and-swap",
-		"Residual TOCTOU",
-		"Pinned PR head revalidation (every write)",
-		"baseline-none/create path and the existing-owned-review reconciliation path",
-		"PR head SHA ≠ pinned reviewed SHA, or PR head read failed",
-		// Artifact timing + helper non-attestation.
-		"Post-Tycho / pre-consume",
-		"bridge helper does **not** attest Git state",
+		"reject it as review input and continue to acknowledgement",
 		"reject the application payload",
-		// #328 evidence completeness without reopening #323 policy or its historical #327 gate.
-		"Historical #327 gate",
-		"completed by merged PR #361",
-		"native `create_thread`",
-		"Pre-Tycho",
-		"Post-Tycho / pre-consume** reviewed-artifact proof",
-		"per-write PR head equality checks",
-		"Pre-Tycho and post-Tycho GitHub snapshots",
-		"Cleanup evidence from acknowledge output, not `show`",
-		"show` cannot supply it",
-		"final `show` only to inspect terminal `acknowledged`",
-		"no Tycho-phase review/comment mutation",
-		"Committed tree object identity",
-		"does **not** detect dirty index or worktree content by itself",
-		"An ambiguous, partial, or failed read is a deny",
-		"bridge helper never attests Git or GitHub head state",
+		"does **not** detect dirty index or worktree content",
+		"team-review-pending-reconciliation.md",
+		"team-review-field-evidence.md",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("team-review second-opinion workflow is missing %q", required)
 		}
 	}
-	if !strings.Contains(workflow, "Out of scope") || !strings.Contains(workflow, "Stable `cmd/` or `internal/` changes") {
+	if !strings.Contains(workflow, "out of scope") || !strings.Contains(workflow, "Stable `cmd/`/`internal/` changes") {
 		t.Error("team-review workflow must keep stable cmd/internal changes out of scope")
+	}
+	for _, branchOnly := range []string{"Canonical snapshot", "Six PR #11886 gaps", "Multiple cycles, natural-failure recovery"} {
+		if strings.Contains(workflow, branchOnly) {
+			t.Errorf("ordinary team-review workflow embeds branch-only detail %q", branchOnly)
+		}
+	}
+	for _, required := range []string{
+		"owns for this assignment",
+		"unowned pre-existing current-user PENDING review is a conflict",
+		"Canonical snapshot",
+		"Comment `updated_at`",
+		"Do **not** use review `submitted_at` as a freshness signal",
+		"no atomic compare-and-swap",
+		"Residual TOCTOU",
+		"Immediately before every review or comment write",
+		"Stop rather than overwrite",
+		"An ambiguous, partial, or failed read is a deny",
+	} {
+		if !strings.Contains(pending, required) {
+			t.Errorf("PENDING reconciliation branch is missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		"completed by merged PR #361",
+		"authenticated `create_thread`",
+		"Exact evidence for one #328 field run",
+		"Pre-Tycho artifact mode",
+		"Post-Tycho/pre-consume artifact proof",
+		"no Tycho-phase mutation",
+		"show` cannot supply `custody_cleanup` status",
+		"Six PR #11886 gaps",
+		"Multiple cycles, natural-failure recovery",
+		"ordinary field run alone never promotes the route",
+	} {
+		if !strings.Contains(fieldEvidence, required) {
+			t.Errorf("field-evidence branch is missing %q", required)
+		}
 	}
 	if strings.Contains(workflow, "| `/amux-tycho` semantic-report receipt/inbox | Proven") ||
 		strings.Contains(workflow, "marks `/amux-tycho` field-proven") {
@@ -1048,8 +1066,8 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 	if !strings.Contains(skill, "reference/team-review-second-opinion.md") {
 		t.Error("amux-tycho SKILL.md must progressively disclose the team-review workflow")
 	}
-	if !strings.Contains(skill, "#327") || !strings.Contains(skill, "completed by merged PR #361") || !strings.Contains(skill, "native Amp coordinator") {
-		t.Error("amux-tycho SKILL.md must retire #327 as a current #328 blocker")
+	if strings.Contains(skill, "completed by merged PR #361") || strings.Contains(skill, "Six PR #11886 gaps") {
+		t.Error("amux-tycho SKILL.md must not disclose historical or field-evidence ceremony")
 	}
 	if !strings.Contains(triggers, "Authoritative Amp /team-review with one Opus second opinion") {
 		t.Error("amux-tycho triggers must route the team-review second-opinion phrase")
@@ -1090,19 +1108,25 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 
 	// Task digest changes when route/head/workdir fields change.
 	type taskFields struct {
-		repo, pr, head, tree, ampWT, tychoWT, agent, project, harness, model string
+		repo, pr, head, tree, ampWT, tychoWT, immutableSource, comparisonPath, comparisonHead, comparisonTree, agent, project, harness, model string
 	}
 	base := taskFields{
 		repo: "acme/widgets", pr: "11886",
 		head:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		tree:  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		ampWT: "/tmp/amp-review", tychoWT: "/tmp/tycho-review",
+		immutableSource: "github:acme/widgets@refs/pull/11886/head",
+		comparisonPath: "/tmp/amp-comparison",
+		comparisonHead: "cccccccccccccccccccccccccccccccccccccccc",
+		comparisonTree: "dddddddddddddddddddddddddddddddddddddddd",
 		agent: "reviewer-1", project: "bta", harness: "claude", model: "claude-opus-5",
 	}
 	taskDigest := func(f taskFields) string {
 		payload := strings.Join([]string{
 			"repo=" + f.repo, "pr=" + f.pr, "head=" + f.head, "tree=" + f.tree,
 			"amp_workdir=" + f.ampWT, "tycho_workdir=" + f.tychoWT,
+			"immutable_source=" + f.immutableSource, "comparison_path=" + f.comparisonPath,
+			"comparison_head=" + f.comparisonHead, "comparison_tree=" + f.comparisonTree,
 			"agent=" + f.agent, "project=" + f.project, "harness=" + f.harness, "model=" + f.model,
 			"producer_role=team_review_second_opinion", "authority=report_only",
 		}, "\n")
@@ -1122,6 +1146,10 @@ func TestTeamReviewSecondOpinionWorkflowStaysReportOnlyAndProgressivelyDisclosed
 		{"tree", func(f *taskFields) { f.tree = "dddddddddddddddddddddddddddddddddddddddd" }},
 		{"tycho workdir", func(f *taskFields) { f.tychoWT = "/tmp/other-tycho" }},
 		{"amp workdir", func(f *taskFields) { f.ampWT = "/tmp/other-amp" }},
+		{"immutable source", func(f *taskFields) { f.immutableSource = "github:acme/widgets@refs/pull/11886/other" }},
+		{"comparison path", func(f *taskFields) { f.comparisonPath = "/tmp/other-comparison" }},
+		{"comparison head", func(f *taskFields) { f.comparisonHead = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" }},
+		{"comparison tree", func(f *taskFields) { f.comparisonTree = "ffffffffffffffffffffffffffffffffffffffff" }},
 		{"project", func(f *taskFields) { f.project = "other-project" }},
 		{"harness", func(f *taskFields) { f.harness = "other-harness" }},
 		{"agent", func(f *taskFields) { f.agent = "other-agent" }},
@@ -1458,39 +1486,36 @@ func TestTeamReviewSecondOpinionAllowsPreparedRouteAndImmutableRemoteArtifact(t 
 	triggers := readSkillFile(t, root, filepath.Join("skills", "amux-tycho", "reference", "trigger-phrases.md"))
 	matrix := readSkillFile(t, root, filepath.Join("docs", "provider-executor-readiness.md"))
 
-	for name, contents := range map[string]string{
-		"skill":             skill,
-		"workflow":          workflow,
-		"trigger checklist": triggers,
-		"readiness matrix":  matrix,
+	for _, check := range []struct {
+		name     string
+		contents string
+		required []string
+	}{
+		{
+			name:     "skill",
+			contents: skill,
+			required: []string{"owner-authorized prepared route", "without provider execution", "no fallback", "immutable remote artifact", "full head SHA", "full tree SHA"},
+		},
+		{
+			name:     "ordinary workflow",
+			contents: workflow,
+			required: []string{"one owner-authorized prepared route", "without provider execution", "stops without retry or alternate selection", "dual-local-attachment", "immutable-remote", "full head SHA", "full tree SHA", "inspect that pinned commit/diff instead of treating worktree `HEAD` as the reviewed artifact"},
+		},
+		{
+			name:     "trigger checklist",
+			contents: triggers,
+			required: []string{"one exact owner-authorized Tycho route", "high-impact conclusion", "field-evidence ceremony disclose only when those branches activate"},
+		},
+		{
+			name:     "readiness matrix",
+			contents: matrix,
+			required: []string{"owner-authorized prepared route", "without provider execution", "no fallback", "immutable remote artifact", "full head SHA", "full tree SHA"},
+		},
 	} {
-		for _, required := range []string{
-			"owner-authorized prepared route",
-			"without provider execution",
-			"no fallback",
-			"immutable remote artifact",
-			"full head SHA",
-			"full tree SHA",
-		} {
-			if !strings.Contains(contents, required) {
-				t.Errorf("%s is missing prepared-route/remote-artifact policy %q", name, required)
+		for _, required := range check.required {
+			if !strings.Contains(check.contents, required) {
+				t.Errorf("%s is missing prepared-route/remote-artifact policy %q", check.name, required)
 			}
-		}
-	}
-
-	for _, required := range []string{
-		"create exactly one dormant project/agent",
-		"must not start the provider",
-		"create the immutable receipt before the first provider run",
-		"route creation is indeterminate",
-		"repository `owner/repo`, PR number, full head SHA, and full tree SHA",
-		"coordinator comparison HEAD",
-		"must inspect the pinned commit/diff explicitly rather than treating worktree `HEAD` as the reviewed artifact",
-		"dual-local-attachment",
-		"immutable-remote",
-	} {
-		if !strings.Contains(workflow, required) {
-			t.Errorf("team-review second-opinion workflow is missing %q", required)
 		}
 	}
 

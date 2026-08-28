@@ -14,7 +14,7 @@ Before use, consult the [provider executor readiness matrix](https://github.com/
 ## Route triggers
 
 - **Route a bounded task through an exact Tycho route**: follow [Explicit-only workflow](#explicit-only-workflow) and the canonical [bridge protocol](reference/tycho-report-bridge.md). Use an existing route or, only when the owner explicitly requests it, one owner-authorized prepared route created without provider execution and bound before its first run.
-- **Authoritative Amp `/team-review` with one Opus second opinion**: load [`reference/team-review-second-opinion.md`](reference/team-review-second-opinion.md). Amp finishes an independent first pass; owner approves one exact existing or owner-authorized prepared route (normally exact `claude-opus-5`); create one immutable receipt before Tycho; accept only one typed `complete`/`blocked` report; Amp alone verifies candidates and mutates the single current-user PENDING GitHub review.
+- **Authoritative Amp `/team-review` with one Opus second opinion**: load [`reference/team-review-second-opinion.md`](reference/team-review-second-opinion.md). Native Amp review is the default. Use Tycho only when an independent Opus judgment could change a high-impact conclusion; Amp finishes its first pass before any Tycho input and remains authoritative.
 - **Recover this `/amux-tycho` receipt**: [`reference/tycho-report-bridge.md`](reference/tycho-report-bridge.md#optional-notification-and-recovery).
 - **Abandon a created-only receipt with lost custody**: [`reference/tycho-report-bridge.md`](reference/tycho-report-bridge.md#created-only-lost-token-abandonment).
 
@@ -41,36 +41,10 @@ Use `show`, notification recovery, created-only abandonment, and cleanup replay 
 
 For a long Tycho run, the Amp coordinator may own a single one-time Amp schedule whose prompt only re-checks the exact bound local Tycho agent's status/result. Clear it as soon as the run reaches a terminal or recovered state. The schedule firing is only a wake-up token—never durable truth, delivery, consume, or acknowledgement—and grants no retry, resend, lifecycle, or authority change. Do not turn it into a recurring watcher.
 
-## Optional formal promotion policy
-
-- Loading this skill never authorizes a provider run; every run requires explicit owner authorization and exact route selection.
-- [#327](https://github.com/zainfathoni/amux/issues/327)'s historical local-worker assignment gate was completed by merged PR #361. It is not a current blocker for [#328](https://github.com/zainfathoni/amux/issues/328) with a native Amp coordinator; exact #327 installation proof applies only when deliberately draining that superseded local-worker workflow.
-- [#323](https://github.com/zainfathoni/amux/issues/323) closed after the accepted [Karsa/nix-home lifecycle](https://github.com/zainfathoni/nix-home/issues/13#issuecomment-5248690973) proved create, separate-process recovery, one typed report, consume, separate acknowledgement, and terminal cleanup.
-- Multiple cycles, natural-failure recovery, supported versioned ingress, privacy review, ADR work, and formal readiness promotion are optional formal-promotion policy—not ordinary-use or #323 closure gates.
-- Owner-only filesystem permissions protect against other OS users, not another process with the same UID. The helper does not confine Tycho.
-- The semantic receipt is temporary compatibility transport. Earlier removal wording paired “native authenticated structured delivery and separate acknowledgement”; ADR 0007 supersedes that pairing because separate acknowledgement belongs only to existing receipts, not the future direct route. Stop creating receipts after one ordinary field run returns exactly one schema-valid bounded `complete|blocked` result, authenticated and correlated to the invoking Amp request/thread, directly to that caller through the exact selected route without transcript/log mining or an Amux receipt. That future direct return itself establishes delivery and has no separate Amux consume/acknowledge step. Existing receipts still drain only through `created → valid_report → delivered → acknowledged|abandoned`; notification uncertainty and terminal cleanup status remain separate. Do not promote helper fields into a stable Go command/schema merely to preserve the experiment.
-- There is no resident watcher, arbitrary Amp Web-thread return route, model/entitlement attestation, provider fallback, or automatic retry.
-- Stable `cmd/`, `internal/`, canonical Amp identity, group/report/callback, and lifecycle boundaries remain unchanged.
-
-## Migrating pre-split receipts
-
-Receipts created by the former core `/amux` helper remain compatible; they are not rewritten or upgraded. Install `/amux-tycho` explicitly, preserve the original state, custody, and abandonment directories byte-for-byte at their original canonical paths, and preserve every receipt ID, immutable binding, event ID, and capability. Continue with the helper at its new installed `/amux-tycho` path. Never recreate, copy, move, rebind, or upgrade a receipt or capability directory. For terminal cleanup `pending`, replay the identical terminal event against the same original capability directory.
-
-## Load only what you need
+## Branch references
 
 - Canonical receipt, storage, submission, recovery, consumption, acknowledgement, abandonment, notification, and cleanup protocol: [`reference/tycho-report-bridge.md`](reference/tycho-report-bridge.md)
-- Authoritative Amp `/team-review` Opus second-opinion workflow and #328 design decisions: [`reference/team-review-second-opinion.md`](reference/team-review-second-opinion.md)
+- Authoritative Amp `/team-review` ordinary Opus second-opinion lane: [`reference/team-review-second-opinion.md`](reference/team-review-second-opinion.md)
 - Explicit activation checklist: [`reference/trigger-phrases.md`](reference/trigger-phrases.md)
 - Canonical helper: `experimental/tycho-report-bridge/tycho_report_bridge.py` within this installed skill
-
-## Troubleshooting
-
-- `created`: preserve custody and producer proof; no report exists. If custody is genuinely irrecoverable, use only the documented abandonment path.
-- Existing pre-split receipt: preserve every original path and identity, require this thread to equal the bound Amp origin, and continue through the new helper path without migration mutation.
-- Provider stop or exit without `submit`: no Tycho finding; do not recover candidates from logs, state, or prose.
-- `valid_report`: explicitly consume from the private store regardless of notification outcome.
-- `delivered`: independently verify every candidate, then separately acknowledge if appropriate. Only Amp mutates the PENDING GitHub review.
-- `acknowledged` or `abandoned` with cleanup `pending`: replay the identical terminal event with the same capability directory; do not append another event.
-- Lock contention: retry the identical operation. Malformed store, proof/custody conflict, wrong origin/target, invalid transition, or unknown notification outcome: preserve evidence and stop.
-
-Never repair this route by fabricating Amp identity, changing immutable binding, granting provider/coordinator authority, editing stable registries, treating notification/polling as delivery, or promoting readiness from an incomplete cycle.
+- Compatibility migration activates only for a proven pre-split receipt; formal-promotion policy activates only for an explicit promotion decision. Both live in the canonical bridge protocol and readiness matrix, not this ordinary lane.
