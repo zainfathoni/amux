@@ -94,9 +94,9 @@ var rootCommand = &commandSpec{
 		lifecycleCommand("launch", "Launch configured workers and runners", true, "--workspace, -w <name>", "--thread, -t <id>", "--workdir, -d <path>", "--current", "--all"),
 		lifecycleCommand("park", "Park running workers and runners", true, "--workspace, -w <name>", "--thread, -t <id>", "--workdir, -d <path>", "--current", "--all"),
 		lifecycleCommand("restart", "Restart running workers and runners", true, "--workspace, -w <name>", "--thread, -t <id>", "--workdir, -d <path>", "--current", "--all"),
-		lifecycleCommand("remove", "Remove worker or runner configuration", true, "--workspace, -w <name>", "--thread, -t <id>", "--workdir, -d <path>", "--current", "--all"),
+		lifecycleCommand("remove", "Remove worker configuration; configured runner deletion fails closed", true, "--workspace, -w <name>", "--thread, -t <id>", "--workdir, -d <path>", "--current", "--all"),
 		lifecycleCommand("doctor", "Diagnose worker and runner state", false, "--workspace, -w <name>", "--thread, -t <id>", "--workdir, -d <path>", "--current", "--all"),
-		lifecycleCommand("reconcile", "Explicitly repair worker and runner drift", true, "--workspace, -w <name>", "--thread, -t <id>", "--workdir, -d <path>", "--current", "--all"),
+		lifecycleCommand("reconcile", "Repair worker drift; retain missing configured runner rows", true, "--workspace, -w <name>", "--thread, -t <id>", "--workdir, -d <path>", "--current", "--all"),
 		workerCommand(),
 		runnerCommand(),
 		workspaceCommand(),
@@ -194,13 +194,13 @@ func runnerCommand() *commandSpec {
 		maintenanceCommand(),
 		runnerLeaf("list", "List configured runners", false, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
 		runnerLeaf("pin", "Pin a runner without launching it", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current"),
-		runnerLeaf("unpin", "Unpin a runner without stopping it", true, "--workdir, -d <path>", "--current"),
+		runnerLeaf("unpin", "Retain configured runners and fail closed", true, "--workdir, -d <path>", "--current"),
 		runnerLeaf("launch", "Launch runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
 		runnerLeaf("park", "Park runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
 		runnerLeaf("restart", "Restart runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
-		runnerLeaf("remove", "Remove runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
+		runnerLeaf("remove", "Retain configured runners and fail closed", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
 		runnerLeaf("doctor", "Diagnose runners", false, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
-		runnerLeaf("reconcile", "Reconcile runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
+		runnerLeaf("reconcile", "Keep present rows unchanged; retain missing rows and fail closed", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
 	}
 	return runner
 }

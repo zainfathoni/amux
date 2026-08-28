@@ -1056,13 +1056,15 @@ exit 2
 	}
 }
 
-func TestRunnerReconcileFailsClosedWithLiveRuntimeAndRepeatsAsSkip(t *testing.T) {
+func TestRunnerReconcilePresentWorkdirSkipsWithoutInspectingLiveRuntime(t *testing.T) {
 	dir := t.TempDir()
-	workdir := filepath.Join(t.TempDir(), "missing")
+	workdir := t.TempDir()
 	window := config.RunnerWindow(workdir)
 	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
 	bin := t.TempDir()
+	called := filepath.Join(bin, "tmux-called")
 	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+touch `+shellSingleQuote(called)+`
 if [ "$1" = has-session ]; then exit 0; fi
 if [ "$1" = list-panes ]; then printf 'alpha\t`+window+`\t@1\t%%1\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(runnerStartCommand(workdir))+`; exit 0; fi
 exit 2
@@ -1070,12 +1072,15 @@ exit 2
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
-	err := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", "reconcile", "--workdir", workdir)
-	if err == nil || !strings.Contains(err.Error(), "runtime ownership") {
-		t.Fatalf("live reconcile error = %v", err)
+	got := executeRunnerJSON(t, "--json", "--config-dir", dir, "runner", "reconcile", "--workdir", workdir)
+	if len(got.Skipped) != 1 || got.Skipped[0].Resource.Workdir != workdir || got.Skipped[0].Message != "already in desired state" {
+		t.Fatalf("present runner reconcile = %+v", got)
+	}
+	if _, err := os.Stat(called); !os.IsNotExist(err) {
+		t.Fatalf("present runner reconcile inspected tmux: %v", err)
 	}
 	if rows, loadErr := config.LoadRunnersReadOnly(filepath.Join(dir, config.RunnersFile)); loadErr != nil || len(rows) != 1 {
-		t.Fatalf("live reconcile removed config: %+v err=%v", rows, loadErr)
+		t.Fatalf("present runner reconcile changed config: %+v err=%v", rows, loadErr)
 	}
 }
 
@@ -1144,7 +1149,7 @@ func TestRunnerReconcileRejectsInvalidWorkdirsBeforeConfigOrTmuxMutation(t *test
 	}
 }
 
-func TestRunnerParkRemoveReconcileAndDryRunConverge(t *testing.T) {
+func TestRunnerReconcileRetainsMissingRowWithoutPositiveProcessAndCatalogAbsence(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(t.TempDir(), "gone")
 	writeRunnerRegistry(t, dir, "alpha\t"+missing+"\n")
@@ -1153,50 +1158,86 @@ func TestRunnerParkRemoveReconcileAndDryRunConverge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cache := t.TempDir()
-	oldCacheDir := runnerCacheDir
-	runnerCacheDir = func() (string, error) { return cache, nil }
-	t.Cleanup(func() { runnerCacheDir = oldCacheDir })
-	sum := sha256.Sum256([]byte(missing))
-	marker := filepath.Join(cache, "amp", "pids", fmt.Sprintf("runner-%x.pid", sum[:8]))
-	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+	for _, command := range []string{"reconcile", "remove", "unpin"} {
+		rowDeletionErr := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", command, "--workdir", missing)
+		if rowDeletionErr == nil || result.ExitCode(rowDeletionErr) != result.ExitRejected || !strings.Contains(rowDeletionErr.Error(), "runner "+command+" blocked") || !strings.Contains(rowDeletionErr.Error(), "no process stop or row deletion attempted") {
+			t.Fatalf("%s row-deletion error = %v, exit=%d", command, rowDeletionErr, result.ExitCode(rowDeletionErr))
+		}
+		registryAfter, readErr := os.ReadFile(registryPath)
+		if readErr != nil || !bytes.Equal(registryAfter, registryBefore) {
+			t.Fatalf("%s changed registry: before=%q after=%q err=%v", command, registryBefore, registryAfter, readErr)
+		}
+	}
+}
+
+func TestRunnerRemoveRetainsConfiguredRowWhenProcessAndCatalogAbsenceAreUnproven(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
+	registryPath := filepath.Join(dir, config.RunnersFile)
+	before, err := os.ReadFile(registryPath)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(marker, []byte("12345\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	oldProbe := runnerProcessAlive
-	runnerProcessAlive = func(pid int) bool { return pid == 12345 }
-	t.Cleanup(func() { runnerProcessAlive = oldProbe })
 	bin := t.TempDir()
 	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
-	reconcileErr := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", "reconcile", "--workdir", missing)
-	if reconcileErr == nil || result.ExitCode(reconcileErr) != result.ExitRejected || !strings.Contains(reconcileErr.Error(), "ownership is ambiguous") {
-		t.Fatalf("ambiguous reconcile error = %v, exit=%d", reconcileErr, result.ExitCode(reconcileErr))
-	}
-	registryAfter, err := os.ReadFile(registryPath)
-	if err != nil || !bytes.Equal(registryAfter, registryBefore) {
-		t.Fatalf("ambiguous reconcile changed registry: before=%q after=%q err=%v", registryBefore, registryAfter, err)
-	}
-	runnerProcessAlive = func(int) bool { return false }
-	reconciled := executeRunnerJSON(t, "--json", "--config-dir", dir, "runner", "reconcile", "--workdir", missing)
-	if len(reconciled.Successful) != 1 || !strings.Contains(reconciled.Successful[0].Message, "stale pid") {
-		t.Fatalf("reconcile = %+v", reconciled)
-	}
-	repeated := executeRunnerJSON(t, "--json", "--config-dir", dir, "runner", "reconcile", "--workdir", missing)
-	if len(repeated.Skipped) != 1 || !strings.Contains(repeated.Skipped[0].Message, "stale pid") {
-		t.Fatalf("repeated reconcile = %+v", repeated)
-	}
-	removed := executeRunnerJSON(t, "--json", "--config-dir", dir, "runner", "remove", "--workdir", missing)
-	if len(removed.Skipped) != 1 || removed.Skipped[0].Message != "already in desired state" {
-		t.Fatalf("idempotent remove = %+v", removed)
+	for _, dryRun := range []bool{false, true} {
+		args := []string{"--json", "--config-dir", dir}
+		if dryRun {
+			args = append(args, "--dry-run")
+		}
+		args = append(args, "runner", "remove", "--workdir", workdir)
+		removeErr := executeRunnerJSONError(t, args...)
+		if removeErr == nil || result.ExitCode(removeErr) != result.ExitRejected || !strings.Contains(removeErr.Error(), "runner remove blocked") || !strings.Contains(removeErr.Error(), "no process stop or row deletion attempted") || !strings.Contains(removeErr.Error(), "retained configuration") {
+			t.Fatalf("dry-run=%t remove error = %v, exit=%d", dryRun, removeErr, result.ExitCode(removeErr))
+		}
+		after, readErr := os.ReadFile(registryPath)
+		if readErr != nil || !bytes.Equal(after, before) {
+			t.Fatalf("dry-run=%t remove changed registry: before=%q after=%q err=%v", dryRun, before, after, readErr)
+		}
 	}
 }
 
-func TestRunnerBulkReconcileRejectsAmbiguousPIDOwnershipBeforeMutation(t *testing.T) {
+func TestRunnerRemoveDoesNotStopExactRunnerWithoutBoundProcessAndCatalogAbsence(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	window := config.RunnerWindow(workdir)
+	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
+	registryPath := filepath.Join(dir, config.RunnersFile)
+	before, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	mutation := filepath.Join(bin, "mutation")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) exit 0 ;;
+  list-panes) printf 'alpha\t`+window+`\t@1\t%%1\t`+workdir+`\tbash\t%s\t0\t7000\n' `+shellSingleQuote(runnerStartCommand(workdir))+` ;;
+  kill-window) touch "`+mutation+`"; exit 0 ;;
+  *) exit 2 ;;
+esac
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	removeErr := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", "remove", "--workdir", workdir)
+	if removeErr == nil || result.ExitCode(removeErr) != result.ExitRejected || !strings.Contains(removeErr.Error(), "runner remove blocked") || !strings.Contains(removeErr.Error(), "no process stop or row deletion attempted") || !strings.Contains(removeErr.Error(), "use runner park") {
+		t.Fatalf("exact runner remove error = %v, exit=%d", removeErr, result.ExitCode(removeErr))
+	}
+	after, readErr := os.ReadFile(registryPath)
+	if readErr != nil || !bytes.Equal(after, before) {
+		t.Fatalf("exact runner remove changed registry: before=%q after=%q err=%v", before, after, readErr)
+	}
+	if _, statErr := os.Stat(mutation); !os.IsNotExist(statErr) {
+		t.Fatalf("exact runner remove mutated tmux: %v", statErr)
+	}
+}
+
+func TestRunnerBulkReconcileRejectsFirstRowDeletionBeforeMutation(t *testing.T) {
 	dir := t.TempDir()
 	first := filepath.Join(t.TempDir(), "first-missing")
 	ambiguous := filepath.Join(t.TempDir(), "second-missing")
@@ -1228,7 +1269,7 @@ func TestRunnerBulkReconcileRejectsAmbiguousPIDOwnershipBeforeMutation(t *testin
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
 	reconcileErr := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", "reconcile", "--all")
-	if reconcileErr == nil || result.ExitCode(reconcileErr) != result.ExitRejected || !strings.Contains(reconcileErr.Error(), "ownership is ambiguous") {
+	if reconcileErr == nil || result.ExitCode(reconcileErr) != result.ExitRejected || !strings.Contains(reconcileErr.Error(), "runner reconcile blocked") || !strings.Contains(reconcileErr.Error(), first) {
 		t.Fatalf("bulk reconcile error = %v, exit=%d", reconcileErr, result.ExitCode(reconcileErr))
 	}
 	after, readErr := os.ReadFile(registryPath)

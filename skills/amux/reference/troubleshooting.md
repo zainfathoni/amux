@@ -34,7 +34,7 @@ Reuse the task-appropriate mode selection rule; replacement urgency alone does n
 
 ## Runner safety
 
-Runner pin requires a canonical existing directory; Git repository, worktree, and lock state are irrelevant. Missing-directory repair belongs to `amux runner reconcile --workdir <path>`, not launch. Reconcile fails closed on ambiguous Amp-owned PID markers. Never delete marker files or remove runner configuration as part of worker finish.
+Runner pin requires a canonical existing directory; Git repository, worktree, and lock state are irrelevant. Runner reconcile is a present-directory no-op and fails closed on a missing directory, retaining the row until authoritative process/catalog absence can be proved. Never delete marker files or remove runner configuration as part of worker finish.
 
 ## Mutation lock
 

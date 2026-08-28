@@ -164,8 +164,9 @@ Worker and runner pin/unpin require a namespace because their identities differ:
 amux worker pin --workspace amux --window docs --workdir ~/Code/amux --thread T-example
 amux worker unpin --thread T-example
 amux runner pin --workspace amux --workdir ~/Code/amux-runner
-amux runner unpin --workdir ~/Code/amux-runner
 ```
+
+Runner row deletion through `remove`, `unpin`, or missing-workdir `reconcile` currently fails closed pending authoritative process/catalog absence evidence. Use `runner park` to stop an exact owned process while retaining its row.
 
 `amux workspace list` and its exact `amux workspaces` alias list the worker/runner workspace union. Add `--mode worker` or `--mode runner` to filter.
 
@@ -202,8 +203,8 @@ amux teardown --thread T-example
 - Shelve records local shelf intent before archiving and parking, preserving worker configuration.
 - Unshelve unarchives and removes intent only after success; it does not launch.
 - Teardown archives the verified thread, removes worker and shelf configuration, and stops the verified local client. A verified already-absent local process is a benign skip; ambiguity still fails closed.
-- Remove stops a worker and deletes local configuration without archiving. Unpin only deletes configuration and does not stop it.
-- Reconcile explicitly synchronizes worker shelf/remote drift or repairs stale runner ownership. Launch never performs hidden reconciliation.
+- Worker remove stops the worker and deletes local configuration without archiving; worker unpin only deletes configuration. Configured runner remove and unpin fail closed and retain the row.
+- Reconcile explicitly synchronizes worker shelf/remote drift. Runner reconcile is a present-workdir no-op and retains a missing-workdir row pending authoritative process/catalog absence evidence. Launch never performs hidden reconciliation.
 
 ## Pre-cutover durable work-group compatibility
 
@@ -276,13 +277,13 @@ Coordinator soft budgets to `ready` are Small 30m, Medium 1h (default), Large 2h
 | `list`, `workspace list` | inspect | inspect | none | none |
 | `doctor` | inspect | inspect | inspect | inspect only |
 | `launch` | read; skip shelved | read | create/verify | none |
-| `pin` / `unpin` | pin worker; unpin worker and shelf intent | mutate runner registry | none | none |
+| `pin` / `unpin` | pin worker; unpin worker and shelf intent | pin mutates; runner unpin currently retains and rejects | none | none |
 | `park` / `restart` | preserve | preserve | stop/restart verified | none |
-| `remove` | remove worker/shelf | remove runner | stop verified | none |
+| `remove` | remove worker/shelf | runner removal currently retains and fails closed until bound process/catalog absence is provable | stop verified workers only | none |
 | `shelve` / `unshelve` | preserve worker; mutate intent | none | shelve parks only | archive/unarchive |
 | `spawn` | generalized admission rejected; exact assignment-store drain or owner-authorized schema-2 host/workdir exception only | no worker/group/operation/shelf writes | none | exception only: one empty exact-host local create plus one coordinator-native exact-thread message; execution unproven |
 | `teardown` | remove worker/shelf | none | stop verified worker | archive |
-| `reconcile` | synchronize shelf/archive drift; remove only proven-missing safe worker bindings | repair stale ownership | verified repairs only | worker sync only for present bindings |
+| `reconcile` | synchronize shelf/archive drift; remove only proven-missing safe worker bindings | present-directory no-op; retain missing rows pending positive process/catalog absence | verified worker repairs only | worker sync only for present bindings |
 | `callback register` / `clear` | none; mutate machine runtime lease only | none | inspect exact pane/process | none |
 | `report submit` | persist report, then best-effort verified wake-up | none | optionally send short token | none |
 | `group list` / `group show` | inspect durable group intent | none | none | none |

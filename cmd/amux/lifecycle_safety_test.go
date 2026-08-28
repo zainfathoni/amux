@@ -150,8 +150,8 @@ func TestLifecycleExecutorPreflightFailsClosedOnUnavailableOrReusedIdentity(t *t
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			installLifecycleSafetyFixture(t, 90, 70, test.inspect)
-			err := preflightLifecycleExecutor("runner remove", []tmux.WindowPane{{Session: "alpha", Window: "runner", WindowID: "@1"}})
-			if err == nil || !strings.Contains(err.Error(), "cannot prove runner remove is independent") || !strings.Contains(err.Error(), "verified independent executor") {
+			err := preflightLifecycleExecutor("runner restart", []tmux.WindowPane{{Session: "alpha", Window: "runner", WindowID: "@1"}})
+			if err == nil || !strings.Contains(err.Error(), "cannot prove runner restart is independent") || !strings.Contains(err.Error(), "verified independent executor") {
 				t.Fatalf("ambiguous evidence error = %v", err)
 			}
 		})
@@ -271,7 +271,7 @@ func TestLifecycleExecutorAllowsIndependentTmux34PaneWithoutCreatedField(t *test
 
 func TestStopCapableCommandRoutesRequireTmuxAndLifecycleGuard(t *testing.T) {
 	workerStops := map[string]bool{"shelve": true, "park": true, "restart": true, "remove": true, "teardown": true}
-	runnerStops := map[string]bool{"park": true, "restart": true, "remove": true}
+	runnerStops := map[string]bool{"park": true, "restart": true}
 	workerFound, runnerFound := map[string]bool{}, map[string]bool{}
 	for _, command := range workerCommand().Children {
 		if lifecycleCommandStopsWorker(command.Name) {
@@ -375,7 +375,7 @@ func TestWorkerStopCommandsRejectSelfTargetBeforeAnyMutation(t *testing.T) {
 }
 
 func TestRunnerStopCommandsRejectSelfTargetBeforeAnyMutation(t *testing.T) {
-	for _, command := range []string{"park", "restart", "remove"} {
+	for _, command := range []string{"park", "restart"} {
 		t.Run(command, func(t *testing.T) {
 			dir := t.TempDir()
 			workdir := t.TempDir()

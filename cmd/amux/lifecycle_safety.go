@@ -28,7 +28,7 @@ func lifecycleCommandStopsWorker(name string) bool {
 
 func lifecycleCommandStopsRunner(name string) bool {
 	switch name {
-	case "park", "restart", "remove":
+	case "park", "restart":
 		return true
 	}
 	return false

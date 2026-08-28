@@ -497,7 +497,7 @@ func TestInvocationPolicyIsProgressivelyDisclosedWithoutChangingClaudeRoutes(t *
 			t.Errorf("invocation policy is missing %q", required)
 		}
 	}
-	for _, required := range []string{"exact Workspace Project and Orb", "known linked ChatGPT subscription", "small mechanical work", "ordinary implementation", "hard architecture", "one exact runner ID", "parent/child route", "automatic adoption"} {
+	for _, required := range []string{"exact Workspace Project and Orb", "known linked ChatGPT subscription", "small mechanical work", "ordinary implementation", "hard architecture", "one exact runner ID", "`runner_id` argument", "not an Amux CLI flag", "parent/child route", "automatic adoption"} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("native creation workflow is missing %q", required)
 		}
@@ -525,6 +525,28 @@ func TestNativeCreationDoesNotAdoptOrClaimExecutorMigration(t *testing.T) {
 			if !strings.Contains(check.contents, required) {
 				t.Errorf("%s is missing explicit native-affinity boundary %q", path, required)
 			}
+		}
+	}
+}
+
+func TestRunnerIDDesignIsSupersededByLeanNativeHandoff(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	design := readSkillFile(t, root, filepath.Join("docs", "proposals", "runner-id-design-grill.md"))
+	if !strings.HasPrefix(design, "---\nstatus: superseded\nsuperseded-by: ../adr/0007-retire-amux-through-native-cutover-and-staged-drain.md\n---\n") {
+		t.Error("runner-ID design must be marked superseded by ADR 0007")
+	}
+	for _, required := range []string{
+		"Do not implement issues #212–#216 as an Amux feature graph",
+		"do not add",
+		"Amux `--runner-id` selector",
+		"Only after old-runner absence is proven",
+		"amp --no-tui --runner-id <stable-owner-selected-id>",
+		"native `create_thread` `runner_id` argument",
+		"No new runner-ID store, migration framework, lifecycle classifier, or Amux CLI surface is required",
+	} {
+		if !strings.Contains(design, required) {
+			t.Errorf("lean runner-ID disposition is missing %q", required)
 		}
 	}
 }

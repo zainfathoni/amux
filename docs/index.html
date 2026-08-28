@@ -991,9 +991,9 @@
         },
         unpin: {
           label: "unpin",
-          desc: "Remove mode-namespaced configuration without stopping local execution or changing a remote thread. Worker unpin also removes matching shelf intent.",
-          domains: [0, 1],
-          note: "Use amux runner unpin --workdir … for a runner.",
+          desc: "Remove worker configuration without stopping local execution or changing a remote thread. Configured runner unpin fails closed and retains its row.",
+          domains: [0],
+          note: "Worker unpin also removes matching shelf intent.",
           script: [{ cmd: "amux worker unpin --thread T-example", out: ["worker and matching shelf intent removed; local client unchanged"] }],
         },
         launch: {
@@ -1019,10 +1019,10 @@
         },
         remove: {
           label: "remove",
-          desc: "Stop verified local clients and remove their configuration. Removing a worker does not archive its remote thread.",
-          domains: [0, 1, 2],
-          note: "Broad remove requires --all.",
-          script: [{ cmd: "amux remove --workspace product", out: ["verified local clients stopped; local configuration removed", "remote worker threads unchanged"] }],
+          desc: "Stop verified workers and remove their configuration without archiving remote threads. Configured runner removal fails closed and retains its row and process.",
+          domains: [0, 2],
+          note: "Aggregate remove fails before worker mutation when it selects a configured runner.",
+          script: [{ cmd: "amux worker remove --workspace product", out: ["verified worker clients stopped; local configuration removed", "remote worker threads unchanged"] }],
         },
         shelve: {
           label: "shelve",
@@ -1068,10 +1068,10 @@
         },
         reconcile: {
           label: "reconcile",
-          desc: "Explicitly repair worker shelf/remote drift or stale runner ownership; unlike launch, reconciliation is an intentional mutation.",
-          domains: [1, 3],
-          note: "Aggregate reconcile affects both modes; broad repair requires --all.",
-          script: [{ cmd: "amux reconcile --workspace product", out: ["verified workspace drift repaired explicitly"] }],
+          desc: "Explicitly repair worker shelf/remote drift. Runner reconcile leaves present rows unchanged and fails closed while retaining missing rows.",
+          domains: [0, 3],
+          note: "Aggregate reconcile fails before worker mutation when selected runner deletion cannot be proved safe.",
+          script: [{ cmd: "amux worker reconcile --workspace product", out: ["verified worker drift repaired explicitly"] }],
         },
       };
 

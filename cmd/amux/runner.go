@@ -126,6 +126,23 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 		}
 		return &env, result.Preflight(errors.New("no configured runner matches the selector"))
 	}
+	if in.Command.Name == "unpin" || in.Command.Name == "remove" {
+		return &env, result.Preflight(runnerRowDeletionUnavailable(in.Command.Name, rows[0].Workdir))
+	}
+	if in.Command.Name == "reconcile" {
+		for _, row := range rows {
+			if _, err := runnerDirectoryState(row.Workdir); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return &env, result.Preflight(runnerRowDeletionUnavailable("reconcile", row.Workdir))
+				}
+				return &env, result.Preflight(err)
+			}
+		}
+		for _, row := range rows {
+			env.Skipped = append(env.Skipped, runnerOutcome(row, "reconcile", "already in desired state"))
+		}
+		return &env, nil
+	}
 
 	if in.Command.Name == "launch" || in.Command.Name == "restart" {
 		if err := preflightRunnerWindowCollisions(dir); err != nil {
@@ -133,8 +150,6 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 		}
 	}
 	inspections := make(map[string]runnerInspection, len(rows))
-	reconcileMissing := make(map[string]bool, len(rows))
-	reconcilePIDDiagnostics := make(map[string]string, len(rows))
 	for _, row := range rows {
 		if !runnerCommandNeedsTmux(in.Command.Name) {
 			continue
@@ -149,26 +164,10 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 		inspections[row.Workdir] = inspection
 	}
 	for _, row := range rows {
-		inspection := inspections[row.Workdir]
 		if in.Command.Name == "launch" || in.Command.Name == "restart" {
 			if err := requireRunnerDirectory(row.Workdir); err != nil {
 				return &env, result.Preflight(err)
 			}
-		}
-		if in.Command.Name == "reconcile" && inspection.state != runnerPaneAbsent {
-			return &env, result.Preflight(fmt.Errorf("runner %s still has %s runtime ownership; reconcile will not remove its configuration", row.Workdir, inspection.state))
-		}
-		if in.Command.Name == "reconcile" {
-			_, directoryErr := runnerDirectoryState(row.Workdir)
-			if directoryErr != nil && !errors.Is(directoryErr, os.ErrNotExist) {
-				return &env, result.Preflight(directoryErr)
-			}
-			pidInspection := inspectRunnerPIDMarker(row.Workdir)
-			if pidInspection.ambiguous {
-				return &env, result.Preflight(fmt.Errorf("runner %s%s", row.Workdir, pidInspection.diagnostic))
-			}
-			reconcileMissing[row.Workdir] = directoryErr != nil
-			reconcilePIDDiagnostics[row.Workdir] = pidInspection.diagnostic
 		}
 	}
 	if lifecycleCommandStopsRunner(in.Command.Name) {
@@ -192,10 +191,6 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 			continue
 		}
 		inspection := inspections[row.Workdir]
-		pidDiagnostic := ""
-		if in.Command.Name == "reconcile" {
-			pidDiagnostic = reconcilePIDDiagnostics[row.Workdir]
-		}
 		if in.Command.Name == "doctor" {
 			workdirState, workdirErr := runnerDirectoryState(row.Workdir)
 			if workdirErr != nil {
@@ -242,27 +237,15 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 			env.Skipped = append(env.Skipped, out)
 			continue
 		}
-		if in.Command.Name == "reconcile" {
-			if !reconcileMissing[row.Workdir] {
-				if pidDiagnostic == "" {
-					out.Message = "already in desired state"
-				} else {
-					out.Message = "already in desired state" + pidDiagnostic
-				}
-				env.Skipped = append(env.Skipped, out)
-				continue
-			}
-		}
 		if in.Options.DryRun {
-			out.Message = strings.TrimPrefix(pidDiagnostic, "; ")
 			env.Planned = append(env.Planned, out)
 			continue
 		}
 
 		var runtimeErr error
 		switch in.Command.Name {
-		case "unpin":
-			_, runtimeErr = config.RemoveRunnerWorkdir(dir.RunnersPath(), row.Workdir)
+		case "unpin", "remove", "reconcile":
+			runtimeErr = runnerRowDeletionUnavailable(in.Command.Name, row.Workdir)
 		case "park":
 			runtimeErr = stopRunner(row, inspection)
 		case "restart":
@@ -274,16 +257,6 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 			}
 		case "launch":
 			_, runtimeErr = launchRunner(row)
-		case "remove":
-			if inspection.state == runnerPaneExact {
-				runtimeErr = stopRunner(row, inspection)
-			}
-			if runtimeErr == nil {
-				_, runtimeErr = config.RemoveRunnerWorkdir(dir.RunnersPath(), row.Workdir)
-			}
-		case "reconcile":
-			_, runtimeErr = config.RemoveRunnerWorkdir(dir.RunnersPath(), row.Workdir)
-			out.Message = strings.TrimPrefix(pidDiagnostic, "; ")
 		}
 		if runtimeErr != nil {
 			out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: runtimeErr.Error()}
@@ -300,6 +273,10 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 		return &env, result.Runtime(fmt.Errorf("runner %s %s failed: %s", failed.Resource.Workdir, failed.Action, failed.Error.Message))
 	}
 	return &env, nil
+}
+
+func runnerRowDeletionUnavailable(command, workdir string) error {
+	return fmt.Errorf("runner %s blocked for %s: no process stop or row deletion attempted; retained configuration because current Amp APIs cannot bind the native catalog entry to an exact local process or prove positive process/catalog absence; use runner park to stop an exact owned process while retaining its row", command, workdir)
 }
 
 func maintenanceDoctorMessage(d *result.MaintenanceDetails) string {
