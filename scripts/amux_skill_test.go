@@ -2136,7 +2136,7 @@ func TestHealthAndFinishPreserveModeSafety(t *testing.T) {
 		"Never send text to a runner pane",
 		"no-response` means candidate stale, not safe to replace",
 		"Any configured runner, unexpected Amp client",
-		"Unavailable, incomplete, or ambiguous host process evidence also blocks",
+		"Unavailable, incomplete, or ambiguous runner-list or host process evidence also blocks",
 		"never escalates to `-D`",
 		"run worker teardown as the final action",
 	} {
@@ -2326,13 +2326,14 @@ func TestOrdinaryFinishGitSemantics(t *testing.T) {
 		repo, _, _ := newRemovalSafetyRepo(t)
 		worktree := filepath.Join(t.TempDir(), "attached-finish")
 		gitTest(t, repo, "worktree", "add", "-b", "finish-feature", worktree, "HEAD")
+		registered := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "--show-toplevel"))
 		commitFile(t, worktree, "unique.txt", "unique and unpushed\n", "unique finish commit")
 		tip := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "HEAD"))
 		if got := gitTestOptionalRef(t, repo, "refs/remotes/origin/finish-feature"); got != "" {
 			t.Fatalf("synthetic finish commit unexpectedly has remote coverage: %s", got)
 		}
-		if err := syntheticOrdinaryFinishIndexState(worktree); err != nil {
-			t.Fatalf("ordinary index state = %v, want clear", err)
+		if err := syntheticOrdinaryFinishState(worktree); err != nil {
+			t.Fatalf("ordinary finish state = %v, want clear", err)
 		}
 
 		gitTest(t, repo, "worktree", "remove", worktree)
@@ -2343,7 +2344,7 @@ func TestOrdinaryFinishGitSemantics(t *testing.T) {
 		if _, err := os.Stat(worktree); !os.IsNotExist(err) {
 			t.Fatalf("removed worktree stat = %v, want absent", err)
 		}
-		if block := syntheticWorktreeBlock(gitTest(t, repo, "worktree", "list", "--porcelain"), worktree); block != "" {
+		if block := syntheticWorktreeBlock(gitTest(t, repo, "worktree", "list", "--porcelain"), registered); block != "" {
 			t.Fatalf("removed worktree remains registered: %q", block)
 		}
 	})
@@ -2352,6 +2353,7 @@ func TestOrdinaryFinishGitSemantics(t *testing.T) {
 		repo, _, _ := newRemovalSafetyRepo(t)
 		worktree := filepath.Join(t.TempDir(), "untracked-finish")
 		gitTest(t, repo, "worktree", "add", "-b", "finish-untracked", worktree, "HEAD")
+		registered := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "--show-toplevel"))
 		if err := os.WriteFile(filepath.Join(worktree, "untracked.txt"), []byte("keep me\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -2361,7 +2363,7 @@ func TestOrdinaryFinishGitSemantics(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(worktree, "untracked.txt")); err != nil {
 			t.Fatalf("refused removal lost untracked content: %v", err)
 		}
-		if block := syntheticWorktreeBlock(gitTest(t, repo, "worktree", "list", "--porcelain"), worktree); block == "" {
+		if block := syntheticWorktreeBlock(gitTest(t, repo, "worktree", "list", "--porcelain"), registered); block == "" {
 			t.Fatal("refused removal dropped the worktree registration")
 		}
 	})
@@ -2380,6 +2382,9 @@ func TestOrdinaryFinishGitSemantics(t *testing.T) {
 		}
 		if status := gitTest(t, worktree, "status", "--porcelain=v1", "--untracked-files=all"); status != "" {
 			t.Fatalf("ignored fixture unexpectedly appears in ordinary status: %q", status)
+		}
+		if err := syntheticOrdinaryFinishState(worktree); err == nil || !strings.Contains(err.Error(), "non-index filesystem object") {
+			t.Fatalf("ordinary finish state = %v, want ignored-content blocker", err)
 		}
 
 		gitTest(t, repo, "worktree", "remove", worktree)
@@ -2400,7 +2405,7 @@ func TestOrdinaryFinishGitSemantics(t *testing.T) {
 		if status := gitTest(t, worktree, "status", "--porcelain=v1", "--untracked-files=all"); status != "" {
 			t.Fatalf("assume-unchanged fixture unexpectedly appears in status: %q", status)
 		}
-		if err := syntheticOrdinaryFinishIndexState(worktree); err == nil || !strings.Contains(err.Error(), "assume-unchanged") {
+		if err := syntheticOrdinaryFinishState(worktree); err == nil || !strings.Contains(err.Error(), "assume-unchanged") {
 			t.Fatalf("index flag check = %v, want assume-unchanged blocker", err)
 		}
 
@@ -2416,7 +2421,7 @@ func TestOrdinaryFinishGitSemantics(t *testing.T) {
 			worktree := filepath.Join(t.TempDir(), "skip-worktree-finish")
 			gitTest(t, repo, "worktree", "add", "-b", "finish-skip-worktree", worktree, "HEAD")
 			gitTest(t, worktree, "update-index", "--skip-worktree", "tracked.txt")
-			if err := syntheticOrdinaryFinishIndexState(worktree); err == nil || !strings.Contains(err.Error(), "skip-worktree") {
+			if err := syntheticOrdinaryFinishState(worktree); err == nil || !strings.Contains(err.Error(), "skip-worktree") {
 				t.Fatalf("index flag check = %v, want skip-worktree blocker", err)
 			}
 		})
@@ -2428,7 +2433,7 @@ func TestOrdinaryFinishGitSemantics(t *testing.T) {
 			oid := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "HEAD:tracked.txt"))
 			indexInfo := fmt.Sprintf("0 %s\ttracked.txt\n100644 %s 1\ttracked.txt\n100644 %s 2\ttracked.txt\n", strings.Repeat("0", 40), oid, oid)
 			gitTestInput(t, worktree, []byte(indexInfo), "update-index", "--index-info")
-			if err := syntheticOrdinaryFinishIndexState(worktree); err == nil || !strings.Contains(err.Error(), "non-stage-zero") {
+			if err := syntheticOrdinaryFinishState(worktree); err == nil || !strings.Contains(err.Error(), "non-stage-zero") {
 				t.Fatalf("index stage check = %v, want non-stage-zero blocker", err)
 			}
 		})
@@ -2456,7 +2461,7 @@ func TestOrdinaryFinishGitSemantics(t *testing.T) {
 		if status := gitTest(t, worktree, "status", "--porcelain=v1", "--untracked-files=all"); status != "" {
 			t.Fatalf("stat-cache fixture unexpectedly appears in status: %q", status)
 		}
-		if err := syntheticOrdinaryFinishIndexState(worktree); err == nil || !strings.Contains(err.Error(), "content differs from index") {
+		if err := syntheticOrdinaryFinishState(worktree); err == nil || !strings.Contains(err.Error(), "content differs from index") {
 			t.Fatalf("index content check = %v, want false-clean content blocker", err)
 		}
 	})
@@ -2484,7 +2489,7 @@ func TestOrdinaryFinishGitSemantics(t *testing.T) {
 		if status := gitTest(t, worktree, "status", "--porcelain=v1", "--untracked-files=all"); status != "" {
 			t.Fatalf("fileMode=false fixture unexpectedly appears in status: %q", status)
 		}
-		if err := syntheticOrdinaryFinishIndexState(worktree); err == nil || !strings.Contains(err.Error(), "executable mode differs") {
+		if err := syntheticOrdinaryFinishState(worktree); err == nil || !strings.Contains(err.Error(), "executable mode differs") {
 			t.Fatalf("index mode check = %v, want owner-executable mismatch blocker", err)
 		}
 	})
@@ -2493,9 +2498,10 @@ func TestOrdinaryFinishGitSemantics(t *testing.T) {
 		repo, _, _ := newRemovalSafetyRepo(t)
 		locked := filepath.Join(t.TempDir(), "locked-finish")
 		gitTest(t, repo, "worktree", "add", "-b", "finish-locked", locked, "HEAD")
+		lockedRegistered := strings.TrimSpace(gitTest(t, locked, "rev-parse", "--show-toplevel"))
 		gitTest(t, repo, "worktree", "lock", locked)
 		gitTestFailure(t, repo, "worktree", "remove", locked)
-		if block := syntheticWorktreeBlock(gitTest(t, repo, "worktree", "list", "--porcelain"), locked); !strings.Contains(block, "\nlocked") {
+		if block := syntheticWorktreeBlock(gitTest(t, repo, "worktree", "list", "--porcelain"), lockedRegistered); !strings.Contains(block, "\nlocked") {
 			t.Fatalf("locked worktree block = %q", block)
 		}
 		gitTest(t, repo, "worktree", "unlock", locked)
@@ -2503,7 +2509,8 @@ func TestOrdinaryFinishGitSemantics(t *testing.T) {
 
 		unlocked := filepath.Join(t.TempDir(), "unlocked-finish")
 		gitTest(t, repo, "worktree", "add", "-b", "finish-unlocked", unlocked, "HEAD")
-		if block := syntheticWorktreeBlock(gitTest(t, repo, "worktree", "list", "--porcelain"), unlocked); strings.Contains(block, "\nlocked") {
+		unlockedRegistered := strings.TrimSpace(gitTest(t, unlocked, "rev-parse", "--show-toplevel"))
+		if block := syntheticWorktreeBlock(gitTest(t, repo, "worktree", "list", "--porcelain"), unlockedRegistered); block == "" || strings.Contains(block, "\nlocked") {
 			t.Fatalf("ordinary worktree unexpectedly locked: %q", block)
 		}
 		gitTest(t, repo, "worktree", "remove", unlocked)
@@ -4224,6 +4231,13 @@ func gitTestFailure(t *testing.T, dir string, args ...string) string {
 	return string(out)
 }
 
+func syntheticOrdinaryFinishState(worktree string) error {
+	if err := syntheticOrdinaryFinishIndexState(worktree); err != nil {
+		return err
+	}
+	return syntheticOrdinaryFinishFilesystemState(worktree)
+}
+
 func syntheticOrdinaryFinishIndexState(worktree string) error {
 	flags := exec.Command("git", "-C", worktree, "ls-files", "--cached", "-v", "-z")
 	flags.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
@@ -4335,6 +4349,78 @@ func syntheticOrdinaryFinishIndexState(worktree string) error {
 		}
 	}
 	return nil
+}
+
+func syntheticOrdinaryFinishFilesystemState(worktree string) error {
+	rootCommand := exec.Command("git", "-C", worktree, "rev-parse", "--show-toplevel")
+	rootCommand.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
+	rootOutput, err := rootCommand.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("resolve worktree root: %w: %s", err, rootOutput)
+	}
+	root := strings.TrimSpace(string(rootOutput))
+	if root == "" || !filepath.IsAbs(root) {
+		return fmt.Errorf("malformed worktree root %q", root)
+	}
+
+	trackedCommand := exec.Command("git", "-C", root, "ls-files", "--cached", "-z")
+	trackedCommand.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
+	trackedOutput, err := trackedCommand.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("read tracked filesystem set: %w: %s", err, trackedOutput)
+	}
+	tracked := make(map[string]struct{})
+	ancestors := make(map[string]struct{})
+	for _, record := range bytes.Split(trackedOutput, []byte{0}) {
+		if len(record) == 0 {
+			continue
+		}
+		path := filepath.Clean(filepath.FromSlash(string(record)))
+		if filepath.IsAbs(path) || path == "." || path == ".." || strings.HasPrefix(path, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("unsafe tracked filesystem path %q", record)
+		}
+		tracked[path] = struct{}{}
+		for ancestor := filepath.Dir(path); ancestor != "."; ancestor = filepath.Dir(ancestor) {
+			ancestors[ancestor] = struct{}{}
+		}
+	}
+
+	return filepath.WalkDir(root, func(path string, _ os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("walk worktree filesystem: %w", walkErr)
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return fmt.Errorf("lstat worktree filesystem path %q: %w", path, err)
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return fmt.Errorf("relativize worktree filesystem path %q: %w", path, err)
+		}
+		relative = filepath.Clean(relative)
+		if relative == "." {
+			if !info.IsDir() {
+				return fmt.Errorf("worktree root is not a directory: %s", info.Mode().Type())
+			}
+			return nil
+		}
+		if relative == ".git" {
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("linked-worktree .git is not a regular administrative file: %s", info.Mode().Type())
+			}
+			return nil
+		}
+		if _, ok := tracked[relative]; ok {
+			return nil
+		}
+		if _, ok := ancestors[relative]; ok {
+			if !info.IsDir() {
+				return fmt.Errorf("tracked ancestor %q is not a directory: %s", relative, info.Mode().Type())
+			}
+			return nil
+		}
+		return fmt.Errorf("non-index filesystem object %q", relative)
+	})
 }
 
 func syntheticRemovalVerdict(repo, baseline, tip string) (string, string, error) {
