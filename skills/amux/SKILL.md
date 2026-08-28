@@ -40,7 +40,7 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 - **/amux health**: [`workflows.md`](reference/workflows.md#health-workers-and-runners).
 - **/amux sprawl**: [`workflows.md`](reference/workflows.md#sprawl-independent-issue-threads).
 - **/amux sweep**: one-time staged-drain inventory only; [`workflows.md`](reference/workflows.md#sweep-worktree-inventory).
-- **/amux finish**: pre-cutover existing-worker compatibility/drain only; [`workflows.md`](reference/workflows.md#finish-a-merged-worker).
+- **/amux finish**: pre-cutover completed-worker compatibility/drain only; one read-only preflight, one exact approval, park the verified live worker, normally remove its index-only worktree while retaining the branch, then exact-thread teardown; [`workflows.md`](reference/workflows.md#finish-a-completed-worker).
 - **Before any worktree remove or prune path**: load [`reference/removal-safety.md`](reference/removal-safety.md).
 
 Deadlines (compatibility only): load [`reference/deadline-v1.md`](reference/deadline-v1.md) only when handling an existing pre-cutover deadline wake-up—not on every `/amux` load and never to create deadline state for native work.
@@ -62,5 +62,5 @@ Experimental external execution is explicit-only. Load **`/amux-tycho`** for the
 
 - No secrets in names, workdirs, or thread IDs. Prefer temporary `--config-dir` and `--dry-run` for tests.
 - Mutations are idempotent under one machine lock. On partial failure, inspect before retrying.
-- Never guess a callback pane, infer finish from a wake-up, auto-release, force-delete a branch, or erase group history during finish.
+- Never guess a callback pane, infer finish from a wake-up, auto-release, force-remove a worktree, force-delete or implicitly delete a branch, or erase group history during finish.
 - Runner commands never own remote agent threads. Teardown never applies to runners.

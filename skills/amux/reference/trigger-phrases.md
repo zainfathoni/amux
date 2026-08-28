@@ -21,6 +21,6 @@ This table is the complete activation and routing contract for [`../SKILL.md`](.
 | `Doctor amux` | aggregate or mode-specific `doctor` | Read-only diagnosis. |
 | `/amux health` | [`workflows.md#health-workers-and-runners`](workflows.md#health-workers-and-runners) | Skill-only aggregate, safe mode-specific probes. |
 | `/amux sprawl` | [`workflows.md#sprawl-independent-issue-threads`](workflows.md#sprawl-independent-issue-threads) | Skill-only native fan-out; no Amux adoption/lifecycle state. |
-| `/amux finish` | [`workflows.md#finish-a-merged-worker`](workflows.md#finish-a-merged-worker) | Skill-only pre-cutover compatibility/drain; fail closed on runner ownership. |
+| `/amux finish` | [`workflows.md#finish-a-completed-worker`](workflows.md#finish-a-completed-worker) | Skill-only pre-cutover completed-worker drain; merged or review-only completion, one preflight/approval, retained branch, non-force removal, exact-thread archive. |
 
 When editing a trigger, update the frontmatter description, top-level routing, this table, its linked workflow/reference, and consistency tests together.

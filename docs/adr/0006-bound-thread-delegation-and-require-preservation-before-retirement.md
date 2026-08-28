@@ -33,7 +33,7 @@ This decision depends on [ADR 0005](0005-maintain-amux-as-a-local-worker-lifecyc
 
 ## Adoption surface
 
-This ADR selects policy, not a carrier or enforcement mechanism. Consistent with ADR 0004's retained constraints, operating guidance reaches agents only through a separately reviewed documentation or skill change, and enforced behavior requires its own accepted design and implementation. [Issue #320](https://github.com/zainfathoni/amux/issues/320) owns the symmetric creation/retirement proposal and explicit per-resource disposition design. Its later operating-guidance adoption site is the paired-lifecycle and worktree-removal sequence under **Finish a merged worker** in `skills/amux/reference/workflows.md`; that workflow remains current until the proposal is reviewed, approved, and adopted separately.
+This ADR selects policy, not a carrier or enforcement mechanism. Consistent with ADR 0004's retained constraints, operating guidance reaches agents only through a separately reviewed documentation or skill change, and enforced behavior requires its own accepted design and implementation. [Issue #320](https://github.com/zainfathoni/amux/issues/320) owns the symmetric creation/retirement proposal and explicit per-resource disposition design. Its later operating-guidance adoption site is the paired-lifecycle and worktree-removal sequence now titled **Finish a completed worker** in `skills/amux/reference/workflows.md`; that workflow remains current until the proposal is reviewed, approved, and adopted separately.
 
 ## Consequences
 

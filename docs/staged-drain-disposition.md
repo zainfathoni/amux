@@ -45,8 +45,8 @@ This ledger translates [ADR 0007](adr/0007-retire-amux-through-native-cutover-an
 | Issue | Exact recommendation |
 | --- | --- |
 | [#232](https://github.com/zainfathoni/amux/issues/232) | **Keep open and reprioritize as a runner-drain blocker.** Implement the ADR 0007 join and fail-closed removal preflight. Retain rows on live/conflicting/unproven evidence; stop only exact proven processes; verify absence before row removal; handle already orphaned row-absent processes without inferred adoption; then hand stable native runner IDs to OS supervision. Close when all six migration cases in ADR 0007 pass. |
-| [#238](https://github.com/zainfathoni/amux/issues/238) | Narrow to preservation/removal guidance for an existing review-only worker during drain. Do not add a new terminal report state or permanent finish route. |
-| [#249](https://github.com/zainfathoni/amux/issues/249) | Close as superseded by the smaller drain and existing adjacent worktree gates. Do not add a durable finish-plan generation. |
+| [#238](https://github.com/zainfathoni/amux/issues/238) | Use the same concise `/amux finish` wind-down for an exactly identified completed review-only worker: explicit completion evidence replaces merge evidence, while index-only/non-unique-loss/ownership checks, worker parking, branch preservation, normal removal, and teardown-last remain. Do not add a report terminal state or retirement framework. |
+| [#249](https://github.com/zainfathoni/amux/issues/249) | Complete through the skill's one read-only preflight, one privacy-safe exact summary, one owner approval, and adjacent revalidation. Skip unlock when already unlocked; never force-remove. Existing Git/report/provider/Amux outcomes provide replay evidence—no durable finish plan, digest, progress ledger, or planner. |
 | [#318](https://github.com/zainfathoni/amux/issues/318) | Narrow to selectors retained by the compatibility reader and drain commands. Do not normalize command families scheduled for removal merely for completeness. |
 
 ### Tycho and provider paths

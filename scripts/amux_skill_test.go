@@ -633,7 +633,7 @@ func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
-	stages := []string{"### 1. Preflight existing authoritative state", "### 2. Revalidate the existing coordinator lease", "### 3. Continue only the existing member", "### 4. Persist ready, wake, acknowledge, and independently verify", "### 5. Merge, verify post-merge CI, then authorize finish", "### 6. Submit merged and run `/amux finish`", "### 7. Coordinator-owned deadline queue"}
+	stages := []string{"### 1. Preflight existing authoritative state", "### 2. Revalidate the existing coordinator lease", "### 3. Continue only the existing member", "### 4. Persist ready, wake, acknowledge, and independently verify", "### 5. Merge, verify post-merge CI, then authorize finish", "### 6. Run `/amux finish`; submit merged inside the approved wind-down", "### 7. Coordinator-owned deadline queue"}
 	last := -1
 	for _, stage := range stages {
 		at := strings.Index(workflow, stage)
@@ -645,7 +645,7 @@ func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
 	for _, required := range []string{
 		"native parent/child association", "authenticated `create_thread`", "exact executor/workdir", "task-only assignment", "leave it unmanaged by Amux", "compatibility-only", "Do not add a new member", "--group <durable-issue-group>",
 		"amux report submit --report-id <stable-report-id>", "amux report pending --group <durable-issue-group>", "amux report acknowledge --report-id <stable-report-id>",
-		"PR URL, head branch/SHA", "amux report authorize-finish --report-id <stable-report-id>", "post-merge CI", "--status merged", "amux teardown --thread <member-thread>", "Group membership and report history survive teardown",
+		"PR URL, head branch/SHA", "amux report authorize-finish --report-id <stable-report-id>", "post-merge CI", "--status merged", "the child remains alive", "does not wait for a separate acknowledgement round trip", "amux teardown --thread <member-thread>", "Group membership and report history survive teardown",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("coordinator workflow is missing %q", required)
@@ -2135,8 +2135,9 @@ func TestHealthAndFinishPreserveModeSafety(t *testing.T) {
 		"mode=<worker|runner>",
 		"Never send text to a runner pane",
 		"no-response` means candidate stale, not safe to replace",
-		"Fail closed on unexpected runner ownership",
-		"do not use `-D` automatically",
+		"Any configured runner, unexpected Amp client",
+		"Unavailable, incomplete, or ambiguous host process evidence also blocks",
+		"never escalates to `-D`",
 		"run worker teardown as the final action",
 	} {
 		if !strings.Contains(workflow, required) {
@@ -2150,7 +2151,91 @@ func TestFinishRemovalGateDocumentsEveryFailClosedInvariant(t *testing.T) {
 	root := repoRoot(t)
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
 	reference := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "removal-safety.md"))
+	contract := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "contract-v1.md"))
 	combined := workflow + reference
+	finishStart := strings.Index(workflow, "## Finish a completed worker")
+	generalStart := strings.Index(workflow, "### Removal preflight for finish, remove-on-missing, and prune")
+	if finishStart < 0 || generalStart <= finishStart {
+		t.Fatal("completed-worker finish section is missing")
+	}
+	finish := workflow[finishStart:generalStart]
+	for _, required := range []string{
+		"Run every currently knowable read-only check",
+		"**Merged PR:**",
+		"**Review-only:**",
+		"Do not fabricate merge, PR, CI, or report evidence, submit `merged`, or add a terminal report status",
+		"ordinary completed-worker fast path",
+		"present worktree with an index-only filesystem",
+		"unique or unpushed commits remain reachable",
+		"normal removal has no non-index content to discard",
+		"current working directory or open file is under the worktree blocks",
+		"amux --dry-run --json worker park --thread <thread-id>",
+		"FINISH PREFLIGHT: PROCEED | BLOCKED",
+		"one concise privacy-safe summary",
+		"Ask once for approval",
+		"not a durable finish plan",
+		"declined/canceled approval before mutation produces no mutation",
+		"existing Git, report, provider, and Amux outcomes are the replay evidence",
+		"skip unlock for `unlocked`",
+		"git worktree remove <exact-path>",
+		"Never pass `--force`",
+		"Preserve the local branch by default",
+		"remote branch deletion is never implicit",
+		"archives the exact completed thread",
+		"review-only case retains its report unchanged",
+		"require durable authorization from the exact current coordinator before entering the approved finish sequence",
+		"Include only the already-authorized terminal `merged` transition",
+		"exact terminal history when only the separate best-effort callback failed",
+		"expected progress, not drift",
+		"unrelated lifecycle change",
+		"If the owner cancels or any evidence becomes ambiguous after the first mutation",
+		"fresh complete preflight and approval",
+		"no new runtime or filesystem lock is created",
+		"Report actual outcomes rather than the intended plan",
+	} {
+		if !strings.Contains(finish, required) {
+			t.Errorf("ordinary finish workflow is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"git pull --ff-only", "git branch -D", "versioned finish-plan", "persist finish progress"} {
+		if strings.Contains(finish, forbidden) {
+			t.Errorf("ordinary finish workflow retains superseded ceremony %q", forbidden)
+		}
+	}
+	preflight := strings.Index(finish, "### One read-only preflight and one approval")
+	summary := strings.Index(finish, "FINISH PREFLIGHT: PROCEED | BLOCKED")
+	approval := strings.Index(finish, "Ask once for approval")
+	mutation := strings.Index(finish, "### Mutate narrowly, with adjacent revalidation")
+	if mutation < 0 {
+		t.Fatal("ordinary finish mutation section is missing")
+	}
+	mutationBody := finish[mutation:]
+	park := strings.Index(mutationBody, "amux --json worker park --thread <thread-id>") + mutation
+	transition := strings.Index(mutationBody, "Perform only the listed already-authorized terminal report transition and exact bound-provider dispositions") + mutation
+	revalidation := strings.Index(mutationBody, "Re-run the complete ordinary preflight") + mutation
+	remove := strings.Index(mutationBody, "git worktree remove <exact-path>") + mutation
+	teardown := strings.LastIndex(finish, "amux teardown --thread <thread-id>")
+	if preflight < 0 || summary <= preflight || approval <= summary || mutation <= approval || park <= mutation || transition <= park || revalidation <= transition || remove <= revalidation || teardown <= remove {
+		t.Errorf("ordinary finish ordering must be preflight → summary → approval → park → exact transitions → revalidation → remove → teardown: preflight=%d summary=%d approval=%d mutation=%d park=%d transition=%d revalidation=%d remove=%d teardown=%d", preflight, summary, approval, mutation, park, transition, revalidation, remove, teardown)
+	}
+	authorize := strings.Index(workflow, "amux report authorize-finish --report-id <stable-report-id>")
+	if authorize < 0 || authorize >= finishStart {
+		t.Errorf("durable report authorization must occur before finish preflight: authorize=%d finish=%d", authorize, finishStart)
+	}
+	if strings.Contains(mutationBody, "amux report authorize-finish") {
+		t.Error("finish mutation section must not create durable report authorization")
+	}
+	for _, required := range []string{
+		"existing merged-PR report binding",
+		"review-only assignment may instead finish from explicit owner completion and cleanup approval",
+		"retain any review-only report unchanged",
+		"parks a verified live worker before filesystem mutation",
+		"does not manufacture a report or terminal transition for review-only work",
+	} {
+		if !strings.Contains(contract, required) {
+			t.Errorf("finish contract is missing %q", required)
+		}
+	}
 	for _, required := range []string{
 		"override`, `origin/HEAD`, or `GitHub default branch`",
 		"refs/remotes/origin/<name>",
@@ -2165,16 +2250,14 @@ func TestFinishRemovalGateDocumentsEveryFailClosedInvariant(t *testing.T) {
 		"Rule 5 is always `NEEDS_BACKUP`",
 		"create refs/heads/backup/<worktree-name>-before-remove-<date> at <C>",
 		"classify → backup → unlock → prune",
-		"without force only when that immediately preceding revalidation",
-		"Keep branch deletion separate from worktree removal",
 		"gh pr view <pr> --json state,mergedAt,headRefName,headRefOid",
+		"review-only work records `PR: not applicable`",
 		"unfiltered count and paths of `??` untracked entries",
 		"symlink-to-external",
 		"duplicate-of-canonical",
 		"Generated-artifact exclusions are configurable presentation filters",
 		"never count `refs/stash` as commit coverage",
 		"Any scan or resolution error blocks ordinary removal",
-		"no earlier verdict survives this step",
 		"Revalidate adjacent to targeted removal",
 		"Never reuse rule-2a evidence",
 		"A single-target verdict never authorizes `git worktree prune`",
@@ -2203,17 +2286,231 @@ func TestFinishRemovalGateDocumentsEveryFailClosedInvariant(t *testing.T) {
 			t.Errorf("repository-wide prune revalidation is missing %q", required)
 		}
 	}
-	mutation := strings.Index(workflow, "[Remove the worker worktree without force")
-	link := strings.Index(workflow, "](removal-safety.md#removal-ordering-context)")
-	if mutation < 0 || link < mutation {
-		t.Error("actual finish mutation sentence lacks inline progressive-disclosure link")
+	for _, required := range []string{
+		"exact surviving local branch itself preserves every commit at `HEAD`",
+		"GIT_OPTIONAL_LOCKS=0",
+		"git ls-remote --heads <remote> <ref>",
+		"without fetching or changing local refs",
+		"status --porcelain=v1 --untracked-files=all",
+		"ls-files --cached -v -z",
+		"assume-unchanged",
+		"skip-worktree",
+		"ls-files --stage -z",
+		"require every entry to be stage zero",
+		"rather than trusting the stat cache",
+		"Git owner-executable bit (`0100`)",
+		"hash-object --path=<git-path> -- <git-path>",
+		"hash-object --stdin",
+		"unsupported modes (including gitlinks)",
+		"Normal removal can also silently delete ignored content",
+		"strictly index-only filesystem",
+		"ls-files --cached -z",
+		"walk the entire worktree with `lstat` without following symlinks",
+		"exact linked-worktree `.git` administrative file",
+		"ignored file or directory",
+		"nested-repository or present submodule content",
+		"a count or ignored-file listing is not a complete deletion inventory",
+		"Independently remove or preserve generated ignored output",
+		"`unlocked` skips unlock",
+		"with no `--force`",
+		"Branch deletion, remote mutation, prune, and backup-ref creation are outside this fast path",
+	} {
+		if !strings.Contains(reference, required) {
+			t.Errorf("ordinary removal fast path is missing %q", required)
+		}
 	}
-	pull := strings.Index(workflow, "git pull --ff-only` before classification")
-	preflight := strings.Index(workflow, "Run the removal preflight below against the exact worker worktree")
-	adjacent := strings.Index(workflow, "Then perform the adjacent revalidation below")
-	if pull < 0 || preflight <= pull || adjacent <= preflight || mutation <= adjacent {
-		t.Errorf("finish ordering must be pull → classify → adjacent revalidation → remove: pull=%d preflight=%d adjacent=%d remove=%d", pull, preflight, adjacent, mutation)
-	}
+}
+
+func TestOrdinaryFinishGitSemantics(t *testing.T) {
+	t.Run("attached branch preserves unique commit after normal removal", func(t *testing.T) {
+		repo, _, _ := newRemovalSafetyRepo(t)
+		worktree := filepath.Join(t.TempDir(), "attached-finish")
+		gitTest(t, repo, "worktree", "add", "-b", "finish-feature", worktree, "HEAD")
+		commitFile(t, worktree, "unique.txt", "unique and unpushed\n", "unique finish commit")
+		tip := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "HEAD"))
+		if got := gitTestOptionalRef(t, repo, "refs/remotes/origin/finish-feature"); got != "" {
+			t.Fatalf("synthetic finish commit unexpectedly has remote coverage: %s", got)
+		}
+		if err := syntheticOrdinaryFinishIndexState(worktree); err != nil {
+			t.Fatalf("ordinary index state = %v, want clear", err)
+		}
+
+		gitTest(t, repo, "worktree", "remove", worktree)
+
+		if got := gitTestOptionalRef(t, repo, "refs/heads/finish-feature"); got != tip {
+			t.Fatalf("retained branch tip = %q, want unique commit %q", got, tip)
+		}
+		if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+			t.Fatalf("removed worktree stat = %v, want absent", err)
+		}
+		if block := syntheticWorktreeBlock(gitTest(t, repo, "worktree", "list", "--porcelain"), worktree); block != "" {
+			t.Fatalf("removed worktree remains registered: %q", block)
+		}
+	})
+
+	t.Run("untracked content makes normal removal refuse", func(t *testing.T) {
+		repo, _, _ := newRemovalSafetyRepo(t)
+		worktree := filepath.Join(t.TempDir(), "untracked-finish")
+		gitTest(t, repo, "worktree", "add", "-b", "finish-untracked", worktree, "HEAD")
+		if err := os.WriteFile(filepath.Join(worktree, "untracked.txt"), []byte("keep me\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		gitTestFailure(t, repo, "worktree", "remove", worktree)
+
+		if _, err := os.Stat(filepath.Join(worktree, "untracked.txt")); err != nil {
+			t.Fatalf("refused removal lost untracked content: %v", err)
+		}
+		if block := syntheticWorktreeBlock(gitTest(t, repo, "worktree", "list", "--porcelain"), worktree); block == "" {
+			t.Fatal("refused removal dropped the worktree registration")
+		}
+	})
+
+	t.Run("ignored content is silently deleted by normal removal", func(t *testing.T) {
+		repo, _, _ := newRemovalSafetyRepo(t)
+		if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("generated.log\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, repo, "add", ".gitignore")
+		gitTest(t, repo, "commit", "-m", "ignore generated output")
+		worktree := filepath.Join(t.TempDir(), "ignored-finish")
+		gitTest(t, repo, "worktree", "add", "-b", "finish-ignored", worktree, "HEAD")
+		if err := os.WriteFile(filepath.Join(worktree, "generated.log"), []byte("silently lost\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if status := gitTest(t, worktree, "status", "--porcelain=v1", "--untracked-files=all"); status != "" {
+			t.Fatalf("ignored fixture unexpectedly appears in ordinary status: %q", status)
+		}
+
+		gitTest(t, repo, "worktree", "remove", worktree)
+
+		if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+			t.Fatalf("normal removal with ignored content stat = %v, want absent", err)
+		}
+	})
+
+	t.Run("assume unchanged can hide a modification and therefore blocks", func(t *testing.T) {
+		repo, _, _ := newRemovalSafetyRepo(t)
+		worktree := filepath.Join(t.TempDir(), "assume-unchanged-finish")
+		gitTest(t, repo, "worktree", "add", "-b", "finish-assume-unchanged", worktree, "HEAD")
+		gitTest(t, worktree, "update-index", "--assume-unchanged", "tracked.txt")
+		if err := os.WriteFile(filepath.Join(worktree, "tracked.txt"), []byte("hidden modification\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if status := gitTest(t, worktree, "status", "--porcelain=v1", "--untracked-files=all"); status != "" {
+			t.Fatalf("assume-unchanged fixture unexpectedly appears in status: %q", status)
+		}
+		if err := syntheticOrdinaryFinishIndexState(worktree); err == nil || !strings.Contains(err.Error(), "assume-unchanged") {
+			t.Fatalf("index flag check = %v, want assume-unchanged blocker", err)
+		}
+
+		gitTest(t, repo, "worktree", "remove", worktree)
+		if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+			t.Fatalf("normal removal with hidden tracked modification stat = %v, want absent", err)
+		}
+	})
+
+	t.Run("skip worktree and non-stage-zero entries block", func(t *testing.T) {
+		t.Run("skip-worktree", func(t *testing.T) {
+			repo, _, _ := newRemovalSafetyRepo(t)
+			worktree := filepath.Join(t.TempDir(), "skip-worktree-finish")
+			gitTest(t, repo, "worktree", "add", "-b", "finish-skip-worktree", worktree, "HEAD")
+			gitTest(t, worktree, "update-index", "--skip-worktree", "tracked.txt")
+			if err := syntheticOrdinaryFinishIndexState(worktree); err == nil || !strings.Contains(err.Error(), "skip-worktree") {
+				t.Fatalf("index flag check = %v, want skip-worktree blocker", err)
+			}
+		})
+
+		t.Run("non-stage-zero", func(t *testing.T) {
+			repo, _, _ := newRemovalSafetyRepo(t)
+			worktree := filepath.Join(t.TempDir(), "unmerged-index-finish")
+			gitTest(t, repo, "worktree", "add", "-b", "finish-unmerged-index", worktree, "HEAD")
+			oid := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "HEAD:tracked.txt"))
+			indexInfo := fmt.Sprintf("0 %s\ttracked.txt\n100644 %s 1\ttracked.txt\n100644 %s 2\ttracked.txt\n", strings.Repeat("0", 40), oid, oid)
+			gitTestInput(t, worktree, []byte(indexInfo), "update-index", "--index-info")
+			if err := syntheticOrdinaryFinishIndexState(worktree); err == nil || !strings.Contains(err.Error(), "non-stage-zero") {
+				t.Fatalf("index stage check = %v, want non-stage-zero blocker", err)
+			}
+		})
+	})
+
+	t.Run("stat cache false-clean tracked modification blocks", func(t *testing.T) {
+		repo, _, _ := newRemovalSafetyRepo(t)
+		worktree := filepath.Join(t.TempDir(), "false-clean-finish")
+		gitTest(t, repo, "worktree", "add", "-b", "finish-false-clean", worktree, "HEAD")
+		gitTest(t, worktree, "config", "core.trustctime", "false")
+		gitTest(t, worktree, "config", "core.checkStat", "minimal")
+
+		tracked := filepath.Join(worktree, "tracked.txt")
+		fixedTime := time.Unix(1_600_000_000, 123_456_789)
+		if err := os.Chtimes(tracked, fixedTime, fixedTime); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, worktree, "update-index", "--refresh")
+		if err := os.WriteFile(tracked, []byte("evil\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(tracked, fixedTime, fixedTime); err != nil {
+			t.Fatal(err)
+		}
+		if status := gitTest(t, worktree, "status", "--porcelain=v1", "--untracked-files=all"); status != "" {
+			t.Fatalf("stat-cache fixture unexpectedly appears in status: %q", status)
+		}
+		if err := syntheticOrdinaryFinishIndexState(worktree); err == nil || !strings.Contains(err.Error(), "content differs from index") {
+			t.Fatalf("index content check = %v, want false-clean content blocker", err)
+		}
+	})
+
+	t.Run("filemode false owner executable mismatch blocks", func(t *testing.T) {
+		repo, _, _ := newRemovalSafetyRepo(t)
+		gitTest(t, repo, "config", "core.fileMode", "true")
+		executable := filepath.Join(repo, "executable.sh")
+		if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(executable, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, repo, "add", "executable.sh")
+		gitTest(t, repo, "commit", "-m", "add executable")
+
+		worktree := filepath.Join(t.TempDir(), "filemode-finish")
+		gitTest(t, repo, "worktree", "add", "-b", "finish-filemode", worktree, "HEAD")
+		gitTest(t, worktree, "config", "core.fileMode", "false")
+		executable = filepath.Join(worktree, "executable.sh")
+		if err := os.Chmod(executable, 0o450); err != nil {
+			t.Fatal(err)
+		}
+		if status := gitTest(t, worktree, "status", "--porcelain=v1", "--untracked-files=all"); status != "" {
+			t.Fatalf("fileMode=false fixture unexpectedly appears in status: %q", status)
+		}
+		if err := syntheticOrdinaryFinishIndexState(worktree); err == nil || !strings.Contains(err.Error(), "executable mode differs") {
+			t.Fatalf("index mode check = %v, want owner-executable mismatch blocker", err)
+		}
+	})
+
+	t.Run("locked requires unlock and unlocked removes directly", func(t *testing.T) {
+		repo, _, _ := newRemovalSafetyRepo(t)
+		locked := filepath.Join(t.TempDir(), "locked-finish")
+		gitTest(t, repo, "worktree", "add", "-b", "finish-locked", locked, "HEAD")
+		gitTest(t, repo, "worktree", "lock", locked)
+		gitTestFailure(t, repo, "worktree", "remove", locked)
+		if block := syntheticWorktreeBlock(gitTest(t, repo, "worktree", "list", "--porcelain"), locked); !strings.Contains(block, "\nlocked") {
+			t.Fatalf("locked worktree block = %q", block)
+		}
+		gitTest(t, repo, "worktree", "unlock", locked)
+		gitTest(t, repo, "worktree", "remove", locked)
+
+		unlocked := filepath.Join(t.TempDir(), "unlocked-finish")
+		gitTest(t, repo, "worktree", "add", "-b", "finish-unlocked", unlocked, "HEAD")
+		if block := syntheticWorktreeBlock(gitTest(t, repo, "worktree", "list", "--porcelain"), unlocked); strings.Contains(block, "\nlocked") {
+			t.Fatalf("ordinary worktree unexpectedly locked: %q", block)
+		}
+		gitTest(t, repo, "worktree", "remove", unlocked)
+		if _, err := os.Stat(unlocked); !os.IsNotExist(err) {
+			t.Fatalf("direct unlocked removal stat = %v, want absent", err)
+		}
+	})
 }
 
 func TestBackupRemovalRefsContractIsNarrowAndFailClosed(t *testing.T) {
@@ -2230,7 +2527,7 @@ func TestBackupRemovalRefsContractIsNarrowAndFailClosed(t *testing.T) {
 		"--no-backup",
 		"removal_authorized` is always false",
 		"Human output ends with the exact JSON facts envelope",
-		"Restart the complete preflight",
+		"rerun the complete preflight",
 		"ignore only that expected exact ref",
 		"including rows that need no backup",
 		"never removes files or worktrees, unlocks, prunes, deletes branches",
@@ -3335,7 +3632,7 @@ func TestClaudePairTeardownIsFailClosedAndRunsBeforeWorkerTeardown(t *testing.T)
 		"executable_identity_acknowledgement",
 		"terminal Amp work authorization",
 		"durable origin fence",
-		"must not continue to worktree removal",
+		"before Git cleanup",
 	} {
 		if !strings.Contains(recovery+workflow+contract, required) {
 			t.Errorf("indeterminate detach progressive disclosure is missing %q", required)
@@ -3349,15 +3646,15 @@ func TestClaudePairTeardownIsFailClosedAndRunsBeforeWorkerTeardown(t *testing.T)
 	if strings.Contains(skill, "Recover indeterminate Claude worker evidence") {
 		t.Error("core /amux skill must not own Claude recovery triggers")
 	}
-	pairAdmission := strings.Index(workflow, "If `/amux-claude` pairs may exist, run the paired Claude lifecycle dry-run")
-	worktreeRemoval := strings.Index(workflow, "[Remove the worker worktree without force")
-	finalRevalidation := strings.Index(workflow, "rerun paired Claude lifecycle revalidation")
+	pairAdmission := strings.Index(workflow, "Run a provider-specific read-only paired-lifecycle preflight")
+	worktreeRemoval := strings.Index(workflow, "git worktree remove <exact-path>")
+	finalRevalidation := strings.Index(workflow, "revalidate its terminal/cleared evidence and origin fence")
 	finalTeardown := strings.LastIndex(workflow, "amux teardown --thread <thread-id>")
 	if pairAdmission < 0 || worktreeRemoval < 0 || pairAdmission > worktreeRemoval {
-		t.Error("finish does not admit paired Claude lifecycle before worktree removal")
+		t.Error("finish does not preflight exact paired lifecycle before worktree removal")
 	}
 	if finalRevalidation < 0 || finalTeardown < 0 || finalRevalidation > finalTeardown {
-		t.Error("finish does not revalidate the durable pair fence before final worker teardown")
+		t.Error("finish does not revalidate an applicable exact pair fence before final worker teardown")
 	}
 }
 
@@ -3497,16 +3794,16 @@ func TestActivePublicSurfacesLabelLegacyLifecycleAndNativeChildren(t *testing.T)
 		"skill metadata": {
 			"proven pre-cutover compatibility/drain state for work groups, reports, callback leases, deadlines, and finish authorization",
 			"routing new Amp work to native child threads",
-			"pre-cutover existing-worker compatibility/drain only",
+			"pre-cutover completed-worker compatibility/drain only",
 		},
 		"trigger checklist": {
 			"`Coordinate child threads`",
-			"Skill-only pre-cutover compatibility/drain",
+			"Skill-only pre-cutover completed-worker drain",
 		},
 		"workflow source": {
 			"Coordinate native child threads and drain a durable work group",
 			"compatibility-only for a durable group, member worker, callback, and report identity that already exist",
-			"Finish is compatibility/drain-only post-merge orchestration for an existing pre-cutover worker",
+			"Finish is compatibility/drain-only wind-down for an existing pre-cutover worker",
 		},
 	}
 	for name, required := range requiredBySurface {
@@ -3915,6 +4212,129 @@ func gitTestInput(t *testing.T, dir string, input []byte, args ...string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git -C %s %s: %v\n%s", dir, strings.Join(args, " "), err, out)
 	}
+}
+
+func gitTestFailure(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("git -C %s %s unexpectedly succeeded\n%s", dir, strings.Join(args, " "), out)
+	}
+	return string(out)
+}
+
+func syntheticOrdinaryFinishIndexState(worktree string) error {
+	flags := exec.Command("git", "-C", worktree, "ls-files", "--cached", "-v", "-z")
+	flags.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
+	flagOutput, err := flags.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("read index flags: %w: %s", err, flagOutput)
+	}
+	for _, record := range bytes.Split(flagOutput, []byte{0}) {
+		if len(record) == 0 {
+			continue
+		}
+		if len(record) < 3 || record[1] != ' ' {
+			return fmt.Errorf("malformed index flag record %q", record)
+		}
+		tag := record[0]
+		if tag == 'S' || tag == 's' {
+			return fmt.Errorf("skip-worktree index entry %q", record[2:])
+		}
+		if tag >= 'a' && tag <= 'z' {
+			return fmt.Errorf("assume-unchanged index entry %q", record[2:])
+		}
+	}
+
+	stages := exec.Command("git", "-C", worktree, "ls-files", "--stage", "-z")
+	stages.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
+	stageOutput, err := stages.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("read index stages: %w: %s", err, stageOutput)
+	}
+	for _, record := range bytes.Split(stageOutput, []byte{0}) {
+		if len(record) == 0 {
+			continue
+		}
+		headerEnd := bytes.IndexByte(record, '\t')
+		if headerEnd < 0 {
+			return fmt.Errorf("malformed index stage record %q", record)
+		}
+		fields := bytes.Fields(record[:headerEnd])
+		if len(fields) != 3 {
+			return fmt.Errorf("malformed index stage header %q", record[:headerEnd])
+		}
+		if !bytes.Equal(fields[2], []byte("0")) {
+			return fmt.Errorf("non-stage-zero index entry %q at stage %q", record[headerEnd+1:], fields[2])
+		}
+
+		mode := string(fields[0])
+		oid := string(fields[1])
+		path := string(record[headerEnd+1:])
+		cleanPath := filepath.Clean(filepath.FromSlash(path))
+		if path == "" || filepath.IsAbs(cleanPath) || cleanPath == "." || cleanPath == ".." || strings.HasPrefix(cleanPath, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("unsafe index path %q", path)
+		}
+		if len(oid) != 40 && len(oid) != 64 {
+			return fmt.Errorf("malformed index object ID %q for %q", oid, path)
+		}
+		for _, digit := range oid {
+			if !((digit >= '0' && digit <= '9') || (digit >= 'a' && digit <= 'f')) {
+				return fmt.Errorf("malformed index object ID %q for %q", oid, path)
+			}
+		}
+
+		absolutePath := filepath.Join(worktree, cleanPath)
+		info, err := os.Lstat(absolutePath)
+		if err != nil {
+			return fmt.Errorf("lstat index path %q: %w", path, err)
+		}
+
+		var hash *exec.Cmd
+		switch mode {
+		case "100644", "100755":
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("index path %q has mode %s but worktree type %s", path, mode, info.Mode().Type())
+			}
+			executable := info.Mode().Perm()&0o100 != 0
+			if (mode == "100755") != executable {
+				return fmt.Errorf("index path %q executable mode differs from index mode %s", path, mode)
+			}
+			hash = exec.Command("git", "-C", worktree, "hash-object", "--path="+path, "--", path)
+		case "120000":
+			if info.Mode()&os.ModeSymlink == 0 {
+				return fmt.Errorf("index path %q has symlink mode but worktree type %s", path, info.Mode().Type())
+			}
+			target, err := os.Readlink(absolutePath)
+			if err != nil {
+				return fmt.Errorf("read index symlink %q: %w", path, err)
+			}
+			hash = exec.Command("git", "-C", worktree, "hash-object", "--stdin")
+			hash.Stdin = strings.NewReader(target)
+		default:
+			return fmt.Errorf("unsupported index mode %q for %q", mode, path)
+		}
+
+		hash.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
+		hashOutput, err := hash.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("hash index path %q: %w: %s", path, err, hashOutput)
+		}
+		hashOutput = bytes.TrimSuffix(hashOutput, []byte{'\n'})
+		if len(hashOutput) != len(oid) {
+			return fmt.Errorf("malformed worktree object ID %q for %q", hashOutput, path)
+		}
+		for _, digit := range hashOutput {
+			if !((digit >= '0' && digit <= '9') || (digit >= 'a' && digit <= 'f')) {
+				return fmt.Errorf("malformed worktree object ID %q for %q", hashOutput, path)
+			}
+		}
+		if !bytes.Equal(hashOutput, fields[1]) {
+			return fmt.Errorf("worktree content differs from index for %q", path)
+		}
+	}
+	return nil
 }
 
 func syntheticRemovalVerdict(repo, baseline, tip string) (string, string, error) {

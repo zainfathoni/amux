@@ -27,20 +27,20 @@ Before an exact legacy child message or Read Thread, also follow [`amp-invocatio
 
 - Own only the already-bound issue, branch, and worktree. Report overlap; do not absorb foreign scope or accept a new task under the legacy identity.
 - Follow only lifecycle identities and obligations present in the proven pre-cutover records. Do not manufacture a missing receipt, report, callback, group, deadline, adoption, or finish authorization.
-- If an existing report binding is present, stay alive after every report status. Do not merge, release, tag, teardown, unpin, or finish without its explicit durable authorization and direction.
-- For already-bound work-group members, use the exact stable `--report-id` and immutable group/thread/issue/reference binding:
+- If an existing merged-PR report binding is present, stay alive after every report status until its exact durable finish authorization and direction. Do not merge, release, tag, teardown, unpin, or finish that merged-PR flow without them. An exact review-only assignment may instead finish from explicit owner completion and cleanup approval; retain any review-only report unchanged and do not reinterpret it as merge or terminal-report authority.
+- For already-bound merged-PR work-group members, use the exact stable `--report-id` and immutable group/thread/issue/reference binding:
   - `blocked` — remaining blocker; `--pr none` when no PR exists
   - `ready` — implementation, focused tests/checks, one focused review and fixes, PR, and normal CI are complete; requires a PR URL
   - `merged` — only after durable finish authorization; same binding and payload; terminal
 - An existing callback or wake-up token is notification only. It is not report delivery, acknowledgement, verification, merge, or finish authority.
-- `/amux finish` applies only when that lifecycle already exists, after independently verified merge **and** explicit coordinator/owner direction. Finish fails closed on unexpected runner ownership of the worktree.
+- `/amux finish` applies only to an exact existing pre-cutover worker, after independently verified merged-PR completion or exact review-only completion evidence **and** explicit owner direction. It uses one complete read-only preflight and one exact approval, parks a verified live worker before filesystem mutation, fails closed on dirty/shared/runner-owned/process-ambiguous state, preserves the local branch, and never force-removes a worktree.
 
 ## Coordinator duties
 
 - For an already-bound durable group, its stores are authoritative: `amux group …`, `amux report pending/history`, not tmux text or child summaries.
-- For an already-bound report, acknowledge receipt separately from verification. Independently verify PR URL/head/scope/mergeability/closing issue, worktree, review, and required CI before merge.
-- After an authorized merge in that existing report flow, verify post-merge CI (and Pages when triggered). Only then `amux report authorize-finish`. Ready, blocked, notification, acknowledgement, deadline expiry, and late callbacks never authorize finish.
-- Direct `/amux finish` explicitly only when the existing lifecycle requires it. Never force-delete a branch, auto-release, or erase group/report history during finish.
+- For an already-bound pre-finish `blocked` or `ready` report, acknowledge receipt separately from verification. Independently verify PR URL/head/scope/mergeability/closing issue, worktree, review, and required CI before merge. The already-authorized terminal `merged` transition inside finish needs exact durable history, not a new acknowledgement round trip.
+- After an authorized merge in an already-bound merged-PR report flow, verify post-merge CI (and Pages when triggered). Only then `amux report authorize-finish`. Ready, blocked, notification, acknowledgement, deadline expiry, and late callbacks never authorize finish. Durable coordinator authorization must exist before `/amux finish` begins; finish may submit only the exact already-authorized terminal `merged` transition after parking the worker. This requirement does not manufacture a report or terminal transition for review-only work.
+- Direct `/amux finish` explicitly only when the existing lifecycle requires it and any bound merged-PR report is already durably authorized or terminal. Do not create authorization, report/provider/retirement state for cleanup; preserve existing group/report/provider evidence, keep branch deletion separate and opt-in, never force-remove a worktree, and never auto-release.
 - Do not paste protocol essays into worker messages. A proven legacy drain assignment carries only its existing IDs and acceptance criteria, plus one line with the absolute contract path when that existing worker still needs it.
 
 ## Wake-ups
