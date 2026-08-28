@@ -75,7 +75,7 @@ Inspect the existing group coordinator and callback. Re-register only the same e
 
 ### 3. Continue only the existing member
 
-Use only the already-recorded member thread, workdir, group, and stable report ID. Do not native-create a replacement, adopt, rebind, or add membership. The existing child remains alive after every status. `ready`, `blocked`, and `merged` retain their current meanings and exact immutable binding.
+Use only the already-recorded member thread, workdir, group, and stable report ID. Do not native-create a replacement, adopt, rebind, or add membership. The existing child remains alive through `blocked`/`ready` and until durable finish authorization plus the approved finish direction; terminal `merged` is submitted inside finish only after the exact worker is parked. All statuses retain their current meanings and exact immutable binding.
 
 ### 4. Persist ready, wake, acknowledge, and independently verify
 
@@ -108,15 +108,15 @@ amux report history --report-id <stable-report-id>
 
 Human output is `<stable-report-id><TAB>authorized`. Authorization is durable, separate from acknowledgement, and accepted only from the current group coordinator while status is `ready`. Ready, blocked, notification, acknowledgement, deadline expiry, and a late callback never authorize finish.
 
-### 6. Submit merged and run `/amux finish`
+### 6. Run `/amux finish`; submit merged inside the approved wind-down
 
-The child confirms the durable authorization and independently verifies merge, then progresses the same report ID without changing its immutable binding or authorized payload:
+After durable authorization exists, invoke `/amux finish` from a verified independent executor while the child remains alive. The finish preflight independently verifies the merge, authorization, immutable report binding, and exact cleanup actions. Its one owner approval is the explicit finish direction. When that approved sequence parks the exact worker, it may then progress the same already-authorized report ID without changing its immutable binding or payload:
 
 ```sh
 amux report submit --report-id <stable-report-id> --group <durable-issue-group> --thread <member-thread> --status merged --issue '#<issue>' --pr <pr-url> --summary implementation-tests-review-pr-ci-complete
 ```
 
-`merged` is terminal. The callback remains a wake-up; the coordinator inspects and acknowledges the merged event. Then the coordinator explicitly directs `/amux finish`. Finish verifies GitHub/Git/worktree/runner ownership, cleans the worktree and safe branch state, and invokes `amux teardown --thread <member-thread>` last. Group membership and report history survive teardown unless a separate explicit group removal is requested. Never force-delete a branch, infer finish from a callback, or release automatically.
+`merged` is terminal. Its callback remains a best-effort wake-up with no cleanup authority, and finish does not wait for a separate acknowledgement round trip. If the report outcome persisted but callback delivery failed, re-read exact history: the immutable terminal `merged` event satisfies the listed report action, while absent, conflicting, or ambiguous history stops before Git cleanup. Finish invokes `amux teardown --thread <member-thread>` last. Group membership and report history survive teardown unless a separate explicit group removal is requested. Never force-delete a branch, infer finish from a callback, or release automatically.
 
 Run the final park/remove/teardown from a verified independent executor, never from the worker or runner transport being stopped. amux checks exact process incarnation and ancestry before mutation and fails closed for the whole invocation when any target relationship is ambiguous; pane names, cwd, and other presentation are not independence evidence. A rejected maintenance safety preflight reports the error without rewriting its prior checkpoint.
 
@@ -194,31 +194,61 @@ This workflow performs no fetch, cleanup, reconciliation, removal, unlock, prune
 
 **Sunset condition:** after the owner records acceptance of one complete staged-drain inventory (or records its explicit incomplete/error disposition) and confirms that no repeat inventory is required, delete `scripts/sweep-inventory`, its sweep-only tests, and every `/amux sweep` route/reference before the next Amux release. Do not promote the helper into the CLI, retain it as a standing diagnostic, schedule it, or extend it for post-drain monitoring.
 
-## Finish a merged worker
+## Finish a completed worker
 
-Finish is compatibility/drain-only post-merge orchestration for an existing pre-cutover worker. It never applies to native-created work, removes a runner implicitly, or treats `status=ready` as cleanup authority.
+Finish is compatibility/drain-only wind-down for an existing pre-cutover worker. The ordinary route covers either a merged PR or a completed review-only assignment with no worker-owned merge. It never applies to native-created work, removes a runner implicitly, or manufactures a PR, report, authorization, provider record, or other lifecycle state.
 
-1. Re-verify the exact PR lifecycle with `gh pr view <pr> --json state,mergedAt,headRefName,headRefOid`, and verify the reported head commit with the ref-coverage check below. An open PR, null `mergedAt`, mismatched head, or unavailable/ambiguous GitHub evidence blocks finish. Neither `already_stopped` nor a covering branch proves that review is finished.
-2. Fail closed on unexpected runner ownership **before worktree removal**. List runner configuration first:
+### One read-only preflight and one approval
+
+Run every currently knowable read-only check from a verified independent executor before the first cleanup mutation. Bind one exact worker thread and its recorded canonical worktree; require that `workers.tsv`, `amux --json worker list --thread <thread-id>`, `git worktree list --porcelain`, and the filesystem identify the same present worktree and that no other worker shares it.
+
+1. Establish exactly one completion case:
+   - **Merged PR:** run `gh pr view <pr> --json state,mergedAt,headRefName,headRefOid`, require merged state and non-null `mergedAt`, and require the PR head OID to equal the exact worktree `HEAD`. Verify required post-merge checks when the repository defines them. Open, mismatched, unavailable, or ambiguous evidence blocks finish.
+   - **Review-only:** require the exact assignment or existing report evidence plus an explicit owner decision that this review is complete and owns no merge. Do not fabricate merge, PR, CI, or report evidence, submit `merged`, or add a terminal report status; any existing report remains retained history. Missing or ambiguous assignment, completion, or ownership evidence blocks finish.
+2. Apply the [ordinary completed-worker fast path](removal-safety.md#ordinary-completed-worker-fast-path). It requires a present worktree with an index-only filesystem, an attached local branch resolving to the exact `HEAD`, and preservation of that branch. This proves that unique or unpushed commits remain reachable without a backup-ref or branch-deletion ceremony and that normal removal has no non-index content to discard. Detached, missing, dirty, untracked, ignored, shared, or ambiguous worktrees are not ordinary finish: stop with the worktree and branch intact and report the applicable general removal-safety route separately.
+3. Query `amux --json runner list --workdir <worker-worktree>`, inspect the exact target worker client, and inspect host processes without exposing arguments in the summary. The target worker may be a verified live client that the approved finish will park, or it may already be verified absent. Any configured runner, unexpected Amp client, or other observed process whose current working directory or open file is under the worktree blocks. Unavailable, incomplete, or ambiguous runner-list or host process evidence also blocks. Do not unpin, remove, stop, or reinterpret a runner or unrelated process.
+4. Inspect only lifecycle state already bound to this exact worker:
+   - In the merged-PR case, if an exact pre-cutover report exists, inspect `pending`/`history` and require durable authorization from the exact current coordinator before entering the approved finish sequence. An unauthorized `ready` report blocks and returns to the existing coordinator flow; `/amux finish` never runs `amux report authorize-finish`. Include only the already-authorized terminal `merged` transition when still required. Its expected postcondition is an exact report outcome under `successful`, an idempotent exact `already satisfied`/`skipped` outcome, or exact terminal history when only the separate best-effort callback failed. Do not create a report binding or add acknowledgement/callback round trips merely for cleanup. The review-only case retains its report unchanged as stated above.
+   - Run a provider-specific read-only paired-lifecycle preflight only when exact persisted evidence binds a pair to this origin thread or makes applicability ambiguous. A proven bound pair's exact required disposition is an exceptional action before Git cleanup; no bound pair is `not applicable`. Provider receipts, unrelated provider state, and mere provider-skill installation are not ambient finish gates.
+5. If the exact target worker is live, run `amux --dry-run --json worker park --thread <thread-id>` and require a plan to stop only its verified client while preserving worker configuration and thread identity. If it is already absent, record that exact expected state and plan no park command. Also run `amux --dry-run --json teardown --thread <thread-id>`; it must select the same worker and plan archival of that exact completed thread. A refusal, identity drift, unexpected process target, or ambiguous local client blocks before mutation.
+6. Classify the exact Git worktree lock from porcelain as `locked`, `unlocked`, or `ambiguous`. Plan one exact normal unlock only for `locked`; skip unlock for `unlocked`; block on `ambiguous`.
+
+Present one concise privacy-safe summary, with no raw receipts, process arguments, account data, prompts, transcripts, or unnecessary private paths:
+
+```text
+FINISH PREFLIGHT: PROCEED | BLOCKED
+identity: exact thread; repository/worktree identity; HEAD; attached branch
+completion: merged PR + checks | completed review-only assignment
+actions: [park exact worker if live] → [already-authorized terminal report transition and exact bound-provider dispositions] → full revalidation → [unlock exact worktree if locked] → normal removal → verify absence → exact-worker teardown/archive
+lifecycle exceptions: exact actions and expected postconditions, or none
+kept: local branch; remote branch; refs/stashes; group/report/provider evidence
+blockers: none | complete list
+```
+
+The summary is an ephemeral decision, not a durable finish plan, digest, generation, progress ledger, retirement record, or new authorization system. Ask once for approval of only the exact actions shown in the current summary. A blocker or declined/canceled approval before mutation produces no mutation and retains the complete worker/worktree/thread state for a fresh later preflight. Approval does not widen to a different thread, worktree, branch, report, provider pair, process, or action.
+
+### Mutate narrowly, with adjacent revalidation
+
+After the one approval, revalidate each exact identity and precondition adjacent to its action. An exact listed lifecycle action reaching its exact `successful` or idempotent `already satisfied` postcondition is expected progress, not drift. Any other change stops the remaining actions and requires a fresh complete preflight and approval; existing Git, report, provider, and Amux outcomes are the replay evidence.
+
+1. If the exact worker was live in the approved summary, revalidate its identity and run `amux --json worker park --thread <thread-id>` as the first mutation. Require the exact client to be absent afterward while worker configuration and thread identity remain. If absence is not proven, stop before lifecycle or filesystem mutation.
+2. Perform only the listed already-authorized terminal report transition and exact bound-provider dispositions, revalidating each exact precondition immediately before it and its expected postcondition immediately afterward. A terminal report persisted under the exact immutable binding remains successful when only its separate best-effort callback failed; verify it from history and do not add an acknowledgement round trip. A paired-provider disposition runs before Git cleanup. Any other failure, cancellation result, unrelated lifecycle change, or ambiguous outcome stops with the worktree intact.
+3. Re-run the complete ordinary preflight against the expected parked/absent worker state. Prove again that no configured runner, unexpected Amp client, or process with a current working directory or open file under the worktree exists. If the worktree is `locked`, immediately revalidate its identity/lock/ownership, run one exact normal `git worktree unlock <exact-path>`, and require success. If it is already `unlocked`, issue no unlock command. Revalidate the resulting unlocked state and every removal-critical fact again.
+4. With no intervening action, run `git worktree remove <exact-path>`. Never pass `--force`. Verify that the exact registration and path are absent; an unsuccessful or ambiguous result stops before worker teardown.
+5. Preserve the local branch by default. Worktree removal never implies local or remote branch deletion. Only when branch deletion was independently requested and separately proven safe may it be a distinct later action; a normal `git branch -d` refusal keeps the branch, never escalates to `-D`, and remote branch deletion is never implicit.
+6. When an exact paired-provider disposition ran, revalidate its terminal/cleared evidence and origin fence; changed or ambiguous pair state stops without Amp teardown. Re-run `amux --dry-run --json teardown --thread <thread-id>` and require the same exact worker. Then run worker teardown as the final action:
 
    ```sh
-   amux --json runner list --workdir <worker-worktree>
+   amux teardown --thread <thread-id>
    ```
 
-   An unreadable list or any configured runner match blocks finish. Only for a matched runner, use `amux --json runner doctor --workdir <worker-worktree>` to collect evidence; do not unpin/remove it or unlock its worktree. An empty list is the normal owner-free case. Then inspect tmux/process metadata for an unexpected `amp --no-tui` process using that workdir; ambiguous or positive ownership blocks, while a clean inspection may proceed.
-3. If `/amux-claude` pairs may exist, run the paired Claude lifecycle dry-run and execution from **Teardown a worker** before any worktree, branch, report, or Amp worker mutation. A blocker preserves lifecycle evidence and stops finish; finish must not continue to worktree removal. Owner-authorized recovery seams live only in `/amux-claude`. When no Claude pairs are possible, skip this step.
-4. Update the designated main worktree with `git pull --ff-only` before classification. Pull/fetch may advance the baseline or remove a stale remote-tracking ref that previously supplied `SAFE` evidence, so no earlier verdict survives this step.
-5. Run the removal preflight below against the exact worker worktree and its recorded `HEAD`. Complete the report before any removal, unlock, or prune mutation. `BLOCKED`, incomplete evidence, or any preflight command failure stops finish. For every `NEEDS_BACKUP` row, run the complete-set backup procedure below; an absent, declined, conflicting, or unverifiable backup remains a hard stop. Backup creation does not change the classifier verdict and does not authorize removal. Restart the complete preflight. Then perform the adjacent revalidation below with no intervening command. [Remove the worker worktree without force only when that immediately preceding revalidation reports a proceeding verdict, every current `NEEDS_BACKUP` tip has its exact verified backup ref, and no independent blocker remains](removal-safety.md#removal-ordering-context). An untracked-file prediction means this unforced remove is expected to refuse; report it before attempting removal rather than presenting the raw Git error as a surprise. If worktree removal ever gains `--force`, untracked files must become `BLOCKED` in that same change.
-6. Keep branch deletion separate from worktree removal. A `SAFE_KEEP_BRANCH` verdict means preserve the local branch and do not attempt branch deletion. For other verdicts, try `git branch -d <branch>` only after merge verification and only as a distinct authorized action. If it refuses because the PR was squash-merged, do not use `-D` automatically; verify the PR head, remote state, and absence of unique/unpushed work, then require explicit authorization for force deletion. Delete a remote branch only when its merged PR proves it safe and the user authorized shared mutation.
-7. Do not tag or release unless separately and explicitly requested. Finish does not imply either.
-8. Follow the originating report protocol exactly. For a work-group worker, confirm the durable authorization, submit `merged` with the same report ID/binding/payload, and let amux verify the callback lease and send only its wake-up token. If durable reporting or notification fails, do not guess another pane and do not teardown; the report remains inspectable and the worker remains alive. For a legacy non-group assignment, follow its explicit callback format after re-verifying the immutable pane/session/window/process identity.
-9. After durable merged reporting and the coordinator's explicit finish direction, rerun paired Claude lifecycle revalidation when `/amux-claude` pairs may exist. Only after that succeeds (or when no pairs apply), run worker teardown as the final action:
+Teardown archives the exact completed thread, removes its worker/shelf configuration, and stops only its verified local client. It does not own the worktree, branches, stashes, reports, groups, descendants, or provider evidence. Do not tag or release.
 
-    ```sh
-    amux teardown --thread <thread-id>
-    ```
+If the owner cancels or any evidence becomes ambiguous after the first mutation, stop before the next action. Inspect existing Git, Amux, report, and provider outcomes, then require a fresh complete preflight and approval for the remaining exact state; never record or infer a durable finish-progress marker. The adjacent checks park every known writer and leave no non-index content, but no new runtime or filesystem lock is created: a newly arriving external writer in the final inspection-to-removal window remains outside this skill-only guarantee and must cause a stop whenever observed.
 
-The pre-teardown report/legacy callback covers merge, worktree, local/remote branch, runner-ownership check, and the pending final teardown. Teardown stops the worker, so no post-teardown callback is required. Durable group/report history remains. Only then may the worker stop. Never force-delete a branch, auto-release, or erase group history.
+### Final summary
+
+Report actual outcomes rather than the intended plan: exact thread archived or retained; worker configuration/client removed or retained; exact worktree removed or retained; lock removed, skipped as already unlocked, or retained; and every local branch, remote branch, ref/stash, group/report record, provider artifact, descendant, and unrelated resource kept. On partial failure, say where execution stopped and use only existing command/store outcomes to decide a retry—never invent finish progress state.
 
 ### Removal preflight for finish, remove-on-missing, and prune
 
@@ -226,7 +256,7 @@ Load [`removal-safety.md`](removal-safety.md) before applying this gate. Use it 
 
 Run the gate from a verified independent executor. It is read-only through the final decision and records the command result for every item; an unavailable command, malformed output, changed target identity, or unresolved path fails closed rather than dropping a row.
 
-1. **Bind the target and fetch evidence.** Parse the exact target entry and tip from `git worktree list --porcelain`, then `stat` the recorded path separately. Record path, `HEAD`, attached branch or `detached`, `locked`, `prunable`, and path `present|absent|unreadable`. Run `git fetch --prune origin` before classification and record that exact command and its successful result. Plain `git fetch origin` is insufficient because it can retain a deleted upstream branch as a phantom remote-tracking ref and falsely satisfy rule 2a. For finish or any review-worktree cleanup, the PR lifecycle evidence above is mandatory and fail-closed. A non-review remove-on-missing or prune records `PR: not applicable` plus its separate removal authorization/context; it does not fabricate or require a PR, while every Git, ownership, file-loss, and stash check below remains mandatory. Resolve the remote default baseline in this order:
+1. **Bind the target and fetch evidence.** Parse the exact target entry and tip from `git worktree list --porcelain`, then `stat` the recorded path separately. Record path, `HEAD`, attached branch or `detached`, `locked`, `prunable`, and path `present|absent|unreadable`. Run `git fetch --prune origin` before classification and record that exact command and its successful result. Plain `git fetch origin` is insufficient because it can retain a deleted upstream branch as a phantom remote-tracking ref and falsely satisfy rule 2a. For finish, the applicable completion evidence above is mandatory and fail-closed: merged work requires exact PR lifecycle evidence; review-only work records `PR: not applicable` plus its exact assignment/report and owner-completion evidence without fabricating a PR. A non-finish remove-on-missing or prune also records `PR: not applicable` plus its separate removal authorization/context. Every Git, ownership, file-loss, and stash check below remains mandatory. Resolve the remote default baseline in this order:
 
    1. explicit `--baseline` override;
    2. `git symbolic-ref refs/remotes/origin/HEAD`;
