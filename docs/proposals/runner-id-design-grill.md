@@ -19,13 +19,13 @@ Do not implement issues #212–#216 as an Amux feature graph. In particular, do 
 
 Canonical workdir remains the identity of a retained Amux runner. ADR 0008's #232 boundary requires bounded fail-closed evidence to stop an exact process and prove process and native-catalog absence before removing its row. The existing implementation classifies that evidence but does not yet execute all retained remove/reconcile behavior. Conflict, ambiguity, or unreadable evidence retains the row and process.
 
-An explicit native ID may be supplied to the Amp process that Amux launches:
+Future Amux launch support could pass an explicit native ID to the Amp process without making it a second Amux identity:
 
 ```sh
 amp --no-tui --runner-id <stable-owner-selected-id>
 ```
 
-That ID remains native Amp process configuration rather than a second Amux identity or selector. The ID must satisfy Amp's current runner-ID contract. Amux need not generate, persist, attest, or migrate it: Amux retains the canonical-workdir registry and launches the tmux/Amp process, while the OS service activates `amux launch --all` and retains its process group.
+That passthrough is not implemented: current Amux launch and exact-process validation require exactly `amp --no-tui` and reject extra arguments. If added separately, the ID would remain native Amp process configuration rather than a second Amux identity or selector. Amux need not generate, persist, attest, or migrate it; Amux would still retain the canonical-workdir registry and launch the tmux/Amp process, while the OS service activates `amux launch --all` and retains its process group.
 
 ## `/amux` native selection boundary
 

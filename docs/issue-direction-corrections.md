@@ -31,7 +31,7 @@ Authoritative sources:
 - Generalized worker spawn/adoption and native-work coordination
 - Groups, reports, callbacks, deadlines, finish authorization, and shelving coordination state
 - Provider-specific lifecycle bridges only after their replacement gates are proven
-- Temporary sweep machinery only after #360's owner acceptance/disposition + no-repeat gate activates
+- One future #360 inventory only on a separate explicit owner request; sweep-surface deletion only after acceptance/disposition + no-repeat confirmation
 
 ## Related work
 
@@ -43,7 +43,7 @@ Authoritative sources:
 | #318 | Selector boundary on retained drain commands |
 | #311 | Digest-drift fix only if it blocks receipt drain |
 | #232 / PR #366 | Retained runner-operation safety evidence; classifier is preflight-only |
-| PR #360 / #351 | Owner-gated one-time sweep; do not run or delete now |
+| PR #360 / #351 | One-time sweep requires separate owner authorization; this correction does not run it, and deletion remains inactive |
 
 ## Acceptance
 

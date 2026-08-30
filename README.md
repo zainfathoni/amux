@@ -104,16 +104,15 @@ To resume a Tycho receipt created before this skill split, install `/amux-tycho`
 
 The CLI writes schema-marked registries under `~/.config/amux` by default. Select another directory with `--config-dir` (`-c`) or `AMUX_CONFIG_DIR`. Do not create or edit registry rows manually when a command exists.
 
-Pin a known worker explicitly, then manage it by canonical thread identity:
+Existing pre-cutover workers may still be inspected and drained by canonical thread identity. Do not pin a native-created thread or create a new worker row for ordinary work:
 
 ```sh
-amux worker pin --workspace amux --window docs --workdir ~/Code/amux --thread T-example
 amux worker list --thread T-example
 amux worker park --thread T-example
 amux worker launch --thread T-example
 ```
 
-Pin and unpin change configuration only. Park stops a verified local client but preserves configuration and remote state. Launch restores local execution without changing remote thread state.
+Worker pin remains implemented until a separately published worker-family cutover generation can distinguish safe replay from new admission, but it is compatibility-only and not an active `/amux` or new-work route. Worker unpin changes configuration only. Park stops a verified local client but preserves configuration and remote state. Launch restores local execution without changing remote thread state.
 
 For a workdir-bound runner:
 
@@ -153,15 +152,14 @@ Agents should use long flags:
 | `--thread`, `-t` | canonical worker identity |
 | `--workdir`, `-d` | canonical runner identity; explicit worker-reconcile drift scope |
 | `--workspace`, `-w` | worker/runner lifecycle group and same-named tmux session |
-| `--window`, `-W` | worker pin/adoption placement metadata |
+| `--window`, `-W` | historical worker pin/adoption placement metadata |
 | `--mode`, `-m` | workspace-list filter |
 | `--current` | resource owning the invoking pane/workdir |
 | `--all` | explicit machine-wide scope |
 
-Worker and runner pin/unpin require a namespace because their identities differ:
+Runner pin is retained active admission. Worker unpin remains available for drain; worker pin is implemented compatibility syntax but must not create ordinary new-work lifecycle state:
 
 ```sh
-amux worker pin --workspace amux --window docs --workdir ~/Code/amux --thread T-example
 amux worker unpin --thread T-example
 amux runner pin --workspace amux --workdir ~/Code/amux-runner
 ```
@@ -279,7 +277,7 @@ Coordinator soft budgets to `ready` are Small 30m, Medium 1h (default), Large 2h
 | `list`, `workspace list` | inspect | inspect | none | none |
 | `doctor` | inspect | inspect | inspect | inspect only |
 | `launch` | read; skip shelved | read | create/verify | none |
-| `pin` / `unpin` | pin worker; unpin worker and shelf intent | pin mutates; runner unpin currently retains and rejects | none | none |
+| `pin` / `unpin` | worker pin remains implemented compatibility syntax, not a supported new-work route; unpin removes worker and shelf intent | runner pin is retained active admission; runner unpin currently retains and rejects | none | none |
 | `park` / `restart` | preserve | preserve | stop/restart verified | none |
 | `remove` | remove worker/shelf | runner removal currently retains and fails closed until bound process/catalog absence is provable | stop verified workers only | none |
 | `shelve` / `unshelve` | preserve worker; mutate intent | none | shelve parks only | archive/unarchive |

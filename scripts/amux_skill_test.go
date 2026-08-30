@@ -543,6 +543,8 @@ func TestRunnerIDDesignDoesNotDisplaceRetainedAmuxLaunch(t *testing.T) {
 		"Amux `--runner-id` selector",
 		"Canonical workdir remains the identity of a retained Amux runner",
 		"amp --no-tui --runner-id <stable-owner-selected-id>",
+		"That passthrough is not implemented",
+		"require exactly `amp --no-tui` and reject extra arguments",
 		"native `create_thread` `runner_id` argument",
 		"systemd/launchd activates `amux launch --all`",
 		"No new runner-ID store, migration framework, lifecycle classifier, or Amux CLI surface is required",
@@ -561,6 +563,9 @@ func TestThinHostDirectionIsUnambiguous(t *testing.T) {
 	readme := readSkillFile(t, root, "README.md")
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
 	ledger := readSkillFile(t, root, filepath.Join("docs", "staged-drain-disposition.md"))
+	homepage := readSkillFile(t, root, filepath.Join("docs", "index.html"))
+	skillGuide := readSkillFile(t, root, filepath.Join("docs", "skill", "index.html"))
+	triggers := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md"))
 	active := adr8 + readme + skill + ledger
 
 	for _, required := range []string{
@@ -573,6 +578,8 @@ func TestThinHostDirectionIsUnambiguous(t *testing.T) {
 		"preflight-only",
 		"legacy coordination",
 		"not being fully deprecated or archived",
+		"A future invocation requires a separate explicit owner request",
+		"After that run, deletion activates only when the owner accepts one complete inventory",
 	} {
 		if !strings.Contains(active, required) {
 			t.Errorf("thin-host direction is missing %q", required)
@@ -590,6 +597,27 @@ func TestThinHostDirectionIsUnambiguous(t *testing.T) {
 	}
 	if !strings.HasPrefix(adr7, "---\nstatus: partially-superseded\n") || !strings.Contains(adr7, "partially-superseded-by: 0008") {
 		t.Error("ADR 0007 must be explicitly partially superseded by ADR 0008")
+	}
+	for name, contents := range map[string]string{
+		"README":        readme,
+		"skill":         skill,
+		"trigger table": triggers,
+		"homepage":      homepage,
+		"skill guide":   skillGuide,
+	} {
+		if strings.Contains(contents, "amux worker pin") {
+			t.Errorf("%s must not actively route new worker pin admission", name)
+		}
+	}
+	for name, contents := range map[string]string{
+		"skill":         skill,
+		"trigger table": triggers,
+		"homepage":      homepage,
+		"skill guide":   skillGuide,
+	} {
+		if !strings.Contains(contents, "Pin this runner") {
+			t.Errorf("%s must route retained pin admission to runners", name)
+		}
 	}
 	for _, forbidden := range []string{"amux worker adopt", "amux group declare", "amux report submit"} {
 		frontmatterEnd := strings.Index(skill, "\n---\n")

@@ -57,12 +57,12 @@ curl -fsSL https://amux.zainf.dev/install.sh | AMUX_SKILLS_SOURCE="$AMUX_REPO" s
 
           <h2 id="model">Terminology</h2>
           <ul><li><strong>Worker:</strong> interactive TUI client identified by canonical Amp thread ID.</li><li><strong>Runner:</strong> non-interactive <code>amp --no-tui</code> client identified by canonical workdir. It enables remote work but does not own remote agent threads.</li><li><strong>Workspace:</strong> worker/runner lifecycle group represented by one same-named tmux session.</li></ul>
-          <p>Top-level <code>list</code>, <code>launch</code>, <code>park</code>, <code>restart</code>, <code>remove</code>, <code>doctor</code>, and <code>reconcile</code> aggregate both modes. The <code>worker</code> and <code>runner</code> namespaces narrow scope. Pin/unpin always require a mode namespace.</p>
+          <p>Top-level <code>list</code>, <code>launch</code>, <code>park</code>, <code>restart</code>, <code>remove</code>, <code>doctor</code>, and <code>reconcile</code> aggregate both modes. The <code>worker</code> and <code>runner</code> namespaces narrow scope. Runner pin is retained active admission; worker pin remains implemented compatibility syntax rather than a new-work route.</p>
           <p class="note">Amux work groups, reports, callback leases, deadlines, and finish authorization are pre-cutover compatibility/drain state only. Native child threads use native parent/reply routing and acquire none of that lifecycle.</p>
 
           <h2 id="routing">Trigger routing</h2>
           <table><thead><tr><th>Say</th><th>Agent route</th><th>Effect</th></tr></thead><tbody>
-            <tr><td>Pin it</td><td><code>amux worker pin --current</code> with complete identity, or full explicit selectors</td><td>Worker config only; never mix current and another selector.</td></tr>
+            <tr><td>Pin this runner</td><td><code>amux runner pin --workspace &lt;name&gt; --workdir &lt;path&gt;</code> or <code>--current</code></td><td>Retained runner config admission; never enroll a native-created thread as a worker.</td></tr>
             <tr><td>Unpin it</td><td><code>amux worker unpin --current</code></td><td>Remove worker and shelf intent; no stop or archive.</td></tr>
             <tr><td>Park it</td><td><code>amux worker park --current</code></td><td>Stop verified local worker; preserve config/thread.</td></tr>
             <tr><td>Shelve this</td><td><code>amux shelve --current</code></td><td>Record intent, archive thread, park worker.</td></tr>

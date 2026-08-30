@@ -26,7 +26,7 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 
 ## Route triggers
 
-- **Pin it**: `amux worker pin --current` when complete `AMUX_*` identity exists; else explicit selectors. Config only. Never combine `--current` with another selector.
+- **Pin this runner**: `amux runner pin --workspace <name> --workdir <existing-directory>` or `--current`. Runner config only. Do not route an unqualified pin request to worker pin; worker pin is implemented compatibility syntax pending a separately chosen cutover generation, not a new-work route.
 - **Unpin it** / **forget this on restore**: `amux worker unpin --current`.
 - **Park it**: `amux worker park --current`.
 - **Restart unresponsive clients**: `amux restart --all` or mode-specific restart.

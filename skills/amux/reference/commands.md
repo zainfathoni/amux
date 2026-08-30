@@ -13,6 +13,7 @@ amux park|restart|remove|doctor|reconcile [selectors]
 # Mode-specific routes
 amux worker list|launch|park|restart|remove|doctor|reconcile [worker selectors]
 amux runner list|launch|park|restart|remove|doctor|reconcile [runner selectors]
+# Implemented compatibility syntax only; not an active new-work route
 amux worker pin --workspace <name> --window <name> --workdir <path> --thread <id>
 amux worker adopt --workspace <name> --window <name> --workdir <path> --thread <existing-explicit-adoption-id> [--group <id>]
 amux worker pin --current
@@ -70,7 +71,7 @@ Removed commands and positional forms fail with remediation. Do not use `store`,
 | `list`, `workspace list` | inspect | inspect | none | none |
 | `doctor` | inspect | inspect | inspect | inspect only where needed |
 | `launch` | read; skip shelved workers | read | create/verify selected clients | none |
-| mode-specific `pin` / `unpin` | pin mutates worker registry; unpin removes worker and matching shelf intent | pin mutates; runner unpin currently retains and rejects | none | none |
+| mode-specific `pin` / `unpin` | worker pin remains implemented compatibility syntax pending a separately published cutover generation, not an active new-work route; unpin removes worker and matching shelf intent | pin is retained active admission; runner unpin currently retains and rejects | none | none |
 | `worker adopt` | compatibility path for existing explicit adoption operations; never automatic after native creation | reject canonical-workdir overlap | create/verify exact local client | inspect active status only; never send a message |
 | `park` | preserve | preserve | stop verified selected clients | none |
 | `restart` | preserve | preserve | replace verified selected clients | none |
