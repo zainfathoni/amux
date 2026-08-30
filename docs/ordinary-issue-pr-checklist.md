@@ -14,10 +14,10 @@ Compose-only operating guidance for one coherent issue or PR review after [ADR 0
 
 | Concern | Owner |
 | --- | --- |
-| Review-only / no-PR finish | [#238](https://github.com/zainfathoni/amux/issues/238) |
+| Review-only / finish wind-down (shipped) | [`workflows.md`](../skills/amux/reference/workflows.md) finish path; closed [#238](https://github.com/zainfathoni/amux/issues/238) / [#249](https://github.com/zainfathoni/amux/issues/249) via [#373](https://github.com/zainfathoni/amux/pull/373) |
 | Amp `/team-review` + optional `/amux-tycho` second opinion | [#328](https://github.com/zainfathoni/amux/issues/328); load `/amux-tycho` when explicitly requested |
-| Removal safety / retain-vs-remove (shipped; epic closed) | [`removal-safety.md`](../skills/amux/reference/removal-safety.md); closed [#344](https://github.com/zainfathoni/amux/issues/344); drain umbrella [#331](https://github.com/zainfathoni/amux/issues/331)–[#339](https://github.com/zainfathoni/amux/issues/339) |
-| Lifecycle/orchestration surface inventory | [#313](https://github.com/zainfathoni/amux/issues/313) |
+| Removal safety / retain-vs-remove (shipped; epic closed) | [`removal-safety.md`](../skills/amux/reference/removal-safety.md); closed [#344](https://github.com/zainfathoni/amux/issues/344) |
+| Staged drain umbrella / rollout docs | [#331](https://github.com/zainfathoni/amux/issues/331), [#339](https://github.com/zainfathoni/amux/issues/339); [disposition ledger](staged-drain-disposition.md) |
 
 ## Non-goals
 

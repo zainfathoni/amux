@@ -119,7 +119,7 @@ For each configured runner:
 3. **Conflicting or ambiguous:** retain the row and emit a migration blocker. Do not kill, adopt, unpin, launch a replacement, or infer ownership from cwd, name, heartbeat, or idleness.
 4. **Previously orphaned with row absent:** reconstruct a temporary drain binding only when an immutable prior Amux outcome plus exact current process-incarnation evidence proves the same resource. Otherwise record it in the migration inventory as an external orphan; the owner must stop that exact process through the owning native/OS surface, after which Amux verifies absence but never claims it performed the stop.
 
-Only after old absence is proven may the owner start a native runner with a stable `--runner-id` under the selected OS service. Starting that runner is a native/OS operation, not an Amux write. Work on #232 is complete for retirement when this preflight and recovery path are tested for configured-live, configured-absent, row-absent-live, conflicting, interrupted-stop, and exact-replay cases; it need not make runner lifecycle a permanent product.
+Only after old absence is proven may the owner start a native runner with a stable `--runner-id` under the selected OS service. Starting that runner is a native/OS operation, not an Amux write. Issue #232 is **closed**: PR #366 shipped the fail-closed classifier covering configured-live, configured-absent, row-absent-live, conflicting, interrupted-stop, and exact-replay cases. Remaining work is owner-operated drain execution against that classifier and OS supervision of native replacements—not an Amux runner-lifecycle product.
 
 ## Git and worktree safety
 
@@ -131,7 +131,7 @@ The removal-safety guidance must not grow into a retirement ledger, provider rec
 
 1. **Adopt this direction:** publish the superseding ADR and active disposition ledger. Make no runtime claim from documentation alone.
 2. **Run and remove the bounded inventory:** merged PR #360 provides one strictly read-only migration inventory and completed #351. After the owner accepts one inventory or explicitly dispositions it incomplete/error and confirms no repeat is required, delete the helper, sweep-only tests, and every `/amux sweep` route/reference before the next Amux release. Do not wait for store freeze or reuse it as a recurring or final reconciler.
-3. **Close the runner safety gap:** implement and test the #232 migration preflight before closing runner admission.
+3. **Close the runner safety gap:** the #232 migration preflight classifier shipped in PR #366. Before closing runner admission, finish drain execution against that classifier and hand stable native `--runner-id` starts to OS supervision after proven absence.
 4. **Validate direct Tycho return:** retain the current bridge until the field gate above passes.
 5. **Close admission per family:** native Amp becomes the sole owner for new work; publish each cutover generation and reject new Amux resources.
 6. **Drain:** allow only the transitions defined above. Never dual-write or manufacture terminal truth.
