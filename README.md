@@ -1,8 +1,8 @@
 # amux
 
-`amux` is the local tmux lifecycle layer for [Amp](https://ampcode.com/). It manages interactive **workers**, non-interactive **runners**, and named **workspaces** with explicit, agent-safe side effects.
+`amux` is the machine-local runner and tmux host layer for [Amp](https://ampcode.com/). It manages interactive **workers**, non-interactive **runners**, and named **workspaces** with explicit, agent-safe side effects.
 
-> **Retirement direction:** new Amp-to-Amp work moves to native Amp creation, exact runner/Orb placement, messaging, replies, waiting, and archive lifecycle. Amux will close new resource admission one operation family at a time, retain drain-only writes for state that predates each cutover, then export, freeze, remove writers, provide a bounded read-only compatibility window, and archive the lifecycle product. The current Tycho bridge remains until a direct bounded structured-return route is field-validated; Git/worktree removal safety remains independent transition safety. Documentation does not itself change current command behavior. See [ADR 0007](docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md) and the [active disposition ledger](docs/staged-drain-disposition.md).
+> **Thin-host direction:** native Amp owns all new task creation and coordination. Amux retains its machine-local runner registry, exact workdir bindings, automatic login/boot launch, tmux/Amp process lifecycle, diagnostics, maintenance, and OS activation integration. Worker/coordination/provider stores are compatibility and drain only; native-created work never acquires them. Amux is not being fully deprecated or archived. See [ADR 0008](docs/adr/0008-retain-machine-local-runner-host-and-drain-coordination.md), the partially superseded [ADR 0007](docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md), and the [active disposition ledger](docs/staged-drain-disposition.md).
 
 - A **worker** is an interactive Amp client identified machine-wide by its canonical thread ID.
 - A **runner** is an `amp --no-tui` client identified machine-wide by its canonical workdir. It enables Amp Agents Anywhere but does not own remote agent threads.
@@ -357,6 +357,10 @@ amux runner maintenance remove
 ```
 
 Use `self` when Amp's updater owns updates and `external` when a package manager does. Installation is explicit and dry-runnable. Maintenance uses the same operation lock and records diagnostics consumed by `amux install doctor`.
+
+### Automatic runner launch
+
+At graphical login or boot, machine configuration runs `amux launch --all`. Amux—not systemd or launchd—reads the machine-local registry and launches the tmux/Amp process group. Verified deployment patterns use a systemd user service with `Type=oneshot` plus `RemainAfterExit=yes`, or a RunAtLoad macOS LaunchAgent with `AbandonProcessGroup=true`, so the OS activates Amux and retains its launched process group rather than replacing the Amux launcher with direct runner supervision. Machine-specific service definitions belong in the operator's system configuration.
 
 ## Shell completions
 
