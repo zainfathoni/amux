@@ -18,6 +18,100 @@ import (
 	"time"
 )
 
+func TestProductionCLIRejectsWorkerBoundRoutesBeforeMutation(t *testing.T) {
+	helper, err := filepath.Abs("claude_delegation.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	stateDir := filepath.Join(root, "state")
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	processLog := filepath.Join(root, "process.log")
+	for _, name := range []string{"amux", "claude", "tmux"} {
+		writeExecutable(t, filepath.Join(binDir, name), "#!/bin/sh\nprintf '%s\\n' "+name+" >> \"$PROCESS_LOG\"\n")
+	}
+	tests := [][]string{
+		{"receipt", "create"},
+		{"receipt", "route"},
+		{"report", "submit"},
+		{"report", "acknowledge"},
+		{"inbox", "consume"},
+		{"input", "submit"},
+		{"input", "accept"},
+		{"session", "acquire"},
+		{"launch", "execute"},
+		{"launch", "plan"},
+		{"launch", "policy-digest"},
+		{"launch", "transport", "--delegation-id", "synthetic", "--transport-sha256", strings.Repeat("0", 64), "--tmux-environment-sha256", strings.Repeat("0", 64)},
+		{"mcp", "serve", "--delegation-id", "synthetic"},
+		{"session", "park"},
+		{"notify", "amp-pane"},
+		{"capacity", "decide-mutating"},
+		{"lifecycle", "worker-teardown", "--origin-thread", "T-synthetic"},
+		{"lifecycle", "worker-teardown-release", "--origin-thread", "T-synthetic"},
+		{"lifecycle", "register-legacy-store", "--origin-thread", "T-synthetic", "--store-path", filepath.Join(root, "legacy")},
+		{"lifecycle", "detach-indeterminate-worker"},
+		{"lifecycle", "retire-live-indeterminate-pair"},
+		{"lifecycle", "retire-live-acquired-no-report-pair"},
+		{"lifecycle", "dispose-exact-pre-identity-acquired-pair"},
+		{"quarantine", "plan"},
+		{"quarantine", "apply"},
+		{"mutation", "prepare"},
+		{"mutation", "validate-handoff"},
+	}
+	for _, args := range tests {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			command := exec.Command("python3", append([]string{helper, "--state-dir", stateDir}, args...)...)
+			command.Env = append(replaceEnvironment(os.Environ(), "HOME", home), "PATH="+binDir+":"+os.Getenv("PATH"), "PROCESS_LOG="+processLog)
+			command.Stdin = strings.NewReader("not-json")
+			output, err := command.CombinedOutput()
+			if err == nil || !strings.Contains(string(output), "worker-bound Claude delegation is closed") {
+				t.Fatalf("command was not closed before dispatch: err=%v output=%s", err, output)
+			}
+			if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+				t.Fatalf("command touched state directory: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(home, "Library", "Application Support", "amux")); !os.IsNotExist(err) {
+				t.Fatalf("command touched lifecycle directory: %v", err)
+			}
+			if _, err := os.Stat(processLog); !os.IsNotExist(err) {
+				t.Fatalf("command invoked an external process: %v", err)
+			}
+		})
+	}
+
+	bootstrapState := filepath.Join(root, "bootstrap-state")
+	bootstrap := exec.Command("python3", "-c", legacyClaudeTestScript, helper, "--state-dir", bootstrapState, "receipt", "create")
+	bootstrap.Env = append(replaceEnvironment(os.Environ(), "HOME", home), "PATH="+binDir+":"+os.Getenv("PATH"), "PROCESS_LOG="+processLog)
+	bootstrap.Stdin = strings.NewReader("not-json")
+	output, err := bootstrap.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "legacy test dispatch is unavailable outside the test harness") {
+		t.Fatalf("import bootstrap bypassed production closure: err=%v output=%s", err, output)
+	}
+	if _, err := os.Stat(bootstrapState); !os.IsNotExist(err) {
+		t.Fatalf("import bootstrap touched state directory: %v", err)
+	}
+
+	inspectState := filepath.Join(root, "inspect-state")
+	inspect := exec.Command("python3", helper, "--state-dir", inspectState, "quarantine", "inspect")
+	inspect.Env = append(replaceEnvironment(os.Environ(), "HOME", home), "PATH="+binDir+":"+os.Getenv("PATH"), "PROCESS_LOG="+processLog)
+	inspect.Stdin = strings.NewReader(`{"operation_sha256":"` + strings.Repeat("0", 64) + `"}`)
+	output, err = inspect.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), `"outcome":"blocked"`) {
+		t.Fatalf("missing quarantine inspection did not fail closed: err=%v output=%s", err, output)
+	}
+	if _, err := os.Stat(inspectState); !os.IsNotExist(err) {
+		t.Fatalf("quarantine inspection created selected state: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "Library", "Application Support", "amux")); !os.IsNotExist(err) {
+		t.Fatalf("quarantine inspection created default lifecycle state: %v", err)
+	}
+}
+
 func TestProviderOwnedInvalidStoreQuarantine(t *testing.T) {
 	helper, err := filepath.Abs("claude_delegation.py")
 	if err != nil {
@@ -1659,8 +1753,8 @@ func TestCanonicalLifecycleRegistryFindsAlternateStoresAndFencesOrigin(t *testin
 		if stateDir != "" {
 			commandArgs = append(commandArgs, "--state-dir", stateDir)
 		}
-		command := exec.Command("python3", append(commandArgs, args...)...)
-		command.Env = environment
+		command := legacyClaudeTestCommand(helper, append(commandArgs[1:], args...)...)
+		command.Env = append(environment, "AMUX_CLAUDE_DELEGATION_TESTING=1")
 		command.Stdin = bytes.NewReader(payload)
 		var stdout, stderr bytes.Buffer
 		command.Stdout = &stdout
@@ -1771,7 +1865,7 @@ exit 99
 		if isolated {
 			commandArgs = append(commandArgs, "--isolated-test-state")
 		}
-		command := exec.Command("python3", append(commandArgs, args...)...)
+		command := legacyClaudeTestCommand(helper, append(commandArgs[1:], args...)...)
 		command.Env = append(environment, "AMUX_CLAUDE_DELEGATION_TESTING=1")
 		command.Stdin = bytes.NewReader(payload)
 		var stdout, stderr bytes.Buffer
@@ -4233,7 +4327,7 @@ func TestMCPServerExposesOnlySchemaLimitedSemanticSubmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command("python3", helper, "--state-dir", stateDir, "--isolated-test-state", "mcp", "serve", "--delegation-id", binding["delegation_id"].(string))
+	command := legacyClaudeTestCommand(helper, "--state-dir", stateDir, "--isolated-test-state", "mcp", "serve", "--delegation-id", binding["delegation_id"].(string))
 	command.Env = append(os.Environ(), "AMUX_CLAUDE_DELEGATION_TESTING=1")
 	command.Stdin = &input
 	output, err := command.CombinedOutput()
@@ -6559,6 +6653,7 @@ func callMCPReport(t *testing.T, commandPath string, commandArgs []string, repor
 		input.WriteByte('\n')
 	}
 	command := exec.Command(commandPath, commandArgs...)
+	command.Env = append(os.Environ(), "AMUX_CLAUDE_DELEGATION_TESTING=1")
 	command.Stdin = &input
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -6640,6 +6735,13 @@ printf '%s\n' '[{"provider":"claude","source":"web","usage":{"primary":{"usedPer
 		}
 	}
 	initialDiagnostic := decodeJSONMap(t, stdout)
+	closedCapabilities := initialDiagnostic["capabilities"].(map[string]any)
+	for _, name := range []string{"read_only_delegation", "mutating_delegation"} {
+		capability := closedCapabilities[name].(map[string]any)
+		if capability["status"] != "unavailable" || capability["reason"] != "core Amux worker lifecycle was removed; historical evidence is read-only" {
+			t.Fatalf("closed %s diagnostic = %#v", name, capability)
+		}
+	}
 	initialCapacity := initialDiagnostic["capacity"].(map[string]any)
 	if initialCapacity["reason"] != "capacity source payload has no supported versioned contract" || len(initialCapacity["windows"].([]any)) != 0 {
 		t.Fatalf("unversioned capacity diagnostic = %#v", initialCapacity)
@@ -7021,7 +7123,16 @@ func assertHelperOutcomeEnv(t *testing.T, stateDir string, environment []string,
 	t.Helper()
 	stdout, stderr, err := runHelperEnv(t, stateDir, environment, input, args...)
 	if err != nil {
-		t.Fatalf("helper %s: %v: %s", strings.Join(args, " "), err, stderr)
+		paneOutput := ""
+		for _, entry := range environment {
+			if strings.HasPrefix(entry, "PANE_OUTPUT=") {
+				if data, readErr := os.ReadFile(strings.TrimPrefix(entry, "PANE_OUTPUT=")); readErr == nil {
+					paneOutput = "\npane output: " + string(data)
+				}
+				break
+			}
+		}
+		t.Fatalf("helper %s: %v: %s%s", strings.Join(args, " "), err, stderr, paneOutput)
 	}
 	if !strings.Contains(stdout, `"outcome":"`+want+`"`) {
 		t.Fatalf("helper %s output = %s, want outcome %s", strings.Join(args, " "), stdout, want)
@@ -7042,7 +7153,7 @@ func runHelperEnv(t *testing.T, stateDir string, environment []string, input map
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command("python3", append([]string{helper, "--state-dir", stateDir, "--isolated-test-state"}, args...)...)
+	command := legacyClaudeTestCommand(helper, append([]string{"--state-dir", stateDir, "--isolated-test-state"}, args...)...)
 	command.Env = append(environmentOrCurrent(environment), "AMUX_CLAUDE_DELEGATION_TESTING=1")
 	command.Stdin = bytes.NewReader(payload)
 	var stdout, stderr bytes.Buffer
@@ -7062,7 +7173,7 @@ func runHelperEnvWithStackLimit(t *testing.T, stateDir string, environment []str
 	if err != nil {
 		t.Fatal(err)
 	}
-	arguments := append([]string{"python3", helper, "--state-dir", stateDir, "--isolated-test-state"}, args...)
+	arguments := append([]string{"python3", "-c", legacyClaudeTestScript, helper, "--state-dir", stateDir, "--isolated-test-state"}, args...)
 	command := exec.Command("/bin/sh", append([]string{"-c", `ulimit -s 256; exec "$@"`, "sh"}, arguments...)...)
 	command.Env = append(environmentOrCurrent(environment), "AMUX_CLAUDE_DELEGATION_TESTING=1")
 	command.Stdin = bytes.NewReader(payload)
@@ -7071,6 +7182,24 @@ func runHelperEnvWithStackLimit(t *testing.T, stateDir string, environment []str
 	command.Stderr = &stderr
 	err = command.Run()
 	return stdout.String(), stderr.String(), err
+}
+
+const legacyClaudeTestScript = `import importlib.util, pathlib, sys
+spec = importlib.util.spec_from_file_location("claude_delegation_test", pathlib.Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+sys.argv = [sys.argv[1], *sys.argv[2:]]
+try:
+    raise SystemExit(module.legacy_test_main())
+except module.HelperError as error:
+    print(f"claude-delegation: {error}", file=sys.stderr)
+    raise SystemExit(2) from error
+`
+
+func legacyClaudeTestCommand(helper string, args ...string) *exec.Cmd {
+	command := exec.Command("python3", append([]string{"-c", legacyClaudeTestScript, helper}, args...)...)
+	command.Env = append(os.Environ(), "AMUX_CLAUDE_DELEGATION_TESTING=1")
+	return command
 }
 
 func writeExecutable(t *testing.T, path, contents string) {
@@ -7162,6 +7291,7 @@ func main() {
 	}
 	panePID := filepath.Join(t.TempDir(), "pane.pid")
 	paneOutput := filepath.Join(t.TempDir(), "pane.output")
+	startCommandFile := filepath.Join(t.TempDir(), "start-command")
 	writeExecutable(t, filepath.Join(binDir, "tmux"), `#!/bin/sh
 set -eu
 case "$1" in
@@ -7172,6 +7302,7 @@ case "$1" in
   new-window)
     printf '%s\n' "$*" >> "$TMUX_LOG"
     for argument do start_command=$argument; done
+    printf '%s' "$start_command" > "$START_COMMAND_FILE"
     replaced=0
     if [ -n "${REPLACE_EXECUTABLE_WITH:-}" ]; then mv "$REPLACE_EXECUTABLE_WITH" "$CLAUDE_PATH"; replaced=1; fi
     if [ -n "${REPLACE_PACKET_WITH:-}" ]; then mv "$REPLACE_PACKET_WITH" "$PACKET_PATH"; replaced=1; fi
@@ -7194,7 +7325,7 @@ case "$1" in
     if [ -n "${DRIFT_RECEIPT_MODEL:-}" ] && [ ! -e "$DRIFT_RECEIPT_SNAPSHOT" ] && [ -e "${CLAUDE_STARTED_MARKER:-/nonexistent}" ]; then
       python3 -c 'import json,os,pathlib; p=pathlib.Path(os.environ["DRIFT_RECEIPT_PATH"]); d=json.loads(p.read_text()); e=next(x for x in d["receipts"][0]["events"] if x.get("kind")=="launch_intent"); m=os.environ["DRIFT_RECEIPT_MODEL"]; e.pop("model",None) if m=="__omit__" else e.__setitem__("model",m); b=json.dumps(d,separators=(",",":")).encode(); p.write_bytes(b); pathlib.Path(os.environ["DRIFT_RECEIPT_SNAPSHOT"]).write_bytes(b)'
     fi
-    start_command=$(tail -n 1 "$TMUX_LOG" | sed -n 's/^.* -c [^ ]* //p')
+    start_command=$(cat "$START_COMMAND_FILE")
     if [ -n "${REPORTED_START_COMMAND:-}" ]; then start_command=$REPORTED_START_COMMAND; fi
     printf 'Claude\tthinker\t@20\t%%20\t%s\t%s\tclaude\t%s\n' "$pane_pid" "${REPORTED_WORKDIR:-$WORKDIR}" "$start_command"
     ;;
@@ -7211,6 +7342,7 @@ esac
 		*environment,
 		"PANE_PID_FILE="+panePID,
 		"PANE_OUTPUT="+paneOutput,
+		"START_COMMAND_FILE="+startCommandFile,
 		"CLAUDE_STARTED_MARKER="+startedMarker,
 	)
 	t.Cleanup(func() {

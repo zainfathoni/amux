@@ -8,7 +8,7 @@ superseded-by: 0007
 > [!CAUTION]
 > **Historical only — superseded by [ADR 0007](0007-retire-amux-through-native-cutover-and-staged-drain.md).** This file preserves the rationale and evidence behind the former native-create → Amux-adopt design. Every command, workflow step, preflight, ordering or recovery action, failure-matrix behavior, migration gate, and other imperative statement below is superseded and non-current; do not use it as operational guidance.
 >
-> **Current boundary:** New native children remain unmanaged by Amux and retain native parent/reply routing only. Only an exact persisted pre-cutover drain-eligible adoption operation may continue its exact allowed next transition under ADR 0007. Do not native-create then adopt, group, report, or otherwise enroll new work into Amux.
+> **Current boundary:** New native children remain unmanaged by Amux and retain native parent/reply routing only. [ADR 0009](0009-remove-active-legacy-coordination-surfaces.md) removes active adoption and core coordination transitions; historical operation and worker-store bytes are inert evidence. Do not use an older binary, edit stores, or native-create then adopt, group, report, or otherwise enroll work into Amux.
 
 ## Historical decision (superseded; non-current)
 

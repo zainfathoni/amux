@@ -24,10 +24,10 @@
   <p class="lead">Mas <code>firewalker06</code>, problemnya valid: kemampuan membaca session kapan saja bukan mekanisme completion. Itu seperti PM yang berkali-kali membuka layar engineer. Yang dibutuhkan adalah <strong>durable mailbox</strong> untuk hasil dan <strong>doorbell</strong> murah untuk membangunkan coordinator.</p>
 
   <div class="verdict">
-    <strong>Jawaban pendek:</strong> iya, pola yang dibangun di <code>amux</code> memang menyelesaikan kelas masalah itu. Subagent menulis report lebih dulu, lalu callback hanya membangunkan agent. Tetapi untuk work Amp baru, kami sekarang memilih native parent/child reply routing; report/group Amux sedang menjadi jalur kompatibilitas untuk state lama. <code>/amux-tycho</code> tetap eksperimen khusus executor eksternal.
+    <strong>Catatan sejarah:</strong> pola report + callback di bawah menjelaskan desain Amux lama, bukan workflow yang masih boleh dijalankan. Command group/report/callback/finish telah dihapus; store historis sekarang inert dan harus dipertahankan tanpa drain mutation. Untuk work Amp baru gunakan native parent/child reply routing. <code>/amux-tycho</code> tetap bridge receipt terpisah dan explicit-only untuk executor eksternal.
   </div>
 
-  <h2>Kontrak intinya: simpan dulu, bunyikan bel kemudian</h2>
+  <h2>Desain historis: simpan dulu, bunyikan bel kemudian</h2>
   <div class="flow" role="img" aria-label="Subagent menyimpan report ke durable store, callback membangunkan coordinator, lalu coordinator membaca dan memverifikasi report">
     <div class="flow-box"><b>1 · Subagent</b>Selesai atau blocked, lalu submit report terstruktur.</div>
     <div class="arrow" aria-hidden="true">→</div>
@@ -99,27 +99,26 @@
     <thead><tr><th>Kasusmu</th><th>Pilihan sekarang</th></tr></thead>
     <tbody>
       <tr><td>Agent dan subagent sama-sama native Amp</td><td>Pakai native child creation + reply routing/waiting. Jangan onboard ke group/report Amux baru.</td></tr>
-      <tr><td>Sudah punya durable group/report Amux lama</td><td>Drain lewat report, pending/history, acknowledge, verifikasi, dan finish authorization yang ada.</td></tr>
+      <tr><td>Sudah punya durable group/report Amux lama</td><td>Pertahankan bytes sebagai evidence inert. Jangan memakai binary lama, mengedit store, acknowledge, authorize-finish, atau membuat terminal transition.</td></tr>
       <tr><td>Executor eksternal melalui Tycho</td><td><code>/amux-tycho</code> bisa dipakai secara explicit-only dan conditional; Tycho hanya mengirim typed report.</td></tr>
       <tr><td>Orchestrator buatan sendiri</td><td>Ambil kontraknya: durable report + cheap wake-up + idempotency + coordinator-owned verification. Tidak harus mengadopsi seluruh Amux.</td></tr>
     </tbody>
   </table>
 
-  <p class="source-line">Arah staged drain (lokal · pinned):
-    <a class="chip vsc" href="vscode://file/home/user/workspace/repo/docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md:37" aria-label="Buka ADR 0007 baris 37 di VS Code">ADR 0007:37–73</a>
-    <a class="chip gh" href="https://github.com/zainfathoni/amux/blob/891cd39606791993e5dc040aa5c28432250f23ee/docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md#L37-L73" aria-label="Buka ADR 0007 baris 37 sampai 73 di GitHub">GitHub↗</a>
+  <p class="source-line">Arah aktif:
+    <a class="chip gh" href="https://github.com/zainfathoni/amux/blob/main/docs/adr/0009-remove-active-legacy-coordination-surfaces.md" aria-label="Buka ADR 0009 di GitHub">ADR 0009↗</a>
   </p>
 
   <div class="cold">
     <b>Cold-recall defense, satu napas:</b><br>
-    “Amux memisahkan <code>durable truth</code> dari <code>wake-up</code>: subagent persist report dulu, agent dibangunkan kemudian, lalu agent sendiri membaca, memverifikasi, dan acknowledge. Jadi callback boleh gagal tanpa kehilangan hasil.”
+    “Secara historis Amux memisahkan <code>durable truth</code> dari <code>wake-up</code>. Mekanisme worker/group/report/callback itu sekarang sudah dihapus; contoh ini hanya menjelaskan desain lama dan tidak mengizinkan drain atau mutation.”
   </div>
 
   <h2>Jawaban yang bisa langsung dikirim ke temanmu</h2>
   <blockquote>
-    “Iya, Mas—secara pattern ini persis problem yang kami pecahkan di Amux. Daripada agent polling session subagent, subagent persist report saat ready/blocked, lalu mengirim wake-up kecil. Wake-up bukan datanya; kalau notifikasinya gagal, agent tetap bisa recover dari pending report. Agent kemudian baca, verify, dan acknowledge sendiri.<br><br>
+    “Iya, Mas—secara pattern ini problem yang dahulu kami pecahkan di Amux: durable result dipisahkan dari wake-up. Implementasi worker/group/report/callback itu sekarang historical-only dan tidak boleh dijalankan atau di-drain; native Amp menangani koordinasi Amp-to-Amp baru.<br><br>
     Di <code>/amux-tycho</code>, kami adaptasi pattern itu untuk output dari Tycho. Bukan mengganti orchestration Tycho: Tycho tetap mengatur agent/provider-nya, sedangkan boundary ke Amp hanya memberi Tycho authority <code>report_only</code>. Receipt mengikat Amp origin, exact Tycho route, dan task/artifact digest; hanya typed <code>complete/blocked</code> submit yang dianggap hasil—bukan process exit atau log.<br><br>
-    Nuansanya, ini compatibility bridge yang masih experimental. Target akhirnya justru lebih simpel: exact Tycho route return satu structured result langsung ke invoking Amp turn, authenticated dan correlated. Kalau seam itu terbukti, side receipt/consume/ack tidak diperlukan untuk work baru. Untuk Amp-to-Amp sendiri kami sekarang pakai native parent/child reply routing, jadi group/report Amux lama sedang kami drain, bukan diperluas.”
+    Nuansanya, <code>/amux-tycho</code> adalah bridge terpisah yang masih experimental. Target akhirnya justru lebih simpel: exact Tycho route return satu structured result langsung ke invoking Amp turn, authenticated dan correlated. Kalau seam itu terbukti, side receipt/consume/ack tidak diperlukan untuk work baru. Group/report core Amux lama tetap inert dan dipertahankan tanpa mutation.”
   </blockquote>
 
   <h2>Cek pemahaman</h2>
@@ -150,7 +149,7 @@
   </form>
 
   <h2>Primary source</h2>
-  <p>Baca <a href="https://github.com/zainfathoni/amux/blob/83ef39d13aa10a9c63faed932f3d8ed04919fc58/docs/adr/0008-retain-machine-local-runner-host-and-drain-coordination.md">ADR 0008: Retain the machine-local runner host and drain legacy coordination</a> (~8 menit) untuk arah saat ini: native Amp menangani koordinasi work baru, Amux tetap meluncurkan runner lokal, dan report lama hanya drain/compatibility. <a href="https://github.com/zainfathoni/amux/blob/83ef39d13aa10a9c63faed932f3d8ed04919fc58/docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md">ADR 0007</a> tetap menjadi sejarah dan batas drain yang sebagian masih berlaku.</p>
+  <p>Baca <a href="https://github.com/zainfathoni/amux/blob/main/docs/adr/0009-remove-active-legacy-coordination-surfaces.md">ADR 0009</a> (~8 menit) untuk arah saat ini: native Amp menangani koordinasi work baru, Amux tetap meluncurkan runner lokal, dan store koordinasi lama inert tanpa command drain. <a href="https://github.com/zainfathoni/amux/blob/e56eed4e6b8fc8cab2a5704a408d9ba96d3807b5/docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md">ADR 0007</a> tetap sebagai sejarah keputusan yang sudah dipersempit.</p>
 
   <h2>Diskusi asal</h2>
   <p>Lesson ini lahir dari <a href="https://ampcode.com/threads/T-019ff8aa-b9e5-749e-abea-ddfe1a44d7ca">thread publik Amp tentang amux, Tycho, dan completion reporting</a>. Baca thread tersebut untuk konteks pertanyaan asli dan proses penyusunan jawabannya.</p>

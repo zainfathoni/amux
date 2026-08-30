@@ -247,6 +247,25 @@ func TestParseRestartPanesAcceptsTmux34EmptyPaneCreated(t *testing.T) {
 	}
 }
 
+func TestRestartPaneByIDRequestsAndReturnsPaneCreated(t *testing.T) {
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$*" in
+  *'#{pane_created}'*) printf 'alpha\trunner\t@1\t%%1\t/tmp\tamp\tstart\t0\t42\t123\n' ;;
+  *) echo 'pane_created format is missing' >&2; exit 9 ;;
+esac
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	pane, err := (Runner{}).RestartPaneByID("%1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pane.PaneID != "%1" || pane.PID != 42 || pane.StartTime != 123 {
+		t.Fatalf("RestartPaneByID returned %+v", pane)
+	}
+}
+
 func TestDryRunWritesPlannedCommandToConfiguredOutput(t *testing.T) {
 	var output strings.Builder
 	runner := Runner{DryRun: true, Output: &output}

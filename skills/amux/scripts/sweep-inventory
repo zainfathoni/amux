@@ -3,6 +3,7 @@
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,11 @@ import sys
 
 SCHEMA_VERSION = 1
 ZERO_TIME_PREFIX = "0001-01-01T00:00:00"
+REPORT_KEYS = {
+    "schema_version", "report_id", "request_hash", "group_id", "member_thread",
+    "issue", "reference", "pr_url", "summary", "status", "created_at", "updated_at",
+    "acknowledged_at", "authorized_at", "authorizing_thread", "authorization_reference", "events",
+}
 
 
 class DuplicateKey(ValueError):
@@ -184,23 +190,6 @@ def parse_workers(path):
     return rows, errors
 
 
-def validate_reports_with_amux(amux, config_dir):
-    command = [amux, "--json", "--config-dir", config_dir, "report", "pending", "--all"]
-    try:
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    except OSError as error:
-        raise ValueError(f"cannot execute authoritative amux report validator: {error}") from error
-    if result.returncode != 0:
-        detail = result.stderr.decode("utf-8", "replace").strip() or result.stdout.decode("utf-8", "replace").strip()
-        raise ValueError(f"authoritative amux report validation failed (exit {result.returncode}): {detail}")
-    try:
-        document = json.loads(result.stdout)
-    except (UnicodeError, ValueError) as error:
-        raise ValueError("authoritative amux report validator returned malformed JSON") from error
-    if not isinstance(document, dict) or document.get("schema_version") != 1 or document.get("failed"):
-        raise ValueError("authoritative amux report validator did not return a successful v1 envelope")
-
-
 def parse_reports(path, amux, config_dir):
     state, state_error = regular_file_state(path)
     if state == "absent":
@@ -209,22 +198,43 @@ def parse_reports(path, amux, config_dir):
         return [], [inventory_error("reports.json", f"cannot read {path}: {state_error}")]
     try:
         before = Path(path).read_bytes()
-        validate_reports_with_amux(amux, config_dir)
         after = Path(path).read_bytes()
         if before != after:
-            raise ValueError("reports.json changed during authoritative validation")
+            raise ValueError("reports.json changed during read-only inventory")
     except (OSError, ValueError) as error:
         return [], [inventory_error("reports.json", str(error))]
+    try:
+        validation = subprocess.run(
+            [amux, "--config-dir", config_dir, "__sweep-validate-reports", hashlib.sha256(before).hexdigest()],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return [], [inventory_error("reports.json", f"authoritative validation unavailable: {error}")]
+    if validation.returncode != 0:
+        message = validation.stderr.strip() or f"validator exited {validation.returncode}"
+        return [], [inventory_error("reports.json", f"authoritative validation failed: {message}")]
     try:
         document = json.loads(before.decode("utf-8"), object_pairs_hook=strict_object)
     except (UnicodeError, ValueError) as error:
         return [], [inventory_error("reports.json", f"cannot parse {path}: {error}")]
     if not isinstance(document, dict) or document.get("schema_version") != 1 or not isinstance(document.get("reports", []), list):
         return [], [inventory_error("reports.json", "expected schema_version 1 and a reports array")]
+    deadlines = document.get("deadlines")
+    if set(document) - {"schema_version", "reports", "deadlines"} or deadlines is not None and not isinstance(deadlines, list):
+        return [], [inventory_error("reports.json", "expected only schema_version, reports, and optional deadlines array or null")]
+    for number, deadline in enumerate(deadlines or [], 1):
+        if not isinstance(deadline, dict) or not all(isinstance(deadline.get(key), expected) for key, expected in {
+            "group_id": str, "member_thread": str, "generations": list, "progress_at": str,
+        }.items()):
+            return [], [inventory_error("reports.json", f"deadline {number}: malformed historical deadline record")]
     reports, errors, seen = [], [], set()
     for number, item in enumerate(document.get("reports", []), 1):
         if not isinstance(item, dict):
             errors.append(inventory_error("reports.json", f"report {number}: expected an object"))
+            continue
+        if set(item) - REPORT_KEYS:
+            errors.append(inventory_error("reports.json", f"report {number}: unknown fields"))
             continue
         report_id, thread, status = item.get("report_id"), item.get("member_thread"), item.get("status")
         if not all(isinstance(value, str) and value for value in (report_id, thread, status)):

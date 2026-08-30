@@ -2,6 +2,8 @@
 
 These ADR 0008 direction corrections were applied on 2026-08-30: [#331](https://github.com/zainfathoni/amux/issues/331) and [#339](https://github.com/zainfathoni/amux/issues/339) received the exact title/body rewrites below, and closed [#374](https://github.com/zainfathoni/amux/issues/374#issuecomment-5469174178) received the exact corrective comment below without being reopened.
 
+> **Later direction:** ADR 0009 removes the active core worker/coordination drain routes and leaves their stores inert. The text below is retained as an exact historical record of edits already applied to GitHub, not current command guidance. Any follow-up issue rewrite requires separate authorization.
+
 ## Applied rewrite #331
 
 **Applied title:** `Thin Amux host + legacy coordination drain umbrella (ADR 0008)`

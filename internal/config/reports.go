@@ -168,6 +168,21 @@ func LoadReports(path string) ([]ReportRecord, error) {
 	f, e := loadReportsFile(path)
 	return f.Reports, e
 }
+
+// ValidateReportsStore applies the complete historical reports/deadlines schema
+// validation without exposing any coordination operation or mutating the store.
+func ValidateReportsStore(path string) error {
+	_, err := loadReportsFile(path)
+	return err
+}
+
+// ValidateReportsStoreBytes validates an exact reports.json snapshot without
+// opening a path or mutating any state.
+func ValidateReportsStoreBytes(data []byte) error {
+	_, err := decodeReportsFile(data)
+	return err
+}
+
 func LoadPendingReports(path string) ([]ReportRecord, error) {
 	rs, e := LoadReports(path)
 	if e != nil {
@@ -905,13 +920,17 @@ func loadReportsFile(path string) (reportsFile, error) {
 	if e != nil {
 		return reportsFile{}, e
 	}
+	return decodeReportsFile(data)
+}
+
+func decodeReportsFile(data []byte) (reportsFile, error) {
 	var f reportsFile
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
-	if e = d.Decode(&f); e != nil {
-		return f, fmt.Errorf("parse reports: %w", e)
+	if err := d.Decode(&f); err != nil {
+		return f, fmt.Errorf("parse reports: %w", err)
 	}
-	if e = d.Decode(&struct{}{}); e != io.EOF {
+	if err := d.Decode(&struct{}{}); err != io.EOF {
 		return f, errors.New("parse reports: trailing JSON data")
 	}
 	if f.SchemaVersion != ReportsSchemaVersion {

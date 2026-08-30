@@ -21,6 +21,9 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	_ = os.Setenv("GIT_CONFIG_COUNT", "1")
+	_ = os.Setenv("GIT_CONFIG_KEY_0", "commit.gpgsign")
+	_ = os.Setenv("GIT_CONFIG_VALUE_0", "false")
 	runnerProcessArgs = func(int) ([]string, error) { return []string{"amp", "--no-tui"}, nil }
 	runnerProcessIdentity = func(pid int) (string, error) { return fmt.Sprintf("start-%d", pid), nil }
 	runnerChildProcesses = func(parentPID int) ([]tmux.ProcessMetadata, error) {
@@ -692,14 +695,21 @@ case "$1" in
   has-session) exit 1 ;;
   new-session) printf 'alpha\t`+window+`\t@7\t%%9\n' ;;
   list-panes) printf 'alpha\t`+window+`\t@7\t%%9\t`+workdir+`\tamp\t%s\t0\t5252\t123\n' `+shellSingleQuote(start)+` ;;
-  capture-pane) echo 'direct amp had extra argv' ;;
-  kill-window) touch "`+killed+`" ;;
+  capture-pane) printf 'direct amp had extra argv: '; head -c 5000 /dev/zero | tr '\0' x ;;
+  kill-window) touch "`+killed+`"; exit 9 ;;
   *) exit 2 ;;
 esac
 `)
-	oldArgs := runnerProcessArgs
+	oldArgs, oldIdentity, oldChildren, oldCacheDir := runnerProcessArgs, runnerProcessIdentity, runnerChildProcesses, runnerCacheDir
+	runnerProcessIdentity = func(int) (string, error) { return "shell-start", nil }
+	runnerChildProcesses = func(int) ([]tmux.ProcessMetadata, error) {
+		return []tmux.ProcessMetadata{{PID: 6262, ParentPID: 5252, Name: "amp", Identity: "amp-start"}}, nil
+	}
 	runnerProcessArgs = func(int) ([]string, error) { return []string{"amp", "--no-tui", "unexpected"}, nil }
-	t.Cleanup(func() { runnerProcessArgs = oldArgs })
+	runnerCacheDir = func() (string, error) { return "", errors.New(strings.Repeat("cache-diagnostic-", 400)) }
+	t.Cleanup(func() {
+		runnerProcessArgs, runnerProcessIdentity, runnerChildProcesses, runnerCacheDir = oldArgs, oldIdentity, oldChildren, oldCacheDir
+	})
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	oldTimeout, oldPoll := runnerStartupTimeout, runnerPollInterval
 	runnerStartupTimeout, runnerPollInterval = 10*time.Millisecond, time.Millisecond
@@ -709,8 +719,71 @@ esac
 	if err == nil || !strings.Contains(err.Error(), "direct amp had extra argv") {
 		t.Fatalf("direct amp with extra argv error = %v", err)
 	}
+	if !strings.Contains(err.Error(), "cleanup: kill exact failed runner window") {
+		t.Fatalf("runner launch did not preserve cleanup failure: %v", err)
+	}
+	if len(err.Error()) != runnerStartupErrorLimit {
+		t.Fatalf("runner launch error length = %d, want truncation limit %d", len(err.Error()), runnerStartupErrorLimit)
+	}
 	if _, statErr := os.Stat(killed); statErr != nil {
 		t.Fatalf("rejected direct amp window was not removed: %v", statErr)
+	}
+}
+
+func TestRunnerStartupCleanupRetainsChangedTargetAndPropagatesKillFailure(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		windowID       string
+		startTime      int64
+		actualIdentity string
+		killExit       int
+		want           string
+		wantKilled     bool
+	}{
+		{name: "pane identity drift", windowID: "@8", startTime: 123, actualIdentity: "shell-start", want: "pane identity changed"},
+		{name: "missing pane start time", windowID: "@7", startTime: 0, actualIdentity: "shell-start", want: "pane identity changed"},
+		{name: "pane start time drift", windowID: "@7", startTime: 124, actualIdentity: "shell-start", want: "pane identity changed"},
+		{name: "process incarnation drift", windowID: "@7", startTime: 123, actualIdentity: "replacement-start", want: "process incarnation changed"},
+		{name: "kill failure", windowID: "@7", startTime: 123, actualIdentity: "shell-start", killExit: 9, want: "kill exact failed runner window", wantKilled: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bin := t.TempDir()
+			killed := filepath.Join(bin, "killed")
+			killCommand := "touch " + shellSingleQuote(killed)
+			if test.killExit != 0 {
+				killCommand += fmt.Sprintf("; exit %d", test.killExit)
+			}
+			writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  list-panes) printf 'alpha\trunner\t`+test.windowID+`\t%%9\t/tmp/work\tamp\tstart\t0\t5252\t`+strconv.FormatInt(test.startTime, 10)+`\n' ;;
+  kill-window) `+killCommand+` ;;
+  *) exit 2 ;;
+esac
+`)
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			oldIdentity := runnerProcessIdentity
+			runnerProcessIdentity = func(int) (string, error) { return test.actualIdentity, nil }
+			t.Cleanup(func() { runnerProcessIdentity = oldIdentity })
+
+			evidence := &runnerStartupCleanupEvidence{
+				pane:            tmux.WindowPane{Session: "alpha", Window: "runner", WindowID: "@7", PaneID: "%9", PID: 5252, StartTime: 123},
+				processIdentity: "shell-start",
+			}
+			err := cleanupFailedRunnerStartup(tmux.Runner{}, evidence)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("cleanup error = %v, want %q", err, test.want)
+			}
+			_, statErr := os.Stat(killed)
+			if test.wantKilled && statErr != nil {
+				t.Fatalf("kill was not attempted: %v", statErr)
+			}
+			if !test.wantKilled && !os.IsNotExist(statErr) {
+				t.Fatalf("changed target was killed: %v", statErr)
+			}
+		})
+	}
+	if evidence := captureRunnerStartupCleanupEvidence(tmux.WindowPane{PID: 5252}); evidence != nil {
+		t.Fatalf("startup cleanup accepted missing pane creation time: %+v", evidence)
 	}
 }
 
@@ -977,8 +1050,8 @@ mode=$(cat "`+state+`" 2>/dev/null)
 case "$1" in
   has-session) exit 0 ;;
   list-panes)
-    if [ "$mode" = legacy ]; then printf 'alpha\tlegacy-runner\t@1\t%%1\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(legacyStart)+`
-    elif [ "$mode" = canonical ]; then printf 'alpha\t`+derived+`\t@2\t%%2\t`+workdir+`\tamp\t%s\t0\n' `+shellSingleQuote(newStart)+`; fi ;;
+    if [ "$mode" = legacy ]; then printf 'alpha\tlegacy-runner\t@1\t%%1\t`+workdir+`\tamp\t%s\t0\t7000\t123\n' `+shellSingleQuote(legacyStart)+`
+    elif [ "$mode" = canonical ]; then printf 'alpha\t`+derived+`\t@2\t%%2\t`+workdir+`\tamp\t%s\t0\t7000\t123\n' `+shellSingleQuote(newStart)+`; fi ;;
   kill-window) echo absent > "`+state+`" ;;
   new-window) echo canonical > "`+state+`"; printf 'alpha\t`+derived+`\t@2\t%%2\n' ;;
   *) exit 2 ;;

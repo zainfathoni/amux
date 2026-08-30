@@ -3720,10 +3720,12 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
         raise HelperError("launch packet cannot be encoded within the deterministic transport limit")
     transport_digest = hashlib.sha256(transport_bytes).hexdigest()
     _, tmux_environment_digest = tmux_environment_snapshot(request["tmux_session"])
+    helper_prefix = [str(python), str(helper)]
+    if __name__ != "__main__":
+        helper_prefix = [str(python), "-c", LEGACY_TEST_BOOTSTRAP, str(helper)]
     start_command = "exec " + shlex.join(
         [
-            str(python),
-            str(helper),
+            *helper_prefix,
             "--state-dir",
             str(store.state_dir),
             "launch",
@@ -3744,7 +3746,7 @@ def launch_components(store: ReceiptStore, request_value: Any) -> dict[str, Any]
             "amux-claude-delegation": {
                 "type": "stdio",
                 "command": str(python),
-                "args": [str(helper), "--state-dir", str(store.state_dir), "mcp", "serve", "--delegation-id", request["delegation_id"]],
+                "args": [*helper_prefix[1:], "--state-dir", str(store.state_dir), "mcp", "serve", "--delegation-id", request["delegation_id"]],
             }
         }
     }
@@ -4289,11 +4291,9 @@ def diagnostics() -> dict[str, Any]:
             capabilities["platform"] = {"status": "unavailable", "value": system, "reason": str(error)[:512]}
     else:
         capabilities["platform"] = {"status": "unavailable", "value": system, "reason": "no exact process identity implementation"}
-    capabilities["mutating_delegation"] = {"status": "supported" if system == "Darwin" else "unavailable"}
-    if system == "Linux":
-        capabilities["mutating_delegation"]["reason"] = "Linux support is limited to read-only delegation"
-    elif system != "Darwin":
-        capabilities["mutating_delegation"]["reason"] = "not proven on this platform"
+    closed_reason = "core Amux worker lifecycle was removed; historical evidence is read-only"
+    capabilities["read_only_delegation"] = {"status": "unavailable", "reason": closed_reason}
+    capabilities["mutating_delegation"] = {"status": "unavailable", "reason": closed_reason}
     try:
         probe_environment = exact_launch_environment(["GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN"])
         version = run_command(["claude", "--version"], probe_environment)
@@ -6907,6 +6907,45 @@ def quarantine_lifecycle_lock(lifecycle: LifecycleRegistry) -> Iterator[tuple[in
             raise HelperError("quarantine lifecycle lock cleanup is unavailable") from cleanup_error
 
 
+@contextlib.contextmanager
+def quarantine_lifecycle_read_lock(lifecycle: LifecycleRegistry) -> Iterator[tuple[int, os.stat_result]]:
+    directory_descriptor = -1
+    lock_descriptor = -1
+    try:
+        directory_descriptor, directory_info = open_quarantine_directory(
+            lifecycle.state_dir, "quarantine lifecycle state", private=True
+        )
+        lock_descriptor = os.open(
+            "experimental.lock",
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_descriptor,
+        )
+        lock_info = os.fstat(lock_descriptor)
+        if (
+            not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.geteuid()
+            or stat.S_IMODE(lock_info.st_mode) != 0o600
+        ):
+            raise HelperError("quarantine lifecycle lock is unavailable")
+        fcntl.flock(lock_descriptor, fcntl.LOCK_SH)
+    except (OSError, ValueError, HelperError) as error:
+        for descriptor in (lock_descriptor, directory_descriptor):
+            if descriptor >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+        raise HelperError("quarantine lifecycle lock is unavailable") from error
+    try:
+        yield directory_descriptor, directory_info
+    finally:
+        cleanup_error = None
+        for descriptor in (lock_descriptor, directory_descriptor):
+            try:
+                os.close(descriptor)
+            except (OSError, ValueError) as close_error:
+                cleanup_error = cleanup_error or close_error
+        if cleanup_error is not None:
+            raise HelperError("quarantine lifecycle lock cleanup is unavailable") from cleanup_error
+
+
 def exact_canonical_path(value: Any, label: str) -> str:
     path = required_string({"path": value}, "path", 4096)
     if not os.path.isabs(path) or "\x00" in path or any(ord(character) < 0x20 for character in path):
@@ -7824,7 +7863,7 @@ def quarantine_inspect(store: ReceiptStore, request: dict[str, Any]) -> dict[str
     operation_id = required_string(request, "operation_sha256", 64)
     if not re.fullmatch(r"[0-9a-f]{64}", operation_id):
         raise HelperError("quarantine receipt is unavailable")
-    with quarantine_lifecycle_lock(store.lifecycle) as (directory_descriptor, _):
+    with quarantine_lifecycle_read_lock(store.lifecycle) as (directory_descriptor, _):
         records = load_quarantine_records_at(directory_descriptor)
         receipt = next(
             (item for item in records["receipts"] if item["operation_id"] == operation_id), None
@@ -7996,8 +8035,7 @@ def parser() -> argparse.ArgumentParser:
     return root
 
 
-def main() -> int:
-    arguments = parser().parse_args()
+def dispatch(arguments: argparse.Namespace) -> int:
     state_dir = arguments.state_dir.expanduser().resolve()
     if arguments.isolated_test_state:
         if os.environ.get("AMUX_CLAUDE_DELEGATION_TESTING") != "1":
@@ -8145,6 +8183,46 @@ def main() -> int:
             raise HelperError("unsupported command")
     print(json.dumps(output, sort_keys=True, separators=(",", ":")))
     return 0
+
+
+def is_read_only_command(arguments: argparse.Namespace) -> bool:
+    return (
+        arguments.area == "diagnose"
+        or arguments.area == "amp" and arguments.command == "inspect"
+        or arguments.area == "receipt" and arguments.command == "show"
+        or arguments.area == "quarantine" and arguments.command == "inspect"
+    )
+
+
+LEGACY_TEST_BOOTSTRAP = """import importlib.util,pathlib,sys
+spec=importlib.util.spec_from_file_location('claude_delegation_test',pathlib.Path(sys.argv[1]))
+module=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+sys.argv=[sys.argv[1],*sys.argv[2:]]
+try:
+ raise SystemExit(module.legacy_test_main())
+except module.HelperError as error:
+ print(f'claude-delegation: {error}',file=sys.stderr)
+ raise SystemExit(2) from error
+"""
+
+
+def legacy_test_main() -> int:
+    """Exercise preserved implementation evidence without exposing a script route."""
+    if __name__ == "__main__":
+        raise HelperError("legacy test dispatch is import-only")
+    if os.environ.get("AMUX_CLAUDE_DELEGATION_TESTING") != "1":
+        raise HelperError("legacy test dispatch is unavailable outside the test harness")
+    return dispatch(parser().parse_args())
+
+
+def main() -> int:
+    arguments = parser().parse_args()
+    if not is_read_only_command(arguments):
+        raise HelperError(
+            "worker-bound Claude delegation is closed; preserve historical evidence without provider mutation"
+        )
+    return dispatch(arguments)
 
 
 if __name__ == "__main__":

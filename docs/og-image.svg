@@ -69,7 +69,7 @@
     <text x="250" y="30" font-family="SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace" font-size="14" fill="#ffffff" opacity="0.58">tmux · Amp</text>
     <text x="24" y="92" font-family="SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace" font-size="18" fill="#f05252">$</text>
     <text x="48" y="92" font-family="SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace" font-size="14" fill="#d6dbe6">amux launch --workspace product</text>
-    <text x="48" y="128" font-family="SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace" font-size="15" fill="#ffffff" opacity="0.66">workers + runners restored</text>
+    <text x="48" y="128" font-family="SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace" font-size="15" fill="#ffffff" opacity="0.66">machine-local runners restored</text>
     <text x="24" y="184" font-family="SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace" font-size="18" fill="#f05252">$</text>
     <text x="48" y="184" font-family="SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace" font-size="14" fill="#d6dbe6">amux doctor --workspace product</text>
     <text x="48" y="220" font-family="SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace" font-size="15" fill="#ffffff" opacity="0.66">read-only inspection complete</text>

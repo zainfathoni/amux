@@ -1,10 +1,7 @@
 package main
 
 import (
-	"errors"
 	"fmt"
-	"io"
-	"os"
 	"sort"
 	"strings"
 
@@ -28,187 +25,16 @@ func isWorkspaceList(path []string) bool {
 	return len(path) == 1 && path[0] == "workspaces" || len(path) == 2 && path[0] == "workspace" && path[1] == "list"
 }
 
+// executeAggregate preserves the top-level lifecycle aliases for the retained
+// runner host. Legacy worker participation was removed; existing worker state
+// is inert and is never read or mutated here.
 func (a app) executeAggregate(in invocation, dir config.Directory) (*result.Envelope, error) {
-	env := result.NewEnvelope(strings.Join(in.Path, " "), in.Options.DryRun)
-	workerIn, runnerIn, useWorker, useRunner, err := aggregateInvocations(in, dir)
-	if err != nil {
-		return &env, result.Preflight(err)
+	in.Path = []string{"runner", in.Command.Name}
+	env, err := a.executeRunner(in, dir)
+	if env != nil {
+		env.Command = in.Command.Name
 	}
-	// Maintenance is machine-level rather than runner-level. Keep it visible to
-	// aggregate doctor even when the runner registry is empty.
-	if in.Command.Name == "doctor" && in.Selectors.All && !useRunner {
-		_, metadataErr := os.Stat(dir.MaintenancePath())
-		_, resultErr := os.Stat(dir.MaintenanceResultPath())
-		if metadataErr == nil || resultErr == nil {
-			useRunner = true
-			runnerIn.Selectors.All = true
-		}
-	}
-	if in.Command.Name == "doctor" && in.Selectors.All && !useWorker {
-		operations, operationsErr := config.LoadOperationsReadOnly(dir.OperationsPath())
-		if operationsErr != nil {
-			return &env, result.Preflight(operationsErr)
-		}
-		for _, operation := range operations {
-			if operation.Kind == "worker-spawn" {
-				useWorker = true
-				workerIn.Selectors.All = true
-				break
-			}
-		}
-	}
-	if !useWorker && !useRunner {
-		switch {
-		case in.Command.Name == "list":
-			return &env, nil
-		case in.Selectors.All && in.Command.Name != "launch":
-			env.Skipped = append(env.Skipped, result.Outcome{Resource: result.CommandResource(), Action: in.Command.Name, Message: "already in desired state"})
-			return &env, nil
-		default:
-			return &env, result.Preflight(errors.New("no configured worker or runner matches the selector"))
-		}
-	}
-
-	// Read-only commands need no mutation barrier. Mutating commands first run
-	// both complete mode plans with dry-run semantics while the operation lock is
-	// held, so neither mode can mutate before the other mode accepts its scope.
-	var workerPlan *result.Envelope
-	var runnerPlan *result.Envelope
-	workerRemovalBlocked := false
-	if in.Command.Mutating {
-		preflightApp := a
-		preflightApp.stdout = io.Discard
-		for _, mode := range []struct {
-			use    bool
-			worker bool
-			in     invocation
-		}{{useRunner, false, runnerIn}, {useWorker, true, workerIn}} {
-			if !mode.use {
-				continue
-			}
-			planned := mode.in
-			planned.Options.DryRun = true
-			var plan *result.Envelope
-			var preflightErr error
-			if mode.worker {
-				plan, preflightErr = preflightApp.executeWorker(planned, dir)
-				workerPlan = plan
-			} else {
-				plan, preflightErr = preflightApp.executeRunner(planned, dir)
-				runnerPlan = plan
-			}
-			if preflightErr != nil {
-				if in.Command.Name == "reconcile" && mode.worker && plan != nil && len(plan.Failed) > 0 {
-					workerRemovalBlocked = true
-					if hasPlannedWorkerShelfReconcile(plan) {
-						continue
-					}
-					mergeBlockedReconcileRemovalPlan(&env, runnerPlan)
-				}
-				mergeEnvelope(&env, plan)
-				return &env, result.Preflight(errors.New(preflightErr.Error()))
-			}
-		}
-	}
-
-	if in.Options.DryRun {
-		if workerRemovalBlocked {
-			mergeBlockedReconcileRemovalPlan(&env, runnerPlan)
-			mergeEnvelope(&env, workerPlan)
-			return &env, result.Preflight(errors.New("worker reconcile refused one or more stale-registration removals"))
-		}
-		if useRunner {
-			modeEnv, modeErr := a.executeRunner(runnerIn, dir)
-			mergeEnvelope(&env, modeEnv)
-			if modeErr != nil {
-				return &env, modeErr
-			}
-		}
-		if useWorker {
-			modeEnv, modeErr := a.executeWorker(workerIn, dir)
-			mergeEnvelope(&env, modeEnv)
-			if modeErr != nil {
-				return &env, modeErr
-			}
-		}
-		if in.Options.AttachMode == attachAlways {
-			env.Planned = append(env.Planned, result.Outcome{Resource: result.CommandResource(), Action: "attach", Message: "attach workspace " + in.Selectors.Workspace})
-			if !in.Options.JSON {
-				fmt.Fprintf(a.stdout, "Would attach workspace %s after launch\n", in.Selectors.Workspace)
-			}
-		}
-		return &env, nil
-	}
-
-	var aggregateErr error
-	aggregateStarted := false
-	if workerRemovalBlocked {
-		mergeBlockedReconcileRemovalPlan(&env, runnerPlan)
-	} else if useRunner {
-		modeEnv, modeErr := a.executeRunner(runnerIn, dir)
-		mergeEnvelope(&env, modeEnv)
-		aggregateStarted = len(modeEnv.Successful) > 0 || len(modeEnv.Failed) > 0
-		aggregateErr = modeErr
-	}
-	// Runtime failures are resource-local, so workers still run. A new request
-	// or preflight rejection means the selected plan is no longer valid.
-	if useWorker && (aggregateErr == nil || result.ErrorKindOf(aggregateErr) == result.ErrorRuntime) {
-		modeEnv, modeErr := a.executeWorker(workerIn, dir)
-		mergeEnvelope(&env, modeEnv)
-		if modeErr != nil && in.Command.Mutating && aggregateStarted && result.ErrorKindOf(modeErr) != result.ErrorRuntime {
-			appendLatePreflightFailure(&env, workerPlan, modeErr)
-			modeErr = result.Runtime(errors.New("worker precondition changed after aggregate mutation began: " + modeErr.Error()))
-		}
-		if modeErr != nil && (aggregateErr == nil || result.ErrorKindOf(modeErr) == result.ErrorRuntime) {
-			aggregateErr = modeErr
-		}
-	}
-	if aggregateErr != nil {
-		return &env, aggregateErr
-	}
-	return &env, nil
-}
-
-func mergeBlockedReconcileRemovalPlan(env *result.Envelope, plan *result.Envelope) {
-	if plan == nil {
-		return
-	}
-	for _, out := range plan.Planned {
-		out.Message = "stale registration removal not attempted because the aggregate worker removal plan was refused"
-		env.Skipped = append(env.Skipped, out)
-	}
-	env.Skipped = append(env.Skipped, plan.Skipped...)
-	env.Failed = append(env.Failed, plan.Failed...)
-}
-
-func hasPlannedWorkerShelfReconcile(plan *result.Envelope) bool {
-	if plan == nil || len(plan.Failed) == 0 {
-		return false
-	}
-	for _, out := range plan.Planned {
-		if out.Resource.Kind == "worker" && out.Reconcile != nil && out.Reconcile.Decision == "synchronize_shelf_intent" {
-			return true
-		}
-	}
-	return false
-}
-
-func appendLatePreflightFailure(env *result.Envelope, plan *result.Envelope, err error) {
-	message := "precondition changed after aggregate mutation began: " + err.Error()
-	if plan != nil {
-		for _, out := range plan.Planned {
-			out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: message}
-			env.Failed = append(env.Failed, out)
-		}
-		env.Skipped = append(env.Skipped, plan.Skipped...)
-	}
-	if len(env.Failed) == 0 {
-		env.Failed = append(env.Failed, result.Outcome{
-			Resource: result.CommandResource(),
-			Action:   "aggregate",
-			Error:    &result.Failure{Kind: result.ErrorRuntime, Message: message},
-		})
-	}
+	return env, err
 }
 
 // attachAfterAggregateLaunch runs after dispatch returns so the mutation lock
@@ -223,85 +49,15 @@ func (a app) attachAfterAggregateLaunch(in invocation) error {
 	return nil
 }
 
-func aggregateInvocations(in invocation, dir config.Directory) (invocation, invocation, bool, bool, error) {
-	workerIn, runnerIn := in, in
-	if in.Selectors.Current {
-		if aggregateCurrentIsWorker() {
-			return workerIn, runnerIn, true, false, nil
-		}
-		return workerIn, runnerIn, false, true, nil
-	}
-	if in.Selectors.Thread != "" {
-		return workerIn, runnerIn, true, false, nil
-	}
-	if in.Selectors.Workdir != "" {
-		if in.Command.Name == "reconcile" {
-			return workerIn, runnerIn, true, true, nil
-		}
-		return workerIn, runnerIn, false, true, nil
-	}
-	workers, err := config.LoadReadOnly(dir.WorkersPath())
-	if err != nil {
-		return workerIn, runnerIn, false, false, err
-	}
-	runners, err := config.LoadRunnersReadOnly(dir.RunnersPath())
-	if err != nil {
-		return workerIn, runnerIn, false, false, err
-	}
-	useWorker := len(selectWorkerRows(workers, in.Selectors)) > 0
-	useRunner := len(selectRunnerRows(runners, in.Selectors)) > 0
-	if in.Command.Name == "remove" && in.Selectors.All && !useWorker {
-		shelves, shelfErr := config.LoadShelvesReadOnly(dir.ShelvesPath())
-		if shelfErr != nil {
-			return workerIn, runnerIn, false, false, shelfErr
-		}
-		useWorker = len(shelves) > 0
-	}
-	return workerIn, runnerIn, useWorker, useRunner, nil
-}
-
-func aggregateCurrentIsWorker() bool {
-	for _, name := range []string{"AMUX_WORKSPACE", "AMUX_SESSION", "AMUX_WINDOW", "AMUX_THREAD_ID", "AMUX_WORKDIR"} {
-		if os.Getenv(name) != "" {
-			return true
-		}
-	}
-	return false
-}
-
-func mergeEnvelope(target *result.Envelope, source *result.Envelope) {
-	if source == nil {
-		return
-	}
-	target.Planned = append(target.Planned, source.Planned...)
-	target.Successful = append(target.Successful, source.Successful...)
-	target.Skipped = append(target.Skipped, source.Skipped...)
-	target.Failed = append(target.Failed, source.Failed...)
-}
-
 func (a app) executeWorkspaceList(in invocation, dir config.Directory) (*result.Envelope, error) {
 	env := result.NewEnvelope(strings.Join(in.Path, " "), in.Options.DryRun)
-	if in.Selectors.Mode != "" && in.Selectors.Mode != "worker" && in.Selectors.Mode != "runner" {
-		return &env, result.Request(errors.New("--mode must be worker or runner"))
+	rows, err := config.LoadRunnersReadOnly(dir.RunnersPath())
+	if err != nil {
+		return &env, result.Preflight(err)
 	}
-	workspaces := map[string]bool{}
-	if in.Selectors.Mode != "runner" {
-		workers, err := config.LoadReadOnly(dir.WorkersPath())
-		if err != nil {
-			return &env, result.Preflight(err)
-		}
-		for _, row := range workers {
-			workspaces[row.Workspace] = true
-		}
-	}
-	if in.Selectors.Mode != "worker" {
-		runners, err := config.LoadRunnersReadOnly(dir.RunnersPath())
-		if err != nil {
-			return &env, result.Preflight(err)
-		}
-		for _, row := range runners {
-			workspaces[row.Workspace] = true
-		}
+	workspaces := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		workspaces[row.Workspace] = struct{}{}
 	}
 	names := make([]string, 0, len(workspaces))
 	for name := range workspaces {
@@ -309,9 +65,13 @@ func (a app) executeWorkspaceList(in invocation, dir config.Directory) (*result.
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		env.Successful = append(env.Successful, result.Outcome{Resource: result.WorkspaceResource(name), Action: "list"})
+		env.Successful = append(env.Successful, result.Outcome{
+			Resource: result.WorkspaceResource(name),
+			Action:   "list",
+			Message:  "runner",
+		})
 		if !in.Options.JSON {
-			fmt.Fprintln(a.stdout, name)
+			fmt.Fprintf(a.stdout, "%s\trunner\n", name)
 		}
 	}
 	return &env, nil

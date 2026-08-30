@@ -508,7 +508,7 @@ func TestCanonicalWindowRequiresAnExactIntegerDuration(t *testing.T) {
 		fmt.Sprintf(`{"capacity":{"status":"supported","provider":"claude","source":"web","source_version":1,"schema_version":1,"confidence":"reported","windows":[{"name":"primary","used_percent":99,"window_minutes":300.0,"resets_at":%q}]},"reserve_floors":{"five_hour":20,"weekly":20,"model_specific":{}},"acknowledged_unknown_capacity":false}`, futureCapacityReset(300)),
 		fmt.Sprintf(`{"capacity":{"status":"supported","provider":"claude","source":"web","source_version":1,"schema_version":1,"confidence":"reported","windows":[{"name":"secondary","used_percent":99,"window_minutes":10080.0,"resets_at":%q}]},"reserve_floors":{"five_hour":20,"weekly":20,"model_specific":{}},"acknowledged_unknown_capacity":false}`, futureCapacityReset(10080)),
 	} {
-		command := exec.Command("python3", helper, "--state-dir", t.TempDir(), "capacity", "decide-mutating")
+		command := legacyClaudeTestCommand(helper, "--state-dir", t.TempDir(), "capacity", "decide-mutating")
 		command.Stdin = strings.NewReader(input)
 		output, err := command.CombinedOutput()
 		if err == nil || !strings.Contains(string(output), "conflicts with its declared class") {
@@ -608,7 +608,7 @@ func TestMutatingCapacityRejectsDuplicatedAndNonFiniteJSON(t *testing.T) {
 		`{"capacity":{"status":"supported","provider":"claude","source":"web","source_version":1,"schema_version":1,"confidence":"reported","windows":[{"name":"primary","used_percent":NaN,"window_minutes":300,"resets_at":"2026-07-19T20:00:00Z"},{"name":"secondary","used_percent":10,"window_minutes":10080,"resets_at":"2026-07-26T00:00:00Z"}]},"reserve_floors":{"five_hour":20,"weekly":20,"model_specific":{}},"acknowledged_unknown_capacity":false}`,
 	}
 	for _, input := range inputs {
-		command := exec.Command("python3", helper, "--state-dir", t.TempDir(), "capacity", "decide-mutating")
+		command := legacyClaudeTestCommand(helper, "--state-dir", t.TempDir(), "capacity", "decide-mutating")
 		command.Stdin = strings.NewReader(input)
 		output, err := command.CombinedOutput()
 		if err == nil || strings.Contains(string(output), `"decision":"autonomous_allowed"`) {
@@ -1097,7 +1097,7 @@ func TestMutatingReceiptRejectsThinkerReportWithoutFreezingOrDelivery(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command("python3", helper, "--state-dir", stateDir, "--isolated-test-state", "mcp", "serve", "--delegation-id", "mutation-kind")
+	command := legacyClaudeTestCommand(helper, "--state-dir", stateDir, "--isolated-test-state", "mcp", "serve", "--delegation-id", "mutation-kind")
 	command.Env = append(os.Environ(), "AMUX_CLAUDE_DELEGATION_TESTING=1")
 	command.Stdin = &input
 	output, err := command.CombinedOutput()

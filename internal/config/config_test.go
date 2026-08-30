@@ -386,7 +386,7 @@ func TestRemoveKeepsOtherRows(t *testing.T) {
 	}
 }
 
-func TestMigrationIsExplicitIdempotentAndPreservesLegacyFiles(t *testing.T) {
+func TestMigrationIgnoresLegacyWorkerFiles(t *testing.T) {
 	path := t.TempDir()
 	dir := Directory{Path: path}
 	legacyPath := filepath.Join(path, "workspaces.tsv")
@@ -399,7 +399,7 @@ func TestMigrationIsExplicitIdempotentAndPreservesLegacyFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := len(plan.Actions), 3; got != want {
+	if got, want := len(plan.Actions), 0; got != want {
 		t.Fatalf("migration actions = %d, want %d", got, want)
 	}
 	for _, target := range []string{dir.WorkersPath(), dir.RunnersPath(), dir.ShelvesPath()} {
@@ -412,17 +412,8 @@ func TestMigrationIsExplicitIdempotentAndPreservesLegacyFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, result := range results {
-		if result.Status != MigrationSuccessful {
-			t.Fatalf("migration result for %s = %s, want %s", result.Registry, result.Status, MigrationSuccessful)
-		}
-	}
-	workers, err := os.ReadFile(dir.WorkersPath())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := string(workers), "# amux-schema: workers/v1\nmac\tworker\t/tmp/project\tT-worker\n"; got != want {
-		t.Fatalf("workers migration = %q, want %q", got, want)
+	if len(results) != 0 {
+		t.Fatalf("migration results = %#v, want none", results)
 	}
 	legacyAfter, err := os.ReadFile(legacyPath)
 	if err != nil {
@@ -576,7 +567,7 @@ func TestRunnerWindowUsesCanonicalPathHashToAvoidBasenameCollisions(t *testing.T
 	}
 }
 
-func TestMigrationRejectsDuplicateCanonicalIdentityBeforeWriting(t *testing.T) {
+func TestMigrationDoesNotParseLegacyWorkerIdentity(t *testing.T) {
 	path := t.TempDir()
 	dir := Directory{Path: path}
 	legacy := "one\tfirst\t/tmp/one\tT-same\ntwo\tsecond\t/tmp/two\thttps://ampcode.com/threads/T-same\n"
@@ -584,9 +575,12 @@ func TestMigrationRejectsDuplicateCanonicalIdentityBeforeWriting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := PlanMigration(dir)
-	if err == nil || !strings.Contains(err.Error(), "worker thread T-same is already configured") {
-		t.Fatalf("PlanMigration duplicate identity error = %v", err)
+	plan, err := PlanMigration(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Actions) != 0 {
+		t.Fatalf("PlanMigration actions = %#v, want none", plan.Actions)
 	}
 	for _, target := range []string{dir.WorkersPath(), dir.RunnersPath(), dir.ShelvesPath()} {
 		if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {

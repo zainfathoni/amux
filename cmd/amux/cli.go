@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -87,28 +88,20 @@ type invocation struct {
 
 var rootCommand = &commandSpec{
 	Name:    "amux",
-	Summary: "Manage local Amp workers and runners",
+	Summary: "Manage machine-local Amp runners",
 	Usage:   "amux [global flags] <command> [flags]",
 	Children: []*commandSpec{
-		lifecycleCommand("list", "List configured workers and runners", false, "--workspace, -w <name>", "--thread, -t <id>", "--workdir, -d <path>", "--current", "--all"),
-		lifecycleCommand("launch", "Launch configured workers and runners", true, "--workspace, -w <name>", "--thread, -t <id>", "--workdir, -d <path>", "--current", "--all"),
-		lifecycleCommand("park", "Park running workers and runners", true, "--workspace, -w <name>", "--thread, -t <id>", "--workdir, -d <path>", "--current", "--all"),
-		lifecycleCommand("restart", "Restart running workers and runners", true, "--workspace, -w <name>", "--thread, -t <id>", "--workdir, -d <path>", "--current", "--all"),
-		lifecycleCommand("remove", "Remove worker configuration; configured runner deletion fails closed", true, "--workspace, -w <name>", "--thread, -t <id>", "--workdir, -d <path>", "--current", "--all"),
-		lifecycleCommand("doctor", "Diagnose worker and runner state", false, "--workspace, -w <name>", "--thread, -t <id>", "--workdir, -d <path>", "--current", "--all"),
-		lifecycleCommand("reconcile", "Repair worker drift; retain missing configured runner rows", true, "--workspace, -w <name>", "--thread, -t <id>", "--workdir, -d <path>", "--current", "--all"),
-		workerCommand(),
+		lifecycleCommand("list", "List configured runners", false, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
+		lifecycleCommand("launch", "Launch configured runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
+		lifecycleCommand("park", "Park running runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
+		lifecycleCommand("restart", "Restart running runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
+		lifecycleCommand("remove", "Retain configured runners and fail closed", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
+		lifecycleCommand("doctor", "Diagnose runner state", false, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
+		lifecycleCommand("reconcile", "Keep present runner rows; retain missing rows and fail closed", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
 		runnerCommand(),
 		workspaceCommand(),
-		groupCommand(),
-		callbackCommand(),
-		reportCommand(),
 		installCommand(),
-		lifecycleCommand("workspaces", "Exact alias for workspace list", false, "--mode, -m <worker|runner>"),
-		workerSpawnCommand("amux spawn"),
-		lifecycleCommand("shelve", "Shelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
-		lifecycleCommand("unshelve", "Unshelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
-		lifecycleCommand("teardown", "Teardown workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
+		lifecycleCommand("workspaces", "Exact alias for workspace list", false),
 		{Name: "migrate-config", Summary: "Explicitly migrate legacy configuration", Usage: "amux migrate-config", NeedsConfig: true, Mutating: true, FoundationOnly: true},
 		{Name: "completion", Summary: "Print shell completion", Usage: "amux completion <bash|zsh|fish>", FoundationOnly: true},
 		{Name: "update", Summary: "Update the amux executable", Usage: "amux update", Mutating: true, FoundationOnly: true},
@@ -118,17 +111,25 @@ var rootCommand = &commandSpec{
 }
 
 var removedCommands = map[string]string{
-	"store":          "use `amux worker pin`",
-	"store-current":  "use `amux worker pin --current`",
-	"pin":            "pin requires a resource namespace; use `amux worker pin` or `amux runner pin`",
-	"pin-current":    "use `amux worker pin --current`",
-	"unpin":          "unpin requires a resource namespace; use `amux worker unpin` or `amux runner unpin`",
-	"unpin-current":  "use `amux worker unpin --current`",
-	"remove-current": "use `amux worker remove --current`",
-	"park-current":   "use `amux worker park --current`",
-	"shelve-current": "use `amux shelve --current`",
-	"shelved":        "use `amux worker list` with the shelved intent filter",
-	"prune-archived": "use explicit worker reconciliation",
+	"worker":         "Amux worker lifecycle was removed; use native Amp threads for task coordination",
+	"spawn":          "Amux spawn was removed; use native Amp thread creation",
+	"group":          "Amux work groups were removed; use native Amp parent/reply routing",
+	"report":         "Amux worker reports were removed; /amux-tycho uses its separate receipt bridge",
+	"callback":       "Amux callback leases were removed; use native Amp replies or inspect the owning native thread",
+	"shelve":         "Amux worker shelves were removed; use native Amp archive state",
+	"unshelve":       "Amux worker shelves were removed; use native Amp archive state",
+	"teardown":       "Amux worker teardown was removed; manage native Amp thread state directly",
+	"store":          "Amux worker lifecycle was removed; use `amux runner pin` only for machine-local runners",
+	"store-current":  "Amux worker lifecycle was removed; use `amux runner pin --current` for a runner",
+	"pin":            "pin requires the retained runner namespace; use `amux runner pin`",
+	"pin-current":    "use `amux runner pin --current`",
+	"unpin":          "unpin requires the retained runner namespace; use `amux runner unpin`",
+	"unpin-current":  "use `amux runner unpin --current`",
+	"remove-current": "use `amux runner remove --current`",
+	"park-current":   "use `amux runner park --current`",
+	"shelve-current": "Amux worker shelves were removed; use native Amp archive state",
+	"shelved":        "Amux worker shelves were removed; use native Amp archive state",
+	"prune-archived": "Amux worker lifecycle was removed; use native Amp archive state",
 	"self-update":    "use `amux update`",
 }
 
@@ -141,51 +142,6 @@ func lifecycleCommand(name, summary string, mutating bool, flags ...string) *com
 		NeedsConfig: true,
 		Mutating:    mutating,
 	}
-}
-
-func workerCommand() *commandSpec {
-	worker := &commandSpec{Name: "worker", Summary: "Manage interactive thread-bound clients", Usage: "amux worker <command>"}
-	worker.Children = []*commandSpec{
-		workerLeaf("list", "List configured workers", false, "--workspace, -w <name>", "--thread, -t <id>", "--shelf <shelved|unshelved>", "--current", "--all"),
-		workerLeaf("pin", "Pin a worker without launching it", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--thread, -t <id>", "--current"),
-		workerLeaf("unpin", "Unpin a worker without stopping it", true, "--thread, -t <id>", "--current"),
-		workerLeaf("launch", "Launch workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
-		workerLeaf("park", "Park workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
-		workerLeaf("restart", "Restart workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
-		workerLeaf("remove", "Remove workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
-		workerLeaf("adopt", "Continue an exact persisted pre-cutover drain-eligible adoption operation", true, "--workspace, -w <name>", "--window, -W <name>", "--workdir, -d <path>", "--thread, -t <id>", "--group <id>  Exact persisted pre-cutover member intent only"),
-		workerSpawnCommand("amux worker spawn"),
-		workerCutoverCommand(),
-		workerLeaf("shelve", "Shelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
-		workerLeaf("unshelve", "Unshelve workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
-		workerLeaf("teardown", "Teardown workers", true, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
-		workerLeaf("doctor", "Diagnose workers", false, "--workspace, -w <name>", "--thread, -t <id>", "--current", "--all"),
-		workerLeaf("reconcile", "Reconcile workers", true, "--workspace, -w <name>", "--workdir, -d <path>", "--thread, -t <id>", "--current", "--all"),
-	}
-	return worker
-}
-
-func workerCutoverCommand() *commandSpec {
-	return &commandSpec{Name: "cutover", Summary: "Publish or inspect the immutable worker-family cutover", Usage: "amux worker cutover <command>", Children: []*commandSpec{
-		{Name: "publish", Summary: "Publish the one-shot manifest and workers/v2 downgrade fence", Usage: "amux worker cutover publish --generation <label>", Flags: []string{"--generation <label>"}, NeedsConfig: true, Mutating: true},
-		{Name: "status", Summary: "Inspect worker cutover integrity and classifications", Usage: "amux worker cutover status", NeedsConfig: true},
-		{Name: "export", Summary: "Export deterministic worker cutover classifications", Usage: "amux worker cutover export", NeedsConfig: true},
-	}}
-}
-
-func workerLeaf(name, summary string, mutating bool, flags ...string) *commandSpec {
-	return &commandSpec{Name: name, Summary: summary, Usage: "amux worker " + name + " [selectors]", Flags: flags, NeedsConfig: true, Mutating: mutating}
-}
-
-func workerSpawnCommand(usage string) *commandSpec {
-	return workerLeaf("spawn", "Drain an existing assignment or run the bounded projectless host exception", true,
-		"--workdir, -d <canonical-path>", "--workspace, -w <name>",
-		"--window, -W <name>", "--group <existing-id>", "--mode, -m <mode> (default medium)",
-		"--prompt-file <path|->", "--assignment-phase <prepare|arm|finalize>",
-		"--assignment-outcome <rejected|indeterminate|authenticated_accepted>",
-		"--native-capability <existing-thread-message-v1>", "--latest-cursor <opaque-value>",
-		"--physical-host <exact-local-host>", "--owner-authorized-projectless-physical-host",
-		"--thread, -t <exact-id>")
 }
 
 func runnerCommand() *commandSpec {
@@ -223,56 +179,9 @@ func workspaceCommand() *commandSpec {
 		Summary: "Inspect configured workspaces",
 		Usage:   "amux workspace <command>",
 		Children: []*commandSpec{
-			{Name: "list", Summary: "List worker and runner workspaces", Usage: "amux workspace list", Flags: []string{"--mode, -m <worker|runner>"}, NeedsConfig: true},
+			{Name: "list", Summary: "List runner workspaces", Usage: "amux workspace list", NeedsConfig: true},
 		},
 	}
-}
-
-func groupCommand() *commandSpec {
-	group := &commandSpec{Name: "group", Summary: "Manage durable Amp thread groups", Usage: "amux group <command>"}
-	group.Children = []*commandSpec{
-		groupLeaf("declare", "Declare a group with its coordinator", true, "--group <id>", "--thread, -t <id>"),
-		groupLeaf("add", "Add explicit local membership and ensure its Amp label", true, "--group <id>", "--thread, -t <id>"),
-		groupLeaf("remove", "Remove local membership without removing its Amp label", true, "--group <id>", "--thread, -t <id>"),
-		groupLeaf("coordinator", "Designate a group's coordinator", true, "--group <id>", "--thread, -t <id>"),
-		groupLeaf("list", "List durable group memberships locally", false, "--group <id>", "--thread, -t <id>", "--all"),
-		groupLeaf("show", "Show one durable group locally", false, "--group <id>"),
-		groupLeaf("reconcile", "Add-only ensure member labels; skip coordinators", true, "--group <id>", "--thread, -t <id>", "--all"),
-	}
-	return group
-}
-
-func groupLeaf(name, summary string, mutating bool, flags ...string) *commandSpec {
-	return &commandSpec{Name: name, Summary: summary, Usage: "amux group " + name + " [selectors]", Flags: flags, NeedsConfig: true, Mutating: mutating}
-}
-
-func reportCommand() *commandSpec {
-	report := &commandSpec{Name: "report", Summary: "Manage durable worker reports and finish authorization", Usage: "amux report <command>"}
-	report.Children = []*commandSpec{
-		reportLeaf("submit", "Submit or progress a durable worker report", true, "--report-id <id>", "--group <id>", "--thread, -t <id>", "--status <ready|blocked|merged>", "--issue <value>", "--reference <value>", "--pr <url>", "--summary <text>"),
-		reportLeaf("pending", "List unacknowledged reports locally", false, "--group <id>", "--thread, -t <id>", "--all"),
-		reportLeaf("history", "Show durable history for one report", false, "--report-id <id>"),
-		reportLeaf("acknowledge", "Acknowledge a report without authorizing finish", true, "--report-id <id>"),
-		reportLeaf("authorize-finish", "Explicitly authorize finish for a ready report", true, "--report-id <id>", "--thread, -t <coordinator-id>", "--reference <value>"),
-	}
-	return report
-}
-
-func callbackCommand() *commandSpec {
-	callback := &commandSpec{Name: "callback", Summary: "Manage ephemeral coordinator callback leases", Usage: "amux callback <command>"}
-	callback.Children = []*commandSpec{
-		callbackLeaf("register", "Register the exact live coordinator pane", true, "--group <id>", "--thread, -t <id>", "--pane <id>"),
-		callbackLeaf("clear", "Invalidate the current coordinator callback lease", true, "--group <id>"),
-	}
-	return callback
-}
-
-func callbackLeaf(name, summary string, mutating bool, flags ...string) *commandSpec {
-	return &commandSpec{Name: name, Summary: summary, Usage: "amux callback " + name + " [selectors]", Flags: flags, NeedsConfig: true, Mutating: mutating}
-}
-
-func reportLeaf(name, summary string, mutating bool, flags ...string) *commandSpec {
-	return &commandSpec{Name: name, Summary: summary, Usage: "amux report " + name + " [selectors]", Flags: flags, NeedsConfig: true, Mutating: mutating}
 }
 
 func installCommand() *commandSpec {
@@ -358,7 +267,7 @@ func parseInvocation(args []string) (invocation, error) {
 			parsed.Path = []string{"amux"}
 			return parsed, nil
 		}
-		words = []string{"worker", "launch"}
+		words = []string{"launch", "--all"}
 	}
 
 	if words[0] == "help" {
@@ -414,11 +323,8 @@ func parseInvocation(args []string) (invocation, error) {
 	if !spec.FoundationOnly && len(parsed.Args) != 0 {
 		return parsed, fmt.Errorf("positional selectors were removed from %s; use named selectors shown by `amux help %s`", strings.Join(path, " "), strings.Join(path, " "))
 	}
-	if !spec.FoundationOnly && spec.Mutating && spec.Name != "launch" && !isMaintenancePath(path) && !isWorkerCutoverPath(path) && !hasResourceScope(parsed.Selectors) {
+	if !spec.FoundationOnly && spec.Mutating && spec.Name != "launch" && !isMaintenancePath(path) && !hasResourceScope(parsed.Selectors) {
 		return parsed, fmt.Errorf("%s requires a resource scope; use an explicit selector or --all", strings.Join(path, " "))
-	}
-	if isAggregateLifecycle(path) && parsed.Selectors.Thread != "" && parsed.Selectors.Workdir != "" {
-		return parsed, errors.New("--thread and --workdir select different resource kinds and cannot be combined")
 	}
 	if opts.AttachMode == attachAlways {
 		if strings.Join(path, " ") != "launch" || parsed.Selectors.Workspace == "" {
@@ -580,6 +486,10 @@ func commandOptionRequiresValue(arg string) bool {
 func resolveCommand(words []string) (*commandSpec, []string, []string, error) {
 	if len(words) == 0 {
 		return rootCommand, []string{"amux"}, nil, nil
+	}
+	if words[0] == "__sweep-validate-reports" {
+		command := &commandSpec{Name: "__sweep-validate-reports", NeedsConfig: true, FoundationOnly: true}
+		return command, []string{command.Name}, words[1:], nil
 	}
 	root := commandChild(rootCommand, words[0])
 	if root == nil {
@@ -1032,22 +942,6 @@ func selectorsEmpty(parsed selectors) bool {
 	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && parsed.WorkItemID == "" && parsed.WorkerOrdinal == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && parsed.PromptFile == "" && parsed.AssignmentPhase == "" && parsed.AssignmentOutcome == "" && parsed.NativeCapability == "" && parsed.LatestCursor == "" && parsed.PhysicalHost == "" && parsed.Generation == "" && !parsed.OwnerAuthorizedProjectlessPhysicalHost && !parsed.Reconcile
 }
 
-func isGroupPath(path []string) bool {
-	return len(path) == 2 && path[0] == "group"
-}
-
-func isReportPath(path []string) bool {
-	return len(path) == 2 && path[0] == "report"
-}
-
-func isCallbackPath(path []string) bool {
-	return len(path) == 2 && path[0] == "callback"
-}
-
-func isWorkerCutoverPath(path []string) bool {
-	return len(path) == 3 && path[0] == "worker" && path[1] == "cutover"
-}
-
 func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 	if parsed.Options.Help {
 		if parsed.Options.JSON {
@@ -1069,7 +963,7 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 		}
 	}
 
-	if parsed.Command.NeedsConfig && parsed.Command.Name != "migrate-config" && parsed.Command.Name != "path" {
+	if parsed.Command.NeedsConfig && parsed.Command.Name != "migrate-config" && parsed.Command.Name != "path" && parsed.Command.Name != "__sweep-validate-reports" {
 		required, err := config.MigrationRequired(dir)
 		if err != nil {
 			return nil, result.Preflight(err)
@@ -1093,33 +987,20 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 		return a.executeMaintenance(parsed, dir)
 	}
 
-	if !parsed.Command.FoundationOnly && !isAggregateLifecycle(parsed.Path) && !isWorkspaceList(parsed.Path) && !isGroupPath(parsed.Path) && !isReportPath(parsed.Path) && !isCallbackPath(parsed.Path) && !isWorkerCutoverPath(parsed.Path) && (len(parsed.Path) != 2 || parsed.Path[0] != "worker" && parsed.Path[0] != "runner") && !isWorkerConvenience(parsed.Path) {
+	if !parsed.Command.FoundationOnly && !isAggregateLifecycle(parsed.Path) && !isWorkspaceList(parsed.Path) && (len(parsed.Path) != 2 || parsed.Path[0] != "runner") {
 		return nil, result.Preflight(fmt.Errorf("%s is reserved for its lifecycle implementation phase and is not available in the CLI foundations", strings.Join(parsed.Path, " ")))
 	}
 
 	var held *lock.Lock
-	if parsed.Command.Mutating && parsed.Command.Name != "spawn" {
+	if parsed.Command.Mutating {
 		held, err = acquireMutationLock(parsed.Path)
 		if err != nil {
 			return nil, result.Preflight(err)
 		}
 		defer held.Release()
 	}
-	if isGroupPath(parsed.Path) {
-		return a.executeGroup(parsed, dir)
-	}
-	if isReportPath(parsed.Path) {
-		return a.executeReport(parsed, dir)
-	}
-	if isCallbackPath(parsed.Path) {
-		return a.executeCallback(parsed, dir)
-	}
-	if isWorkerCutoverPath(parsed.Path) {
-		return a.executeWorkerCutover(parsed, dir)
-	}
-
 	switch parsed.Command.Name {
-	case "list", "pin", "unpin", "launch", "park", "restart", "remove", "adopt", "spawn", "shelve", "unshelve", "teardown", "doctor", "reconcile":
+	case "list", "pin", "unpin", "launch", "park", "restart", "remove", "doctor", "reconcile":
 		if strings.Join(parsed.Path, " ") == "install doctor" {
 			if len(parsed.Args) != 0 || !selectorsEmpty(parsed.Selectors) {
 				return nil, result.Request(errors.New("usage: amux install doctor"))
@@ -1136,7 +1017,7 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 			if len(parsed.Path) == 2 && parsed.Path[0] == "runner" {
 				return a.executeRunner(parsed, dir)
 			}
-			return a.executeWorker(parsed, dir)
+			return nil, result.Preflight(fmt.Errorf("unsupported runner command %s", strings.Join(parsed.Path, " ")))
 		}
 		return nil, result.Preflight(fmt.Errorf("%s is reserved for its lifecycle implementation phase", strings.Join(parsed.Path, " ")))
 	case "workspaces":
@@ -1151,6 +1032,21 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 			return nil, result.Request(errors.New("usage: amux path"))
 		}
 		fmt.Fprintln(a.stdout, dir.Path)
+		return nil, nil
+	case "__sweep-validate-reports":
+		if len(parsed.Args) != 1 || !selectorsEmpty(parsed.Selectors) {
+			return nil, result.Request(errors.New("invalid sweep validator invocation"))
+		}
+		data, err := os.ReadFile(filepath.Join(dir.Path, "reports.json"))
+		if err != nil {
+			return nil, result.Preflight(err)
+		}
+		if fmt.Sprintf("%x", sha256.Sum256(data)) != parsed.Args[0] {
+			return nil, result.Preflight(errors.New("reports.json changed after sweep snapshot"))
+		}
+		if err := config.ValidateReportsStoreBytes(data); err != nil {
+			return nil, result.Preflight(err)
+		}
 		return nil, nil
 	case "version":
 		if len(parsed.Args) != 0 || !selectorsEmpty(parsed.Selectors) {

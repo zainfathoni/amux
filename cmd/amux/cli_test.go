@@ -2,121 +2,34 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/zainfathoni/amux/internal/lock"
 	"github.com/zainfathoni/amux/internal/result"
 )
 
-func TestExecuteUsesConfigDirectoryFlagAndDoesNotCreateItForPath(t *testing.T) {
-	home := t.TempDir()
-	fromEnv := filepath.Join(home, "from-env")
-	fromFlag := filepath.Join(home, "from-flag")
-	t.Setenv("HOME", home)
-	t.Setenv("AMUX_CONFIG_DIR", fromEnv)
-
-	var stdout bytes.Buffer
-	err := (app{stdout: &stdout}).execute([]string{"--config-dir", fromFlag, "path"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := stdout.String(), fromFlag+"\n"; got != want {
-		t.Fatalf("path output = %q, want %q", got, want)
-	}
-	for _, path := range []string{fromEnv, fromFlag} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("read-only path command created %s: %v", path, err)
-		}
-	}
-}
-
-func TestExecuteRejectsLegacyFileSelectionWithRemediation(t *testing.T) {
-	t.Setenv("AMUX_CONFIG_DIR", "")
-	t.Setenv("AMUX_WORKSPACES", "/tmp/legacy.tsv")
-	err := (app{}).execute([]string{"path"})
-	if err == nil || !strings.Contains(err.Error(), "AMUX_CONFIG_DIR") || result.ExitCode(err) != result.ExitRejected {
-		t.Fatalf("legacy environment error = %v, exit=%d", err, result.ExitCode(err))
-	}
-
-	err = (app{}).execute([]string{"--config", "/tmp/legacy.tsv", "path"})
-	if err == nil || !strings.Contains(err.Error(), "--config-dir") || result.ExitCode(err) != result.ExitRejected {
-		t.Fatalf("legacy flag error = %v, exit=%d", err, result.ExitCode(err))
-	}
-}
-
-func TestExecuteProvidesContextualHelpAndStableSelectorFlags(t *testing.T) {
-	var stdout bytes.Buffer
-	if err := (app{stdout: &stdout}).execute([]string{"help", "worker", "pin"}); err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{
-		"Usage: amux worker pin",
-		"--workspace, -w",
-		"--window, -W",
-		"--workdir, -d",
-		"--thread, -t",
-		"--current",
-	} {
-		if !strings.Contains(stdout.String(), want) {
-			t.Fatalf("worker pin help missing %q\n%s", want, stdout.String())
-		}
-	}
-
-	stdout.Reset()
-	if err := (app{stdout: &stdout}).execute([]string{"runner", "--help"}); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(stdout.String(), "Usage: amux runner <command>") || !strings.Contains(stdout.String(), "pin") {
-		t.Fatalf("runner help is not contextual:\n%s", stdout.String())
-	}
-}
-
-func TestWorkerAdoptHelpAndCompletionArePreCutoverDrainOnly(t *testing.T) {
-	const summary = "Continue an exact persisted pre-cutover drain-eligible adoption operation"
-	var stdout bytes.Buffer
-	if err := (app{stdout: &stdout}).execute([]string{"help", "worker", "adopt"}); err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{summary, "Exact persisted pre-cutover member intent only"} {
-		if !strings.Contains(stdout.String(), want) {
-			t.Errorf("worker adopt help is missing %q:\n%s", want, stdout.String())
-		}
-	}
-
-	for _, shell := range []string{"zsh", "fish"} {
-		t.Run(shell, func(t *testing.T) {
-			stdout.Reset()
-			if err := (app{stdout: &stdout}).execute([]string{"completion", shell}); err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(stdout.String(), summary) {
-				t.Errorf("%s completion is missing pre-cutover drain-only adopt description", shell)
-			}
-			for _, forbidden := range []string{"Adopt a native-created thread", "exact native-created thread id"} {
-				if strings.Contains(stdout.String(), forbidden) {
-					t.Errorf("%s completion advertises native-to-Amux adoption with %q", shell, forbidden)
-				}
-			}
-		})
-	}
-}
-
-func TestCompletionRootSurfaceMatchesAuthoritativeHelp(t *testing.T) {
+func TestHelpAndCompletionsExposeOnlyRetainedHostCommands(t *testing.T) {
+	removed := []string{"worker", "spawn", "group", "report", "callback", "shelve", "unshelve", "teardown"}
 	var help bytes.Buffer
 	if err := (app{stdout: &help}).execute([]string{"help"}); err != nil {
 		t.Fatal(err)
 	}
-	commands, flags := rootHelpSurface(help.String())
-	if len(commands) == 0 || len(flags) == 0 {
-		t.Fatalf("failed to read root help surface:\n%s", help.String())
+	for _, retained := range []string{"runner", "workspace", "install", "launch", "park", "restart", "doctor", "reconcile", "migrate-config", "completion", "update"} {
+		if !strings.Contains(help.String(), "  "+retained) {
+			t.Errorf("root help is missing retained command %q:\n%s", retained, help.String())
+		}
+	}
+	for _, command := range removed {
+		if strings.Contains(help.String(), "  "+command+" ") {
+			t.Errorf("root help advertises removed command %q:\n%s", command, help.String())
+		}
 	}
 
 	for _, shell := range []string{"bash", "zsh", "fish"} {
@@ -126,576 +39,288 @@ func TestCompletionRootSurfaceMatchesAuthoritativeHelp(t *testing.T) {
 				t.Fatal(err)
 			}
 			output := completion.String()
-			bashWords := map[string]bool{}
-			zshCommands := map[string]bool{}
-			if shell == "bash" {
-				bashWords = bashRootCompletionWords(output)
-			} else if shell == "zsh" {
-				zshCommands = zshRootCompletionCommands(output)
-			}
-			for _, command := range commands {
-				found := false
-				switch shell {
-				case "zsh":
-					found = zshCommands[command]
-				case "fish":
-					found = completionLineContains(output, "__fish_use_subcommand", "-a '"+command+"'")
-				default:
-					found = bashWords[command]
-				}
-				if !found {
-					t.Errorf("%s root completion is missing help command %q", shell, command)
+			for _, command := range removed {
+				if completionHasCommand(output, command) {
+					t.Errorf("%s completion advertises removed command %q", shell, command)
 				}
 			}
-			for _, flag := range flags {
-				found := false
-				if shell == "fish" {
-					if strings.HasPrefix(flag, "--") {
-						found = completionLineContains(output, "__fish_use_subcommand", "-l '"+strings.TrimPrefix(flag, "--")+"'")
-					} else {
-						found = completionLineContains(output, "__fish_use_subcommand", "-s '"+strings.TrimPrefix(flag, "-")+"'")
-					}
-				} else if shell == "bash" {
-					found = bashWords[flag]
-				} else {
-					found = strings.Contains(output, "  '"+flag+"[")
+			for _, retained := range []string{"runner", "workspace", "launch", "doctor"} {
+				if !completionHasCommand(output, retained) {
+					t.Errorf("%s completion is missing retained command %q", shell, retained)
 				}
-				if !found {
-					t.Errorf("%s root completion is missing help global flag %q", shell, flag)
+			}
+			for _, retained := range []string{"maintenance", "install", "remove", "run"} {
+				if !strings.Contains(output, retained) {
+					t.Errorf("%s completion is missing functional retained token %q", shell, retained)
+				}
+			}
+			switch shell {
+			case "bash":
+				if !strings.Contains(output, "for ((i=1; i<COMP_CWORD; i++))") || !strings.Contains(output, `"$leaf" == maintenance`) || !strings.Contains(output, "--config-dir") || !strings.Contains(output, "--update-owner") {
+					t.Error("bash completion does not parse global flags and nested runner maintenance commands")
+				}
+			case "zsh":
+				if !strings.Contains(output, "for ((i=2; i<CURRENT; i++))") || !strings.Contains(output, "if [[ $word == --config-dir") || !strings.Contains(output, "case $command in") || !strings.Contains(output, "runner_commands") || !strings.Contains(output, "maintenance_commands") || !strings.Contains(output, "--update-owner") {
+					t.Error("zsh completion does not implement nested command and flag completion")
+				}
+			case "fish":
+				if !strings.Contains(output, "not __fish_seen_subcommand_from maintenance list pin unpin launch park restart remove doctor reconcile") || strings.Contains(output, "not __fish_seen_subcommand_from 'maintenance list") || !strings.Contains(output, "__fish_seen_subcommand_from maintenance") || !strings.Contains(output, "__fish_seen_subcommand_from list launch park restart remove doctor reconcile pin; and not __fish_seen_subcommand_from maintenance") || !strings.Contains(output, "-l workdir -s d -r") || !strings.Contains(output, "-l workspace -s w -r") || !strings.Contains(output, "-l config-dir -r") || !strings.Contains(output, "-l terminal-launcher -r") || !strings.Contains(output, "-l update-owner -r") {
+					t.Error("fish completion does not scope nested maintenance and runner flags")
 				}
 			}
 		})
 	}
 }
 
-func TestCompletionPreservesRunnerAndWorkspaceLeaves(t *testing.T) {
-	tests := map[string][]string{
-		"bash": {
-			`compgen -W "maintenance list pin unpin launch park restart remove doctor reconcile"`,
-			`pin) COMPREPLY=( $(compgen -W "--workspace --workdir --current -w -d"`,
-			`unpin) COMPREPLY=( $(compgen -W "--workdir --current -d"`,
-			`compgen -W "install remove run"`,
-			`compgen -W "--update-owner"`,
-			`compgen -W "--scheduled"`,
-			`compgen -W "--mode -m"`,
-		},
-		"zsh": {
-			"runner_commands=(", "runner_maintenance_commands=(", "workspace_commands=(",
-			`pin) _arguments '--workspace[workspace]:workspace:' '--workdir[working directory]:directory:_directories' '--current[current runner]'`,
-			`unpin) _arguments '--workdir[working directory]:directory:_directories' '--current[current runner]'`,
-			`_arguments '--update-owner[update owner]:owner:(self external)'`,
-			`_arguments '--scheduled[scheduled invocation]'`,
-			`'--mode[client mode]:mode:(worker runner)'`,
-		},
-		"fish": {
-			"test (__fish_amux_root_command) = runner; and test -z (__fish_amux_runner_leaf)' -a 'maintenance'",
-			"test (__fish_amux_runner_leaf) = pin' -r -l 'workdir'",
-			"test (__fish_amux_runner_leaf) = unpin' -r -l 'workdir'",
-			"test -z (__fish_amux_runner_maintenance_command)' -a 'install'",
-			"test (__fish_amux_runner_maintenance_command) = install' -r -l 'update-owner'",
-			"test (__fish_amux_runner_maintenance_command) = run' -f -l 'scheduled'",
-			"test (__fish_amux_root_command) = workspaces' -r -f -a 'worker runner' -l 'mode' -d 'Client mode'",
-			"test (__fish_amux_workspace_leaf) = list' -r -f -a 'worker runner' -l 'mode' -d 'Client mode'",
-		},
-	}
-
-	for shell, wants := range tests {
-		t.Run(shell, func(t *testing.T) {
-			var completion bytes.Buffer
-			if err := (app{stdout: &completion}).execute([]string{"completion", shell}); err != nil {
-				t.Fatal(err)
-			}
-			for _, want := range wants {
-				if !strings.Contains(completion.String(), want) {
-					t.Errorf("%s completion is missing runner/workspace contract %q", shell, want)
-				}
-			}
-		})
-	}
+func completionHasCommand(output, command string) bool {
+	return strings.Contains(output, " "+command+" ") ||
+		strings.Contains(output, `"`+command+`:`) ||
+		strings.Contains(output, "-a '"+command+"'")
 }
 
-func rootHelpSurface(help string) (commands, flags []string) {
-	section := ""
-	for _, line := range strings.Split(help, "\n") {
-		switch line {
-		case "Global flags:":
-			section = "flags"
-			continue
-		case "Commands:":
-			section = "commands"
-			continue
-		}
-		if !strings.HasPrefix(line, "  ") {
-			continue
-		}
-		fields := strings.Fields(line)
-		switch section {
-		case "commands":
-			commands = append(commands, fields[0])
-		case "flags":
-			for _, field := range fields {
-				flag := strings.TrimSuffix(field, ",")
-				if strings.HasPrefix(flag, "-") {
-					flags = append(flags, flag)
-					continue
-				}
-				break
-			}
-		}
-	}
-	return commands, flags
-}
-
-func bashRootCompletionWords(completion string) map[string]bool {
-	words := map[string]bool{}
-	for _, line := range strings.Split(completion, "\n") {
-		if !strings.Contains(line, "COMPREPLY") || !strings.Contains(line, "--config-dir") {
-			continue
-		}
-		start := strings.Index(line, `compgen -W "`)
-		if start == -1 {
-			continue
-		}
-		value := line[start+len(`compgen -W "`):]
-		end := strings.Index(value, `"`)
-		if end == -1 {
-			continue
-		}
-		for _, word := range strings.Fields(value[:end]) {
-			words[word] = true
-		}
-	}
-	return words
-}
-
-func zshRootCompletionCommands(completion string) map[string]bool {
-	commands := map[string]bool{}
-	inCommands := false
-	for _, line := range strings.Split(completion, "\n") {
-		switch line {
-		case "commands=(":
-			inCommands = true
-			continue
-		case ")":
-			if inCommands {
-				return commands
-			}
-		}
-		if !inCommands {
-			continue
-		}
-		entry := strings.Trim(strings.TrimSpace(line), `"`)
-		name, _, found := strings.Cut(entry, ":")
-		if found {
-			commands[name] = true
-		}
-	}
-	return commands
-}
-
-func completionLineContains(completion string, values ...string) bool {
-	for _, line := range strings.Split(completion, "\n") {
-		found := true
-		for _, value := range values {
-			found = found && strings.Contains(line, value)
-		}
-		if found {
-			return true
-		}
-	}
-	return false
-}
-
-func TestSpawnAliasesExposeTheSameLeanFlags(t *testing.T) {
-	for _, path := range [][]string{{"help", "spawn"}, {"help", "worker", "spawn"}} {
-		var stdout bytes.Buffer
-		if err := (app{stdout: &stdout}).execute(path); err != nil {
-			t.Fatalf("execute(%q): %v", path, err)
-		}
-		for _, required := range []string{"Drain an existing assignment", "--workdir", "--workspace", "--window", "--group", "--mode", "--prompt-file", "--physical-host", "--owner-authorized-projectless-physical-host"} {
-			if !strings.Contains(stdout.String(), required) {
-				t.Fatalf("help for %q lacks %q:\n%s", path, required, stdout.String())
-			}
-		}
-		for _, removed := range []string{"--runner-id", "--message", "--message-file", "--reconcile", "--idempotency-key", "--title-prefix"} {
-			if strings.Contains(stdout.String(), removed) {
-				t.Fatalf("help for %q retains removed flag %q:\n%s", path, removed, stdout.String())
-			}
-		}
-	}
-}
-
-func TestDirectSpawnHelpIsAvailableOnBothAliases(t *testing.T) {
-	for _, path := range [][]string{{"spawn", "--help"}, {"spawn", "-h"}, {"worker", "spawn", "--help"}, {"worker", "spawn", "-h"}} {
-		var stdout bytes.Buffer
-		if err := (app{stdout: &stdout}).execute(path); err != nil {
-			t.Fatalf("execute(%q): %v", path, err)
-		}
-		if !strings.Contains(stdout.String(), "--prompt-file") || !strings.Contains(stdout.String(), "--owner-authorized-projectless-physical-host") || strings.Contains(stdout.String(), "--runner-id") {
-			t.Fatalf("execute(%q) lacks spawn help: %q", path, stdout.String())
-		}
-	}
-}
-
-func TestParseSelectorsSupportsFixedShorthandsAndExplicitScopes(t *testing.T) {
-	selectors, remaining, err := parseSelectors([]string{
-		"-w", "workspace", "-W=window", "-d", "/tmp/project", "-t=T-worker", "-m", "high", "--title-prefix", "#119",
-	})
-	if err != nil {
+func TestBashCompletionReturnsNestedRunnerCandidates(t *testing.T) {
+	var completion bytes.Buffer
+	if err := (app{stdout: &completion}).execute([]string{"completion", "bash"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(remaining) != 0 {
-		t.Fatalf("remaining selectors = %q", remaining)
-	}
-	if selectors.Workspace != "workspace" || selectors.Window != "window" || selectors.Workdir != "/tmp/project" || selectors.Thread != "T-worker" || selectors.Mode != "high" || selectors.TitlePrefix != "#119" {
-		t.Fatalf("selectors = %+v", selectors)
-	}
-	current, _, err := parseSelectors([]string{"--current"})
-	if err != nil || !current.Current {
-		t.Fatalf("current selector = %+v, error = %v", current, err)
-	}
-
-	_, _, err = parseSelectors([]string{"--all", "--workspace", "workspace"})
-	if err == nil || !strings.Contains(err.Error(), "--all cannot be combined") {
-		t.Fatalf("conflicting --all error = %v", err)
-	}
-	_, _, err = parseSelectors([]string{"--current", "--thread", "T-worker"})
-	if err == nil || !strings.Contains(err.Error(), "--current cannot be combined") {
-		t.Fatalf("conflicting --current error = %v", err)
-	}
-}
-
-func TestParseInvocationConsumesGlobalFlagTokensAsOptionValues(t *testing.T) {
-	tests := []struct {
-		name       string
-		args       []string
-		wantJSON   bool
-		wantDryRun bool
-		want       func(selectors) string
-		wantValue  string
+	for _, test := range []struct {
+		name      string
+		words     string
+		index     int
+		candidate string
+		excluded  string
 	}{
-		{
-			name:      "selector value before true trailing global",
-			args:      []string{"worker", "list", "--workspace", "--dry-run", "--json"},
-			wantJSON:  true,
-			want:      func(got selectors) string { return got.Workspace },
-			wantValue: "--dry-run",
-		},
-		{
-			name:      "inline value before true trailing global",
-			args:      []string{"worker", "list", "--workspace=--dry-run", "--json"},
-			wantJSON:  true,
-			want:      func(got selectors) string { return got.Workspace },
-			wantValue: "--dry-run",
-		},
-	}
-
-	for _, test := range tests {
+		{name: "root", words: `amux ""`, index: 1, candidate: "runner"},
+		{name: "runner after global flag", words: `amux --json runner ""`, index: 3, candidate: "maintenance"},
+		{name: "runner after help flag", words: `amux --help runner ""`, index: 3, candidate: "maintenance"},
+		{name: "maintenance", words: `amux runner maintenance ""`, index: 3, candidate: "install"},
+		{name: "maintenance install flags", words: `amux runner maintenance install ""`, index: 4, candidate: "--update-owner"},
+		{name: "maintenance remove has no runner flags", words: `amux runner maintenance remove ""`, index: 4, excluded: "--all"},
+	} {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := parseInvocation(test.args)
+			script := completion.String() + fmt.Sprintf("\nCOMP_WORDS=(%s); COMP_CWORD=%d; _amux_complete; printf '%%s\\n' \"${COMPREPLY[@]}\"\n", test.words, test.index)
+			output, err := exec.Command("bash", "-c", script).CombinedOutput()
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("execute completion: %v\n%s", err, output)
 			}
-			if got.Options.JSON != test.wantJSON || got.Options.DryRun != test.wantDryRun {
-				t.Fatalf("global options = %+v, want JSON=%t DryRun=%t", got.Options, test.wantJSON, test.wantDryRun)
+			if test.candidate != "" && !strings.Contains("\n"+string(output)+"\n", "\n"+test.candidate+"\n") {
+				t.Fatalf("candidates do not contain %q: %s", test.candidate, output)
 			}
-			if value := test.want(got.Selectors); value != test.wantValue {
-				t.Fatalf("option value = %q, want %q", value, test.wantValue)
+			if test.excluded != "" && strings.Contains("\n"+string(output)+"\n", "\n"+test.excluded+"\n") {
+				t.Fatalf("candidates unexpectedly contain %q: %s", test.excluded, output)
 			}
 		})
 	}
 }
 
-func TestParseCLIOptionsPreservesGlobalTokensForEveryCommandOptionValue(t *testing.T) {
-	for _, option := range []string{
-		"--workspace", "-w", "--window", "-W", "--workdir", "-d", "--thread", "-t",
-		"--group", "--mode", "-m", "--title-prefix", "--shelf", "--idempotency-key",
-		"--report-id", "--pane", "--status", "--issue", "--reference", "--pr", "--summary",
-		"--message", "--message-file", "--update-owner",
+func TestZshCompletionReturnsNestedRunnerCandidates(t *testing.T) {
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh unavailable")
+	}
+	var completion bytes.Buffer
+	if err := (app{stdout: &completion}).execute([]string{"completion", "zsh"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name      string
+		words     string
+		current   int
+		candidate string
+		excluded  string
+	}{
+		{name: "runner after help flag", words: `amux --help runner ''`, current: 4, candidate: "maintenance"},
+		{name: "maintenance after valued global flag", words: `amux --config-dir /tmp runner maintenance ''`, current: 6, candidate: "install"},
+		{name: "maintenance install flags", words: `amux runner maintenance install ''`, current: 5, candidate: "--update-owner"},
+		{name: "maintenance remove has no runner flags", words: `amux runner maintenance remove ''`, current: 5, excluded: "--all"},
+		{name: "runner pin excludes all", words: `amux runner pin ''`, current: 4, excluded: "--all"},
 	} {
-		t.Run(option, func(t *testing.T) {
-			opts, words, err := parseCLIOptions([]string{option, "--json", "--dry-run"})
+		t.Run(test.name, func(t *testing.T) {
+			script := `
+function _arguments {
+  if [[ "$*" == *--update-owner* ]]; then
+    print -r -- --update-owner
+  elif [[ -n "$state" ]]; then
+    print -r -- "$*"
+  else
+    state=args
+  fi
+}
+function _describe {
+  local array_name=${argv[-1]}
+  print -l -- ${(P)array_name}
+}
+function _values { shift; print -l -- "$@" }
+function _amux_test {
+` + completion.String() + "\n}\nwords=(" + test.words + fmt.Sprintf(")\nCURRENT=%d\n_amux_test\n", test.current)
+			output, err := exec.Command(zsh, "-f", "-c", script).CombinedOutput()
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("execute completion: %v\n%s", err, output)
 			}
-			if opts.JSON || !opts.DryRun {
-				t.Fatalf("global options = %+v, want JSON=false DryRun=true", opts)
+			if test.candidate != "" && !strings.Contains(string(output), test.candidate) {
+				t.Fatalf("candidates do not contain %q: %s", test.candidate, output)
 			}
-			if got, want := strings.Join(words, " "), option+" --json"; got != want {
-				t.Fatalf("remaining words = %q, want %q", got, want)
+			if test.excluded != "" && strings.Contains(string(output), test.excluded) {
+				t.Fatalf("candidates unexpectedly contain %q: %s", test.excluded, output)
 			}
 		})
 	}
 }
 
-func TestParseInvocationRejectsContextualFlagsImplicitBulkAndPositionals(t *testing.T) {
+func TestFishCompletionDoesNotLeakRunnerFlagsIntoMaintenance(t *testing.T) {
+	fish, err := exec.LookPath("fish")
+	if err != nil {
+		t.Skip("fish unavailable")
+	}
+	var completion bytes.Buffer
+	if err := (app{stdout: &completion}).execute([]string{"completion", "fish"}); err != nil {
+		t.Fatal(err)
+	}
 	for _, test := range []struct {
-		args []string
-		want string
+		command   string
+		candidate string
+		excluded  string
 	}{
-		{args: []string{"runner", "pin", "--window", "hidden-runtime-name"}, want: "runner pin does not accept --window"},
-		{args: []string{"worker", "park"}, want: "use an explicit selector or --all"},
-		{args: []string{"launch", "workspace", "session"}, want: "positional selectors were removed"},
+		{command: "amux runner maintenance install --", candidate: "--update-owner"},
+		{command: "amux runner maintenance remove --", excluded: "--all"},
+		{command: "amux runner pin --", excluded: "--all"},
 	} {
-		_, err := parseInvocation(test.args)
-		if err == nil || !strings.Contains(err.Error(), test.want) {
-			t.Fatalf("parseInvocation(%q) error = %v, want %q", test.args, err, test.want)
+		script := completion.String() + "\ncomplete -C " + shellSingleQuote(test.command) + "\n"
+		output, err := exec.Command(fish, "-c", script).CombinedOutput()
+		if err != nil {
+			t.Fatalf("execute completion: %v\n%s", err, output)
+		}
+		if test.candidate != "" && !strings.Contains(string(output), test.candidate) {
+			t.Fatalf("candidates do not contain %q: %s", test.candidate, output)
+		}
+		if test.excluded != "" && strings.Contains(string(output), test.excluded) {
+			t.Fatalf("candidates unexpectedly contain %q: %s", test.excluded, output)
 		}
 	}
 }
 
-func TestExecuteRejectsRemovedAndUnknownCommandsBeforeSideEffects(t *testing.T) {
-	tmp := t.TempDir()
-	logPath := filepath.Join(tmp, "calls.log")
-	writeExecutable(t, filepath.Join(tmp, "tmux"), "#!/bin/sh\necho tmux >> "+logPath+"\n")
-	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+func TestRemovedCoordinationCommandsAreTombstonesBeforeSideEffects(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "calls")
+	writeExecutable(t, filepath.Join(dir, "tmux"), "#!/bin/sh\necho tmux >>"+shellSingleQuote(logPath)+"\n")
+	writeExecutable(t, filepath.Join(dir, "amp"), "#!/bin/sh\necho amp >>"+shellSingleQuote(logPath)+"\n")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	for _, test := range []struct {
-		args []string
-		want string
+	tests := []struct {
+		command string
+		want    string
 	}{
-		{args: []string{"store", "mac", "worker", "/tmp", "T-worker"}, want: "amux worker pin"},
-		{args: []string{"self-update"}, want: "amux update"},
-		{args: []string{"mac", "Amp"}, want: "unknown command"},
-	} {
-		err := (app{}).execute(test.args)
-		if err == nil || !strings.Contains(err.Error(), test.want) || result.ExitCode(err) != result.ExitRejected {
-			t.Fatalf("execute(%q) error = %v, exit=%d", test.args, err, result.ExitCode(err))
-		}
+		{"worker", "native Amp threads"},
+		{"spawn", "native Amp thread creation"},
+		{"group", "native Amp parent/reply routing"},
+		{"report", "/amux-tycho uses its separate receipt bridge"},
+		{"callback", "callback leases were removed"},
+		{"shelve", "native Amp archive state"},
+		{"unshelve", "native Amp archive state"},
+		{"teardown", "worker teardown was removed"},
+	}
+	for _, test := range tests {
+		t.Run(test.command, func(t *testing.T) {
+			err := (app{}).execute([]string{"--config-dir", dir, test.command})
+			if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("%s error = %v, exit=%d", test.command, err, result.ExitCode(err))
+			}
+		})
 	}
 	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
-		t.Fatalf("rejected command invoked tmux: %v", err)
+		t.Fatalf("removed command invoked a process: %v", err)
 	}
 }
 
-func TestExecuteRequiresExplicitMigrationWithoutWritingConfig(t *testing.T) {
+func TestRemovedCommandsDoNotMutateLegacyStores(t *testing.T) {
 	dir := t.TempDir()
-	legacyPath := filepath.Join(dir, "workspaces.tsv")
-	legacy := "mac\tworker\t/tmp/project\tT-worker\n"
-	if err := os.WriteFile(legacyPath, []byte(legacy), 0o600); err != nil {
-		t.Fatal(err)
+	stores := map[string][]byte{
+		"workers.tsv":            []byte("# amux-schema: workers/v1\nlegacy\tworker\t/tmp/work\tT-old\n"),
+		"shelves.tsv":            []byte("# amux-schema: shelves/v1\nT-old\n"),
+		"groups.tsv":             []byte("# amux-schema: groups/v1\nlegacy\tT-old\tmember\n"),
+		"reports.json":           []byte("{\"schema_version\":1,\"reports\":[],\"deadlines\":[]}\n"),
+		"operations.json":        []byte("{\"schema_version\":1,\"operations\":[]}\n"),
+		"spawn-assignments.json": []byte("{\"schema_version\":1,\"assignments\":[]}\n"),
 	}
-
-	err := (app{}).execute([]string{"--config-dir", dir, "worker", "list"})
-	if err == nil || !strings.Contains(err.Error(), "amux migrate-config") || result.ExitCode(err) != result.ExitRejected {
-		t.Fatalf("migration-required error = %v, exit=%d", err, result.ExitCode(err))
+	for name, contents := range stores {
+		if err := os.WriteFile(filepath.Join(dir, name), contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, "workers.tsv")); !os.IsNotExist(err) {
-		t.Fatalf("ordinary command migrated config: %v", err)
+	for _, command := range []string{"worker", "spawn", "group", "report", "callback", "shelve", "teardown"} {
+		_ = (app{}).execute([]string{"--config-dir", dir, command})
 	}
-	got, err := os.ReadFile(legacyPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != legacy {
-		t.Fatalf("ordinary command changed legacy config: %q", got)
-	}
-}
-
-func TestExecuteRunnerMutationIsAvailableAndUsesLock(t *testing.T) {
-	configDir := t.TempDir()
-	runtimeDir := filepath.Join(t.TempDir(), "missing-runtime")
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-
-	err := (app{}).execute([]string{"--config-dir", configDir, "runner", "park", "--all"})
-	if err != nil {
-		t.Fatalf("runner lifecycle error = %v", err)
-	}
-	if _, err := os.Stat(runtimeDir); err != nil {
-		t.Fatalf("runner mutation did not use operation lock directory: %v", err)
-	}
-}
-
-func TestExecuteMigrationDryRunJSONIsOneDocumentAndWritesNothing(t *testing.T) {
-	dir := t.TempDir()
-	legacyPath := filepath.Join(dir, "workspaces.tsv")
-	if err := os.WriteFile(legacyPath, []byte("mac\tworker\t/tmp/project\tT-worker\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-
-	var stdout bytes.Buffer
-	err := (app{stdout: &stdout}).execute([]string{"-c", dir, "-j", "-n", "migrate-config"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	decoder := json.NewDecoder(&stdout)
-	var document struct {
-		SchemaVersion int              `json:"schema_version"`
-		Planned       []result.Outcome `json:"planned"`
-		Successful    []result.Outcome `json:"successful"`
-		Failed        []result.Outcome `json:"failed"`
-	}
-	if err := decoder.Decode(&document); err != nil {
-		t.Fatal(err)
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		t.Fatalf("JSON stdout contains more than one document: %v", err)
-	}
-	if document.SchemaVersion != result.SchemaVersion || len(document.Planned) != 3 || len(document.Successful) != 0 || len(document.Failed) != 0 {
-		t.Fatalf("migration JSON = %+v", document)
-	}
-	for _, target := range []string{"workers.tsv", "runners.tsv", "shelves.tsv"} {
-		if _, err := os.Stat(filepath.Join(dir, target)); !os.IsNotExist(err) {
-			t.Fatalf("dry-run migration wrote %s: %v", target, err)
+	for name, before := range stores {
+		after, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil || !bytes.Equal(before, after) {
+			t.Fatalf("%s changed: err=%v before=%q after=%q", name, err, before, after)
 		}
 	}
 }
 
-func TestExecuteJSONRejectionStillWritesExactlyOneDocument(t *testing.T) {
+func TestBareAmuxAndTopLevelLifecycleRouteToRunners(t *testing.T) {
+	bare, err := parseInvocation(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(bare.Path, " "); got != "launch" || !bare.Selectors.All {
+		t.Fatalf("bare amux = path %q all=%t, want launch --all", got, bare.Selectors.All)
+	}
+	for _, command := range []string{"list", "launch", "park", "restart", "remove", "doctor", "reconcile"} {
+		parsed, err := parseInvocation([]string{command, "--all"})
+		if err != nil {
+			t.Fatalf("parse %s: %v", command, err)
+		}
+		if !isAggregateLifecycle(parsed.Path) {
+			t.Fatalf("%s is not a retained top-level runner alias", command)
+		}
+	}
+}
+
+func TestWorkspaceListIgnoresInertWorkers(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "workers.tsv"), []byte("worker-only\tw\t/tmp/w\tT-old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "runners.tsv"), []byte("runner-only\tr\t/tmp/r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	var stdout bytes.Buffer
-	err := (app{stdout: &stdout}).execute([]string{"--config-dir", "/tmp/amux-test-config", "--json", "unknown-command"})
+	if err := (app{stdout: &stdout}).execute([]string{"--config-dir", dir, "workspace", "list"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "runner-only\trunner") || strings.Contains(got, "worker-only") {
+		t.Fatalf("workspace list = %q", got)
+	}
+}
+
+func TestPathIsReadOnlyAndJSONRejectionIsOneDocument(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "missing")
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout}).execute([]string{"--config-dir", dir, "path"}); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != dir+"\n" {
+		t.Fatalf("path output = %q", stdout.String())
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("path created config directory: %v", err)
+	}
+
+	stdout.Reset()
+	err := (app{stdout: &stdout}).execute([]string{"--json", "report"})
 	if err == nil || result.ExitCode(err) != result.ExitRejected {
-		t.Fatalf("JSON rejection error = %v, exit=%d", err, result.ExitCode(err))
+		t.Fatalf("report rejection = %v", err)
 	}
 	decoder := json.NewDecoder(&stdout)
-	var envelope result.Envelope
-	if err := decoder.Decode(&envelope); err != nil {
+	var env result.Envelope
+	if err := decoder.Decode(&env); err != nil {
 		t.Fatal(err)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		t.Fatalf("JSON stdout contains more than one document: %v", err)
+		t.Fatalf("JSON output has more than one document: %v", err)
 	}
-	if len(envelope.Failed) != 1 || envelope.Failed[0].Error.Kind != result.ErrorRequest {
-		t.Fatalf("JSON rejection envelope = %+v", envelope)
-	}
-	if envelope.Command != "unknown-command" {
-		t.Fatalf("JSON rejection command = %q, want %q", envelope.Command, "unknown-command")
-	}
-}
-
-func TestExecuteJSONParseErrorsPreserveDryRun(t *testing.T) {
-	for _, test := range []struct {
-		name string
-		args []string
-	}{
-		{name: "reported command", args: []string{"--json", "--dry-run", "worker", "park"}},
-		{name: "between command words", args: []string{"--json", "worker", "--dry-run", "park"}},
-		{name: "after command", args: []string{"worker", "park", "--json", "--dry-run"}},
-		{name: "short flags", args: []string{"-j", "-n", "worker", "park"}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			var stdout bytes.Buffer
-			err := (app{stdout: &stdout}).execute(test.args)
-			if err == nil || result.ExitCode(err) != result.ExitRejected {
-				t.Fatalf("parse error = %v, exit=%d", err, result.ExitCode(err))
-			}
-
-			decoder := json.NewDecoder(&stdout)
-			var envelope result.Envelope
-			if err := decoder.Decode(&envelope); err != nil {
-				t.Fatal(err)
-			}
-			if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-				t.Fatalf("JSON stdout contains more than one document: %v", err)
-			}
-			if envelope.Command != "worker park" || !envelope.DryRun || len(envelope.Failed) != 1 || envelope.Failed[0].Error.Kind != result.ErrorRequest {
-				t.Fatalf("JSON rejection envelope = %+v", envelope)
-			}
-		})
-	}
-}
-
-func TestExecuteErrorOutputDistinguishesJSONFlagsFromOptionValues(t *testing.T) {
-	t.Run("true trailing global emits JSON", func(t *testing.T) {
-		var stdout bytes.Buffer
-		err := (app{stdout: &stdout}).execute([]string{"worker", "list", "--attach", "--no-attach", "--json"})
-		if err == nil || result.ExitCode(err) != result.ExitRejected {
-			t.Fatalf("error = %v, exit=%d", err, result.ExitCode(err))
-		}
-		var envelope result.Envelope
-		decoder := json.NewDecoder(&stdout)
-		if err := decoder.Decode(&envelope); err != nil {
-			t.Fatal(err)
-		}
-		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-			t.Fatalf("JSON stdout contains more than one document: %v", err)
-		}
-		if len(envelope.Failed) != 1 || envelope.Failed[0].Error.Kind != result.ErrorRequest {
-			t.Fatalf("JSON rejection envelope = %+v", envelope)
-		}
-	})
-
-	t.Run("message value does not emit JSON", func(t *testing.T) {
-		var stdout bytes.Buffer
-		err := (app{stdout: &stdout}).execute([]string{"worker", "spawn", "--message", "--json", "--attach", "--no-attach"})
-		if err == nil || result.ExitCode(err) != result.ExitRejected {
-			t.Fatalf("error = %v, exit=%d", err, result.ExitCode(err))
-		}
-		if stdout.Len() != 0 {
-			t.Fatalf("non-global --json produced output %q", stdout.String())
-		}
-	})
-
-	t.Run("workspace value does not enable dry-run", func(t *testing.T) {
-		var stdout bytes.Buffer
-		err := (app{stdout: &stdout}).execute([]string{"worker", "list", "--workspace", "--dry-run", "--attach", "--no-attach", "--json"})
-		if err == nil || result.ExitCode(err) != result.ExitRejected {
-			t.Fatalf("error = %v, exit=%d", err, result.ExitCode(err))
-		}
-		var envelope result.Envelope
-		if err := json.NewDecoder(&stdout).Decode(&envelope); err != nil {
-			t.Fatal(err)
-		}
-		if envelope.DryRun {
-			t.Fatalf("option value enabled dry-run: %+v", envelope)
-		}
-	})
-
-	t.Run("token after terminator does not enable dry-run", func(t *testing.T) {
-		var stdout bytes.Buffer
-		err := (app{stdout: &stdout}).execute([]string{"--json", "worker", "park", "--", "--dry-run"})
-		if err == nil || result.ExitCode(err) != result.ExitRejected {
-			t.Fatalf("error = %v, exit=%d", err, result.ExitCode(err))
-		}
-		decoder := json.NewDecoder(&stdout)
-		var envelope result.Envelope
-		if err := decoder.Decode(&envelope); err != nil {
-			t.Fatal(err)
-		}
-		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-			t.Fatalf("JSON stdout contains more than one document: %v", err)
-		}
-		if envelope.DryRun {
-			t.Fatalf("token after terminator enabled dry-run: %+v", envelope)
-		}
-	})
-}
-
-func TestExecuteMutationLockRejectsConcurrentMigrationWithOwner(t *testing.T) {
-	runtimeDir := t.TempDir()
-	dir := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	if err := os.WriteFile(filepath.Join(dir, "workspaces.tsv"), []byte("mac\tworker\t/tmp/project\tT-worker\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	path, err := lock.MachinePath()
-	if err != nil {
-		t.Fatal(err)
-	}
-	held, err := lock.Acquire(context.Background(), path, lock.Owner{PID: 456, Command: "other amux mutation", Hostname: "test-host"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = held.Release() })
-	oldWait := mutationLockWait
-	mutationLockWait = 30 * time.Millisecond
-	t.Cleanup(func() { mutationLockWait = oldWait })
-
-	var stdout bytes.Buffer
-	err = (app{stdout: &stdout}).execute([]string{"--json", "--config-dir", dir, "migrate-config"})
-	var busy *lock.BusyError
-	if !errors.As(err, &busy) || busy.Owner.PID != 456 || result.ExitCode(err) != result.ExitRejected {
-		t.Fatalf("lock contention error = %v, owner=%+v, exit=%d", err, busy, result.ExitCode(err))
-	}
-	var envelope result.Envelope
-	if decodeErr := json.NewDecoder(&stdout).Decode(&envelope); decodeErr != nil {
-		t.Fatal(decodeErr)
-	}
-	if len(envelope.Failed) != 1 || envelope.Failed[0].Error.Lock == nil || envelope.Failed[0].Error.Lock.Owner.PID != 456 {
-		t.Fatalf("lock contention JSON = %+v", envelope)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "workers.tsv")); !os.IsNotExist(err) {
-		t.Fatalf("contending migration wrote config: %v", err)
+	if len(env.Failed) != 1 || !strings.Contains(env.Failed[0].Error.Message, "/amux-tycho") {
+		t.Fatalf("report tombstone JSON = %+v", env)
 	}
 }

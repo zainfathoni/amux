@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 type MigrationStatus string
@@ -44,17 +43,10 @@ func PlanMigration(dir Directory) (MigrationPlan, error) {
 	if err != nil {
 		return plan, err
 	}
-	if sources.workers == "" && sources.runners == "" && sources.shelves == "" {
+	if sources.runners == "" {
 		return plan, nil
 	}
 
-	var workers []byte
-	if !fileExists(dir.WorkersPath()) {
-		workers, err = migratedWorkers(sources.workers)
-		if err != nil {
-			return plan, fmt.Errorf("prepare workers migration: %w", err)
-		}
-	}
 	var runners []byte
 	if !fileExists(dir.RunnersPath()) {
 		runners, err = migratedRunners(sources.runners)
@@ -62,19 +54,8 @@ func PlanMigration(dir Directory) (MigrationPlan, error) {
 			return plan, fmt.Errorf("prepare runners migration: %w", err)
 		}
 	}
-	var shelves []byte
-	if !fileExists(dir.ShelvesPath()) {
-		shelves, err = migratedShelves(sources.shelves)
-		if err != nil {
-			return plan, fmt.Errorf("prepare shelves migration: %w", err)
-		}
-	}
 
-	plan.Actions = []MigrationAction{
-		migrationAction("workers", sources.workers, dir.WorkersPath(), workers),
-		migrationAction("runners", sources.runners, dir.RunnersPath(), runners),
-		migrationAction("shelves", sources.shelves, dir.ShelvesPath(), shelves),
-	}
+	plan.Actions = []MigrationAction{migrationAction("runners", sources.runners, dir.RunnersPath(), runners)}
 	return plan, nil
 }
 
@@ -119,18 +100,11 @@ func MigrationRequired(dir Directory) (bool, error) {
 }
 
 type legacySources struct {
-	workers string
 	runners string
-	shelves string
 }
 
 func migrationSources(dir Directory) (legacySources, error) {
 	var sources legacySources
-	localWorkers := filepath.Join(dir.Path, "workspaces.tsv")
-	if fileExists(localWorkers) {
-		sources.workers = localWorkers
-	}
-
 	defaultDir, err := ResolveDirectory("")
 	if err != nil {
 		return sources, err
@@ -143,17 +117,8 @@ func migrationSources(dir Directory) (legacySources, error) {
 		return sources, err
 	}
 	legacyDir := filepath.Join(home, filepath.Dir(LegacyDefaultRelativePath))
-	if sources.workers == "" {
-		path := filepath.Join(legacyDir, "workspaces.tsv")
-		if fileExists(path) {
-			sources.workers = path
-		}
-	}
 	if path := filepath.Join(legacyDir, RunnersFile); fileExists(path) {
 		sources.runners = path
-	}
-	if path := filepath.Join(legacyDir, ShelvesFile); fileExists(path) {
-		sources.shelves = path
 	}
 	return sources, nil
 }
@@ -170,36 +135,6 @@ func migrationAction(registry, source, destination string, contents []byte) Migr
 		Status:      status,
 		contents:    contents,
 	}
-}
-
-func migratedWorkers(path string) ([]byte, error) {
-	rows, err := parseOptionalWorkers(path)
-	if err != nil {
-		return nil, err
-	}
-	var out bytes.Buffer
-	out.WriteString("# amux-schema: workers/v1\n")
-	seenThreads := make(map[string]string)
-	seenWindows := make(map[string]bool)
-	for _, row := range rows {
-		thread, err := CanonicalThreadID(row.Thread)
-		if err != nil {
-			return nil, err
-		}
-		key := row.Workspace + "\x00" + row.Window
-		if seenWindows[key] {
-			return nil, fmt.Errorf("duplicate worker row %s/%s", row.Workspace, row.Window)
-		}
-		if previous, exists := seenThreads[thread]; exists {
-			return nil, fmt.Errorf("worker thread %s is already configured as %s", thread, previous)
-		}
-		seenWindows[key] = true
-		seenThreads[thread] = row.Workspace + "/" + row.Window
-		row.Thread = thread
-		out.WriteString(row.String())
-		out.WriteByte('\n')
-	}
-	return out.Bytes(), nil
 }
 
 func migratedRunners(path string) ([]byte, error) {
@@ -224,47 +159,6 @@ func migratedRunners(path string) ([]byte, error) {
 		out.WriteByte('\n')
 	}
 	return out.Bytes(), nil
-}
-
-func migratedShelves(path string) ([]byte, error) {
-	var out bytes.Buffer
-	out.WriteString("# amux-schema: shelves/v1\n")
-	if path == "" {
-		return out.Bytes(), nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	seen := make(map[string]bool)
-	for lineNo, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		thread, err := CanonicalThreadID(line)
-		if err != nil {
-			return nil, fmt.Errorf("invalid shelf on line %d: %w", lineNo+1, err)
-		}
-		if seen[thread] {
-			return nil, fmt.Errorf("duplicate shelf intent for worker %s", thread)
-		}
-		seen[thread] = true
-		out.WriteString(thread)
-		out.WriteByte('\n')
-	}
-	return out.Bytes(), nil
-}
-
-func parseOptionalWorkers(path string) ([]Row, error) {
-	if path == "" {
-		return nil, nil
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	return Parse(file)
 }
 
 func parseOptionalRunners(path string) ([]RunnerRow, error) {
