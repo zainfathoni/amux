@@ -65,7 +65,7 @@ This ADR supersedes ADR 0007 only where ADR 0007 selected full Amux product reti
 
 ## Temporary sweep boundary
 
-PR #360 remains a one-time, read-only migration inventory under its existing owner-authorization gate. This decision does not authorize or run it. A future invocation requires a separate explicit owner request. After that run, deletion activates only when the owner accepts one complete inventory or explicitly dispositions an incomplete/error result **and** confirms no repeat is needed; only then does the existing delete-before-next-release condition apply.
+PR #360 remains a one-time, read-only migration inventory under its existing owner-authorization gate. This decision does not authorize or run it. A future invocation requires a separate explicit owner request. After that run, deletion activates only when the owner accepts one complete inventory or explicitly dispositions an incomplete/error result **and** confirms no repeat is needed; only then must the helper, tests, and routes be deleted before the next release.
 
 ## Consequences
 

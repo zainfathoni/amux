@@ -27,7 +27,7 @@ The 2026-08-30 PR #375/#376 hygiene remains valid: the issue graph stays narrow,
 
 | PR | Disposition |
 | --- | --- |
-| [#360](https://github.com/zainfathoni/amux/pull/360) | Merged one-time read-only inventory. This direction does **not** run it; a future invocation needs a separate explicit owner request. Sunset activates only after owner acceptance or explicit incomplete/error disposition **plus** no-repeat confirmation; only then delete before the next release. |
+| [#360](https://github.com/zainfathoni/amux/pull/360) | Merged one-time read-only inventory. This direction does **not** run it; a future invocation needs a separate explicit owner request. After that separately authorized run, sunset activates only when the owner accepts one complete inventory or explicitly dispositions an incomplete/error result **and** confirms no repeat is needed; only then delete before the next release. |
 | [#361](https://github.com/zainfathoni/amux/pull/361) | Retain exact pre-cutover prepare/arm/finalize drain safety; admit no successor coordination protocol. |
 | [#363](https://github.com/zainfathoni/amux/pull/363) | Retain backup-before-removal safety, separate from removal authority. |
 | [#366](https://github.com/zainfathoni/amux/pull/366) | Retain as preflight-only evidence for runner operations. It performs no stop, row mutation/removal, admission closure, or migration away from Amux. |

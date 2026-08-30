@@ -578,11 +578,45 @@ func TestThinHostDirectionIsUnambiguous(t *testing.T) {
 		"preflight-only",
 		"legacy coordination",
 		"not being fully deprecated or archived",
-		"A future invocation requires a separate explicit owner request",
-		"After that run, deletion activates only when the owner accepts one complete inventory",
 	} {
 		if !strings.Contains(active, required) {
 			t.Errorf("thin-host direction is missing %q", required)
+		}
+	}
+	for name, check := range map[string]struct {
+		contents string
+		markers  []string
+	}{
+		"ADR 0008": {adr8, []string{
+			"separate explicit owner request",
+			"After that run",
+			"accepts one complete inventory",
+			"explicitly dispositions an incomplete/error result",
+			"confirms no repeat is needed",
+			"only then",
+			"deleted before the next release",
+		}},
+		"ledger": {ledger, []string{
+			"separate explicit owner request",
+			"After that separately authorized run",
+			"accepts one complete inventory",
+			"explicitly dispositions an incomplete/error result",
+			"confirms no repeat is needed",
+			"only then",
+			"before the next release",
+		}},
+	} {
+		previous := -1
+		for _, marker := range check.markers {
+			index := strings.Index(check.contents, marker)
+			if index < 0 {
+				t.Errorf("%s is missing #360 gate %q", name, marker)
+				continue
+			}
+			if index <= previous {
+				t.Errorf("%s has out-of-order #360 gate %q", name, marker)
+			}
+			previous = index
 		}
 	}
 	for _, forbidden := range []string{
@@ -3674,7 +3708,6 @@ func TestSweepPresentationInputsFailClosedWithoutMutation(t *testing.T) {
 func TestSweepWorkflowDocumentsReadOnlyAuthorityBoundary(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
 	for _, required := range []string{
 		"/amux sweep",
@@ -3687,13 +3720,32 @@ func TestSweepWorkflowDocumentsReadOnlyAuthorityBoundary(t *testing.T) {
 		"no fetch, cleanup, reconciliation, removal, unlock, prune, backup-ref mutation",
 		"Preservation-locked historical resources",
 		"one-time read-only migration inventory for the staged Amux drain",
-		"after the owner records acceptance of one complete staged-drain inventory",
 		"delete `scripts/sweep-inventory`, its sweep-only tests, and every `/amux sweep` route/reference before the next Amux release",
 		"Do not promote the helper into the CLI, retain it as a standing diagnostic, schedule it, or extend it for post-drain monitoring",
 	} {
-		if !strings.Contains(skill+workflow, required) {
+		if !strings.Contains(workflow, required) {
 			t.Errorf("sweep contract lacks %q", required)
 		}
+	}
+	previous := -1
+	for _, marker := range []string{
+		"This documentation does not authorize a run",
+		"a future run requires a separate explicit owner request",
+		"After that authorization",
+		"after the owner records acceptance of one complete staged-drain inventory",
+		"explicit incomplete/error disposition",
+		"confirms that no repeat inventory is required",
+		"delete `scripts/sweep-inventory`, its sweep-only tests, and every `/amux sweep` route/reference before the next Amux release",
+	} {
+		index := strings.Index(workflow, marker)
+		if index < 0 {
+			t.Errorf("sweep workflow is missing ordered #360 gate %q", marker)
+			continue
+		}
+		if index <= previous {
+			t.Errorf("sweep workflow has out-of-order #360 gate %q", marker)
+		}
+		previous = index
 	}
 }
 

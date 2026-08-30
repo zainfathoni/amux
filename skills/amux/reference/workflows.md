@@ -178,7 +178,7 @@ Invoke teardown from a verified independent executor. The target worker cannot s
 
 ## Sweep worktree inventory
 
-`/amux sweep` is a one-time read-only migration inventory for the staged Amux drain. It remains a read-only skill workflow, not a recurring lifecycle surface and not an `amux sweep` CLI command. Run it only when the owner authorizes the drain inventory. Run the loaded skill's `scripts/sweep-inventory` helper with the repository, Amux config directory, and every explicit filesystem root whose immediate child checkouts comprise the inventory boundary:
+`/amux sweep` is a one-time read-only migration inventory for the staged Amux drain. It remains a read-only skill workflow, not a recurring lifecycle surface and not an `amux sweep` CLI command. This documentation does not authorize a run; a future run requires a separate explicit owner request. After that authorization, run the loaded skill's `scripts/sweep-inventory` helper with the repository, Amux config directory, and every explicit filesystem root whose immediate child checkouts comprise the inventory boundary:
 
 ```sh
 python3 <loaded-amux-skill>/scripts/sweep-inventory --repo <repository> --config-dir <amux-config-directory> --amux <current-amux-binary> --filesystem-root <checkout-parent> [--filesystem-root <other-parent>] [--presentation-baseline <commit-ish> --generated-exclude <repo-glob> --canonical-worktree <path>] --json
