@@ -4,9 +4,12 @@ package tmux
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -24,6 +27,11 @@ type procBSDInfo struct {
 	Nice                                                                            int32
 	StartSeconds, StartMicroseconds                                                 uint64
 }
+
+var (
+	inspectProcBSDInfo = readProcBSDInfo
+	sysctlKinfoProc    = unix.SysctlKinfoProc
+)
 
 // ProcessArgs returns the kernel's exact argv vector for pid.
 func ProcessArgs(pid int) ([]string, error) {
@@ -83,14 +91,32 @@ func InspectProcessLink(pid int) (ProcessMetadata, error) {
 	if pid <= 0 {
 		return ProcessMetadata{}, fmt.Errorf("process PID is unavailable")
 	}
-	info, err := readProcBSDInfo(pid)
+	info, err := inspectProcBSDInfo(pid)
 	if err != nil {
+		if errors.Is(err, syscall.EPERM) {
+			return inspectProcessLinkSysctl(pid)
+		}
 		return ProcessMetadata{}, err
 	}
-	if info.StartSeconds == 0 {
+	if info.StartSeconds == 0 || info.StartMicroseconds >= 1_000_000 {
 		return ProcessMetadata{}, fmt.Errorf("process %d returned incomplete ancestry identity", pid)
 	}
 	return ProcessMetadata{PID: pid, ParentPID: int(info.PPID), Identity: fmt.Sprintf("%d.%06d", info.StartSeconds, info.StartMicroseconds)}, nil
+}
+
+func inspectProcessLinkSysctl(pid int) (ProcessMetadata, error) {
+	info, err := sysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil {
+		return ProcessMetadata{}, fmt.Errorf("inspect process %d fallback metadata: %w", pid, err)
+	}
+	if int(info.Proc.P_pid) != pid || info.Eproc.Ppid < 0 || info.Proc.P_starttime.Sec <= 0 || info.Proc.P_starttime.Usec < 0 || info.Proc.P_starttime.Usec >= 1_000_000 {
+		return ProcessMetadata{}, fmt.Errorf("process %d returned incomplete fallback ancestry identity", pid)
+	}
+	return ProcessMetadata{
+		PID:       pid,
+		ParentPID: int(info.Eproc.Ppid),
+		Identity:  fmt.Sprintf("%d.%06d", info.Proc.P_starttime.Sec, info.Proc.P_starttime.Usec),
+	}, nil
 }
 
 // ProcessName returns Darwin's native comm value without normalizing whitespace.
