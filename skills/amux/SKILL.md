@@ -1,6 +1,6 @@
 ---
 name: amux
-description: "Operates the retained machine-local Amux runner registry, exact workdir bindings, tmux/Amp launch, diagnostics, maintenance, and safe runner lifecycle while draining existing worker and legacy coordination state. Routes all new task coordination to native Amp child threads without Amux adoption, groups, reports, callbacks, deadlines, or finish state. Use for runner pin/list/doctor/park/remove/reconcile, launch, worker compatibility lifecycle, bounded projectless host placement, /amux health, /amux sprawl, the owner-gated one-time /amux sweep, pre-cutover /amux finish, 'forget this on restore', 'hide it for now', 'defer this workspace', 'Show shelved work', and 'Restore my workspace'. Experimental Tycho, Claude, or Pi routes remain separate explicit-only skills."
+description: "Operates the retained machine-local Amux runner registry, exact workdir bindings, tmux/Amp launch, diagnostics, maintenance, and safe runner lifecycle while draining existing worker and legacy coordination state. Routes all new task coordination to native Amp child threads without Amux adoption, groups, reports, callbacks, deadlines, or finish state. Use for runner pin/list/doctor/park/remove/reconcile/restart, launch, worker compatibility lifecycle, bounded projectless host placement, /amux health, /amux sprawl, the owner-gated one-time /amux sweep, pre-cutover /amux finish, 'Pin it', 'forget this on restore', 'hide it for now', 'defer this workspace', 'Show shelved work', and 'Restore my workspace'. Experimental Tycho, Claude, or Pi routes remain separate explicit-only skills."
 ---
 
 # amux
@@ -26,7 +26,7 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 
 ## Route triggers
 
-- **Pin this runner**: `amux runner pin --workspace <name> --workdir <existing-directory>` or `--current`. Runner config only. Do not route an unqualified pin request to worker pin; worker pin is implemented compatibility syntax pending a separately chosen cutover generation, not a new-work route.
+- **Pin it** / **Pin this runner**: `amux runner pin --workspace <name> --workdir <existing-directory>` or `--current`. Runner config only. Do not route an unqualified pin request to worker pin; worker pin is implemented compatibility syntax pending a separately chosen cutover generation, not a new-work route.
 - **Unpin it** / **forget this on restore**: `amux worker unpin --current`.
 - **Park it**: `amux worker park --current`.
 - **Restart unresponsive clients**: `amux restart --all` or mode-specific restart.

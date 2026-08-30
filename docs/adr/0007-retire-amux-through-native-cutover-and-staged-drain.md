@@ -27,7 +27,7 @@ This decision supersedes ADR 0003's native-create → `amux worker adopt` new-wo
 
 ### Accepted refinements (2026-08-13)
 
-Owner-accepted product refinements recorded in [the staged-drain disposition ledger](../staged-drain-disposition.md#owner-decisions-accepted-2026-08-13). They tighten destination language without reopening the staged-drain mission. These refinements establish contract and sequencing only; they do not themselves authorize code, skill publication, runtime or store changes, push/merge, issue mutation, or other shared-state mutation.
+Owner-accepted product refinements were recorded in [the staged-drain disposition ledger](../staged-drain-disposition.md). They tighten destination language without reopening the staged-drain mission. These refinements establish contract and sequencing only; they do not themselves authorize code, skill publication, runtime or store changes, push/merge, issue mutation, or other shared-state mutation.
 
 1. **Shelve replacement is Archive/Unarchive, not Hide/Unhide.** After shelf admission closes, deferred remote thread visibility uses native Amp archive and unarchive (`amp threads archive` and `amp threads archive --unarchive`). Amux shelf intent (`shelves.tsv`) is drain-only migration state while Amux launch still exists; it is not a permanent product and must not become a second visibility store. Do not treat `find_thread` `hidden:` / `snoozed:` as a mutation API or document “Hide/Unhide replaces shelve” unless a distinct hide mutation surface is later proven different from archive. Existing shelf rows drain in place under this ADR; there is no bulk migrate-to-hidden path.
 

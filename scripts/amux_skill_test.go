@@ -55,8 +55,8 @@ func TestTriggerChecklistMatchesSkillActivationAndRouting(t *testing.T) {
 
 	triggerPattern := regexp.MustCompile(`(?m)^\| \x60([^\x60]+)\x60 \|`)
 	matches := triggerPattern.FindAllStringSubmatch(checklist, -1)
-	if len(matches) != 18 {
-		t.Fatalf("trigger checklist has %d routes, want 18", len(matches))
+	if len(matches) != 19 {
+		t.Fatalf("trigger checklist has %d routes, want 19", len(matches))
 	}
 	for _, match := range matches {
 		trigger := match[1]
@@ -568,19 +568,52 @@ func TestThinHostDirectionIsUnambiguous(t *testing.T) {
 	triggers := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md"))
 	active := adr8 + readme + skill + ledger
 
-	for _, required := range []string{
-		"Native Amp owns new task coordination",
-		"machine-local runner registry",
-		"`amux launch --all`",
-		"Type=oneshot",
-		"RemainAfterExit=yes",
-		"AbandonProcessGroup=true",
-		"preflight-only",
-		"legacy coordination",
-		"not being fully deprecated or archived",
+	for name, check := range map[string]struct {
+		contents string
+		markers  []string
+	}{
+		"ADR 0008": {adr8, []string{
+			"Native Amp owns new task coordination",
+			"machine-local runner registry",
+			"`amux launch --all`",
+			"Type=oneshot",
+			"RemainAfterExit=yes",
+			"AbandonProcessGroup=true",
+			"preflight-only",
+			"legacy coordination",
+			"not being fully deprecated or archived",
+		}},
+		"README": {readme, []string{
+			"native Amp owns all new task creation and coordination",
+			"machine-local runner registry",
+			"`amux launch --all`",
+			"Type=oneshot",
+			"RemainAfterExit=yes",
+			"AbandonProcessGroup=true",
+			"not being fully deprecated or archived",
+		}},
+		"skill": {skill, []string{
+			"machine-local Amux runner registry",
+			"Routes all new task coordination to native Amp child threads",
+			"`amux launch --all`",
+			"legacy coordination state",
+		}},
+		"ledger": {ledger, []string{
+			"Native Amp owns new task coordination",
+			"machine-local runner launch",
+			"`amux launch --all`",
+			"Type=oneshot",
+			"RemainAfterExit=yes",
+			"AbandonProcessGroup=true",
+			"preflight-only",
+			"legacy coordination",
+			"not being fully deprecated or archived",
+		}},
 	} {
-		if !strings.Contains(active, required) {
-			t.Errorf("thin-host direction is missing %q", required)
+		for _, marker := range check.markers {
+			if !strings.Contains(check.contents, marker) {
+				t.Errorf("%s thin-host direction is missing %q", name, marker)
+			}
 		}
 	}
 	for name, check := range map[string]struct {
@@ -651,6 +684,15 @@ func TestThinHostDirectionIsUnambiguous(t *testing.T) {
 	} {
 		if !strings.Contains(contents, "Pin this runner") {
 			t.Errorf("%s must route retained pin admission to runners", name)
+		}
+	}
+	for name, contents := range map[string]string{
+		"skill description": skill[:strings.Index(skill, "\n---\n")],
+		"skill routing":     skill,
+		"trigger table":     triggers,
+	} {
+		if !strings.Contains(contents, "Pin it") {
+			t.Errorf("%s must retain the unqualified runner pin trigger", name)
 		}
 	}
 	for _, forbidden := range []string{"amux worker adopt", "amux group declare", "amux report submit"} {

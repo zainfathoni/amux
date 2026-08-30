@@ -356,7 +356,7 @@ amux runner maintenance remove
 
 Use `self` when Amp's updater owns updates and `external` when a package manager does. Installation is explicit and dry-runnable. Maintenance uses the same operation lock and records diagnostics consumed by `amux install doctor`.
 
-### Automatic runner launch
+## Automatic runner launch
 
 At graphical login or boot, machine configuration runs `amux launch --all`. Amux—not systemd or launchd—reads the machine-local registry and launches the tmux/Amp process group. Verified deployment patterns use a systemd user service with `Type=oneshot` plus `RemainAfterExit=yes`, or a RunAtLoad macOS LaunchAgent with `AbandonProcessGroup=true`, so the OS activates Amux and retains its launched process group rather than replacing the Amux launcher with direct runner supervision. Machine-specific service definitions belong in the operator's system configuration.
 

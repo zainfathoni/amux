@@ -48,7 +48,7 @@ The narrow six-issue open set remains #221, #311, #318, #328, #331, and #339.
 | [#311](https://github.com/zainfathoni/amux/issues/311) | Compatibility fix only if digest drift blocks an existing receipt drain. |
 | [#318](https://github.com/zainfathoni/amux/issues/318) | Strict selector boundary only on retained compatibility/drain commands. Canonical evidence does not require broader wording. |
 
-Closed #232 remains safety evidence implemented by preflight-only PR #366. Closed #374 remains closed; its long-running-supervisor idea is still not required, but its body rationale that OS/native launch replaces Amux is obsolete and should receive a non-reopening correction comment. Closed #212–#216 remain closed because ADR 0008 retains workdir identity and does not revive their separate Amux runner-ID product graph.
+Closed #232 remains safety evidence implemented by preflight-only PR #366. Closed #374 remains closed; its long-running-supervisor idea is still not required, and its obsolete rationale that OS/native launch replaces Amux received the [authorized non-reopening correction recorded here](issue-direction-corrections.md#applied-corrective-comment-on-closed-374-not-reopened). Closed #212–#216 remain closed because ADR 0008 retains workdir identity and does not revive their separate Amux runner-ID product graph.
 
 ## Withdrawn dates and gates
 
