@@ -1,10 +1,10 @@
-# Proposed GitHub issue direction corrections
+# Applied GitHub issue direction corrections
 
-These are exact proposed edits following ADR 0008. They do not authorize or perform GitHub mutation.
+These ADR 0008 direction corrections were applied on 2026-08-30: [#331](https://github.com/zainfathoni/amux/issues/331) and [#339](https://github.com/zainfathoni/amux/issues/339) received the exact title/body rewrites below, and closed [#374](https://github.com/zainfathoni/amux/issues/374#issuecomment-5469174178) received the exact corrective comment below without being reopened.
 
-## Rewrite #331
+## Applied rewrite #331
 
-**Proposed title:** `Thin Amux host + legacy coordination drain umbrella (ADR 0008)`
+**Applied title:** `Thin Amux host + legacy coordination drain umbrella (ADR 0008)`
 
 ```markdown
 ## Purpose
@@ -66,9 +66,9 @@ Authoritative sources:
 Originally the symmetric-retirement umbrella, then rewritten under ADR 0007 in PR #375. Corrected under ADR 0008 to retain the machine-local runner-launch core while preserving the valid legacy coordination drain.
 ```
 
-## Rewrite #339
+## Applied rewrite #339
 
-**Proposed title:** `ADR 0008 rollout docs: retained runner host and legacy drain gates`
+**Applied title:** `ADR 0008 rollout docs: retained runner host and legacy drain gates`
 
 ```markdown
 ## Parent
@@ -114,7 +114,7 @@ Publish operating guidance with one explicit ownership boundary:
 Originally “Retirement slice 8,” then rewritten under ADR 0007 in PR #375. Corrected under ADR 0008 after the owner retained the thin machine-local runner host.
 ```
 
-## Corrective comment on closed #374 (do not reopen)
+## Applied corrective comment on closed #374 (not reopened)
 
 ```markdown
 Direction correction under ADR 0008; this issue remains closed.

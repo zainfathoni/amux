@@ -63,6 +63,6 @@ There is no runner-admission closure gate and no complete-product archive gate. 
 3. For #360, accept one complete inventory or explicitly disposition incomplete/error and separately confirm no repeat before the existing deletion condition activates.
 4. Decide implementation scope and release sequencing for completing retained runner remove/reconcile behavior using #232/#366 safety evidence.
 5. Name and field-validate #328's concrete authenticated same-turn Tycho return route before receipt admission closes.
-6. Authorize any issue-body rewrite/comment, release, process/store mutation, or external deployment change separately.
+6. Authorize any further issue-body rewrite/comment, release, process/store mutation, or external deployment change separately.
 
-Exact proposed issue text is recorded in [the issue direction corrections](issue-direction-corrections.md). It is a proposal only and does not mutate GitHub.
+The exact #331/#339 rewrites and closed-#374 corrective comment applied on 2026-08-30 are recorded in [the issue direction corrections](issue-direction-corrections.md).
