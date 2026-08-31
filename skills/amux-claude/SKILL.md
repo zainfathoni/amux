@@ -26,7 +26,7 @@ Before choosing an executor, consult the repository's [provider executor readine
 - Operator-assisted local tmux adoption: [`reference/claude-local-tmux-adoption.md`](reference/claude-local-tmux-adoption.md)
 - Recovery branches: [`reference/claude-delegation-recovery.md`](reference/claude-delegation-recovery.md)
 - Trigger checklist: [`reference/trigger-phrases.md`](reference/trigger-phrases.md)
-- Helper: `experimental/claude-delegation/claude_delegation.py` within this installed skill
+- Read-only helper: `experimental/claude-delegation/claude_delegation.py` within this installed skill. It exposes bounded `diagnose` and exact historical `receipt show` inspection only; worker-bound launch, report, lifecycle, quarantine mutation, and hidden test dispatch are absent.
 
 ## Safety
 

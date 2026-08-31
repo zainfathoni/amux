@@ -12,6 +12,6 @@ Use only after explicit owner recovery authorization. Core Amux workers and work
 
 ## Read-only diagnosis
 
-Exact receipt inspection may identify the existing blocker and preserved evidence. Pane prose, logs, idle state, process exit, and wake-up tokens are not semantic reports or lifecycle authority. A malformed, missing, unreadable, ambiguous, or drifted store remains indeterminate; preserve it.
+The installed helper exposes only bounded `diagnose` and exact historical `receipt show` inspection. It contains no legacy mutating dispatcher or environment-variable bypass. Exact receipt inspection may identify the existing blocker and preserved evidence. Pane prose, logs, idle state, process exit, and wake-up tokens are not semantic reports or lifecycle authority. A malformed, missing, unreadable, ambiguous, or drifted store remains indeterminate; preserve it.
 
 Provider-specific replacement routes may be introduced only after their own authenticated field evidence and owner acceptance. Until then, the only safe recovery result for worker-bound historical evidence is a bounded blocker stating that the process and all evidence remain retained. Do not substitute native task coordination, the retained runner registry, `/amux-tycho`, or OS service supervision as cleanup authority.
