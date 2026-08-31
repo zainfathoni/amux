@@ -581,19 +581,19 @@ func TestThinHostDirectionIsUnambiguous(t *testing.T) {
 			"not being fully deprecated or archived",
 		}},
 		"README": {readme, []string{
-			"native Amp owns all new task creation and coordination",
+			"Native Amp owns new task creation and coordination",
 			"machine-local runner registry",
 			"`amux launch --all`",
 			"Type=oneshot",
 			"RemainAfterExit=yes",
 			"AbandonProcessGroup=true",
-			"not being fully deprecated or archived",
+			"Amux is not deprecated or archived",
 		}},
 		"skill": {skill, []string{
 			"machine-local Amux runner registry",
-			"Routes all new task coordination to native Amp child threads",
+			"Routes new delegated work to native Amp child threads",
 			"`amux launch --all`",
-			"legacy coordination state",
+			"Historical worker/coordination files are inert",
 		}},
 		"ledger": {ledger, []string{
 			"Native Amp owns new task coordination",
