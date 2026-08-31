@@ -4,7 +4,8 @@ This table is the complete activation and routing contract for [`../SKILL.md`](.
 
 | Trigger phrase | Route | Contract |
 | --- | --- | --- |
-| `Pin it` | `amux worker pin --current` with complete `AMUX_*` identity; otherwise full explicit selectors | Worker config only; never combine current with another selector. |
+| `Pin it` | `amux runner pin --workspace <name> --workdir <existing-directory>` or `--current` | Unqualified pin requests select the retained runner route, never worker admission. |
+| `Pin this runner` | `amux runner pin --workspace <name> --workdir <existing-directory>` or `--current` | Retained runner config admission. |
 | `Unpin it` | `amux worker unpin --current` | Remove worker row and shelf intent; no stop/archive. |
 | `forget this on restore` | `amux worker unpin --current` | Same as unpin. |
 | `Park it` | `amux worker park --current` | Stop verified local worker; preserve config/thread. |

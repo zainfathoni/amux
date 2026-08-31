@@ -1,8 +1,8 @@
 # amux
 
-`amux` is the local tmux lifecycle layer for [Amp](https://ampcode.com/). It manages interactive **workers**, non-interactive **runners**, and named **workspaces** with explicit, agent-safe side effects.
+`amux` is the machine-local runner and tmux host layer for [Amp](https://ampcode.com/). It manages interactive **workers**, non-interactive **runners**, and named **workspaces** with explicit, agent-safe side effects.
 
-> **Retirement direction:** new Amp-to-Amp work moves to native Amp creation, exact runner/Orb placement, messaging, replies, waiting, and archive lifecycle. Amux will close new resource admission one operation family at a time, retain drain-only writes for state that predates each cutover, then export, freeze, remove writers, provide a bounded read-only compatibility window, and archive the lifecycle product. The current Tycho bridge remains until a direct bounded structured-return route is field-validated; Git/worktree removal safety remains independent transition safety. Documentation does not itself change current command behavior. See [ADR 0007](docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md) and the [active disposition ledger](docs/staged-drain-disposition.md).
+> **Thin-host direction:** native Amp owns all new task creation and coordination. Amux retains its machine-local runner registry, exact workdir bindings, automatic login/boot launch, tmux/Amp process lifecycle, diagnostics, maintenance, and OS activation integration. Worker/coordination/provider stores are compatibility and drain only; native-created work never acquires them. Amux is not being fully deprecated or archived. See [ADR 0008](docs/adr/0008-retain-machine-local-runner-host-and-drain-coordination.md), the partially superseded [ADR 0007](docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md), and the [active disposition ledger](docs/staged-drain-disposition.md).
 
 - A **worker** is an interactive Amp client identified machine-wide by its canonical thread ID.
 - A **runner** is an `amp --no-tui` client identified machine-wide by its canonical workdir. It enables Amp Agents Anywhere but does not own remote agent threads.
@@ -104,16 +104,15 @@ To resume a Tycho receipt created before this skill split, install `/amux-tycho`
 
 The CLI writes schema-marked registries under `~/.config/amux` by default. Select another directory with `--config-dir` (`-c`) or `AMUX_CONFIG_DIR`. Do not create or edit registry rows manually when a command exists.
 
-Pin a known worker explicitly, then manage it by canonical thread identity:
+Existing pre-cutover workers may still be inspected and drained by canonical thread identity. Do not pin a native-created thread or create a new worker row for ordinary work:
 
 ```sh
-amux worker pin --workspace amux --window docs --workdir ~/Code/amux --thread T-example
 amux worker list --thread T-example
 amux worker park --thread T-example
 amux worker launch --thread T-example
 ```
 
-Pin and unpin change configuration only. Park stops a verified local client but preserves configuration and remote state. Launch restores local execution without changing remote thread state.
+Worker pin remains implemented until a separately published worker-family cutover generation can distinguish safe replay from new admission, but it is compatibility-only and not an active `/amux` or new-work route. Worker unpin changes configuration only. Park stops a verified local client but preserves configuration and remote state. Launch restores local execution without changing remote thread state.
 
 For a workdir-bound runner:
 
@@ -153,15 +152,14 @@ Agents should use long flags:
 | `--thread`, `-t` | canonical worker identity |
 | `--workdir`, `-d` | canonical runner identity; explicit worker-reconcile drift scope |
 | `--workspace`, `-w` | worker/runner lifecycle group and same-named tmux session |
-| `--window`, `-W` | worker pin/adoption placement metadata |
+| `--window`, `-W` | historical worker pin/adoption placement metadata |
 | `--mode`, `-m` | workspace-list filter |
 | `--current` | resource owning the invoking pane/workdir |
 | `--all` | explicit machine-wide scope |
 
-Worker and runner pin/unpin require a namespace because their identities differ:
+Runner pin is retained active admission. Worker unpin remains available for drain; worker pin is implemented compatibility syntax but must not create ordinary new-work lifecycle state:
 
 ```sh
-amux worker pin --workspace amux --window docs --workdir ~/Code/amux --thread T-example
 amux worker unpin --thread T-example
 amux runner pin --workspace amux --workdir ~/Code/amux-runner
 ```
@@ -279,7 +277,7 @@ Coordinator soft budgets to `ready` are Small 30m, Medium 1h (default), Large 2h
 | `list`, `workspace list` | inspect | inspect | none | none |
 | `doctor` | inspect | inspect | inspect | inspect only |
 | `launch` | read; skip shelved | read | create/verify | none |
-| `pin` / `unpin` | pin worker; unpin worker and shelf intent | pin mutates; runner unpin currently retains and rejects | none | none |
+| `pin` / `unpin` | worker pin remains implemented compatibility syntax, not a supported new-work route; unpin removes worker and shelf intent | runner pin is retained active admission; runner unpin currently retains and rejects | none | none |
 | `park` / `restart` | preserve | preserve | stop/restart verified | none |
 | `remove` | remove worker/shelf | runner removal currently retains and fails closed until bound process/catalog absence is provable | stop verified workers only | none |
 | `shelve` / `unshelve` | preserve worker; mutate intent | none | shelve parks only | archive/unarchive |
@@ -357,6 +355,10 @@ amux runner maintenance remove
 ```
 
 Use `self` when Amp's updater owns updates and `external` when a package manager does. Installation is explicit and dry-runnable. Maintenance uses the same operation lock and records diagnostics consumed by `amux install doctor`.
+
+## Automatic runner launch
+
+At graphical login or boot, machine configuration runs `amux launch --all`. Amux—not systemd or launchd—reads the machine-local registry and launches the tmux/Amp process group. Verified deployment patterns use a systemd user service with `Type=oneshot` plus `RemainAfterExit=yes`, or a RunAtLoad macOS LaunchAgent with `AbandonProcessGroup=true`, so the OS activates Amux and retains its launched process group rather than replacing the Amux launcher with direct runner supervision. Machine-specific service definitions belong in the operator's system configuration.
 
 ## Shell completions
 

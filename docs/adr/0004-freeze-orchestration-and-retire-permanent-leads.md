@@ -7,7 +7,7 @@ superseded-by: 0005
 
 # Freeze orchestration expansion and retire permanent Leads
 
-> **Historical decision:** ADR 0005 reversed this ADR's blanket retirement direction while retaining its constraints against permanent Lead hierarchies, broad orchestration, and token-heavy coordination. [ADR 0007](0007-retire-amux-through-native-cutover-and-staged-drain.md) now supersedes ADR 0005 with a staged drain that preserves existing recovery evidence without adding a retirement engine. This document remains available as diagnosis and decision history.
+> **Historical decision:** ADR 0005 reversed this ADR's blanket retirement direction while retaining its constraints against permanent Lead hierarchies, broad orchestration, and token-heavy coordination. ADR 0007 later selected native new-work coordination and a staged legacy drain; [ADR 0008](0008-retain-machine-local-runner-host-and-drain-coordination.md) rejects full-product retirement and retains the thin machine-local runner host. This document remains available as diagnosis and decision history.
 
 ## Decision
 

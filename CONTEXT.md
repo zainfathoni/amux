@@ -7,7 +7,7 @@ _Avoid_: Thread, interactive client
 
 **Worker identity** — The canonical Amp thread ID. A thread may belong to only one configured worker on a machine; workspace, window, and workdir describe its local placement rather than its identity.
 
-**Runner** — A non-interactive Amp client that makes a machine and working directory available for remote work.
+**Runner** — A non-interactive Amp client that makes a machine and working directory available for remote work. The retained Amux host layer registers, launches, and safely operates it.
 _Avoid_: Worker, background worker
 
 **Runner identity** — The canonical workdir. A directory may belong to only one configured runner workspace on a machine.
@@ -50,7 +50,7 @@ _Avoid_: Session when referring to the configured lifecycle group
 
 **Park** — Stop local execution while preserving both the restore configuration and remote thread. Parked work can be launched again without first changing its remote state.
 
-**Shelf intent** — An explicit local record that a configured worker is deliberately deferred. Shelf intent is authoritative for whether amux may launch the worker; Amp **archive** state separately controls remote thread visibility. Under [ADR 0007](docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md), shelf intent is **drain-only migration state**, not a permanent product: after shelf admission closes and Amux launch is gone, there is no Amux launch gate left for it to enforce.
+**Shelf intent** — An explicit local record that a configured worker is deliberately deferred. Shelf intent is authoritative for whether amux may launch the worker; Amp **archive** state separately controls remote thread visibility. Under [ADR 0007](docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md) as narrowed by [ADR 0008](docs/adr/0008-retain-machine-local-runner-host-and-drain-coordination.md), shelf intent is **drain-only migration state**, not a permanent product. Its worker coordination role can drain without removing retained Amux runner launch.
 _Avoid_: Treating shelf intent as native Hide, or as a second long-lived visibility store beside Amp archive
 
 **Shelve** — Historical Amux composite: record shelf intent, **archive** the remote thread (`amp threads archive`), and park (stop) verified local execution while preserving worker configuration. Shelved work must be unshelved before Amux may launch it. This is not native “Hide/Unhide”; `find_thread` `hidden:` / `snoozed:` are search filters only unless a distinct hide mutation API is later proven. After Amux shelf admission closes, defer remote visibility with native archive/unarchive alone (optional owner-local stop); do not add bulk migrate-to-hidden tooling.

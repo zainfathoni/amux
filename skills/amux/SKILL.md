@@ -1,11 +1,11 @@
 ---
 name: amux
-description: "Drains existing local Amux worker, runner, and workspace state plus proven pre-cutover compatibility/drain state for work groups, reports, callback leases, deadlines, and finish authorization, while routing new Amp work to native child threads. Use for pin/unpin/park/restart/shelve/unshelve/launch, bounded projectless host placement, doctor, teardown, /amux health, /amux sprawl, the one-time staged-drain /amux sweep, pre-cutover /amux finish, child-thread coordination, 'forget this on restore', 'hide it for now', 'defer this workspace', 'Show shelved work', and 'Restore my workspace'. Experimental Tycho, Claude, or Pi routes remain separate explicit-only skills."
+description: "Operates the retained machine-local Amux runner registry, exact workdir bindings, tmux/Amp launch, diagnostics, maintenance, and safe runner lifecycle while draining existing worker and legacy coordination state. Routes all new task coordination to native Amp child threads without Amux adoption, groups, reports, callbacks, deadlines, or finish state. Use for runner pin/list/doctor/park/remove/reconcile/restart, launch, worker compatibility lifecycle, bounded projectless host placement, /amux health, /amux sprawl, the owner-gated one-time /amux sweep, pre-cutover /amux finish, 'Pin it', 'forget this on restore', 'hide it for now', 'defer this workspace', 'Show shelved work', and 'Restore my workspace'. Experimental Tycho, Claude, or Pi routes remain separate explicit-only skills."
 ---
 
 # amux
 
-Local Amp/tmux lifecycle. **Worker** = interactive thread-bound client. **Runner** = `amp --no-tui` bound to a canonical workdir. **Workspace** = same-named tmux session grouping both.
+Thin machine-local Amp/tmux host. **Worker** = legacy interactive thread-bound client. **Runner** = retained `amp --no-tui` client bound to a canonical workdir. **Workspace** = same-named tmux session grouping both.
 
 Do not edit registries when the CLI can express the change. Run `amux help [command ...]` before assuming syntax. [`reference/contract-v1.md`](reference/contract-v1.md) is compatibility-only: use it only for an exact pre-cutover Amux-managed spawn, adopt, or group flow whose persisted provenance proves it is drain-eligible. Never put its path or lifecycle instructions in a native `create_thread` prompt.
 
@@ -14,6 +14,7 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 - Canonical worker identity is `--thread`; runner identity is `--workdir`; `--workspace` selects a lifecycle group. Use long selectors.
 - Top-level `list`, `launch`, `park`, `restart`, `remove`, `doctor`, and `reconcile` aggregate both modes. Narrow with `amux worker ...` or `amux runner ...`.
 - Bare `amux` launches workers only. `amux launch` launches both. Other machine-wide mutations need explicit `--all`.
+- Runner pin/list/doctor/park/remove and minimum fail-closed reconcile remain active machine-local operations. Graphical-login/boot integration runs `amux launch --all`; systemd/launchd activate Amux and retain its tmux/Amp process group rather than replacing Amux with direct runner supervision.
 - Generalized `amux spawn` admission closed at `spawn-native-cutover-v1`. When delegated work needs a native child, use authenticated native Amp `create_thread` on the exact intended Workspace Project and Orb, or exact live runner and its intended workdir. If the owner supplies `--runner-id <id>` to `/amux`, treat it only as the exact native `create_thread` `runner_id`: list live runners immediately before creation, require that exact ID and intended workdir, and never pass it to the Amux CLI. Give the child a lean task prompt—task, acceptance criteria, relevant constraints, validation, and expected reply—and retain only native parent/reply routing. Do not call it an Amux worker or spawned worker. One coherent issue or PR review may run on the direct coordinator without a child.
 - Native-created work receives no Amux contract path, receipt, report, callback, group, deadline, finish authorization, or automatic adoption. Do not add these exclusions to the child prompt; enforce them in the parent by creating no Amux lifecycle state.
 - Every native creation and bounded exception uses an explicit mode. When a linked ChatGPT subscription and target-mode availability are known, choose `low` for small mechanical work, `medium` for ordinary implementation, or `high` for hard architecture, debugging, or review. Otherwise use `medium`. An explicitly requested mode always wins; `ultra`, plugin, and other special modes remain explicit-only.
@@ -25,7 +26,7 @@ Do not edit registries when the CLI can express the change. Run `amux help [comm
 
 ## Route triggers
 
-- **Pin it**: `amux worker pin --current` when complete `AMUX_*` identity exists; else explicit selectors. Config only. Never combine `--current` with another selector.
+- **Pin it** / **Pin this runner**: `amux runner pin --workspace <name> --workdir <existing-directory>` or `--current`. Runner config only. Do not route an unqualified pin request to worker pin; worker pin is implemented compatibility syntax pending a separately chosen cutover generation, not a new-work route.
 - **Unpin it** / **forget this on restore**: `amux worker unpin --current`.
 - **Park it**: `amux worker park --current`.
 - **Restart unresponsive clients**: `amux restart --all` or mode-specific restart.

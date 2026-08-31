@@ -4,6 +4,8 @@ status: accepted
 
 # Make the client lifecycle CLI agent-first
 
+> **Current scope:** [ADR 0008](0008-retain-machine-local-runner-host-and-drain-coordination.md) retains this ADR's machine-local runner registry, launch, maintenance, diagnostics, and fail-closed lifecycle contracts. [ADR 0007](0007-retire-amux-through-native-cutover-and-staged-drain.md) remains authoritative for draining worker and legacy coordination state; native-created work does not acquire that lifecycle.
+
 amux will model interactive thread-bound clients as workers and non-interactive workdir-bound clients as runners. Canonical mode-specific commands live under `amux worker` and `amux runner`; top-level lifecycle commands aggregate both modes when they share the same semantics, while inherently worker-only commands may retain concise top-level forms. This replaces legacy implicit worker semantics with a predictable resource hierarchy designed primarily for agents while preserving a few simple human commands.
 
 ## Accepted interface rules

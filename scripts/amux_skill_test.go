@@ -55,8 +55,8 @@ func TestTriggerChecklistMatchesSkillActivationAndRouting(t *testing.T) {
 
 	triggerPattern := regexp.MustCompile(`(?m)^\| \x60([^\x60]+)\x60 \|`)
 	matches := triggerPattern.FindAllStringSubmatch(checklist, -1)
-	if len(matches) != 18 {
-		t.Fatalf("trigger checklist has %d routes, want 18", len(matches))
+	if len(matches) != 19 {
+		t.Fatalf("trigger checklist has %d routes, want 19", len(matches))
 	}
 	for _, match := range matches {
 		trigger := match[1]
@@ -135,7 +135,7 @@ func TestOrdinaryIssuePRChecklistStaysDocsOnlyAndLean(t *testing.T) {
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
 	checklist := readSkillFile(t, root, filepath.Join("docs", "ordinary-issue-pr-checklist.md"))
 
-	// ADR 0007: ordinary issue/PR guidance must not activate the retiring /amux drain skill.
+	// ADR 0007/0008: ordinary issue/PR guidance must not activate /amux coordination state.
 	frontmatterEnd := strings.Index(skill, "\n---\n")
 	if frontmatterEnd < 0 {
 		t.Fatal("SKILL.md missing frontmatter terminator")
@@ -530,24 +530,178 @@ func TestNativeCreationDoesNotAdoptOrClaimExecutorMigration(t *testing.T) {
 	}
 }
 
-func TestRunnerIDDesignIsSupersededByLeanNativeHandoff(t *testing.T) {
+func TestRunnerIDDesignDoesNotDisplaceRetainedAmuxLaunch(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	design := readSkillFile(t, root, filepath.Join("docs", "proposals", "runner-id-design-grill.md"))
-	if !strings.HasPrefix(design, "---\nstatus: superseded\nsuperseded-by: ../adr/0007-retire-amux-through-native-cutover-and-staged-drain.md\n---\n") {
-		t.Error("runner-ID design must be marked superseded by ADR 0007")
+	if !strings.HasPrefix(design, "---\nstatus: superseded\nsuperseded-by: ../adr/0008-retain-machine-local-runner-host-and-drain-coordination.md\n---\n") {
+		t.Error("runner-ID design must be marked superseded by ADR 0008")
 	}
 	for _, required := range []string{
 		"Do not implement issues #212–#216 as an Amux feature graph",
 		"do not add",
 		"Amux `--runner-id` selector",
-		"Only after old-runner absence is proven",
+		"Canonical workdir remains the identity of a retained Amux runner",
 		"amp --no-tui --runner-id <stable-owner-selected-id>",
+		"That passthrough is not implemented",
+		"require exactly `amp --no-tui` and reject extra arguments",
 		"native `create_thread` `runner_id` argument",
+		"systemd/launchd activates `amux launch --all`",
 		"No new runner-ID store, migration framework, lifecycle classifier, or Amux CLI surface is required",
 	} {
 		if !strings.Contains(design, required) {
-			t.Errorf("lean runner-ID disposition is missing %q", required)
+			t.Errorf("retained-launch runner-ID disposition is missing %q", required)
+		}
+	}
+}
+
+func TestThinHostDirectionIsUnambiguous(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	adr7 := readSkillFile(t, root, filepath.Join("docs", "adr", "0007-retire-amux-through-native-cutover-and-staged-drain.md"))
+	adr8 := readSkillFile(t, root, filepath.Join("docs", "adr", "0008-retain-machine-local-runner-host-and-drain-coordination.md"))
+	readme := readSkillFile(t, root, "README.md")
+	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
+	ledger := readSkillFile(t, root, filepath.Join("docs", "staged-drain-disposition.md"))
+	homepage := readSkillFile(t, root, filepath.Join("docs", "index.html"))
+	skillGuide := readSkillFile(t, root, filepath.Join("docs", "skill", "index.html"))
+	triggers := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md"))
+	active := adr8 + readme + skill + ledger
+
+	for name, check := range map[string]struct {
+		contents string
+		markers  []string
+	}{
+		"ADR 0008": {adr8, []string{
+			"Native Amp owns new task coordination",
+			"machine-local runner registry",
+			"`amux launch --all`",
+			"Type=oneshot",
+			"RemainAfterExit=yes",
+			"AbandonProcessGroup=true",
+			"preflight-only",
+			"legacy coordination",
+			"not being fully deprecated or archived",
+		}},
+		"README": {readme, []string{
+			"native Amp owns all new task creation and coordination",
+			"machine-local runner registry",
+			"`amux launch --all`",
+			"Type=oneshot",
+			"RemainAfterExit=yes",
+			"AbandonProcessGroup=true",
+			"not being fully deprecated or archived",
+		}},
+		"skill": {skill, []string{
+			"machine-local Amux runner registry",
+			"Routes all new task coordination to native Amp child threads",
+			"`amux launch --all`",
+			"legacy coordination state",
+		}},
+		"ledger": {ledger, []string{
+			"Native Amp owns new task coordination",
+			"machine-local runner launch",
+			"`amux launch --all`",
+			"Type=oneshot",
+			"RemainAfterExit=yes",
+			"AbandonProcessGroup=true",
+			"preflight-only",
+			"legacy coordination",
+			"not being fully deprecated or archived",
+		}},
+	} {
+		for _, marker := range check.markers {
+			if !strings.Contains(check.contents, marker) {
+				t.Errorf("%s thin-host direction is missing %q", name, marker)
+			}
+		}
+	}
+	for name, check := range map[string]struct {
+		contents string
+		markers  []string
+	}{
+		"ADR 0008": {adr8, []string{
+			"separate explicit owner request",
+			"After that run",
+			"accepts one complete inventory",
+			"explicitly dispositions an incomplete/error result",
+			"confirms no repeat is needed",
+			"only then",
+			"deleted before the next release",
+		}},
+		"ledger": {ledger, []string{
+			"separate explicit owner request",
+			"After that separately authorized run",
+			"accepts one complete inventory",
+			"explicitly dispositions an incomplete/error result",
+			"confirms no repeat is needed",
+			"only then",
+			"before the next release",
+		}},
+	} {
+		previous := -1
+		for _, marker := range check.markers {
+			index := strings.Index(check.contents, marker)
+			if index < 0 {
+				t.Errorf("%s is missing #360 gate %q", name, marker)
+				continue
+			}
+			if index <= previous {
+				t.Errorf("%s has out-of-order #360 gate %q", name, marker)
+			}
+			previous = index
+		}
+	}
+	for _, forbidden := range []string{
+		"2026-09-01 cutover date",
+		"2026-11-30 reader window begins",
+		"Runner admission closes",
+		"OS supervision of native runners",
+	} {
+		if strings.Contains(active, forbidden) {
+			t.Errorf("active thin-host guidance retains obsolete direction %q", forbidden)
+		}
+	}
+	if !strings.HasPrefix(adr7, "---\nstatus: partially-superseded\n") || !strings.Contains(adr7, "partially-superseded-by: 0008") {
+		t.Error("ADR 0007 must be explicitly partially superseded by ADR 0008")
+	}
+	for name, contents := range map[string]string{
+		"README":        readme,
+		"skill":         skill,
+		"trigger table": triggers,
+		"homepage":      homepage,
+		"skill guide":   skillGuide,
+	} {
+		if strings.Contains(contents, "amux worker pin") {
+			t.Errorf("%s must not actively route new worker pin admission", name)
+		}
+	}
+	for name, contents := range map[string]string{
+		"skill":         skill,
+		"trigger table": triggers,
+		"homepage":      homepage,
+		"skill guide":   skillGuide,
+	} {
+		if !strings.Contains(contents, "Pin this runner") {
+			t.Errorf("%s must route retained pin admission to runners", name)
+		}
+	}
+	for name, contents := range map[string]string{
+		"skill description": skill[:strings.Index(skill, "\n---\n")],
+		"skill routing":     skill,
+		"trigger table":     triggers,
+	} {
+		if !strings.Contains(contents, "Pin it") {
+			t.Errorf("%s must retain the unqualified runner pin trigger", name)
+		}
+	}
+	for _, forbidden := range []string{"amux worker adopt", "amux group declare", "amux report submit"} {
+		frontmatterEnd := strings.Index(skill, "\n---\n")
+		if frontmatterEnd < 0 {
+			t.Fatal("SKILL.md missing frontmatter terminator")
+		}
+		if strings.Contains(skill[:frontmatterEnd], forbidden) {
+			t.Errorf("/amux routing frontmatter revives legacy coordination %q", forbidden)
 		}
 	}
 }
@@ -3596,7 +3750,6 @@ func TestSweepPresentationInputsFailClosedWithoutMutation(t *testing.T) {
 func TestSweepWorkflowDocumentsReadOnlyAuthorityBoundary(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
 	for _, required := range []string{
 		"/amux sweep",
@@ -3609,13 +3762,32 @@ func TestSweepWorkflowDocumentsReadOnlyAuthorityBoundary(t *testing.T) {
 		"no fetch, cleanup, reconciliation, removal, unlock, prune, backup-ref mutation",
 		"Preservation-locked historical resources",
 		"one-time read-only migration inventory for the staged Amux drain",
-		"after the owner records acceptance of one complete staged-drain inventory",
 		"delete `scripts/sweep-inventory`, its sweep-only tests, and every `/amux sweep` route/reference before the next Amux release",
 		"Do not promote the helper into the CLI, retain it as a standing diagnostic, schedule it, or extend it for post-drain monitoring",
 	} {
-		if !strings.Contains(skill+workflow, required) {
+		if !strings.Contains(workflow, required) {
 			t.Errorf("sweep contract lacks %q", required)
 		}
+	}
+	previous := -1
+	for _, marker := range []string{
+		"This documentation does not authorize a run",
+		"a future run requires a separate explicit owner request",
+		"After that authorization",
+		"after the owner records acceptance of one complete staged-drain inventory",
+		"explicit incomplete/error disposition",
+		"confirms that no repeat inventory is required",
+		"delete `scripts/sweep-inventory`, its sweep-only tests, and every `/amux sweep` route/reference before the next Amux release",
+	} {
+		index := strings.Index(workflow, marker)
+		if index < 0 {
+			t.Errorf("sweep workflow is missing ordered #360 gate %q", marker)
+			continue
+		}
+		if index <= previous {
+			t.Errorf("sweep workflow has out-of-order #360 gate %q", marker)
+		}
+		previous = index
 	}
 }
 
@@ -3815,7 +3987,7 @@ func TestActivePublicSurfacesLabelLegacyLifecycleAndNativeChildren(t *testing.T)
 
 	requiredBySurface := map[string][]string{
 		"homepage": {
-			"Current new work uses native child threads. The pre-cutover lifecycle cards below describe compatibility/drain support retained by this release, not new-work features.",
+			"Current new task coordination uses native child threads. Machine-local runner registry, launch, maintenance, and diagnostics remain active Amux features; worker/group/report/callback coordination is compatibility/drain-only.",
 			"<code>pre-cutover group drain</code>",
 			"<code>pre-cutover report drain</code>",
 			"<code>pre-cutover callback drain</code>",
@@ -3833,8 +4005,9 @@ func TestActivePublicSurfacesLabelLegacyLifecycleAndNativeChildren(t *testing.T)
 			"`amux worker adopt` is a compatibility/drain surface only for an exact persisted pre-cutover adoption operation whose next transition is proven drain-eligible",
 		},
 		"skill metadata": {
-			"proven pre-cutover compatibility/drain state for work groups, reports, callback leases, deadlines, and finish authorization",
-			"routing new Amp work to native child threads",
+			"retained machine-local Amux runner registry",
+			"Routes all new task coordination to native Amp child threads",
+			"legacy coordination state",
 			"pre-cutover completed-worker compatibility/drain only",
 		},
 		"trigger checklist": {

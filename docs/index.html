@@ -871,7 +871,7 @@
               </div>
               <a class="release-link" href="https://github.com/zainfathoni/amux/releases">All releases →</a>
             </div>
-            <p class="small-note">Current new work uses native child threads. The pre-cutover lifecycle cards below describe compatibility/drain support retained by this release, not new-work features.</p>
+            <p class="small-note">Current new task coordination uses native child threads. Machine-local runner registry, launch, maintenance, and diagnostics remain active Amux features; worker/group/report/callback coordination is compatibility/drain-only.</p>
             <div class="api-grid">
               <article class="api-card">
                 <code>aggregate lifecycle</code>
@@ -922,7 +922,7 @@
               </p>
             </div>
             <div class="trigger-list" aria-label="amux skill trigger phrases">
-              <div class="trigger-row"><span class="trigger-say">“Pin it”</span><code class="trigger-run">amux worker pin --workspace … --window … --workdir … --thread …</code></div>
+              <div class="trigger-row"><span class="trigger-say">“Pin this runner”</span><code class="trigger-run">amux runner pin --workspace … --workdir …</code></div>
               <div class="trigger-row"><span class="trigger-say">“Park it”</span><code class="trigger-run">amux worker park --current</code></div>
               <div class="trigger-row"><span class="trigger-say">“Shelve this”</span><code class="trigger-run">amux shelve --thread …</code></div>
               <div class="trigger-row"><span class="trigger-say">“Restore my workspace”</span><code class="trigger-run">amux launch --workspace …</code></div>
@@ -984,10 +984,10 @@
       const verbs = {
         pin: {
           label: "pin",
-          desc: "Record a worker by canonical --thread or a runner by canonical --workdir. Pin is mode-namespaced and changes configuration only.",
-          domains: [0, 1],
-          note: "Use amux runner pin for runner configuration.",
-          script: [{ cmd: "amux worker pin --workspace product --window api --workdir ~/Code/product --thread T-example", out: ["worker configuration recorded; execution and thread unchanged"] }],
+          desc: "Record a retained runner by canonical --workdir. Native-created task threads do not become Amux workers.",
+          domains: [1],
+          note: "Worker pin remains compatibility syntax, not a supported new-work route.",
+          script: [{ cmd: "amux runner pin --workspace product --workdir ~/Code/product-runner", out: ["runner configuration recorded; execution unchanged"] }],
         },
         unpin: {
           label: "unpin",
