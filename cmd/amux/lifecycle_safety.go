@@ -18,14 +18,6 @@ var (
 	lifecyclePaneProcess = resolveLifecyclePaneProcess
 )
 
-func lifecycleCommandStopsWorker(name string) bool {
-	switch name {
-	case "shelve", "park", "restart", "remove", "teardown":
-		return true
-	}
-	return false
-}
-
 func lifecycleCommandStopsRunner(name string) bool {
 	switch name {
 	case "park", "restart":

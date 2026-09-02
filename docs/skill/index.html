@@ -3,107 +3,59 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>The /amux skill — safe Amp lifecycle routing</title>
-    <meta name="description" content="Install and use the bundled /amux skill for worker, runner, workspace, health, sprawl, and finish workflows." />
-    <meta property="og:title" content="The /amux skill" />
-    <meta property="og:description" content="Safe agent routing for amux worker, runner, and workspace lifecycle." />
-    <meta property="og:type" content="website" />
-    <meta property="og:url" content="https://amux.zainf.dev/skill/" />
-    <meta name="theme-color" content="#161e2e" />
-    <link rel="canonical" href="https://amux.zainf.dev/skill/" />
+    <meta name="description" content="Install and use /amux for machine-local Amp runners." />
+    <title>/amux skill guide</title>
     <style>
-      :root { color-scheme:dark; --bg:#161e2e; --panel:#10141f; --ink:#fff; --muted:#b6bece; --red:#f05252; --line:#354055; }
-      * { box-sizing:border-box; } html { scroll-behavior:smooth; }
-      body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.7 Inter,system-ui,sans-serif; }
-      a { color:var(--red); } code,pre { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; }
-      .wrap { width:min(72rem,calc(100% - 2rem)); margin:auto; }
-      header { display:flex; justify-content:space-between; padding:1.4rem 0; border-bottom:1px solid var(--line); }
-      header a { color:var(--ink); text-decoration:none; font-weight:800; }
-      .layout { display:grid; grid-template-columns:15rem minmax(0,1fr); gap:4rem; padding:4rem 0 7rem; }
-      aside { position:sticky; top:2rem; align-self:start; }
-      aside a { display:block; padding:.35rem 0; color:var(--muted); text-decoration:none; }
-      h1 { margin:0; font-size:clamp(3rem,7vw,5.7rem); line-height:.95; letter-spacing:-.055em; }
-      h2 { margin-top:4rem; padding-top:1rem; border-top:1px solid var(--line); font-size:2rem; letter-spacing:-.035em; }
-      h3 { margin-top:2rem; }
-      .lede { max-width:60ch; color:var(--muted); font-size:1.15rem; }
-      pre { padding:1.2rem; overflow:auto; border:1px solid var(--line); background:var(--panel); }
-      table { width:100%; border-collapse:collapse; font-size:.93rem; }
-      th,td { padding:.8rem; border:1px solid var(--line); text-align:left; vertical-align:top; }
-      th { color:var(--red); }
-      .note { padding:1rem 1.2rem; border-left:4px solid var(--red); background:var(--panel); }
-      @media (max-width:780px) { .layout { grid-template-columns:1fr; padding-top:2.5rem; } aside { position:static; } }
+      :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; background: #0c111b; color: #e8edf7; }
+      body { max-width: 820px; margin: 0 auto; padding: 4rem 1.5rem; line-height: 1.6; }
+      h1 { font-size: clamp(2.5rem, 8vw, 5rem); margin: 0; }
+      h2 { margin-top: 3rem; }
+      a { color: #8cc8ff; }
+      code, pre { font-family: ui-monospace, monospace; }
+      pre { background: #151d2b; border: 1px solid #26344a; border-radius: .75rem; padding: 1rem; overflow-x: auto; }
     </style>
   </head>
   <body>
-    <div class="wrap">
-      <header><a href="/">← amux</a><a href="https://github.com/zainfathoni/amux/tree/main/skills/amux">Skill source</a></header>
-      <div class="layout">
-        <aside aria-label="On this page"><strong>On this page</strong><a href="#install">Install</a><a href="#model">Terminology</a><a href="#routing">Trigger routing</a><a href="#health">Health</a><a href="#sprawl">Sprawl</a><a href="#coordination">Coordination</a><a href="#finish">Finish</a><a href="#contracts">Agent contracts</a></aside>
-        <main>
-          <h1>The <span style="color:var(--red)">/amux</span> skill</h1>
-          <p class="lede">The bundled skill gives agents a precise vocabulary for local Amp lifecycle. It separates configuration, local execution, and remote thread state—and reserves higher-level health, sprawl, and finish behavior for safe skill orchestration.</p>
+    <p><a href="../">← amux</a></p>
+    <h1>/amux</h1>
+    <p>The core skill operates retained machine-local runners and routes new delegated work to native Amp child threads. It has no worker or legacy coordination route.</p>
 
-          <h2 id="install">Install globally</h2>
-          <pre><code>npx skills add zainfathoni/amux --skill amux --global
-# optional experiments only:
-npx skills add zainfathoni/amux --skill amux-claude --global
-npx skills add zainfathoni/amux --skill amux-pi --global
-npx skills add zainfathoni/amux --skill amux-tycho --global</code></pre>
-          <p>skills.sh is the primary installation path. A machine with a clean local <code>main</code> checkout may opt into installer-managed links for all four skills:</p>
-          <pre><code>AMUX_REPO="$HOME/Code/GitHub/zainfathoni/amux"
+    <h2>Install</h2>
+    <pre><code>npx skills add zainfathoni/amux --skill amux --global</code></pre>
+    <p>Optional provider skills are installed separately with <code>--skill amux-tycho</code>, <code>--skill amux-claude</code>, or <code>--skill amux-pi</code>.</p>
+    <p>For a clean local checkout, the installer supports opt-in links without updating the checkout:</p>
+    <pre><code>AMUX_REPO="$HOME/Code/GitHub/zainfathoni/amux"
 git -C "$AMUX_REPO" pull --ff-only origin main
 curl -fsSL https://amux.zainf.dev/install.sh | AMUX_SKILLS_SOURCE="$AMUX_REPO" sh</code></pre>
-          <p>The installer does not update the checkout. It preserves replaced installations as timestamped backups and creates absolute links under <code>~/.agents/skills</code>. Pull again and reload Amp (or start a new thread) after <code>main</code> changes. Core <code>/amux</code> stays thin: runner registry, exact workdir launch, maintenance, and diagnostics remain active; only an already-bound pre-cutover Amux worker whose persisted provenance proves it drain-eligible reads <code>reference/contract-v1.md</code>; only an existing pre-cutover deadline uses <code>reference/deadline-v1.md</code>. Native-created work receives neither. Experimental Tycho/Claude/Pi routes are separate skills.</p>
 
-          <h2 id="model">Terminology</h2>
-          <ul><li><strong>Worker:</strong> interactive TUI client identified by canonical Amp thread ID.</li><li><strong>Runner:</strong> non-interactive <code>amp --no-tui</code> client identified by canonical workdir. It enables remote work but does not own remote agent threads.</li><li><strong>Workspace:</strong> worker/runner lifecycle group represented by one same-named tmux session.</li></ul>
-          <p>Top-level <code>list</code>, <code>launch</code>, <code>park</code>, <code>restart</code>, <code>remove</code>, <code>doctor</code>, and <code>reconcile</code> aggregate both modes. The <code>worker</code> and <code>runner</code> namespaces narrow scope. Runner pin is retained active admission; worker pin remains implemented compatibility syntax rather than a new-work route.</p>
-          <p class="note">Amux work groups, reports, callback leases, deadlines, and finish authorization are pre-cutover compatibility/drain state only. Native child threads use native parent/reply routing and acquire none of that lifecycle.</p>
+    <h2>Terminology</h2>
+    <ul>
+      <li><strong>Runner:</strong> a machine-local <code>amp --no-tui</code> process identified by canonical workdir.</li>
+      <li><strong>Workspace:</strong> a same-named tmux session grouping runners.</li>
+      <li><strong>Native child:</strong> an Amp thread created and coordinated through Amp, never enrolled in Amux lifecycle state.</li>
+    </ul>
 
-          <h2 id="routing">Trigger routing</h2>
-          <table><thead><tr><th>Say</th><th>Agent route</th><th>Effect</th></tr></thead><tbody>
-            <tr><td>Pin this runner</td><td><code>amux runner pin --workspace &lt;name&gt; --workdir &lt;path&gt;</code> or <code>--current</code></td><td>Retained runner config admission; never enroll a native-created thread as a worker.</td></tr>
-            <tr><td>Unpin it</td><td><code>amux worker unpin --current</code></td><td>Remove worker and shelf intent; no stop or archive.</td></tr>
-            <tr><td>Park it</td><td><code>amux worker park --current</code></td><td>Stop verified local worker; preserve config/thread.</td></tr>
-            <tr><td>Shelve this</td><td><code>amux shelve --current</code></td><td>Record intent, archive thread, park worker.</td></tr>
-            <tr><td>Unshelve this</td><td><code>amux unshelve --current</code></td><td>Unarchive/remove intent; launch separately.</td></tr>
-            <tr><td>Restore my workspace</td><td><code>amux launch --workspace &lt;name&gt;</code></td><td>Launch workers and runners.</td></tr>
-            <tr><td>Teardown this worker</td><td><code>amux teardown --current</code></td><td>Archive, remove config, stop verified worker.</td></tr>
-          </tbody></table>
+    <h2>Trigger routing</h2>
+    <ul>
+      <li><strong>Pin this runner:</strong> <code>amux runner pin --workspace &lt;name&gt; --workdir &lt;path&gt;</code>.</li>
+      <li><strong>Restore my workspace:</strong> <code>amux launch --workspace &lt;name&gt;</code>.</li>
+      <li><strong>Park it:</strong> <code>amux runner park --current</code> or an exact workdir.</li>
+      <li><strong>Doctor amux:</strong> <code>amux runner doctor --all</code>.</li>
+      <li><strong>Spawn/delegate work:</strong> native Amp <code>create_thread</code>, not Amux spawn/adoption.</li>
+    </ul>
 
-          <h2 id="health">Skill-only health</h2>
-          <p><code>/amux health</code> aggregates workers and runners by default, with optional workspace and mode filters. It is not a CLI command.</p>
-          <ul><li>Workers: match configuration, tmux placement, workdir, thread, and an idle interactive Amp pane; send one tokenized read-only prompt only when safe.</li><li>Runners: never send input; verify canonical workdir, ownership, generated window, and the exact <code>amp --no-tui</code> process.</li></ul>
-          <p class="note">A worker timeout means candidate stale, not safe to replace. Health never mutates, launches, restarts, removes, reconciles, or spawns.</p>
+    <h2>Skill-only workflows</h2>
+    <p><code>/amux health</code> performs read-only runner diagnostics. <code>/amux sprawl</code> creates independent native Amp children only. <code>/amux sweep</code> is the protected #360 read-only inventory and requires a separate exact owner authorization; loading the skill does not authorize it.</p>
 
-          <h2 id="sprawl">Skill-only sprawl</h2>
-          <p><code>/amux sprawl</code> uses authenticated native Amp creation. Before side effects, the agent reads every issue and native dependency relationship, checks likely file/API overlap, and sequences anything dependent or conflicting.</p>
-          <pre data-native-create-prompt><code>Task: &lt;bounded issue task and why it matters&gt;
-Acceptance criteria: &lt;observable outcome and scope boundary&gt;
-Relevant context and constraints: &lt;files, repository, safety limits, settled decisions&gt;
-Validation: &lt;checks to run&gt;
-Expected result: complete the task and reply to the parent with changed files, checks, and blockers.</code></pre>
-          <p>Every accepted issue gets one narrow assignment and dedicated branch/worktree. Physical worktrees require the exact live runner rooted at that canonical workdir; there is no Orb/runner fallback. Native-created children remain unmanaged by Amux: no worker, group, report, callback, shelf, or pane state. With known linked ChatGPT routing and target-mode availability, use Low for small mechanical work, Medium for ordinary implementation, or High for difficult architecture, debugging, or review; otherwise use Medium. Ultra and special modes remain owner-explicit.</p>
+    <h2>Removed surfaces</h2>
+    <p>Worker, spawn, shelf, teardown, group, worker-report, callback, deadline, and finish commands are removed. Historical stores are inert and must not be migrated, rewritten, drained, or deleted. <code>/amux-tycho</code> remains a distinct explicit-only receipt bridge.</p>
 
-          <h2 id="coordination">Native child-thread coordination</h2>
-          <p>New coordination uses Amp's authenticated <code>create_thread</code>, parent/child identity, reply routing, messaging, and waiting. Each child is created directly on its exact executor/workdir and receives only a lean task prompt. No contract path, receipt, report, callback, adoption, group, deadline, finish authorization, or other Amux lifecycle state is created for it.</p>
-          <pre data-native-create-prompt><code>Task: &lt;bounded coordination task and why it matters&gt;
-Acceptance criteria: &lt;observable outcome and scope boundary&gt;
-Relevant context and constraints: &lt;files, repository, safety limits, settled decisions&gt;
-Validation: &lt;checks to run&gt;
-Expected result: complete the task and reply to the parent with changed files, checks, and blockers.</code></pre>
-          <p>Existing pre-cutover durable groups, reports, callback leases, deadlines, and finish authorization remain compatibility/drain-only only when exact persisted provenance proves their already-bound identity and exact allowed next transition. Contract and lifecycle instructions stay inside that boundary. Do not add a replacement member or new task merely to finish old state.</p>
-          <p class="note">Exit 2 lock contention writes nothing: wait, then retry the identical operation and report ID. Missing, stale, recycled, duplicate, reordered, and restarted callbacks fail closed or recover from durable state. Never retry into a suspected busy composer; inspect pending/history directly. Never guess a pane, force-delete, auto-release, or infer finish from a wake-up.</p>
-          <p>Existing pre-cutover report deadlines retain their exact size and generation: Small 30m, Medium 1h, or Large 2h; XL should already have been split. Stale is 15m, review warns after 10m, demonstrated external CI alerts after 20m, and authorized finish alerts after 10m. Only demonstrated external waits pause active time. One existing extension may add at most half the original budget under a new generation; expiry is diagnostic only. Native-created work gets no new Amux deadline state. The coordinator owns one nearest-deadline queue, not a timer process per child; never edit <code>reports.json</code> directly.</p>
-
-          <h2 id="finish">Skill-only finish</h2>
-          <p><code>/amux finish</code> is a drain workflow for an existing completed Amux worker, not a lifecycle automatically attached to native-created work. One read-only preflight binds either a merged PR or an explicitly completed review-only assignment to the exact worker, present index-only worktree, attached branch, runner/process ownership, lock state, and exact-thread teardown. Dirty, ignored, shared, runner-owned, process-ambiguous, detached, or missing state blocks without mutation.</p>
-          <p>Finish presents one concise exact action summary for one owner approval, parks the exact verified live worker first, unlocks only when the exact worktree is locked, removes it normally without force, and preserves the local and remote branches unless deletion is independently requested and proven safe. Exact-thread worker teardown archives the completed thread last; report/group/provider evidence is retained, review-only reports remain unchanged, and no durable finish-plan or retirement state is created.</p>
-
-          <h2 id="contracts">Agent contracts</h2>
-          <ul><li>Use long canonical selectors and current contextual help.</li><li>Use <code>--dry-run</code> before mutation and <code>--json</code> for parsing.</li><li>JSON v1 separates <code>planned</code>, <code>successful</code>, <code>skipped</code>, and <code>failed</code>.</li><li>Exit 2 rejects before mutation; exit 1 may represent partial runtime success.</li><li>Ordinary new threads are created with native <code>create_thread</code>, lean task prompts, and native parent/reply routing only.</li><li>Contract and lifecycle instructions apply only to proven pre-cutover Amux-managed drains.</li><li>The projectless physical-host exception requires exact owner authorization and fails closed without retry or fallback.</li><li>Health, coordinator orchestration, sprawl, and finish are not <code>amux</code> subcommands.</li></ul>
-        </main>
-      </div>
-    </div>
+    <h2>Safety</h2>
+    <ul>
+      <li>Use long selectors and current contextual help.</li>
+      <li>Use <code>--dry-run</code> before mutation and <code>--json</code> for parsing.</li>
+      <li>Runner unpin removes an exact binding only after proving its local tmux runner absent; remove and missing-workdir reconcile remain fail-closed.</li>
+      <li>Runner commands never own remote Amp threads.</li>
+    </ul>
   </body>
 </html>

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -28,9 +29,6 @@ var publicSkillFiles = []string{
 	filepath.Join("skills", "amux", "reference", "workflows.md"),
 	filepath.Join("skills", "amux", "reference", "troubleshooting.md"),
 	filepath.Join("skills", "amux", "reference", "amp-invocation-policy.md"),
-	filepath.Join("skills", "amux", "reference", "contract-v1.md"),
-	filepath.Join("skills", "amux", "reference", "deadline-v1.md"),
-	filepath.Join("skills", "amux", "reference", "removal-safety.md"),
 	filepath.Join("skills", "amux-tycho", "SKILL.md"),
 	filepath.Join("skills", "amux-tycho", "reference", "tycho-report-bridge.md"),
 	filepath.Join("skills", "amux-tycho", "reference", "team-review-second-opinion.md"),
@@ -55,8 +53,8 @@ func TestTriggerChecklistMatchesSkillActivationAndRouting(t *testing.T) {
 
 	triggerPattern := regexp.MustCompile(`(?m)^\| \x60([^\x60]+)\x60 \|`)
 	matches := triggerPattern.FindAllStringSubmatch(checklist, -1)
-	if len(matches) != 19 {
-		t.Fatalf("trigger checklist has %d routes, want 19", len(matches))
+	if len(matches) != 12 {
+		t.Fatalf("trigger checklist has %d routes, want 12", len(matches))
 	}
 	for _, match := range matches {
 		trigger := match[1]
@@ -81,10 +79,7 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 				"workflows.md",
 				"troubleshooting.md",
 				"trigger-phrases.md",
-				"contract-v1.md",
-				"deadline-v1.md",
 				"amp-invocation-policy.md",
-				"removal-safety.md",
 			},
 		},
 		{
@@ -127,7 +122,7 @@ func TestSkillReferencesExistAndAreLinked(t *testing.T) {
 	}
 }
 
-func TestOrdinaryIssuePRChecklistStaysDocsOnlyAndLean(t *testing.T) {
+func legacyTestOrdinaryIssuePRChecklistStaysDocsOnlyAndLean(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
@@ -481,7 +476,7 @@ func TestPiSparkResultPipelineDecodesSchemaCorrectTextDelta(t *testing.T) {
 	}
 }
 
-func TestInvocationPolicyIsProgressivelyDisclosedWithoutChangingClaudeRoutes(t *testing.T) {
+func legacyTestInvocationPolicyIsProgressivelyDisclosedWithoutChangingClaudeRoutes(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
@@ -508,7 +503,7 @@ func TestInvocationPolicyIsProgressivelyDisclosedWithoutChangingClaudeRoutes(t *
 	}
 }
 
-func TestNativeCreationDoesNotAdoptOrClaimExecutorMigration(t *testing.T) {
+func legacyTestNativeCreationDoesNotAdoptOrClaimExecutorMigration(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
@@ -560,6 +555,8 @@ func TestThinHostDirectionIsUnambiguous(t *testing.T) {
 	root := repoRoot(t)
 	adr7 := readSkillFile(t, root, filepath.Join("docs", "adr", "0007-retire-amux-through-native-cutover-and-staged-drain.md"))
 	adr8 := readSkillFile(t, root, filepath.Join("docs", "adr", "0008-retain-machine-local-runner-host-and-drain-coordination.md"))
+	adr5 := readSkillFile(t, root, filepath.Join("docs", "adr", "0005-maintain-amux-as-a-local-worker-lifecycle-and-recovery-tool.md"))
+	adr6 := readSkillFile(t, root, filepath.Join("docs", "adr", "0006-bound-thread-delegation-and-require-preservation-before-retirement.md"))
 	readme := readSkillFile(t, root, "README.md")
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
 	ledger := readSkillFile(t, root, filepath.Join("docs", "staged-drain-disposition.md"))
@@ -584,19 +581,19 @@ func TestThinHostDirectionIsUnambiguous(t *testing.T) {
 			"not being fully deprecated or archived",
 		}},
 		"README": {readme, []string{
-			"native Amp owns all new task creation and coordination",
+			"Native Amp owns new task creation and coordination",
 			"machine-local runner registry",
 			"`amux launch --all`",
 			"Type=oneshot",
 			"RemainAfterExit=yes",
 			"AbandonProcessGroup=true",
-			"not being fully deprecated or archived",
+			"Amux is not deprecated or archived",
 		}},
 		"skill": {skill, []string{
 			"machine-local Amux runner registry",
-			"Routes all new task coordination to native Amp child threads",
+			"Routes new delegated work to native Amp child threads",
 			"`amux launch --all`",
-			"legacy coordination state",
+			"Historical worker/coordination files are inert",
 		}},
 		"ledger": {ledger, []string{
 			"Native Amp owns new task coordination",
@@ -662,8 +659,15 @@ func TestThinHostDirectionIsUnambiguous(t *testing.T) {
 			t.Errorf("active thin-host guidance retains obsolete direction %q", forbidden)
 		}
 	}
-	if !strings.HasPrefix(adr7, "---\nstatus: partially-superseded\n") || !strings.Contains(adr7, "partially-superseded-by: 0008") {
-		t.Error("ADR 0007 must be explicitly partially superseded by ADR 0008")
+	if !strings.HasPrefix(adr7, "---\nstatus: partially-superseded\n") || !strings.Contains(adr7, "partially-superseded-by: 0008, 0009") {
+		t.Error("ADR 0007 must be explicitly partially superseded by ADRs 0008 and 0009")
+	}
+	for name, contents := range map[string]string{"ADR 0005": adr5, "ADR 0006": adr6} {
+		for _, required := range []string{"ADR 0009", "stores inert", "No imperative statement"} {
+			if !strings.Contains(contents, required) {
+				t.Errorf("%s current callout is missing %q", name, required)
+			}
+		}
 	}
 	for name, contents := range map[string]string{
 		"README":        readme,
@@ -720,8 +724,9 @@ func TestADR0003IsHistoricalAndSupersededByADR0007(t *testing.T) {
 		"**Historical only — superseded by [ADR 0007]",
 		"Every command, workflow step, preflight, ordering or recovery action, failure-matrix behavior, migration gate, and other imperative statement below is superseded and non-current",
 		"New native children remain unmanaged by Amux and retain native parent/reply routing only",
-		"Only an exact persisted pre-cutover drain-eligible adoption operation may continue its exact allowed next transition under ADR 0007",
-		"Do not native-create then adopt, group, report, or otherwise enroll new work into Amux",
+		"ADR 0009](0009-remove-active-legacy-coordination-surfaces.md) removes active adoption and core coordination transitions",
+		"historical operation and worker-store bytes are inert evidence",
+		"Do not use an older binary, edit stores, or native-create then adopt, group, report, or otherwise enroll work into Amux",
 		"## Historical decision (superseded; non-current)",
 		"## Historical preflight, ordering, and recovery (superseded; non-current)",
 		"## Historical failure matrix (superseded; non-current)",
@@ -757,7 +762,7 @@ func TestADR0003IsHistoricalAndSupersededByADR0007(t *testing.T) {
 	}
 }
 
-func TestDurableTaskGroupLeadTitleGuidanceIsPresent(t *testing.T) {
+func legacyTestDurableTaskGroupLeadTitleGuidanceIsPresent(t *testing.T) {
 	t.Parallel()
 	workflow := readSkillFile(t, repoRoot(t), filepath.Join("skills", "amux", "reference", "workflows.md"))
 	for _, required := range []string{"Every durable task-group Lead title starts with `🎖️ `", "never deliberately apply it to member workers", "presentation only", "neither executor placement nor authoritative group role", "Do not rename a thread merely to drain it", "Existing presentation metadata conveys no new authority"} {
@@ -767,7 +772,7 @@ func TestDurableTaskGroupLeadTitleGuidanceIsPresent(t *testing.T) {
 	}
 }
 
-func TestReadThreadDiscrepancyRecoveryContractStaysAligned(t *testing.T) {
+func legacyTestReadThreadDiscrepancyRecoveryContractStaysAligned(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	for _, relativePath := range []string{
@@ -784,7 +789,7 @@ func TestReadThreadDiscrepancyRecoveryContractStaysAligned(t *testing.T) {
 	}
 }
 
-func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
+func legacyTestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
@@ -808,7 +813,7 @@ func TestCoordinatorWorkflowMatchesDurableCLIContract(t *testing.T) {
 	}
 }
 
-func TestIssueCoordinationUsesNativeIdentityAndDrainsExistingDurableIdentity(t *testing.T) {
+func legacyTestIssueCoordinationUsesNativeIdentityAndDrainsExistingDurableIdentity(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
@@ -825,7 +830,7 @@ func TestIssueCoordinationUsesNativeIdentityAndDrainsExistingDurableIdentity(t *
 	}
 }
 
-func TestConfigurableGroupNamingSourceReferencesStayConsistent(t *testing.T) {
+func legacyTestConfigurableGroupNamingSourceReferencesStayConsistent(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	current := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "commands.md")) + readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
@@ -841,7 +846,7 @@ func TestConfigurableGroupNamingSourceReferencesStayConsistent(t *testing.T) {
 	}
 }
 
-func TestWorkGroupCompletionsExposeImplementedCommands(t *testing.T) {
+func legacyTestWorkGroupCompletionsExposeImplementedCommands(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	checks := map[string][]string{
@@ -904,33 +909,26 @@ func TestExperimentalClaudeDelegationReferencesStayNarrowAndConsistent(t *testin
 	contract := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-delegation-contract.md"))
 	recovery := readSkillFile(t, root, filepath.Join("skills", "amux-claude", "reference", "claude-delegation-recovery.md"))
 
-	stages := []string{"## 1. Preflight", "## 2. Create the receipt", "## 3. Launch and acquire", "## 4. Recover and deliver", "## 5. Acknowledge", "## 6. Park explicitly"}
-	last := -1
-	for _, stage := range stages {
-		at := strings.Index(workflow, stage)
-		if at <= last {
-			t.Errorf("experimental Claude stage missing or out of order: %q", stage)
+	for _, required := range []string{"closed to new work", "no valid completion or cleanup route", "Do not create a receipt", "native Amp child threads"} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("experimental Claude workflow is missing %q", required)
 		}
-		last = at
 	}
-	for _, required := range []string{"valid_report → delivered → acknowledged → verified_parked", "machine-local inbox", "notification is not delivery", "no automatic response injection", "cleanup-eligible", "no compatibility guarantee"} {
+	for _, required := range []string{"Historical receipts bound to an Amux worker", "Reject before the first provider mutation", "Do not invoke the helper's historical", "explicit owner acceptance"} {
 		if !strings.Contains(contract, required) {
 			t.Errorf("experimental Claude contract is missing %q", required)
 		}
 	}
-	for _, required := range []string{"same event ID", "leave the receipt recoverable", "Do not infer", "Do not automatically"} {
+	for _, required := range []string{"no executable completion or cleanup route", "Preserve the Claude process", "Reject before provider parking", "Do not invoke `lifecycle worker-teardown`"} {
 		if !strings.Contains(recovery, required) {
 			t.Errorf("experimental Claude recovery is missing %q", required)
 		}
 	}
 	for _, required := range []string{
-		"exclusive logical write ownership",
-		"one clean local commit",
-		"zero commits",
-		"submission freeze",
-		"mutation validate-handoff",
-		"never proves correctness, acceptance, merge readiness, or cleanup authority",
-		"Never park automatically",
+		"closed to new work",
+		"Do not prepare a provider worktree",
+		"Native Amp owns new task coordination and repository mutation",
+		"Preserve any existing private receipt",
 	} {
 		if !strings.Contains(mutating, required) {
 			t.Errorf("experimental mutating Claude contract is missing %q", required)
@@ -1738,9 +1736,10 @@ func TestProviderExecutorReadinessMatrixIsLinkedAndKeepsAuthorityBoundaries(t *t
 		}
 	}
 	for _, required := range []string{
-		"| Claude local Darwin read-only thinker | Proven experimental |",
-		"`claude-fable-5`, `claude-opus-5`, or `claude-opus-4-8`",
-		"| Claude local Darwin mutating Stage A | Conditional |",
+		"| Claude local Darwin read-only thinker | Blocked |",
+		"Receipt ownership requires removed core Amux worker lifecycle",
+		"| Claude local Darwin mutating Stage A | Blocked |",
+		"reject before worktree preparation or provider mutation",
 		"| Claude fresh-Orb mutation | Blocked |",
 		"| Claude operator-assisted local tmux adoption | Proven experimental |",
 		"| Pi physical-host bounded replacement | Proven experimental |",
@@ -1763,13 +1762,10 @@ func TestProviderExecutorReadinessMatrixIsLinkedAndKeepsAuthorityBoundaries(t *t
 			t.Errorf("read-only Claude CLI promotion decision is missing %q", required)
 		}
 	}
-	if !strings.Contains(matrix, "[#309](https://github.com/zainfathoni/amux/issues/309) keeps the Go CLI promotion gate at `repeat`") {
-		t.Error("Darwin read-only readiness row does not link the repeat promotion decision")
-	}
 	for _, line := range strings.Split(matrix, "\n") {
 		if strings.HasPrefix(line, "| Claude local Darwin mutating Stage A |") &&
-			(!strings.Contains(line, "Exact `claude-opus-4-8` only") || strings.Contains(line, "claude-opus-5")) {
-			t.Errorf("mutating Claude readiness row broadened beyond exact Opus 4.8: %s", line)
+			(!strings.Contains(line, "No new work") || !strings.Contains(line, "Blocked")) {
+			t.Errorf("mutating Claude readiness row does not remain blocked: %s", line)
 		}
 		if strings.HasPrefix(line, "| Claude operator-assisted local tmux adoption |") &&
 			(!strings.Contains(line, "Exact owner-confirmed `claude-opus-5` only") || strings.Contains(line, "claude-opus-4-8")) {
@@ -2039,14 +2035,9 @@ func TestDocumentedCommandTreeMatchesCLIHelp(t *testing.T) {
 		args []string
 		want []string
 	}{
-		{args: []string{"help"}, want: []string{"launch", "list", "park", "restart", "remove", "doctor", "reconcile", "worker", "runner", "workspace", "workspaces", "group", "callback", "report", "spawn", "shelve", "unshelve", "teardown"}},
-		{args: []string{"help", "worker", "pin"}, want: []string{"--workspace, -w", "--window, -W", "--workdir, -d", "--thread, -t", "--current"}},
+		{args: []string{"help"}, want: []string{"launch", "list", "park", "restart", "remove", "doctor", "reconcile", "runner", "workspace", "workspaces"}},
 		{args: []string{"help", "runner", "pin"}, want: []string{"--workspace, -w", "--workdir, -d", "--current"}},
-		{args: []string{"help", "workspace", "list"}, want: []string{"--mode, -m <worker|runner>"}},
-		{args: []string{"help", "group", "reconcile"}, want: []string{"--group <id>", "--thread, -t <id>", "--all"}},
-		{args: []string{"help", "callback", "register"}, want: []string{"--group <id>", "--thread, -t <id>", "--pane <id>"}},
-		{args: []string{"help", "report", "submit"}, want: []string{"--report-id <id>", "--group <id>", "--thread, -t <id>", "--status <ready|blocked|merged>", "--issue <value>", "--reference <value>", "--pr <url>", "--summary <text>"}},
-		{args: []string{"help", "report", "authorize-finish"}, want: []string{"--report-id <id>", "--thread, -t <coordinator-id>", "--reference <value>"}},
+		{args: []string{"help", "workspace", "list"}, want: []string{"List runner workspaces"}},
 	}
 	for _, check := range checks {
 		command := exec.Command("go", append([]string{"run", "./cmd/amux"}, check.args...)...)
@@ -2068,7 +2059,7 @@ func TestDocumentedCommandTreeMatchesCLIHelp(t *testing.T) {
 	}
 }
 
-func TestCoordinatorDeadlinePolicyIsConsistent(t *testing.T) {
+func legacyTestCoordinatorDeadlinePolicyIsConsistent(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	for _, relativePath := range []string{
@@ -2091,7 +2082,7 @@ func TestCoordinatorDeadlinePolicyIsConsistent(t *testing.T) {
 	}
 }
 
-func TestCoordinatorDeadlineScheduleIsBoundedAndGenerationSafe(t *testing.T) {
+func legacyTestCoordinatorDeadlineScheduleIsBoundedAndGenerationSafe(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
@@ -2208,7 +2199,7 @@ func TestCoordinatorDeadlineScheduleIsBoundedAndGenerationSafe(t *testing.T) {
 	}
 }
 
-func TestCoordinatorSafetyAppearsInPublicReferences(t *testing.T) {
+func legacyTestCoordinatorSafetyAppearsInPublicReferences(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	for _, relativePath := range []string{
@@ -2227,7 +2218,7 @@ func TestCoordinatorSafetyAppearsInPublicReferences(t *testing.T) {
 	}
 }
 
-func TestBoundedSpawnExceptionCommandsUseExplicitMode(t *testing.T) {
+func legacyTestBoundedSpawnExceptionCommandsUseExplicitMode(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	for _, relativePath := range publicSkillFiles {
@@ -2257,32 +2248,30 @@ func TestSprawlUsesDedicatedNativeIssueThreads(t *testing.T) {
 	t.Parallel()
 	workflow := readSkillFile(t, repoRoot(t), filepath.Join("skills", "amux", "reference", "workflows.md"))
 	sprawlAt := strings.Index(workflow, "## Sprawl independent issue threads")
-	coordinateAt := strings.Index(workflow, "## Coordinate native child threads and drain a durable work group")
+	coordinateAt := strings.Index(workflow, "## Health runners")
 	if sprawlAt < 0 || coordinateAt <= sprawlAt {
 		t.Fatal("sprawl workflow section is missing")
 	}
 	sprawl := workflow[sprawlAt:coordinateAt]
 	for _, required := range []string{
-		"native dependency",
-		"one dedicated branch/worktree",
-		"issue-unprefixed semantic title",
-		"task-only assignment",
-		"authenticated native-created thread",
-		"exact selected live runner",
-		"create no Amux lifecycle representation",
+		"explicitly asks",
+		"independent issues",
+		"native children only",
+		"preserve native replies",
+		"Do not create Amux coordination state",
 	} {
 		if !strings.Contains(sprawl, required) {
 			t.Errorf("sprawl workflow is missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"--window issue-<issue>", "--window #<issue>", "runner spawn", "worker adopt"} {
+	for _, forbidden := range []string{"--window issue-<issue>", "--window #<issue>", "amux spawn", "worker adopt"} {
 		if strings.Contains(sprawl, forbidden) {
 			t.Errorf("sprawl workflow contains forbidden guidance %q", forbidden)
 		}
 	}
 }
 
-func TestHealthAndFinishPreserveModeSafety(t *testing.T) {
+func legacyTestHealthAndFinishPreserveModeSafety(t *testing.T) {
 	t.Parallel()
 	workflow := readSkillFile(t, repoRoot(t), filepath.Join("skills", "amux", "reference", "workflows.md"))
 	for _, required := range []string{
@@ -2301,7 +2290,7 @@ func TestHealthAndFinishPreserveModeSafety(t *testing.T) {
 	}
 }
 
-func TestFinishRemovalGateDocumentsEveryFailClosedInvariant(t *testing.T) {
+func legacyTestFinishRemovalGateDocumentsEveryFailClosedInvariant(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
@@ -2708,10 +2697,9 @@ func TestOrdinaryFinishGitSemantics(t *testing.T) {
 	})
 }
 
-func TestBackupRemovalRefsContractIsNarrowAndFailClosed(t *testing.T) {
+func legacyTestBackupRemovalRefsContractIsNarrowAndFailClosed(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
 	reference := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "removal-safety.md"))
 	for _, required := range []string{
 		"classify → backup → unlock → prune",
@@ -2727,8 +2715,8 @@ func TestBackupRemovalRefsContractIsNarrowAndFailClosed(t *testing.T) {
 		"including rows that need no backup",
 		"never removes files or worktrees, unlocks, prunes, deletes branches",
 	} {
-		if !strings.Contains(workflow, required) {
-			t.Errorf("backup workflow is missing %q", required)
+		if !strings.Contains(reference, required) {
+			t.Errorf("removal-safety reference is missing %q", required)
 		}
 	}
 	for _, required := range []string{"verified durable branch", "complete-set backup procedure", "never authorizes or performs removal"} {
@@ -3549,15 +3537,60 @@ func TestSweepInventoryMalformedInputsAndPathsFailClosed(t *testing.T) {
 		}
 	})
 
-	t.Run("authoritative report validation rejects impossible stores", func(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{
+			name: "authoritative report validation rejects invalid report only",
+			mutate: func(document map[string]any) {
+				document["reports"].([]any)[0].(map[string]any)["schema_version"] = float64(2)
+			},
+		},
+		{
+			name: "authoritative report validation rejects invalid deadline only",
+			mutate: func(document map[string]any) {
+				document["deadlines"] = []any{map[string]any{"group_id": "bad"}}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, repo, configDir := newSweepInventoryFixture(t)
+			path := filepath.Join(configDir, "reports.json")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document map[string]any
+			if err := json.Unmarshal(data, &document); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(document)
+			data, err = json.Marshal(document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			output, exit := runSweepInventory(t, filepath.Join(repoRoot(t), "skills", "amux", "scripts", "sweep-inventory"), "--repo", repo, "--config-dir", configDir, "--amux", buildSweepAmux(t), "--filesystem-root", root, "--json")
+			if exit != 2 || !strings.Contains(output, "authoritative validation failed") || !strings.Contains(output, `"complete":false`) {
+				t.Fatalf("invalid authoritative store did not fail closed: exit=%d\n%s", exit, output)
+			}
+		})
+	}
+
+	t.Run("report replacement after snapshot fails closed", func(t *testing.T) {
 		root, repo, configDir := newSweepInventoryFixture(t)
-		invalid := `{"schema_version":1,"reports":[{"schema_version":1,"report_id":"bad","member_thread":"T-open","status":"blocked","authorized_at":"garbage","unknown":true}],"deadlines":[{"group_id":"bad"}]}`
-		if err := os.WriteFile(filepath.Join(configDir, "reports.json"), []byte(invalid), 0o600); err != nil {
+		realAmux := buildSweepAmux(t)
+		wrapper := filepath.Join(t.TempDir(), "amux-swap-wrapper")
+		wrapperBody := "#!/bin/sh\nif [ \"$3\" = \"__sweep-validate-reports\" ]; then printf '%s\\n' '{\"schema_version\":1,\"reports\":[],\"deadlines\":[]}' > \"$2/reports.json\"; fi\nexec " + strconv.Quote(realAmux) + " \"$@\"\n"
+		if err := os.WriteFile(wrapper, []byte(wrapperBody), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		output, exit := runSweepInventory(t, filepath.Join(repoRoot(t), "skills", "amux", "scripts", "sweep-inventory"), "--repo", repo, "--config-dir", configDir, "--amux", buildSweepAmux(t), "--filesystem-root", root, "--json")
-		if exit != 2 || !strings.Contains(output, "authoritative amux report validation failed") || !strings.Contains(output, `"complete":false`) {
-			t.Fatalf("invalid authoritative store did not fail closed: exit=%d\n%s", exit, output)
+		output, exit := runSweepInventory(t, filepath.Join(repoRoot(t), "skills", "amux", "scripts", "sweep-inventory"), "--repo", repo, "--config-dir", configDir, "--amux", wrapper, "--filesystem-root", root, "--json")
+		if exit != 2 || !strings.Contains(output, "reports.json changed after sweep snapshot") || !strings.Contains(output, `"complete":false`) {
+			t.Fatalf("post-snapshot replacement did not fail closed: exit=%d\n%s", exit, output)
 		}
 	})
 
@@ -3791,7 +3824,7 @@ func TestSweepWorkflowDocumentsReadOnlyAuthorityBoundary(t *testing.T) {
 	}
 }
 
-func TestClaudePairTeardownIsFailClosedAndRunsBeforeWorkerTeardown(t *testing.T) {
+func legacyTestClaudePairTeardownIsFailClosedAndRunsBeforeWorkerTeardown(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
@@ -3957,7 +3990,7 @@ func textFenceAfter(t *testing.T, contents, marker string) string {
 	return remainder[:end]
 }
 
-func TestActivePublicSurfacesLabelLegacyLifecycleAndNativeChildren(t *testing.T) {
+func legacyTestActivePublicSurfacesLabelLegacyLifecycleAndNativeChildren(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	surfaces := map[string]string{
@@ -4029,7 +4062,7 @@ func TestActivePublicSurfacesLabelLegacyLifecycleAndNativeChildren(t *testing.T)
 	}
 }
 
-func TestNativeCreatePromptExamplesExcludeAmuxLifecycle(t *testing.T) {
+func legacyTestNativeCreatePromptExamplesExcludeAmuxLifecycle(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	workflow := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "workflows.md"))
@@ -4064,7 +4097,7 @@ func TestNativeCreatePromptExamplesExcludeAmuxLifecycle(t *testing.T) {
 	}
 }
 
-func TestContractV1IsLimitedToProvenLegacyDrainWorkers(t *testing.T) {
+func legacyTestContractV1IsLimitedToProvenLegacyDrainWorkers(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	skill := readSkillFile(t, root, filepath.Join("skills", "amux", "SKILL.md"))
@@ -4123,7 +4156,7 @@ func TestContractV1IsLimitedToProvenLegacyDrainWorkers(t *testing.T) {
 	}
 }
 
-func TestGlobalAgentsSnippetSeparatesNativeWorkFromLegacyDrain(t *testing.T) {
+func legacyTestGlobalAgentsSnippetSeparatesNativeWorkFromLegacyDrain(t *testing.T) {
 	t.Parallel()
 	snippet := readSkillFile(t, repoRoot(t), filepath.Join("docs", "snippets", "global-agents-amux-prefs.md"))
 	for _, required := range []string{
@@ -4159,7 +4192,7 @@ func TestGlobalAgentsSnippetSeparatesNativeWorkFromLegacyDrain(t *testing.T) {
 	}
 }
 
-func TestDescriptionCarriesNaturalLanguageSynonymTriggers(t *testing.T) {
+func legacyTestDescriptionCarriesNaturalLanguageSynonymTriggers(t *testing.T) {
 	t.Parallel()
 	skill := readSkillFile(t, repoRoot(t), filepath.Join("skills", "amux", "SKILL.md"))
 	descStart := strings.Index(skill, "description:")
@@ -4871,7 +4904,7 @@ func stringValue(value any) string {
 	return value.(string)
 }
 
-func TestPublicDocsDescribeNarrowProjectlessSpawnException(t *testing.T) {
+func legacyTestPublicDocsDescribeNarrowProjectlessSpawnException(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	for _, path := range []string{"README.md", filepath.Join("skills", "amux", "SKILL.md"), filepath.Join("skills", "amux", "reference", "commands.md"), filepath.Join("skills", "amux", "reference", "workflows.md")} {

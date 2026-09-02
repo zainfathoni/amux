@@ -2,10 +2,10 @@
 
 ## Client modes
 
-**Worker** — An interactive, TUI-based Amp client bound to a thread.
-_Avoid_: Thread, interactive client
+**Worker (historical)** — A removed interactive, TUI-based Amux client formerly bound to a thread. Worker rows are inert evidence, not active clients.
+_Avoid_: Using worker for a native Amp thread or retained runner
 
-**Worker identity** — The canonical Amp thread ID. A thread may belong to only one configured worker on a machine; workspace, window, and workdir describe its local placement rather than its identity.
+**Worker identity (historical)** — The canonical Amp thread ID stored in old worker evidence. It grants no current lifecycle authority.
 
 **Runner** — A non-interactive Amp client that makes a machine and working directory available for remote work. The retained Amux host layer registers, launches, and safely operates it.
 _Avoid_: Worker, background worker
@@ -21,61 +21,40 @@ _Avoid_: Worker, background worker
 **Thread** — The conversation identity underlying Amp work, independent of whether or how a local client is running.
 _Avoid_: Worker when referring to the local TUI client
 
-**Native child thread** — Work created directly with Amp `create_thread`, using a lean task prompt plus native parent/reply routing. It has no Amux contract or lifecycle identity unless exact persisted pre-cutover records independently prove an existing drain-eligible flow.
+**Native child thread** — Work created directly with Amp `create_thread`, using a lean task prompt plus native parent/reply routing. It has no Amux contract or lifecycle identity; historical Amux records remain inert evidence.
 _Avoid_: Amux worker, spawned worker, automatically adopted thread
 
 **Remote agent thread** — An Amp thread whose execution is enabled by a runner but whose lifecycle is owned by Amp or Agents Anywhere, not by the runner or amux.
 _Avoid_: Runner-managed thread
 
-**Workspace** — A named lifecycle group of workers and runners represented locally by one same-named tmux session. A workspace may span multiple repositories and workdirs.
+**Workspace** — A named group of retained runners represented locally by one same-named tmux session. It may span multiple repositories and workdirs.
 _Avoid_: Session when referring to the configured lifecycle group
 
 **Idempotency** — The guarantee that retrying the same desired-state operation converges without duplicating work. Conflicting state still fails, and creation retries stop as indeterminate rather than guessing when external identity cannot be recovered safely.
 
 ## Workspace lifecycle
 
-**Launch** — Make configured, active work available locally. Launching may create local tmux windows and Amp clients, but does not change remote thread state.
+**Launch** — Start configured machine-local runners in tmux without changing remote thread state. Bare `amux` and `amux launch --all` launch every configured runner.
 
-**Aggregate launch** — Launch all configured workers and runners in scope. A workspace may contain workers, runners, or both; neither client mode is required to accompany the other.
-
-**Health** — Active, mode-specific verification that configured clients are responsive or running as intended. Worker health uses a verified TUI response; runner health verifies its workdir, ownership, and `amp --no-tui` process.
+**Health** — Verify each retained runner's exact workdir, tmux ownership, and `amp --no-tui` process.
 
 **Sprawl** — A skill-only workflow that fans independent issues out through authenticated native Amp thread creation on exact Orbs or live runners/workdirs. Native-created children retain Amp parent/reply routing and are not automatically represented as Amux workers, groups, reports, shelves, or panes.
 
-**Finish** — A skill-only completed-worker drain workflow for an existing Amux worker. One read-only preflight binds either merged-PR or explicit review-only completion to the exact worker/worktree, proves the index-only attached worktree can be removed while its branch is retained, and reports one exact action set for one approval. Finish parks a verified live worker first, never force-removes a worktree or implicitly deletes a branch, refuses dirty/shared/runner-owned/process-ambiguous state, and archives the exact thread through worker teardown only after normal worktree removal succeeds. Native-created unmanaged work does not acquire this lifecycle merely because it came from sprawl.
-
-**Reconcile** — Explicitly repair drift between amux intent and external or runtime state. Worker reconciliation synchronizes shelf intent with remote archive state and removes a `workers.tsv` binding only when its canonical workdir is proven missing, no local worker runtime remains, and no blocked never-authorized report leaves an open obligation. Stale-registration removals preflight as one all-or-nothing plan; a refusal blocks every worker and aggregate runner removal in that plan but does not suppress independent shelf/archive synchronization for workers whose workdirs are present. A directory without a worker binding is reported and preserved because `workers.tsv`, not `reports.json` or `groups.tsv`, is the sole thread↔workdir authority. Runner reconciliation removes stale configuration for missing workdirs without silently adopting ambiguous processes.
+**Reconcile** — Inspect runner registry/runtime drift. Preserve rows and processes unless exact retained-runner safety evidence authorizes a change; never adopt an ambiguous process or consult historical worker coordination state as authority.
 
 **Restart** — Replace a running local client in place while preserving its configuration and remote thread.
 
-**Park** — Stop local execution while preserving both the restore configuration and remote thread. Parked work can be launched again without first changing its remote state.
+**Park** — Stop one exact runner while preserving its registry row and remote thread state.
 
-**Shelf intent** — An explicit local record that a configured worker is deliberately deferred. Shelf intent is authoritative for whether amux may launch the worker; Amp **archive** state separately controls remote thread visibility. Under [ADR 0007](docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md) as narrowed by [ADR 0008](docs/adr/0008-retain-machine-local-runner-host-and-drain-coordination.md), shelf intent is **drain-only migration state**, not a permanent product. Its worker coordination role can drain without removing retained Amux runner launch.
-_Avoid_: Treating shelf intent as native Hide, or as a second long-lived visibility store beside Amp archive
+**Remove / Unpin** — Retained runner operations that currently fail closed when authoritative process/catalog absence cannot be proven. They never operate on historical worker rows.
 
-**Shelve** — Historical Amux composite: record shelf intent, **archive** the remote thread (`amp threads archive`), and park (stop) verified local execution while preserving worker configuration. Shelved work must be unshelved before Amux may launch it. This is not native “Hide/Unhide”; `find_thread` `hidden:` / `snoozed:` are search filters only unless a distinct hide mutation API is later proven. After Amux shelf admission closes, defer remote visibility with native archive/unarchive alone (optional owner-local stop); do not add bulk migrate-to-hidden tooling.
-_Avoid_: Hide, Unhide, snooze as synonyms for this operation
+**Pin** — Add one exact canonical runner workdir binding without changing remote thread state.
 
-**Unshelve** — Historical Amux inverse: **unarchive** the remote thread (`amp threads archive --unarchive`), then remove shelf intent, without launching the local client.
+**Machine scope** — Every configured runner workspace on the current machine.
 
-**Archive (native)** — Amp operation that removes a thread from the active list / thread switcher while leaving it viewable by URL and includable via `--include-archived` or `archived:` search. This is the supported native replacement for the **remote** leg of Amux shelve after cutover.
-_Avoid_: Hide when meaning this operation
+**Workspace scope** — Every configured runner in one same-named tmux session.
 
-**Unarchive (native)** — Amp inverse of archive; restores the thread to the active list without implying local Amux launch.
-
-**Teardown** — Finish a worker by **archiving** its remote thread, removing its restore configuration and shelf intent, and stopping its verified local TUI client. Teardown never applies to a runner or implies teardown of remote agent threads.
-
-**Remove** — Stop a worker or runner and remove its local configuration without changing remote thread state. Worker teardown additionally archives the worker's remote thread; remove does not.
-
-**Pin** — Add work to restore configuration without changing local execution or remote thread state.
-
-**Unpin** — Remove work from restore configuration without changing local execution or remote thread state.
-
-**Machine scope** — Every configured worker and runner workspace on the current machine.
-
-**Workspace scope** — Every configured worker and runner belonging to one workspace and its same-named tmux session.
-
-**Window scope** — One configured interactive window within a workspace.
+Historical worker, shelf, group, report, callback, deadline, finish, and teardown terms describe inert evidence only. They are not active Amux operations and must not be revived from older documentation.
 
 ## Delegation admission
 

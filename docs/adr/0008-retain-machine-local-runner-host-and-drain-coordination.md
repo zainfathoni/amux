@@ -2,6 +2,7 @@
 status: accepted
 date: 2026-08-30
 partially-supersedes: 0007
+partially-superseded-by: 0009
 ---
 
 # Retain the machine-local runner host and drain legacy coordination
@@ -21,7 +22,7 @@ Amux retains:
 - install, update, maintenance, and doctor diagnostics; and
 - systemd and launchd integration for activation and process-group retention.
 
-Legacy coordination remains drain-only. Generalized worker spawn/adoption, work groups, reports, callbacks, deadlines, finish authorization, shelving coordination state, and their stores admit no ordinary native work. They retain only the exact compatibility reads and mutations needed to preserve or truthfully drain pre-cutover records. Provider-specific lifecycle bridges drain only after their replacements satisfy their existing proof gates.
+Legacy coordination admits no ordinary native work. This ADR originally retained exact drain mutations for pre-cutover records; the later owner decision in [ADR 0009](0009-remove-active-legacy-coordination-surfaces.md) removes those active core worker/coordination routes and leaves historical stores inert. Provider-specific lifecycle bridges remain under their separate proof gates.
 
 ## OS activation boundary
 
@@ -56,8 +57,8 @@ ADR 0007 remains authoritative for these decisions:
 
 1. ordinary new work uses native Amp creation and is never automatically adopted into Amux;
 2. generalized spawn/adoption and native-work coordination do not reopen;
-3. old state follows only an exact persisted pre-cutover next transition, with no dual-write or manufactured terminal truth;
-4. groups, reports, callbacks, deadlines, finish authorization, shelves, and provider receipts freeze and lose writers only after their evidence-based drain gates;
+3. separately gated provider state follows only an exact authorized transition, with no dual-write or manufactured terminal truth; core worker/coordination stores are inert under ADR 0009;
+4. provider receipts lose writers only after their evidence-based drain gates; ADR 0009 supersedes the equivalent staged-writer expectation for core workers, groups, reports, callbacks, deadlines, finish authorization, and shelves;
 5. `/amux-tycho` remains unchanged until #328's authenticated direct structured-return gate passes, and old/new routes never run for the same task; and
 6. Git/worktree removal safety remains independent of coordination lifecycle authority.
 
@@ -73,9 +74,10 @@ The destination has three unambiguous ownership layers:
 
 - **Native Amp:** all new task creation and coordination.
 - **Retained Amux:** automatic machine-local runner registration, launch, process lifecycle, reconciliation safety, maintenance, and diagnostics.
-- **Legacy Amux stores:** compatibility and drain only; no admission from ordinary native work.
+- **Core legacy Amux stores:** inert historical evidence with no admission, drain, rewrite, or deletion by active commands.
+- **Separately gated provider stores:** preserved under their explicit route-specific evidence and disposition gates.
 
-Amux can shrink as legacy coordination stores reach their gates without removing the runner-launch core. No complete Amux product archive is planned by this decision.
+Amux can shrink around inert core coordination stores while separately gated provider evidence reaches its disposition boundary, without removing the runner-launch core. No complete Amux product archive is planned by this decision.
 
 ## Non-goals
 

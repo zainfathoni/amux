@@ -834,7 +834,7 @@ func (a app) runMaintenance(in invocation, dir config.Directory, env *result.Env
 				if e = setProgress(ro); e != nil {
 					return env, result.Runtime(fmt.Errorf("persist runner restart checkpoint: %w", e))
 				}
-				e = stopRunner(row, inspection)
+				e = stopRunner(row, inspection, maintenancePreflight.processMetadata[lifecyclePaneProcessKey(inspection.pane)])
 				stopped = e == nil
 				if stopped {
 					ro.Phase = "pending_launch"

@@ -53,7 +53,7 @@ type ProcessMetadata struct {
 	Identity  string
 }
 
-const restartPaneFormat = "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}\t#{pane_dead}\t#{pane_pid}"
+const restartPaneFormat = "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}\t#{pane_dead}\t#{pane_pid}\t#{pane_created}"
 
 var inspectProcessIdentity = ProcessIdentity
 var inspectProcessName = ProcessName

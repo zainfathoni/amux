@@ -2,14 +2,14 @@
 status: superseded
 date: 2026-07-30
 depends-on: 0005
-superseded-by: 0007
+superseded-by: 0007, 0009
 ---
 
 # Bound thread delegation and require preservation before retirement
 
-> **Historical decision:** [ADR 0007](0007-retire-amux-through-native-cutover-and-staged-drain.md) retains preservation-before-cleanup and independent destructive authority but rejects a new Amux retirement record, attachment-generation protocol, and finalizer as the migration architecture.
+> **Historical only:** [ADR 0007](0007-retire-amux-through-native-cutover-and-staged-drain.md) retains preservation-before-cleanup and independent destructive authority but rejects a new Amux retirement record, attachment-generation protocol, and finalizer as the migration architecture. [ADR 0009](0009-remove-active-legacy-coordination-surfaces.md) removes core worker finish, teardown, and coordination transitions and leaves their stores inert. No imperative statement or workflow reference below is current operational authority; independently gated provider evidence remains under its separate contract.
 
-> **Accepted direction:** this ADR establishes the bounded delegation and preservation-before-retirement policy that [ADR 0005](0005-maintain-amux-as-a-local-worker-lifecycle-and-recovery-tool.md) reserved for a later owner decision. Acceptance does not itself change instructions, skills, commands, schemas, or runtime behavior; those adoption changes require separate review.
+> **Historical accepted direction:** this ADR established the bounded delegation and preservation-before-retirement policy that [ADR 0005](0005-maintain-amux-as-a-local-worker-lifecycle-and-recovery-tool.md) reserved for a later owner decision. Its active worker lifecycle destination is superseded.
 
 ## Context
 

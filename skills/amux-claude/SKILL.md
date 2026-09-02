@@ -7,14 +7,14 @@ description: "Experimental Amp-to-Claude delegation for amux. Use only after an 
 
 Unstable skill-owned Claude delegation. **Not** an `amux` worker, runner, group member, or compatibility promise. Do not activate from incidental Claude mentions, available capacity, or generic review requests.
 
-Core Amp lifecycle remains `/amux`. Paired worker teardown and finish in `/amux` call into this skill's lifecycle helper when Claude pairs may exist.
+Core Amux worker teardown and finish have been removed. Any worker-bound provider route must reject before receipt creation, launch, parking, retirement, teardown, or other provider mutation. Preserve existing provider evidence and do not substitute an older binary, direct process kill, evidence rewrite, or alternate cleanup authority.
 
 Before choosing an executor, consult the repository's [provider executor readiness matrix](https://github.com/zainfathoni/amux/blob/main/docs/provider-executor-readiness.md). A CLI flag, model name, or prior run does not broaden the route-specific authority recorded there.
 
 ## Route triggers
 
-- **Delegate read-only analysis to Claude**: load [`reference/claude-read-only-delegation.md`](reference/claude-read-only-delegation.md).
-- **Delegate isolated mutating work to Claude**: only after public Pilot 1 `pass`, load [`reference/claude-mutating-delegation.md`](reference/claude-mutating-delegation.md).
+- **Delegate machine-local read-only analysis to Claude**: the historical helper route is closed because it requires removed Amux worker lifecycle; load [`reference/claude-read-only-delegation.md`](reference/claude-read-only-delegation.md) only to report that blocker.
+- **Delegate isolated machine-local mutating work to Claude**: unavailable for the same reason; load [`reference/claude-mutating-delegation.md`](reference/claude-mutating-delegation.md) only to report that blocker.
 - **Adopt owner-created Claude Code tmux windows on an explicitly selected physical host**: load [`reference/claude-local-tmux-adoption.md`](reference/claude-local-tmux-adoption.md). This is operator-assisted coordination of exact semantic `session:window` targets, not managed local delegation or a fresh Orb. Never substitute an Orb, API call, new Claude process, or managed receipt route.
 - **Delegate bounded read-only work to Claude Opus in a fresh Amp Orb**: load [`reference/claude-opus-orb-executor.md`](reference/claude-opus-orb-executor.md). Fresh Orb, project-secret OAuth, exact `claude-opus-4-8`; fail closed on API-key or ambiguous billing.
 - **A fresh-Orb repository mutation is requested**: load [`reference/claude-opus-orb-mutating.md`](reference/claude-opus-orb-mutating.md) and block because the required native authority adapters do not exist. Never substitute local tmux parking, caller assertions, or the read-only route.
@@ -26,11 +26,11 @@ Before choosing an executor, consult the repository's [provider executor readine
 - Operator-assisted local tmux adoption: [`reference/claude-local-tmux-adoption.md`](reference/claude-local-tmux-adoption.md)
 - Recovery branches: [`reference/claude-delegation-recovery.md`](reference/claude-delegation-recovery.md)
 - Trigger checklist: [`reference/trigger-phrases.md`](reference/trigger-phrases.md)
-- Helper: `experimental/claude-delegation/claude_delegation.py` within this installed skill
+- Read-only helper: `experimental/claude-delegation/claude_delegation.py` within this installed skill. It exposes bounded `diagnose` and exact historical `receipt show` inspection only; worker-bound launch, report, lifecycle, quarantine mutation, and hidden test dispatch are absent.
 
 ## Safety
 
 - Explicit-only. No autonomous fan-out or quota filling.
-- Preserve unresolved receipts, reports, artifacts, worktrees, and origin fences unless a named recovery seam authorizes a specific terminal proof.
+- Preserve unresolved receipts, reports, artifacts, worktrees, processes, and origin fences byte-for-byte.
 - Never infer ownership from names, cwd, PID, issue number, tmux placement, or Claude session ID alone.
-- For `receipt_store_invalid_or_unavailable`, only this provider skill may plan, apply, or inspect quarantine. It requires an explicit owner-bound exact `park`; it never authorizes cleanup, detach, archive, removal, teardown, or evidence repair.
+- Worker-bound recovery is read-only diagnosis. Do not plan or apply quarantine, park, detach, retire, dispose, teardown, or fence release.

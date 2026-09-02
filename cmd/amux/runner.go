@@ -126,7 +126,33 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 		}
 		return &env, result.Preflight(errors.New("no configured runner matches the selector"))
 	}
-	if in.Command.Name == "unpin" || in.Command.Name == "remove" {
+	if in.Command.Name == "unpin" {
+		row := rows[0]
+		inspection, inspectErr := inspectRunner(row)
+		if inspectErr != nil {
+			return &env, result.Preflight(fmt.Errorf("runner unpin blocked for %s: local runner state is unreadable; retained configuration and did not stop any process: %w", row.Workdir, inspectErr))
+		}
+		if inspection.state != runnerPaneAbsent {
+			return &env, result.Preflight(fmt.Errorf("runner unpin blocked for %s: local runner state is %s; retained configuration and did not stop any process", row.Workdir, inspection.state))
+		}
+		out := runnerOutcome(row, "unpin", "remove exact runner registry binding")
+		if in.Options.DryRun {
+			env.Planned = append(env.Planned, out)
+			return &env, nil
+		}
+		removed, removeErr := config.RemoveRunnerWorkdir(dir.RunnersPath(), row.Workdir)
+		if removeErr != nil {
+			return &env, result.Runtime(removeErr)
+		}
+		if !removed {
+			out.Message = "already in desired state"
+			env.Skipped = append(env.Skipped, out)
+			return &env, nil
+		}
+		env.Successful = append(env.Successful, out)
+		return &env, nil
+	}
+	if in.Command.Name == "remove" {
 		return &env, result.Preflight(runnerRowDeletionUnavailable(in.Command.Name, rows[0].Workdir))
 	}
 	if in.Command.Name == "reconcile" {
@@ -170,6 +196,7 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 			}
 		}
 	}
+	stopProcessMetadata := map[string]tmux.ProcessMetadata{}
 	if lifecycleCommandStopsRunner(in.Command.Name) {
 		panes := make([]tmux.WindowPane, 0, len(rows))
 		for _, row := range rows {
@@ -177,7 +204,9 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 				panes = append(panes, inspection.pane)
 			}
 		}
-		if err := preflightLifecycleExecutor("runner "+in.Command.Name, panes); err != nil {
+		var err error
+		stopProcessMetadata, err = preflightLifecycleExecutorEvidence("runner "+in.Command.Name, panes)
+		if err != nil {
 			return &env, result.Preflight(err)
 		}
 	}
@@ -247,9 +276,9 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 		case "unpin", "remove", "reconcile":
 			runtimeErr = runnerRowDeletionUnavailable(in.Command.Name, row.Workdir)
 		case "park":
-			runtimeErr = stopRunner(row, inspection)
+			runtimeErr = stopRunner(row, inspection, stopProcessMetadata[lifecyclePaneProcessKey(inspection.pane)])
 		case "restart":
-			runtimeErr = stopRunner(row, inspection)
+			runtimeErr = stopRunner(row, inspection, stopProcessMetadata[lifecyclePaneProcessKey(inspection.pane)])
 			if runtimeErr == nil {
 				row.Window = config.RunnerWindow(row.Workdir)
 				row.LegacyWindow = false
@@ -309,15 +338,6 @@ func preflightRunnerWindowCollisions(dir config.Directory) error {
 		}
 		windows[key] = row.Workdir
 	}
-	workers, err := config.LoadReadOnly(dir.WorkersPath())
-	if err != nil {
-		return err
-	}
-	for _, worker := range workers {
-		if workdir, exists := windows[worker.Workspace+"\x00"+worker.Window]; exists {
-			return fmt.Errorf("derived runner window %s in workspace %s for %s collides with configured worker", worker.Window, worker.Workspace, workdir)
-		}
-	}
 	return nil
 }
 
@@ -345,15 +365,6 @@ func (a app) runnerPinV1(in invocation, dir config.Directory, selected []config.
 		}
 		if existing.Workspace == row.Workspace && existing.Window == row.Window {
 			return env, result.Preflight(fmt.Errorf("derived runner window %s collides with workdir %s", row.Window, existing.Workdir))
-		}
-	}
-	workers, err := config.LoadReadOnly(dir.WorkersPath())
-	if err != nil {
-		return env, result.Preflight(err)
-	}
-	for _, worker := range workers {
-		if worker.Workspace == row.Workspace && worker.Window == row.Window {
-			return env, result.Preflight(fmt.Errorf("derived runner window %s collides with configured worker", row.Window))
 		}
 	}
 	inspection, err := inspectRunner(row)
@@ -612,6 +623,60 @@ func legacyRunnerPaneUnchanged(pane tmux.WindowPane) (bool, error) {
 	return confirmed == pane, nil
 }
 
+type runnerStartupCleanupEvidence struct {
+	pane            tmux.WindowPane
+	processIdentity string
+}
+
+func captureRunnerStartupCleanupEvidence(pane tmux.WindowPane) *runnerStartupCleanupEvidence {
+	if pane.PID <= 0 || pane.StartTime <= 0 {
+		return nil
+	}
+	evidence := &runnerStartupCleanupEvidence{pane: pane}
+	if pane.Dead {
+		return evidence
+	}
+	identity, err := runnerProcessIdentity(pane.PID)
+	if err != nil || identity == "" {
+		return nil
+	}
+	evidence.processIdentity = identity
+	return evidence
+}
+
+func cleanupFailedRunnerStartup(runner tmux.Runner, evidence *runnerStartupCleanupEvidence) error {
+	if evidence == nil {
+		return errors.New("created runner cleanup retained because exact process-incarnation evidence is unavailable")
+	}
+	confirmed, err := runner.RestartPaneByID(evidence.pane.PaneID)
+	if err != nil {
+		return fmt.Errorf("created runner cleanup retained because exact pane revalidation failed: %w", err)
+	}
+	if confirmed.Session != evidence.pane.Session || confirmed.Window != evidence.pane.Window || confirmed.WindowID != evidence.pane.WindowID || confirmed.PaneID != evidence.pane.PaneID || confirmed.StartTime != evidence.pane.StartTime {
+		return errors.New("created runner cleanup retained because pane identity changed")
+	}
+	if !confirmed.Dead {
+		if confirmed.PID != evidence.pane.PID {
+			return errors.New("created runner cleanup retained because pane process changed")
+		}
+		identity, identityErr := runnerProcessIdentity(confirmed.PID)
+		if identityErr != nil || identity == "" || identity != evidence.processIdentity {
+			return errors.New("created runner cleanup retained because process incarnation changed or became unavailable")
+		}
+	}
+	if err := runner.KillWindow(confirmed.WindowID); err != nil {
+		return fmt.Errorf("kill exact failed runner window: %w", err)
+	}
+	return nil
+}
+
+func runnerStartupCleanupDiagnostic(err error) string {
+	if err == nil {
+		return "removed exact created runner window"
+	}
+	return boundedDiagnostic(err.Error(), 1024)
+}
+
 func launchRunner(row config.RunnerRow) (tmux.WindowPane, error) {
 	runner := tmux.Runner{}
 	row.Window = config.RunnerWindow(row.Workdir)
@@ -629,10 +694,16 @@ func launchRunner(row config.RunnerRow) (tmux.WindowPane, error) {
 	lastProcessError := ""
 	lastDetailedObservation := ""
 	lastObservation := ""
+	var cleanupEvidence *runnerStartupCleanupEvidence
+	cleanupEvidenceObserved := false
 	for {
 		hadExactObservation := observedExact
 		pane, inspectErr := runner.RestartPaneByID(created.PaneID)
 		if inspectErr == nil && pane.WindowID == created.WindowID && pane.PaneID == created.PaneID && pane.Session == row.Workspace && pane.Window == row.Window {
+			if !cleanupEvidenceObserved {
+				cleanupEvidenceObserved = true
+				cleanupEvidence = captureRunnerStartupCleanupEvidence(pane)
+			}
 			exactProcess, processDiagnostic, processErr := observeRunnerPaneProcess(pane, true)
 			if processErr != nil {
 				lastProcessError = boundedDiagnostic(processErr.Error(), 1024)
@@ -649,8 +720,8 @@ func launchRunner(row config.RunnerRow) (tmux.WindowPane, error) {
 			}
 			if pane.Dead || processErr == nil && observedExact && !exactProcess {
 				diagnostic, _ := runner.CapturePaneHistory(created.PaneID, 100)
-				_ = runner.KillWindow(created.WindowID)
-				return tmux.WindowPane{}, runnerStartupError("runner exited during startup: %s; %s%s", boundedDiagnostic(diagnostic, 2560), runnerObservationDiagnostic(lastDetailedObservation, lastObservation), staleAmpPIDDiagnostic(row.Workdir))
+				cleanupErr := cleanupFailedRunnerStartup(runner, cleanupEvidence)
+				return tmux.WindowPane{}, runnerStartupError("runner exited during startup; cleanup: %s; pane history: %s; %s%s", runnerStartupCleanupDiagnostic(cleanupErr), boundedDiagnostic(diagnostic, 2560), runnerObservationDiagnostic(lastDetailedObservation, lastObservation), staleAmpPIDDiagnostic(row.Workdir))
 			}
 		} else if inspectErr == nil {
 			lastObservation = fmt.Sprintf("last observed at +%s: created pane identity drifted: expected session=%q window-name=%q window=%s pane=%s; observed session=%q window-name=%q window=%s pane=%s", time.Since(startupBegan).Round(time.Millisecond), row.Workspace, row.Window, created.WindowID, created.PaneID, pane.Session, pane.Window, pane.WindowID, pane.PaneID)
@@ -662,12 +733,12 @@ func launchRunner(row config.RunnerRow) (tmux.WindowPane, error) {
 				continue
 			}
 			diagnostic, _ := runner.CapturePaneHistory(created.PaneID, 100)
-			_ = runner.KillWindow(created.WindowID)
+			cleanupErr := cleanupFailedRunnerStartup(runner, cleanupEvidence)
 			processDiagnostic := ""
 			if lastProcessError != "" {
 				processDiagnostic = "; process inspection failed: " + lastProcessError
 			}
-			return tmux.WindowPane{}, runnerStartupError("runner did not survive startup as exact pane %s/window %s: %s; %s%s%s", created.PaneID, created.WindowID, boundedDiagnostic(diagnostic, 2560), runnerObservationDiagnostic(lastDetailedObservation, lastObservation), processDiagnostic, staleAmpPIDDiagnostic(row.Workdir))
+			return tmux.WindowPane{}, runnerStartupError("runner did not survive startup as exact pane %s/window %s; cleanup: %s; pane history: %s; %s%s%s", created.PaneID, created.WindowID, runnerStartupCleanupDiagnostic(cleanupErr), boundedDiagnostic(diagnostic, 2560), runnerObservationDiagnostic(lastDetailedObservation, lastObservation), processDiagnostic, staleAmpPIDDiagnostic(row.Workdir))
 		}
 		time.Sleep(runnerPollInterval)
 	}
@@ -688,15 +759,27 @@ func runnerStartupError(format string, args ...any) error {
 	return errors.New(message)
 }
 
-func stopRunner(row config.RunnerRow, before runnerInspection) error {
-	after, err := inspectRunner(row)
+var (
+	stopRunnerInspect = inspectRunner
+	stopRunnerKill    = func(windowID string) error { return (tmux.Runner{}).KillWindow(windowID) }
+)
+
+func stopRunner(row config.RunnerRow, before runnerInspection, expectedProcess tmux.ProcessMetadata) error {
+	after, err := stopRunnerInspect(row)
 	if err != nil {
 		return err
 	}
 	if after.state != runnerPaneExact || after.pane.WindowID != before.pane.WindowID || after.pane.PaneID != before.pane.PaneID {
 		return fmt.Errorf("runner %s changed after preflight", row.Workdir)
 	}
-	return (tmux.Runner{}).KillWindow(after.pane.WindowID)
+	actualProcess, err := lifecycleProcessLink(after.pane.PID)
+	if err != nil {
+		return fmt.Errorf("reinspect runner process after lifecycle preflight: %w", err)
+	}
+	if !sameLifecycleProcess(expectedProcess, actualProcess) {
+		return fmt.Errorf("runner %s process incarnation changed after lifecycle preflight", row.Workdir)
+	}
+	return stopRunnerKill(after.pane.WindowID)
 }
 
 func boundedDiagnostic(value string, limit int) string {
