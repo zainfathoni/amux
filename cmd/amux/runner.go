@@ -126,7 +126,33 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 		}
 		return &env, result.Preflight(errors.New("no configured runner matches the selector"))
 	}
-	if in.Command.Name == "unpin" || in.Command.Name == "remove" {
+	if in.Command.Name == "unpin" {
+		row := rows[0]
+		inspection, inspectErr := inspectRunner(row)
+		if inspectErr != nil {
+			return &env, result.Preflight(fmt.Errorf("runner unpin blocked for %s: local runner state is unreadable; retained configuration and did not stop any process: %w", row.Workdir, inspectErr))
+		}
+		if inspection.state != runnerPaneAbsent {
+			return &env, result.Preflight(fmt.Errorf("runner unpin blocked for %s: local runner state is %s; retained configuration and did not stop any process", row.Workdir, inspection.state))
+		}
+		out := runnerOutcome(row, "unpin", "remove exact runner registry binding")
+		if in.Options.DryRun {
+			env.Planned = append(env.Planned, out)
+			return &env, nil
+		}
+		removed, removeErr := config.RemoveRunnerWorkdir(dir.RunnersPath(), row.Workdir)
+		if removeErr != nil {
+			return &env, result.Runtime(removeErr)
+		}
+		if !removed {
+			out.Message = "already in desired state"
+			env.Skipped = append(env.Skipped, out)
+			return &env, nil
+		}
+		env.Successful = append(env.Successful, out)
+		return &env, nil
+	}
+	if in.Command.Name == "remove" {
 		return &env, result.Preflight(runnerRowDeletionUnavailable(in.Command.Name, rows[0].Workdir))
 	}
 	if in.Command.Name == "reconcile" {

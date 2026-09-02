@@ -28,7 +28,7 @@ Thin machine-local Amp/tmux runner host. **Runner** = `amp --no-tui` process bou
 - **Park it**: `amux runner park --current` or exact workdir.
 - **Restart unresponsive runners**: use the exact runner scope; preserve rows and fail closed on ambiguity.
 - **Doctor amux**: `amux doctor --all` or scoped runner doctor.
-- **Remove/unpin/reconcile a runner**: dry-run first. Current row deletion fails closed without authoritative process/catalog absence evidence; preserve the row on any blocker.
+- **Remove/unpin/reconcile a runner**: dry-run first. Unpin removes only an exact selected binding whose local tmux runner is positively absent and never stops a process. Remove and missing-workdir reconcile fail closed without authoritative process/catalog absence evidence; preserve the row on any blocker.
 - **Spawn a worker for / delegate work**: this means native `create_thread`, never Amux spawn/adoption. Load [`reference/workflows.md`](reference/workflows.md).
 - **Coordinate child threads**: use native parent/reply routing, messaging, and waiting only.
 - **/amux health**: [`workflows.md`](reference/workflows.md#health-runners).

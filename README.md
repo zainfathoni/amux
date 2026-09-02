@@ -135,7 +135,7 @@ amux update
 
 Top-level lifecycle routes are runner-only aliases. Bare `amux` is equivalent to automatic runner launch across all configured rows. Mutating machine-wide routes other than launch require explicit `--all`.
 
-Runner pin is active admission. Runner row deletion through `remove`, `unpin`, or missing-workdir `reconcile` currently fails closed pending authoritative process/catalog absence evidence. Use `runner park` to stop an exact owned process while retaining its row.
+Runner pin is active admission. `runner unpin` removes only the exact selected registry binding after proving its local tmux runner is absent; it never stops a process. `runner remove` and missing-workdir `runner reconcile` fail closed pending authoritative process/catalog absence evidence. Use `runner park` to stop an exact owned process while retaining its row.
 
 Removed `worker`, `spawn`, `shelve`, `unshelve`, `teardown`, `group`, `report`, and `callback` routes fail before process or store effects. `report` does not route to `/amux-tycho`; use that separate skill explicitly.
 

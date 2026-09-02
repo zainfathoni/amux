@@ -14,7 +14,7 @@ Do not treat a tmux name, cwd similarity, stale output, or missing catalog evide
 
 Exit `1` means mutation may have started. Inspect `successful`, `skipped`, and `failed` before retrying. Exit `2` means preflight rejected without mutation. Preserve the same desired-state request and never bypass the machine lock.
 
-Runner pin requires a canonical existing directory. Present-workdir reconcile is a no-op. Missing-workdir reconcile, remove, and unpin fail closed and retain the row until authoritative process/catalog absence can be proved. Use `runner park` to stop an exact verified process while preserving configuration.
+Runner pin requires a canonical existing directory. Runner unpin removes only the exact selected binding when local tmux inspection proves the runner absent; live, conflicting, ambiguous, or unreadable state retains the row. Present-workdir reconcile is a no-op. Missing-workdir reconcile and remove fail closed until authoritative process/catalog absence can be proved. Use `runner park` to stop an exact verified process while preserving configuration.
 
 If a removed worker/coordination command is required by old operational notes, stop. Do not find an older binary, edit registries, synthesize a terminal transition, or redirect `amux report` to `/amux-tycho`. Historical stores are inert evidence.
 

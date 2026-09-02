@@ -150,7 +150,7 @@ func runnerCommand() *commandSpec {
 		maintenanceCommand(),
 		runnerLeaf("list", "List configured runners", false, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
 		runnerLeaf("pin", "Pin a runner without launching it", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current"),
-		runnerLeaf("unpin", "Retain configured runners and fail closed", true, "--workdir, -d <path>", "--current"),
+		runnerLeaf("unpin", "Remove an absent runner's exact registry binding", true, "--workdir, -d <path>", "--current"),
 		runnerLeaf("launch", "Launch runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
 		runnerLeaf("park", "Park runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
 		runnerLeaf("restart", "Restart runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),

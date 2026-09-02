@@ -1222,6 +1222,139 @@ func TestRunnerReconcileRejectsInvalidWorkdirsBeforeConfigOrTmuxMutation(t *test
 	}
 }
 
+func TestRunnerUnpinRemovesOnlyExactAbsentRunnerBinding(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		missing bool
+		dryRun  bool
+	}{
+		{name: "present workdir"},
+		{name: "missing workdir", missing: true},
+		{name: "present workdir dry-run", dryRun: true},
+		{name: "missing workdir dry-run", missing: true, dryRun: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			workdir := t.TempDir()
+			if test.missing {
+				workdir = filepath.Join(t.TempDir(), "gone")
+			}
+			other := t.TempDir()
+			writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\nbeta\t"+other+"\n")
+			bin := t.TempDir()
+			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+			args := []string{"--json", "--config-dir", dir}
+			if test.dryRun {
+				args = append(args, "--dry-run")
+			}
+			args = append(args, "runner", "unpin", "--workdir", workdir)
+			got := executeRunnerJSON(t, args...)
+			outcomes := got.Successful
+			if test.dryRun {
+				outcomes = got.Planned
+			}
+			if len(outcomes) != 1 || outcomes[0].Resource.Workdir != workdir || outcomes[0].Action != "unpin" || outcomes[0].Message != "remove exact runner registry binding" {
+				t.Fatalf("unpin outcome = %+v", got)
+			}
+			rows, loadErr := config.LoadRunnersReadOnly(filepath.Join(dir, config.RunnersFile))
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			wantRows := 1
+			if test.dryRun {
+				wantRows = 2
+			}
+			if len(rows) != wantRows {
+				t.Fatalf("rows after unpin = %+v, want %d", rows, wantRows)
+			}
+			if rows[len(rows)-1].Workdir != other {
+				t.Fatalf("unpin changed non-selected row: %+v", rows)
+			}
+			if !test.dryRun {
+				repeated := executeRunnerJSON(t, "--json", "--config-dir", dir, "runner", "unpin", "--workdir", workdir)
+				if len(repeated.Skipped) != 1 || repeated.Skipped[0].Message != "already in desired state" {
+					t.Fatalf("repeated unpin = %+v", repeated)
+				}
+			}
+		})
+	}
+}
+
+func TestRunnerUnpinRetainsLiveConflictingAndAmbiguousRunners(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		panes string
+		want  string
+	}{
+		{name: "live", panes: "exact", want: "local runner state is exact"},
+		{name: "conflicting", panes: "conflict", want: "local runner state is conflict"},
+		{name: "ambiguous", panes: "ambiguous", want: "local runner state is ambiguous"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			workdir := t.TempDir()
+			window := config.RunnerWindow(workdir)
+			writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
+			registryPath := filepath.Join(dir, config.RunnersFile)
+			before, err := os.ReadFile(registryPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bin := t.TempDir()
+			paneLines := `printf 'alpha\t` + window + `\t@1\t%%1\t` + workdir + `\tbash\t%s\t0\t7000\n' ` + shellSingleQuote(runnerStartCommand(workdir))
+			if test.panes == "conflict" {
+				paneLines = `printf 'alpha\t` + window + `\t@1\t%%1\t` + workdir + `\tzsh\twrong-start-command\t0\t7000\n'`
+			}
+			if test.panes == "ambiguous" {
+				paneLines += `; printf 'alpha\t` + window + `\t@1\t%%2\t` + workdir + `\tbash\t%s\t0\t7001\n' ` + shellSingleQuote(runnerStartCommand(workdir))
+			}
+			writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 0; fi\nif [ \"$1\" = list-panes ]; then "+paneLines+"; exit 0; fi\nexit 2\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+			unpinErr := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", "unpin", "--workdir", workdir)
+			if unpinErr == nil || result.ExitCode(unpinErr) != result.ExitRejected || !strings.Contains(unpinErr.Error(), test.want) || !strings.Contains(unpinErr.Error(), "retained configuration") {
+				t.Fatalf("unpin error = %v, exit=%d", unpinErr, result.ExitCode(unpinErr))
+			}
+			after, readErr := os.ReadFile(registryPath)
+			if readErr != nil || !bytes.Equal(after, before) {
+				t.Fatalf("unpin changed registry: before=%q after=%q err=%v", before, after, readErr)
+			}
+		})
+	}
+}
+
+func TestRunnerUnpinRetainsBindingWhenRuntimeIsUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	writeRunnerRegistry(t, dir, "alpha\t"+workdir+"\n")
+	registryPath := filepath.Join(dir, config.RunnersFile)
+	before, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	mutation := filepath.Join(bin, "mutation")
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 2; fi\nif [ \"$1\" = kill-window ]; then touch "+shellSingleQuote(mutation)+"; fi\nexit 2\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	unpinErr := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", "unpin", "--workdir", workdir)
+	if unpinErr == nil || result.ExitCode(unpinErr) != result.ExitRejected || !strings.Contains(unpinErr.Error(), "local runner state is unreadable") || !strings.Contains(unpinErr.Error(), "retained configuration and did not stop any process") {
+		t.Fatalf("unpin error = %v, exit=%d", unpinErr, result.ExitCode(unpinErr))
+	}
+	after, readErr := os.ReadFile(registryPath)
+	if readErr != nil || !bytes.Equal(after, before) {
+		t.Fatalf("unpin changed registry: before=%q after=%q err=%v", before, after, readErr)
+	}
+	if _, statErr := os.Stat(mutation); !os.IsNotExist(statErr) {
+		t.Fatalf("unpin attempted to stop a process: %v", statErr)
+	}
+}
+
 func TestRunnerReconcileRetainsMissingRowWithoutPositiveProcessAndCatalogAbsence(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(t.TempDir(), "gone")
@@ -1231,7 +1364,7 @@ func TestRunnerReconcileRetainsMissingRowWithoutPositiveProcessAndCatalogAbsence
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range []string{"reconcile", "remove", "unpin"} {
+	for _, command := range []string{"reconcile", "remove"} {
 		rowDeletionErr := executeRunnerJSONError(t, "--json", "--config-dir", dir, "runner", command, "--workdir", missing)
 		if rowDeletionErr == nil || result.ExitCode(rowDeletionErr) != result.ExitRejected || !strings.Contains(rowDeletionErr.Error(), "runner "+command+" blocked") || !strings.Contains(rowDeletionErr.Error(), "no process stop or row deletion attempted") {
 			t.Fatalf("%s row-deletion error = %v, exit=%d", command, rowDeletionErr, result.ExitCode(rowDeletionErr))

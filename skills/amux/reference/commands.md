@@ -27,7 +27,7 @@ Bare `amux` and no-selector `launch` launch all configured runners. Other machin
 
 Runner pin is active admission and requires an existing canonical directory. Git repository, worktree, and lock state are not runner requirements.
 
-Runner park preserves the row. Runner remove, unpin, and missing-workdir reconcile currently retain and reject because current Amp APIs cannot prove authoritative process/native-catalog absence. Present-workdir reconcile is a no-op. Never delete a row or process on unreadable, conflicting, or unproven evidence.
+Runner park preserves the row. Runner unpin removes only the exact selected registry binding after proving its local tmux runner is absent; it never stops a process. Runner remove and missing-workdir reconcile retain and reject because current Amp APIs cannot prove authoritative process/native-catalog absence. Present-workdir reconcile is a no-op. Never delete a row or process on unreadable, conflicting, or unproven evidence.
 
 The former `worker`, `spawn`, `shelve`, `unshelve`, `teardown`, `group`, `report`, and `callback` routes are removed and fail before effects. Historical coordination stores are inert. The `report` tombstone is not `/amux-tycho`; that explicit-only skill uses a separate receipt store and protocol.
 

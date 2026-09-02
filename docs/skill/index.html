@@ -54,7 +54,7 @@ curl -fsSL https://amux.zainf.dev/install.sh | AMUX_SKILLS_SOURCE="$AMUX_REPO" s
     <ul>
       <li>Use long selectors and current contextual help.</li>
       <li>Use <code>--dry-run</code> before mutation and <code>--json</code> for parsing.</li>
-      <li>Runner row deletion fails closed without authoritative process/catalog absence evidence.</li>
+      <li>Runner unpin removes an exact binding only after proving its local tmux runner absent; remove and missing-workdir reconcile remain fail-closed.</li>
       <li>Runner commands never own remote Amp threads.</li>
     </ul>
   </body>
