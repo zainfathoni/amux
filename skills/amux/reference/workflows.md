@@ -22,6 +22,19 @@ amux --json install doctor
 
 Report exact workdir, registry/runtime state, and blocker. Do not mutate processes or rows unless the owner separately requests the corresponding runner command.
 
+## Teardown completed native thread worktrees
+
+Use only when the owner asks to retire a completed runner/worktree, or asks to clean up completed native threads and their local worktrees. Amp owns thread records; Amux owns only the exact machine-local runner and worktree operation.
+
+1. Obtain authorization to read every target native thread. Inspect the parent and direct children with native thread tools; do not infer completion from local Git state.
+2. Map each thread to one exact configured canonical workdir from authenticated thread/executor evidence. An uncertain mapping blocks that item.
+3. Revalidate completion, branch preservation, and any unresolved PR/CI concern independently. A merged PR alone is not proof that no unique local bytes remain.
+4. From outside the target worktree, run `amux --json --dry-run runner teardown --workdir <exact-path>`. Review the plan and its branch/HEAD. Any rejected state remains untouched.
+5. Apply exactly once with `amux --json runner teardown --workdir <exact-path> --confirm-plan <fresh-plan-digest>`. On exit `1`, inspect the artifact outcomes before planning recovery: stop → worktree removal → unpin is intentionally recoverable.
+6. Only after the corresponding local teardown succeeds, archive that native thread if the owner requested archival. Archive children before their parent. Thread archival is a separate native Amp action and is never implied by the CLI result.
+
+The command never deletes a branch, archives a thread, performs repository-wide cleanup, invokes #360, or touches worker/group/report/callback/deadline/shelf/provider state. External processes using the worktree are outside Amux's ownership evidence; native thread/executor inspection is therefore required before applying the local plan.
+
 ## Sweep worktree inventory
 
 `/amux sweep` is the protected one-time read-only migration inventory for the staged Amux drain. It is a read-only skill workflow, not a CLI command. This documentation does not authorize a run; a future run requires a separate explicit owner request.

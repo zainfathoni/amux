@@ -61,6 +61,7 @@ type selectors struct {
 	LatestCursor                           string
 	PhysicalHost                           string
 	Generation                             string
+	ConfirmPlan                            string
 	OwnerAuthorizedProjectlessPhysicalHost bool
 	Reconcile                              bool
 }
@@ -151,6 +152,7 @@ func runnerCommand() *commandSpec {
 		runnerLeaf("list", "List configured runners", false, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
 		runnerLeaf("pin", "Pin a runner without launching it", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current"),
 		runnerLeaf("unpin", "Remove an absent runner's exact registry binding", true, "--workdir, -d <path>", "--current"),
+		runnerLeaf("teardown", "Stop one exact runner, remove its Git worktree, and unpin it", true, "--workdir, -d <path>", "--confirm-plan <sha256>"),
 		runnerLeaf("launch", "Launch runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
 		runnerLeaf("park", "Park runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
 		runnerLeaf("restart", "Restart runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
@@ -476,7 +478,7 @@ func commandOptionRequiresValue(arg string) bool {
 	case "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--thread", "-t",
 		"--group", "--mode", "-m", "--title-prefix", "--work-item-id", "--worker-ordinal", "--shelf", "--idempotency-key",
 		"--report-id", "--pane", "--status", "--issue", "--reference", "--pr", "--summary",
-		"--message", "--message-file", "--prompt-file", "--physical-host", "--generation", "--update-owner":
+		"--message", "--message-file", "--prompt-file", "--physical-host", "--generation", "--confirm-plan", "--update-owner":
 		return true
 	default:
 		return false
@@ -703,6 +705,15 @@ func parseSelectors(args []string) (selectors, []string, error) {
 			if err := setSelector(target, value, name); err != nil {
 				return parsed, nil, err
 			}
+		case "--confirm-plan":
+			value, next, err := selectorValue(args, i, name, inline, hasInline)
+			if err != nil {
+				return parsed, nil, err
+			}
+			i = next
+			if err := setSelector(&parsed.ConfirmPlan, value, name); err != nil {
+				return parsed, nil, err
+			}
 		case "--owner-authorized-projectless-physical-host":
 			if hasInline {
 				return parsed, nil, errors.New("--owner-authorized-projectless-physical-host does not accept a value")
@@ -804,6 +815,7 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 		{"--latest-cursor", parsed.LatestCursor},
 		{"--physical-host", parsed.PhysicalHost},
 		{"--generation", parsed.Generation},
+		{"--confirm-plan", parsed.ConfirmPlan},
 	}
 	for _, test := range tests {
 		if test.value != "" && !commandAcceptsFlag(command, test.name) {
@@ -939,7 +951,7 @@ func compactStrings(values []string) []string {
 }
 
 func selectorsEmpty(parsed selectors) bool {
-	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && parsed.WorkItemID == "" && parsed.WorkerOrdinal == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && parsed.PromptFile == "" && parsed.AssignmentPhase == "" && parsed.AssignmentOutcome == "" && parsed.NativeCapability == "" && parsed.LatestCursor == "" && parsed.PhysicalHost == "" && parsed.Generation == "" && !parsed.OwnerAuthorizedProjectlessPhysicalHost && !parsed.Reconcile
+	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && parsed.WorkItemID == "" && parsed.WorkerOrdinal == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && parsed.PromptFile == "" && parsed.AssignmentPhase == "" && parsed.AssignmentOutcome == "" && parsed.NativeCapability == "" && parsed.LatestCursor == "" && parsed.PhysicalHost == "" && parsed.Generation == "" && parsed.ConfirmPlan == "" && !parsed.OwnerAuthorizedProjectlessPhysicalHost && !parsed.Reconcile
 }
 
 func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
@@ -1000,7 +1012,7 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 		defer held.Release()
 	}
 	switch parsed.Command.Name {
-	case "list", "pin", "unpin", "launch", "park", "restart", "remove", "doctor", "reconcile":
+	case "list", "pin", "unpin", "teardown", "launch", "park", "restart", "remove", "doctor", "reconcile":
 		if strings.Join(parsed.Path, " ") == "install doctor" {
 			if len(parsed.Args) != 0 || !selectorsEmpty(parsed.Selectors) {
 				return nil, result.Request(errors.New("usage: amux install doctor"))

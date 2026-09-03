@@ -144,7 +144,7 @@ func TestResolveLifecyclePaneProcessRequiresExactLiveIncarnation(t *testing.T) {
 }
 
 func TestStopCapableRunnerRoutesRequireLifecycleGuard(t *testing.T) {
-	want := map[string]bool{"park": true, "restart": true}
+	want := map[string]bool{"park": true, "restart": true, "teardown": true}
 	got := map[string]bool{}
 	for _, command := range runnerCommand().Children {
 		if lifecycleCommandStopsRunner(command.Name) {

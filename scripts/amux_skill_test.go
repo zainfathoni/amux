@@ -53,8 +53,8 @@ func TestTriggerChecklistMatchesSkillActivationAndRouting(t *testing.T) {
 
 	triggerPattern := regexp.MustCompile(`(?m)^\| \x60([^\x60]+)\x60 \|`)
 	matches := triggerPattern.FindAllStringSubmatch(checklist, -1)
-	if len(matches) != 12 {
-		t.Fatalf("trigger checklist has %d routes, want 12", len(matches))
+	if len(matches) != 13 {
+		t.Fatalf("trigger checklist has %d routes, want 13", len(matches))
 	}
 	for _, match := range matches {
 		trigger := match[1]
