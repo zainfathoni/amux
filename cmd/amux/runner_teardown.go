@@ -65,6 +65,7 @@ type runnerTeardownWorktreeRecord struct {
 	Path     string
 	Head     string
 	Branch   string
+	Bare     bool
 	Locked   bool
 	Prunable bool
 }
@@ -73,6 +74,9 @@ func (a app) runnerTeardown(in invocation, dir config.Directory, rows []config.R
 	env := result.NewEnvelope(strings.Join(in.Path, " "), in.Options.DryRun)
 	if in.Selectors.Workdir == "" {
 		return &env, result.Request(errors.New("runner teardown requires --workdir"))
+	}
+	if in.Options.DryRun && in.Selectors.ConfirmPlan != "" {
+		return &env, result.Request(errors.New("--confirm-plan is not valid with --dry-run"))
 	}
 	if len(rows) == 0 {
 		if _, err := os.Lstat(in.Selectors.Workdir); os.IsNotExist(err) {
@@ -85,10 +89,6 @@ func (a app) runnerTeardown(in invocation, dir config.Directory, rows []config.R
 	if len(rows) != 1 {
 		return &env, result.Preflight(fmt.Errorf("runner teardown requires exactly one configured runner; selector matched %d", len(rows)))
 	}
-	if in.Options.DryRun && in.Selectors.ConfirmPlan != "" {
-		return &env, result.Request(errors.New("--confirm-plan is not valid with --dry-run"))
-	}
-
 	plan, err := buildRunnerTeardownPlan(dir, rows[0])
 	if err != nil {
 		return &env, result.Preflight(err)
@@ -359,6 +359,8 @@ func inspectRunnerTeardownIndex(worktree string) error {
 	if err != nil {
 		return err
 	}
+	var regularPaths []string
+	var regularObjectIDs []string
 	for _, record := range bytes.Split(stages, []byte{0}) {
 		if len(record) == 0 {
 			continue
@@ -384,7 +386,6 @@ func inspectRunnerTeardownIndex(worktree string) error {
 		if statErr != nil {
 			return fmt.Errorf("inspect index path %q: %w", gitPath, statErr)
 		}
-		var actual []byte
 		switch mode {
 		case "100644", "100755":
 			if !info.Mode().IsRegular() {
@@ -393,7 +394,11 @@ func inspectRunnerTeardownIndex(worktree string) error {
 			if (mode == "100755") != (info.Mode().Perm()&0o100 != 0) {
 				return fmt.Errorf("index path %q executable mode differs from index mode %s", gitPath, mode)
 			}
-			actual, err = runnerTeardownGit(worktree, "hash-object", "--no-filters", "--", gitPath)
+			if strings.ContainsRune(gitPath, '\n') {
+				return fmt.Errorf("index path contains a newline and cannot be verified safely: %q", gitPath)
+			}
+			regularPaths = append(regularPaths, gitPath)
+			regularObjectIDs = append(regularObjectIDs, objectID)
 		case "120000":
 			if info.Mode()&os.ModeSymlink == 0 {
 				return fmt.Errorf("index path %q has symlink mode but worktree type %s", gitPath, info.Mode().Type())
@@ -402,16 +407,33 @@ func inspectRunnerTeardownIndex(worktree string) error {
 			if readErr != nil {
 				return fmt.Errorf("read index symlink %q: %w", gitPath, readErr)
 			}
-			actual, err = runnerTeardownGitInput(worktree, []byte(target), "hash-object", "--stdin")
+			actual, hashErr := runnerTeardownGitInput(worktree, []byte(target), "hash-object", "--stdin")
+			if hashErr != nil {
+				return hashErr
+			}
+			actualID := strings.TrimSpace(string(actual))
+			if !validRunnerTeardownObjectID(actualID) || actualID != objectID {
+				return fmt.Errorf("worktree symlink target differs from index for %q", gitPath)
+			}
 		default:
 			return fmt.Errorf("unsupported index mode %q for %q", mode, gitPath)
 		}
-		if err != nil {
-			return err
-		}
-		actualID := strings.TrimSpace(string(actual))
-		if !validRunnerTeardownObjectID(actualID) || actualID != objectID {
-			return fmt.Errorf("worktree content differs from index for %q", gitPath)
+	}
+	if len(regularPaths) == 0 {
+		return nil
+	}
+	input := []byte(strings.Join(regularPaths, "\n") + "\n")
+	actual, err := runnerTeardownGitInput(worktree, input, "hash-object", "--stdin-paths")
+	if err != nil {
+		return err
+	}
+	actualObjectIDs := strings.Fields(string(actual))
+	if len(actualObjectIDs) != len(regularObjectIDs) {
+		return fmt.Errorf("git hash-object returned %d object IDs for %d regular index paths", len(actualObjectIDs), len(regularObjectIDs))
+	}
+	for index, actualID := range actualObjectIDs {
+		if !validRunnerTeardownObjectID(actualID) || actualID != regularObjectIDs[index] {
+			return fmt.Errorf("filtered worktree content differs from index for %q", regularPaths[index])
 		}
 	}
 	return nil
@@ -529,6 +551,7 @@ func parseRunnerTeardownWorktrees(data []byte) ([]runnerTeardownWorktreeRecord, 
 				record.Branch = value
 			case key == "detached" && !found:
 			case key == "bare" && !found:
+				record.Bare = true
 			case key == "locked":
 				record.Locked = true
 			case key == "prunable":
@@ -537,7 +560,7 @@ func parseRunnerTeardownWorktrees(data []byte) ([]runnerTeardownWorktreeRecord, 
 				return nil, fmt.Errorf("unsupported git worktree metadata %q", line)
 			}
 		}
-		if !filepath.IsAbs(record.Path) || record.Head == "" {
+		if !filepath.IsAbs(record.Path) || (!record.Bare && record.Head == "") {
 			return nil, errors.New("incomplete Git worktree metadata")
 		}
 		records = append(records, record)

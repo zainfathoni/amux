@@ -51,6 +51,13 @@ type runnerPIDMarkerInspection struct {
 
 func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelope, error) {
 	env := result.NewEnvelope(strings.Join(in.Path, " "), in.Options.DryRun)
+	if in.Command.Name == "teardown" && in.Selectors.Workdir != "" {
+		canonical, err := config.CanonicalWorkdir(in.Selectors.Workdir)
+		if err != nil {
+			return &env, result.Preflight(err)
+		}
+		in.Selectors.Workdir = canonical
+	}
 	if in.Selectors.Current {
 		runner := tmux.Runner{}
 		workdir, err := runner.CurrentWorkdir()

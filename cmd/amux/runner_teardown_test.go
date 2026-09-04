@@ -70,6 +70,31 @@ func TestRunnerTeardownRecoversMissingWorktreeByUnpinningOnly(t *testing.T) {
 	}
 }
 
+func TestRunnerTeardownCanonicalizesWorkdirSelector(t *testing.T) {
+	_, worktree, _ := newRunnerTeardownRepo(t, false)
+	dir := t.TempDir()
+	writeRunnerRegistry(t, dir, "alpha\t"+worktree+"\n")
+	installAbsentRunnerTmux(t)
+	selector := filepath.Join(worktree, "..", filepath.Base(worktree))
+
+	dry := executeRunnerJSON(t, "--dry-run", "--json", "--config-dir", dir, "runner", "teardown", "--workdir", selector)
+	if len(dry.Planned) != 1 || dry.Planned[0].Teardown == nil {
+		t.Fatalf("canonicalized teardown selector = %+v", dry)
+	}
+}
+
+func TestRunnerTeardownRejectsConfirmationWithDryRunBeforeSelection(t *testing.T) {
+	dir := t.TempDir()
+	writeRunnerRegistry(t, dir, "")
+	installAbsentRunnerTmux(t)
+	missing := filepath.Join(t.TempDir(), "missing")
+
+	err := executeRunnerJSONError(t, "--dry-run", "--json", "--config-dir", dir, "runner", "teardown", "--workdir", missing, "--confirm-plan", strings.Repeat("0", 64))
+	if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), "not valid with --dry-run") {
+		t.Fatalf("dry-run confirmation error = %v, exit=%d", err, result.ExitCode(err))
+	}
+}
+
 func TestRunnerTeardownStopsExactLiveRunnerBeforeRemovingWorktree(t *testing.T) {
 	_, worktree, _ := newRunnerTeardownRepo(t, false)
 	dir := t.TempDir()
@@ -283,6 +308,12 @@ func TestRunnerTeardownRejectsUnsafeWorktrees(t *testing.T) {
 		{name: "locked", setup: func(t *testing.T, repo, worktree string) {
 			runnerTeardownGitTest(t, repo, "worktree", "lock", worktree)
 		}, needle: "locked or prunable"},
+		{name: "newline path", setup: func(t *testing.T, _, worktree string) {
+			name := "line\nbreak.txt"
+			writeRunnerTeardownFile(t, filepath.Join(worktree, name), "preserve\n")
+			runnerTeardownGitTest(t, worktree, "add", "--", name)
+			runnerTeardownGitTest(t, worktree, "commit", "-m", "add newline path")
+		}, needle: "contains a newline"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			repo, worktree, _ := newRunnerTeardownRepo(t, false)
@@ -375,6 +406,53 @@ func TestRunnerTeardownRejectsUnsafeWorktrees(t *testing.T) {
 			t.Fatalf("current-directory error = %v", err)
 		}
 	})
+}
+
+func TestRunnerTeardownAcceptsCleanFilteredWorktree(t *testing.T) {
+	repo := t.TempDir()
+	runnerTeardownGitTest(t, repo, "init", "--initial-branch=main")
+	runnerTeardownGitTest(t, repo, "config", "user.email", "runner-teardown@example.com")
+	runnerTeardownGitTest(t, repo, "config", "user.name", "Runner Teardown Test")
+	writeRunnerTeardownFile(t, filepath.Join(repo, ".gitattributes"), "*.txt text eol=crlf\n")
+	writeRunnerTeardownFile(t, filepath.Join(repo, "tracked.txt"), "preserve\n")
+	runnerTeardownGitTest(t, repo, "add", ".gitattributes", "tracked.txt")
+	runnerTeardownGitTest(t, repo, "commit", "-m", "filtered content")
+	worktree := filepath.Join(t.TempDir(), "worktree")
+	runnerTeardownGitTest(t, repo, "worktree", "add", "-b", "teardown-feature", worktree, "HEAD")
+	contents, err := os.ReadFile(filepath.Join(worktree, "tracked.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(contents, []byte("\r\n")) {
+		t.Fatalf("filtered fixture contents = %q, want CRLF", contents)
+	}
+	if status := runnerTeardownGitTest(t, worktree, "status", "--porcelain=v1"); status != "" {
+		t.Fatalf("filtered fixture is not clean: %q", status)
+	}
+	if _, err := inspectRunnerTeardownWorktree(worktree); err != nil {
+		t.Fatalf("clean filtered worktree rejected: %v", err)
+	}
+}
+
+func TestRunnerTeardownAcceptsLinkedWorktreeFromBareRepository(t *testing.T) {
+	source := t.TempDir()
+	runnerTeardownGitTest(t, source, "init", "--initial-branch=main")
+	runnerTeardownGitTest(t, source, "config", "user.email", "runner-teardown@example.com")
+	runnerTeardownGitTest(t, source, "config", "user.name", "Runner Teardown Test")
+	writeRunnerTeardownFile(t, filepath.Join(source, "tracked.txt"), "preserve\n")
+	runnerTeardownGitTest(t, source, "add", "tracked.txt")
+	runnerTeardownGitTest(t, source, "commit", "-m", "initial")
+	bare := filepath.Join(t.TempDir(), "repo.git")
+	runnerTeardownGitTest(t, source, "clone", "--bare", source, bare)
+	worktree := filepath.Join(t.TempDir(), "worktree")
+	runnerTeardownGitTest(t, bare, "worktree", "add", "-b", "teardown-feature", worktree, "main")
+	got, err := inspectRunnerTeardownWorktree(worktree)
+	if err != nil {
+		t.Fatalf("bare-repository worktree rejected: %v", err)
+	}
+	if got.Repository != bare || got.Path != worktree {
+		t.Fatalf("bare-repository worktree = %+v", got)
+	}
 }
 
 func newRunnerTeardownRepo(t *testing.T, detached bool) (string, string, string) {
