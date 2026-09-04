@@ -35,6 +35,7 @@ type runnerTeardownPlan struct {
 	Version               int    `json:"version"`
 	Workspace             string `json:"workspace"`
 	Workdir               string `json:"workdir"`
+	GitWorktree           string `json:"git_worktree,omitempty"`
 	Window                string `json:"window"`
 	RegistryDigest        string `json:"registry_digest"`
 	RunnerState           string `json:"runner_state"`
@@ -54,6 +55,7 @@ type runnerTeardownPlan struct {
 
 type runnerTeardownWorktree struct {
 	State      string
+	Path       string
 	Repository string
 	Branch     string
 	Head       string
@@ -135,14 +137,14 @@ func (a app) runnerTeardown(in invocation, dir config.Directory, rows []config.R
 	}
 	if plan.WorktreeState == "present" {
 		current, inspectErr := inspectRunnerTeardownWorktree(plan.Workdir)
-		if inspectErr != nil || current.State != plan.WorktreeState || current.Repository != plan.Repository || current.Branch != plan.Branch || current.Head != plan.Head {
+		if inspectErr != nil || current.State != plan.WorktreeState || current.Path != plan.GitWorktree || current.Repository != plan.Repository || current.Branch != plan.Branch || current.Head != plan.Head {
 			if inspectErr == nil {
 				inspectErr = errors.New("Git worktree identity changed after teardown planning")
 			}
 			setRunnerTeardownArtifact(out.Teardown, "git_worktree", "failed", inspectErr.Error())
 			return runnerTeardownRuntimeFailure(&env, out, inspectErr)
 		}
-		if _, removeErr := runnerTeardownGit(plan.Repository, "worktree", "remove", "--", plan.Workdir); removeErr != nil {
+		if _, removeErr := runnerTeardownGit(plan.Repository, "worktree", "remove", "--", plan.GitWorktree); removeErr != nil {
 			setRunnerTeardownArtifact(out.Teardown, "git_worktree", "failed", removeErr.Error())
 			return runnerTeardownRuntimeFailure(&env, out, removeErr)
 		}
@@ -196,6 +198,7 @@ func buildRunnerTeardownPlan(dir config.Directory, row config.RunnerRow) (runner
 		Version:        runnerTeardownPlanVersion,
 		Workspace:      row.Workspace,
 		Workdir:        row.Workdir,
+		GitWorktree:    worktree.Path,
 		Window:         row.Window,
 		RegistryDigest: hex.EncodeToString(registrySum[:]),
 		RunnerState:    string(inspection.state),
@@ -236,22 +239,28 @@ func inspectRunnerTeardownWorktree(workdir string) (runnerTeardownWorktree, erro
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return runnerTeardownWorktree{}, fmt.Errorf("runner teardown requires a non-symlink Git worktree directory: %s", workdir)
 	}
+	resolvedWorkdir, err := filepath.EvalSymlinks(workdir)
+	if err != nil {
+		return runnerTeardownWorktree{}, fmt.Errorf("resolve runner teardown workdir identity %s: %w", workdir, err)
+	}
+	resolvedWorkdir = filepath.Clean(resolvedWorkdir)
 	currentDir, err := runnerTeardownCurrentDir()
 	if err != nil {
 		return runnerTeardownWorktree{}, fmt.Errorf("inspect current directory before runner teardown: %w", err)
 	}
-	if withinRunnerTeardownWorktree(workdir, currentDir) {
+	resolvedCurrentDir, err := filepath.EvalSymlinks(currentDir)
+	if err != nil {
+		return runnerTeardownWorktree{}, fmt.Errorf("resolve current directory before runner teardown: %w", err)
+	}
+	if withinRunnerTeardownWorktree(resolvedWorkdir, filepath.Clean(resolvedCurrentDir)) {
 		return runnerTeardownWorktree{}, fmt.Errorf("runner teardown refuses the current process directory %s; run it from outside the selected worktree", currentDir)
 	}
-	resolved, err := filepath.EvalSymlinks(workdir)
-	if err != nil || filepath.Clean(resolved) != workdir {
-		if err == nil {
-			err = errors.New("path resolves to a different directory")
-		}
-		return runnerTeardownWorktree{}, fmt.Errorf("runner teardown workdir identity is unsafe for %s: %w", workdir, err)
-	}
 	top, err := runnerTeardownGitLine(workdir, "rev-parse", "--show-toplevel")
-	if err != nil || filepath.Clean(top) != workdir {
+	resolvedTop := ""
+	if err == nil {
+		resolvedTop, err = filepath.EvalSymlinks(top)
+	}
+	if err != nil || filepath.Clean(resolvedTop) != resolvedWorkdir {
 		if err == nil {
 			err = fmt.Errorf("Git top-level is %s", top)
 		}
@@ -270,7 +279,14 @@ func inspectRunnerTeardownWorktree(workdir string) (runnerTeardownWorktree, erro
 	}
 	var selected *runnerTeardownWorktreeRecord
 	for i := range records {
-		if records[i].Path == workdir {
+		recordInfo, resolveErr := os.Stat(records[i].Path)
+		if resolveErr != nil {
+			if os.IsNotExist(resolveErr) {
+				continue
+			}
+			return runnerTeardownWorktree{}, fmt.Errorf("inspect registered Git worktree identity %s: %w", records[i].Path, resolveErr)
+		}
+		if os.SameFile(info, recordInfo) {
 			selected = &records[i]
 			break
 		}
@@ -278,7 +294,11 @@ func inspectRunnerTeardownWorktree(workdir string) (runnerTeardownWorktree, erro
 	if selected == nil {
 		return runnerTeardownWorktree{}, fmt.Errorf("runner teardown workdir is not registered with Git: %s", workdir)
 	}
-	if selected.Path == records[0].Path {
+	primaryInfo, err := os.Stat(records[0].Path)
+	if err != nil {
+		return runnerTeardownWorktree{}, fmt.Errorf("inspect primary Git worktree identity %s: %w", records[0].Path, err)
+	}
+	if os.SameFile(info, primaryInfo) {
 		return runnerTeardownWorktree{}, errors.New("runner teardown refuses the repository's primary worktree")
 	}
 	if selected.Locked || selected.Prunable {
@@ -307,7 +327,7 @@ func inspectRunnerTeardownWorktree(workdir string) (runnerTeardownWorktree, erro
 	if err := inspectRunnerTeardownFilesystem(workdir); err != nil {
 		return runnerTeardownWorktree{}, fmt.Errorf("runner teardown refuses undeclared worktree content: %w", err)
 	}
-	return runnerTeardownWorktree{State: "present", Repository: records[0].Path, Branch: selected.Branch, Head: selected.Head}, nil
+	return runnerTeardownWorktree{State: "present", Path: selected.Path, Repository: records[0].Path, Branch: selected.Branch, Head: selected.Head}, nil
 }
 
 func withinRunnerTeardownWorktree(worktree, candidate string) bool {
@@ -556,7 +576,7 @@ func verifyRunnerTeardownWorktreeRemoved(plan runnerTeardownPlan) error {
 		return err
 	}
 	for _, record := range records {
-		if record.Path == plan.Workdir {
+		if record.Path == plan.GitWorktree {
 			return errors.New("Git worktree registration remains after removal")
 		}
 	}

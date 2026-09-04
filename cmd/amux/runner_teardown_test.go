@@ -314,6 +314,43 @@ func TestRunnerTeardownRejectsUnsafeWorktrees(t *testing.T) {
 		}
 	})
 
+	t.Run("parent symlink alias", func(t *testing.T) {
+		repo := t.TempDir()
+		runnerTeardownGitTest(t, repo, "init", "--initial-branch=main")
+		runnerTeardownGitTest(t, repo, "config", "user.email", "runner-teardown@example.com")
+		runnerTeardownGitTest(t, repo, "config", "user.name", "Runner Teardown Test")
+		writeRunnerTeardownFile(t, filepath.Join(repo, "tracked.txt"), "preserve\n")
+		runnerTeardownGitTest(t, repo, "add", "tracked.txt")
+		runnerTeardownGitTest(t, repo, "commit", "-m", "initial")
+		root := t.TempDir()
+		realParent := filepath.Join(root, "real")
+		if err := os.Mkdir(realParent, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		aliasParent := filepath.Join(root, "alias")
+		if err := os.Symlink(realParent, aliasParent); err != nil {
+			t.Fatal(err)
+		}
+		worktree := filepath.Join(realParent, "worktree")
+		runnerTeardownGitTest(t, repo, "worktree", "add", "-b", "teardown-feature", worktree, "HEAD")
+		aliasWorktree := filepath.Join(aliasParent, "worktree")
+		dir := t.TempDir()
+		writeRunnerRegistry(t, dir, "alpha\t"+aliasWorktree+"\n")
+		installAbsentRunnerTmux(t)
+
+		dry := executeRunnerJSON(t, "--dry-run", "--json", "--config-dir", dir, "runner", "teardown", "--workdir", aliasWorktree)
+		if len(dry.Planned) != 1 {
+			t.Fatalf("parent-alias dry-run = %+v", dry)
+		}
+		got := executeRunnerJSON(t, "--json", "--config-dir", dir, "runner", "teardown", "--workdir", aliasWorktree, "--confirm-plan", dry.Planned[0].Teardown.PlanDigest)
+		if len(got.Successful) != 1 {
+			t.Fatalf("parent-alias teardown = %+v", got)
+		}
+		if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+			t.Fatalf("parent-alias worktree remains: %v", err)
+		}
+	})
+
 	t.Run("non-root", func(t *testing.T) {
 		_, worktree, _ := newRunnerTeardownRepo(t, false)
 		nested := filepath.Join(worktree, "nested")
@@ -327,8 +364,12 @@ func TestRunnerTeardownRejectsUnsafeWorktrees(t *testing.T) {
 
 	t.Run("current directory", func(t *testing.T) {
 		_, worktree, _ := newRunnerTeardownRepo(t, false)
+		nested := filepath.Join(worktree, "nested")
+		if err := os.Mkdir(nested, 0o700); err != nil {
+			t.Fatal(err)
+		}
 		old := runnerTeardownCurrentDir
-		runnerTeardownCurrentDir = func() (string, error) { return filepath.Join(worktree, "nested"), nil }
+		runnerTeardownCurrentDir = func() (string, error) { return nested, nil }
 		t.Cleanup(func() { runnerTeardownCurrentDir = old })
 		if _, err := inspectRunnerTeardownWorktree(worktree); err == nil || !strings.Contains(err.Error(), "current process directory") {
 			t.Fatalf("current-directory error = %v", err)
