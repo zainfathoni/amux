@@ -450,7 +450,15 @@ func TestRunnerTeardownAcceptsLinkedWorktreeFromBareRepository(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bare-repository worktree rejected: %v", err)
 	}
-	if got.Repository != bare || got.Path != worktree {
+	resolvedBare, err := filepath.EvalSymlinks(bare)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedWorktree, err := filepath.EvalSymlinks(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Repository != resolvedBare || got.Path != resolvedWorktree {
 		t.Fatalf("bare-repository worktree = %+v", got)
 	}
 }
