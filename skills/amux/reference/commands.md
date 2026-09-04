@@ -11,6 +11,8 @@ amux runner pin --workspace <name> --workdir <existing-directory>
 amux runner pin --current
 amux runner list|launch|park|restart|remove|doctor|reconcile [runner selectors]
 amux runner unpin --workdir <path>|--current
+amux --json --dry-run runner teardown --workdir <secondary-worktree>
+amux --json runner teardown --workdir <secondary-worktree> --confirm-plan <sha256>
 
 # Workspace, maintenance, installation
 amux workspace list
@@ -29,7 +31,9 @@ Runner pin is active admission and requires an existing canonical directory. Git
 
 Runner park preserves the row. Runner unpin removes only the exact selected registry binding after proving its local tmux runner is absent; it never stops a process. Runner remove and missing-workdir reconcile retain and reject because current Amp APIs cannot prove authoritative process/native-catalog absence. Present-workdir reconcile is a no-op. Never delete a row or process on unreadable, conflicting, or unproven evidence.
 
-The former `worker`, `spawn`, `shelve`, `unshelve`, `teardown`, `group`, `report`, and `callback` routes are removed and fail before effects. Historical coordination stores are inert. The `report` tombstone is not `/amux-tycho`; that explicit-only skill uses a separate receipt store and protocol.
+Runner teardown is exact and machine-local: stop the positively identified runner if live, remove its exact clean attached secondary Git worktree, then unpin its exact row. It accepts only `--workdir`; there is no `--all` or `--current`. Dry-run returns a SHA-256 plan digest and apply requires that fresh digest. It preserves the branch ref and rejects primary, detached, locked, prunable, dirty, hidden-change, symlinked, non-root, current-directory, conflicting, ambiguous, and unreadable targets. It never archives native Amp threads, deletes branches, or reads/writes historical coordination stores.
+
+The former `worker`, `spawn`, `shelve`, `unshelve`, top-level `teardown`, `group`, `report`, and `callback` routes are removed and fail before effects. Historical coordination stores are inert. The new runner-scoped teardown does not revive worker teardown. The `report` tombstone is not `/amux-tycho`; that explicit-only skill uses a separate receipt store and protocol.
 
 `--config-dir <path>` and `AMUX_CONFIG_DIR` select the directory containing active `runners.tsv`. Historical worker/coordination files in that directory are not part of active runner operation and must remain untouched.
 

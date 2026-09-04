@@ -20,7 +20,7 @@ var (
 
 func lifecycleCommandStopsRunner(name string) bool {
 	switch name {
-	case "park", "restart":
+	case "park", "restart", "teardown":
 		return true
 	}
 	return false

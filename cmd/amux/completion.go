@@ -34,6 +34,7 @@ var completionCommands = []completionCommand{
 		{Name: "list", Description: "List configured runners", Flags: runnerLifecycleFlags},
 		{Name: "pin", Description: "Pin a runner", Flags: []string{"--workspace", "--workdir", "--current", "-w", "-d"}},
 		{Name: "unpin", Description: "Remove an absent runner's exact registry binding", Flags: []string{"--workdir", "--current", "-d"}},
+		{Name: "teardown", Description: "Stop one exact runner, remove its Git worktree, and unpin it", Flags: []string{"--workdir", "--confirm-plan", "-d"}},
 		{Name: "launch", Description: "Launch runners", Flags: runnerLifecycleFlags},
 		{Name: "park", Description: "Park runners", Flags: runnerLifecycleFlags},
 		{Name: "restart", Description: "Restart runners", Flags: runnerLifecycleFlags},
@@ -99,6 +100,7 @@ _amux_complete() {
       elif [[ "$leaf" == maintenance ]]; then COMPREPLY=()
       elif [[ "$leaf" == pin ]]; then COMPREPLY=( $(compgen -W "--workspace --workdir --current -w -d" -- "$cur") )
       elif [[ "$leaf" == unpin ]]; then COMPREPLY=( $(compgen -W "--workdir --current -d" -- "$cur") )
+      elif [[ "$leaf" == teardown ]]; then COMPREPLY=( $(compgen -W "--workdir --confirm-plan -d" -- "$cur") )
       else COMPREPLY=( $(compgen -W "--workspace --workdir --current --all -w -d" -- "$cur") ); fi ;;
     workspace) if [[ -z "$leaf" ]]; then COMPREPLY=( $(compgen -W "list" -- "$cur") ); fi ;;
     install) if [[ -z "$leaf" ]]; then COMPREPLY=( $(compgen -W "doctor" -- "$cur") ); fi ;;
@@ -154,6 +156,7 @@ case $state in
         elif [[ $leaf == maintenance ]]; then return
         elif [[ $leaf == pin ]]; then _arguments '(-w --workspace)'{-w,--workspace}'[workspace]:name:' '(-d --workdir)'{-d,--workdir}'[workdir]:directory:_directories' '--current[current workdir]'
         elif [[ $leaf == unpin ]]; then _arguments '(-d --workdir)'{-d,--workdir}'[workdir]:directory:_directories' '--current[current workdir]'
+        elif [[ $leaf == teardown ]]; then _arguments '(-d --workdir)'{-d,--workdir}'[workdir]:directory:_directories' '--confirm-plan=[fresh teardown plan digest]:sha256:'
         else _arguments '(-w --workspace)'{-w,--workspace}'[workspace]:name:' '(-d --workdir)'{-d,--workdir}'[workdir]:directory:_directories' '--current[current workdir]' '--all[all runners]'; fi ;;
       workspace) _values 'workspace command' list ;;
       install) _values 'install command' doctor ;;
@@ -192,9 +195,10 @@ func writeFishCompletion(w io.Writer) {
 	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from install; and not __fish_seen_subcommand_from doctor' -a doctor -d 'Diagnose installation'")
 	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'")
 	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from list launch park restart remove doctor reconcile pin; and not __fish_seen_subcommand_from maintenance' -l workspace -s w -r")
-	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from list launch park restart remove doctor reconcile pin unpin; and not __fish_seen_subcommand_from maintenance' -l workdir -s d -r")
+	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from list launch park restart remove doctor reconcile pin unpin teardown; and not __fish_seen_subcommand_from maintenance' -l workdir -s d -r")
 	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from list launch park restart remove doctor reconcile; and not __fish_seen_subcommand_from maintenance' -l all")
 	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from list launch park restart remove doctor reconcile pin unpin; and not __fish_seen_subcommand_from maintenance' -l current")
+	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from teardown; and not __fish_seen_subcommand_from maintenance' -l confirm-plan -r")
 	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from maintenance; and __fish_seen_subcommand_from install' -l update-owner -r -a 'self external'")
 	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from maintenance; and __fish_seen_subcommand_from run' -l scheduled")
 }

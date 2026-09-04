@@ -46,7 +46,12 @@ _Avoid_: Session when referring to the configured lifecycle group
 
 **Park** — Stop one exact runner while preserving its registry row and remote thread state.
 
-**Remove / Unpin** — Retained runner operations that currently fail closed when authoritative process/catalog absence cannot be proven. They never operate on historical worker rows.
+**Remove** — A retained runner operation reserved for future authoritative process/catalog absence evidence. It currently fails closed and never operates on historical worker rows.
+
+**Unpin** — Remove one exact runner binding after local inspection positively proves that runner absent. It never stops a process or removes a workdir.
+
+**Runner teardown** — Retire one exact machine-local runner and its clean secondary Git worktree while preserving its branch. Native Amp thread archival is a separate native action.
+_Avoid_: Worker teardown, thread teardown
 
 **Pin** — Add one exact canonical runner workdir binding without changing remote thread state.
 
@@ -54,7 +59,7 @@ _Avoid_: Session when referring to the configured lifecycle group
 
 **Workspace scope** — Every configured runner in one same-named tmux session.
 
-Historical worker, shelf, group, report, callback, deadline, finish, and teardown terms describe inert evidence only. They are not active Amux operations and must not be revived from older documentation.
+Historical worker, shelf, group, report, callback, deadline, finish, and worker-teardown terms describe inert evidence only. They are not active Amux operations and must not be revived from older documentation.
 
 ## Delegation admission
 

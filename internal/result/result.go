@@ -235,7 +235,11 @@ type TeardownArtifactDetails struct {
 }
 
 type TeardownDetails struct {
-	Artifacts []TeardownArtifactDetails `json:"artifacts"`
+	PlanDigest string                    `json:"plan_digest,omitempty"`
+	Repository string                    `json:"repository,omitempty"`
+	Branch     string                    `json:"branch,omitempty"`
+	Head       string                    `json:"head,omitempty"`
+	Artifacts  []TeardownArtifactDetails `json:"artifacts"`
 }
 
 type Outcome struct {

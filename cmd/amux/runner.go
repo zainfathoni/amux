@@ -51,6 +51,13 @@ type runnerPIDMarkerInspection struct {
 
 func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelope, error) {
 	env := result.NewEnvelope(strings.Join(in.Path, " "), in.Options.DryRun)
+	if in.Command.Name == "teardown" && in.Selectors.Workdir != "" {
+		canonical, err := config.CanonicalWorkdir(in.Selectors.Workdir)
+		if err != nil {
+			return &env, result.Preflight(err)
+		}
+		in.Selectors.Workdir = canonical
+	}
 	if in.Selectors.Current {
 		runner := tmux.Runner{}
 		workdir, err := runner.CurrentWorkdir()
@@ -75,6 +82,9 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 		return &env, result.Preflight(err)
 	}
 	rows = selectRunnerRows(rows, in.Selectors)
+	if in.Command.Name == "teardown" {
+		return a.runnerTeardown(in, dir, rows)
+	}
 	if in.Command.Name == "doctor" && len(rows) == 0 && in.Selectors.All {
 		details, doctorErr := maintenanceDoctorDetails(dir)
 		if doctorErr != nil {
@@ -318,7 +328,7 @@ func maintenanceDoctorMessage(d *result.MaintenanceDetails) string {
 
 func runnerCommandNeedsTmux(name string) bool {
 	switch name {
-	case "launch", "park", "restart", "remove", "doctor", "reconcile":
+	case "launch", "park", "restart", "teardown", "remove", "doctor", "reconcile":
 		return true
 	}
 	return false
