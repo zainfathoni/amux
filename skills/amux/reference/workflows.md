@@ -26,7 +26,7 @@ Report exact workdir, registry/runtime state, and blocker. Do not mutate process
 
 Use only when the owner asks to retire a completed runner/worktree, or asks to clean up completed native threads and their local worktrees. Amp owns thread records; Amux owns only the exact machine-local runner and worktree operation.
 
-1. Obtain authorization to read every target native thread. Inspect the parent and direct children with native thread tools; do not infer completion from local Git state.
+1. Inspect the relevant accessible parent and direct child threads with native thread tools; no separate read approval is needed. Do not infer completion from local Git state.
 2. Map each thread to one exact configured canonical workdir from authenticated thread/executor evidence. An uncertain mapping blocks that item.
 3. Revalidate completion, branch preservation, and any unresolved PR/CI concern independently. A merged PR alone is not proof that no unique local bytes remain.
 4. From outside the target worktree, run `amux --json --dry-run runner teardown --workdir <exact-path>`. Review the plan and its branch/HEAD. Any rejected state remains untouched.

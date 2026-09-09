@@ -1,6 +1,6 @@
 ---
 name: amux
-description: "Operates the retained machine-local Amux runner registry, exact workdir bindings, automatic tmux/Amp launch, diagnostics, maintenance, teardown, and fail-closed runner lifecycle. Routes new delegated work to native Amp child threads without Amux workers, spawn/adoption, groups, reports, callbacks, deadlines, shelves, or finish state. Use for runner pin/list/launch/doctor/park/restart/teardown/remove/reconcile, runner workspaces, 'Pin it', /amux health, /amux sprawl, and the separately owner-gated read-only /amux sweep. Experimental Tycho, Claude, and Pi routes are separate explicit-only skills."
+description: "Operates the retained machine-local Amux runner registry, exact workdir bindings, automatic tmux/Amp launch, diagnostics, maintenance, teardown, and fail-closed runner lifecycle. Routes new delegated work to native Amp child threads without Amux workers, spawn/adoption, groups, reports, callbacks, deadlines, shelves, or finish state. Use for runner pin/list/launch/doctor/park/restart/teardown/remove/reconcile, runner workspaces, 'Pin it', /amux health, /amux sprawl, and the separately owner-gated read-only /amux sweep. Experimental Tycho execution uses a separate explicit-only skill."
 ---
 
 # amux
@@ -15,7 +15,7 @@ Thin machine-local Amp/tmux runner host. **Runner** = `amp --no-tui` process bou
 - The `worker`, `spawn`, shelf, top-level worker teardown, group, report, callback, deadline, and finish surfaces are removed. Never attempt their historical syntax, edit their stores, or manufacture a compatibility transition. `runner teardown` is a new machine-local command, not a compatibility transition.
 - Native-created work receives no Amux worker, adoption, group, report, callback, deadline, shelf, finish authorization, or lifecycle instructions.
 - For delegated work, use authenticated native Amp `create_thread` on the exact intended Workspace Project and Orb, or exact live runner and intended workdir. Keep the native parent/reply route. Do not call the child an Amux worker.
-- Before automatic mode selection, native child creation, another-thread reads, or native child messages, load [`reference/amp-invocation-policy.md`](reference/amp-invocation-policy.md). Never bypass a binding `ask` or `reject`.
+- Before automatic mode selection, native child creation, or native child messages, load [`reference/amp-invocation-policy.md`](reference/amp-invocation-policy.md).
 - Prefer `--dry-run` and `--json`. Exit `2` means preflight rejection; exit `1` means runtime failure after mutation may have begun.
 - `/amux health`, `/amux sprawl`, and `/amux sweep` are skill-only. Never invoke them as CLI commands.
 - `/amux sweep` is the protected one-time #360 read-only inventory. Run it only after a separate exact owner authorization. Its sunset remains inactive until owner acceptance/disposition and explicit no-repeat confirmation.
@@ -36,7 +36,7 @@ Thin machine-local Amp/tmux runner host. **Runner** = `amp --no-tui` process bou
 - **/amux sprawl**: [`workflows.md`](reference/workflows.md#sprawl-independent-issue-threads).
 - **/amux sweep**: [`workflows.md`](reference/workflows.md#sweep-worktree-inventory).
 
-Experimental external execution is explicit-only. Load `/amux-tycho`, `/amux-claude`, or `/amux-pi` only on an explicit owner request. For `/amux-tycho`, the receipt's immutable real Amp origin remains coordinator and consume/acknowledgement authority. Tycho is a typed report-only producer with no group, member, callback, finish, label, provider-identity, or lifecycle authority. An owner-authorized external Tycho second opinion must never grant Tycho GitHub review mutation or readiness promotion. Its receipts are separate from the removed worker-report store and remain until #328 passes.
+Load `/amux-tycho` only on an explicit owner request. The receipt's immutable real Amp origin remains coordinator and consume/acknowledgement authority. Tycho is a typed report-only producer with no group, member, callback, finish, label, provider-identity, or lifecycle authority. An owner-authorized external Tycho second opinion must never grant Tycho GitHub review mutation or readiness promotion. Its receipts are separate from the removed worker-report store and remain until #328 passes.
 
 ## Load only what you need
 
