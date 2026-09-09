@@ -41,6 +41,7 @@ curl -fsSL https://amux.zainf.dev/install.sh | AMUX_SKILLS_SOURCE="$AMUX_REPO" s
       <li><strong>Restore my workspace:</strong> <code>amux launch --workspace &lt;name&gt;</code>.</li>
       <li><strong>Park it:</strong> <code>amux runner park --current</code> or an exact workdir.</li>
       <li><strong>Doctor amux:</strong> <code>amux runner doctor --all</code>.</li>
+      <li><strong>Teardown this runner/worktree:</strong> inspect native thread completion separately, then use the exact two-step <code>amux runner teardown --workdir</code> plan.</li>
       <li><strong>Spawn/delegate work:</strong> native Amp <code>create_thread</code>, not Amux spawn/adoption.</li>
     </ul>
 
@@ -48,13 +49,14 @@ curl -fsSL https://amux.zainf.dev/install.sh | AMUX_SKILLS_SOURCE="$AMUX_REPO" s
     <p><code>/amux health</code> performs read-only runner diagnostics. <code>/amux sprawl</code> creates independent native Amp children only. <code>/amux sweep</code> is the protected #360 read-only inventory and requires a separate exact owner authorization; loading the skill does not authorize it.</p>
 
     <h2>Removed surfaces</h2>
-    <p>Worker, spawn, shelf, teardown, group, worker-report, callback, deadline, and finish commands are removed. Historical stores are inert and must not be migrated, rewritten, drained, or deleted. <code>/amux-tycho</code> remains a distinct explicit-only receipt bridge.</p>
+    <p>Worker, spawn, shelf, top-level worker teardown, group, worker-report, callback, deadline, and finish commands are removed. Historical stores are inert and must not be migrated, rewritten, drained, or deleted. Runner-scoped teardown is machine-local only. <code>/amux-tycho</code> remains a distinct explicit-only receipt bridge.</p>
 
     <h2>Safety</h2>
     <ul>
       <li>Use long selectors and current contextual help.</li>
       <li>Use <code>--dry-run</code> before mutation and <code>--json</code> for parsing.</li>
       <li>Runner unpin removes an exact binding only after proving its local tmux runner absent; remove and missing-workdir reconcile remain fail-closed.</li>
+      <li>Runner teardown requires a fresh plan digest, preserves the branch, and rejects dirty or unsafe worktrees.</li>
       <li>Runner commands never own remote Amp threads.</li>
     </ul>
   </body>

@@ -16,7 +16,7 @@ import (
 )
 
 func TestHelpAndCompletionsExposeOnlyRetainedHostCommands(t *testing.T) {
-	removed := []string{"worker", "spawn", "group", "report", "callback", "shelve", "unshelve", "teardown"}
+	removed := []string{"worker", "spawn", "group", "report", "callback", "shelve", "unshelve"}
 	var help bytes.Buffer
 	if err := (app{stdout: &help}).execute([]string{"help"}); err != nil {
 		t.Fatal(err)
@@ -30,6 +30,13 @@ func TestHelpAndCompletionsExposeOnlyRetainedHostCommands(t *testing.T) {
 		if strings.Contains(help.String(), "  "+command+" ") {
 			t.Errorf("root help advertises removed command %q:\n%s", command, help.String())
 		}
+	}
+	var runnerHelp bytes.Buffer
+	if err := (app{stdout: &runnerHelp}).execute([]string{"help", "runner"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(runnerHelp.String(), "  teardown ") || strings.Contains(help.String(), "  teardown ") {
+		t.Errorf("teardown must be runner-scoped only; root=%q runner=%q", help.String(), runnerHelp.String())
 	}
 
 	for _, shell := range []string{"bash", "zsh", "fish"} {
@@ -49,7 +56,7 @@ func TestHelpAndCompletionsExposeOnlyRetainedHostCommands(t *testing.T) {
 					t.Errorf("%s completion is missing retained command %q", shell, retained)
 				}
 			}
-			for _, retained := range []string{"maintenance", "install", "remove", "run"} {
+			for _, retained := range []string{"maintenance", "install", "remove", "run", "teardown", "confirm-plan"} {
 				if !strings.Contains(output, retained) {
 					t.Errorf("%s completion is missing functional retained token %q", shell, retained)
 				}
@@ -64,7 +71,7 @@ func TestHelpAndCompletionsExposeOnlyRetainedHostCommands(t *testing.T) {
 					t.Error("zsh completion does not implement nested command and flag completion")
 				}
 			case "fish":
-				if !strings.Contains(output, "not __fish_seen_subcommand_from maintenance list pin unpin launch park restart remove doctor reconcile") || strings.Contains(output, "not __fish_seen_subcommand_from 'maintenance list") || !strings.Contains(output, "__fish_seen_subcommand_from maintenance") || !strings.Contains(output, "__fish_seen_subcommand_from list launch park restart remove doctor reconcile pin; and not __fish_seen_subcommand_from maintenance") || !strings.Contains(output, "-l workdir -s d -r") || !strings.Contains(output, "-l workspace -s w -r") || !strings.Contains(output, "-l config-dir -r") || !strings.Contains(output, "-l terminal-launcher -r") || !strings.Contains(output, "-l update-owner -r") {
+				if !strings.Contains(output, "not __fish_seen_subcommand_from maintenance list pin unpin teardown launch park restart remove doctor reconcile") || strings.Contains(output, "not __fish_seen_subcommand_from 'maintenance list") || !strings.Contains(output, "__fish_seen_subcommand_from maintenance") || !strings.Contains(output, "__fish_seen_subcommand_from list launch park restart remove doctor reconcile pin; and not __fish_seen_subcommand_from maintenance") || !strings.Contains(output, "-l workdir -s d -r") || !strings.Contains(output, "-l workspace -s w -r") || !strings.Contains(output, "-l confirm-plan -r") || !strings.Contains(output, "-l config-dir -r") || !strings.Contains(output, "-l terminal-launcher -r") || !strings.Contains(output, "-l update-owner -r") {
 					t.Error("fish completion does not scope nested maintenance and runner flags")
 				}
 			}
@@ -96,6 +103,7 @@ func TestBashCompletionReturnsNestedRunnerCandidates(t *testing.T) {
 		{name: "maintenance", words: `amux runner maintenance ""`, index: 3, candidate: "install"},
 		{name: "maintenance install flags", words: `amux runner maintenance install ""`, index: 4, candidate: "--update-owner"},
 		{name: "maintenance remove has no runner flags", words: `amux runner maintenance remove ""`, index: 4, excluded: "--all"},
+		{name: "teardown exact flags", words: `amux runner teardown ""`, index: 3, candidate: "--confirm-plan", excluded: "--all"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			script := completion.String() + fmt.Sprintf("\nCOMP_WORDS=(%s); COMP_CWORD=%d; _amux_complete; printf '%%s\\n' \"${COMPREPLY[@]}\"\n", test.words, test.index)
@@ -134,6 +142,7 @@ func TestZshCompletionReturnsNestedRunnerCandidates(t *testing.T) {
 		{name: "maintenance install flags", words: `amux runner maintenance install ''`, current: 5, candidate: "--update-owner"},
 		{name: "maintenance remove has no runner flags", words: `amux runner maintenance remove ''`, current: 5, excluded: "--all"},
 		{name: "runner pin excludes all", words: `amux runner pin ''`, current: 4, excluded: "--all"},
+		{name: "runner teardown flags", words: `amux runner teardown ''`, current: 4, candidate: "--confirm-plan", excluded: "--all"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			script := `

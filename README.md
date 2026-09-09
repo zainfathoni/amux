@@ -5,7 +5,7 @@
 Amux is not deprecated or archived. The active product surface is intentionally small:
 
 - a machine-local runner registry and exact canonical-workdir bindings;
-- runner pin, list, launch, doctor, park, restart, remove, and fail-closed reconcile;
+- runner pin, list, launch, doctor, park, restart, teardown, remove, and fail-closed reconcile;
 - automatic `amux launch --all` at graphical login or boot;
 - tmux and `amp --no-tui` process launch;
 - install, update, maintenance, and diagnostics; and
@@ -13,7 +13,7 @@ Amux is not deprecated or archived. The active product surface is intentionally 
 
 The former worker, spawn/adoption, shelf, group, report, callback, deadline, and finish-authorization commands have been removed. Their historical files are inert compatibility evidence: current commands neither migrate nor mutate them. The protected one-time #360 inventory remains read-only under its existing owner gate. `/amux-tycho` is a separate receipt bridge and is unaffected by removal of worker reports.
 
-See [ADR 0009](docs/adr/0009-remove-active-legacy-coordination-surfaces.md), [ADR 0008](docs/adr/0008-retain-machine-local-runner-host-and-drain-coordination.md), and the [disposition ledger](docs/staged-drain-disposition.md).
+See [ADR 0010](docs/adr/0010-add-machine-local-runner-teardown.md), [ADR 0009](docs/adr/0009-remove-active-legacy-coordination-surfaces.md), [ADR 0008](docs/adr/0008-retain-machine-local-runner-host-and-drain-coordination.md), and the [disposition ledger](docs/staged-drain-disposition.md).
 
 Website: [amux.zainf.dev](https://amux.zainf.dev) · Skill guide: [amux.zainf.dev/skill/](https://amux.zainf.dev/skill/)
 
@@ -107,6 +107,15 @@ amux runner park --workdir ~/Code/amux-runner
 amux runner restart --workdir ~/Code/amux-runner
 ```
 
+Retire one exact runner and its clean secondary Git worktree with a state-bound two-step plan:
+
+```sh
+amux --json --dry-run runner teardown --workdir ~/Code/amux-runner
+amux --json runner teardown --workdir ~/Code/amux-runner --confirm-plan <sha256-from-dry-run>
+```
+
+Runner teardown stops only the exact verified local runner, removes only the exact clean attached secondary worktree, and unpins only its exact row. It preserves the local branch and never archives Amp threads. Primary, detached, locked, prunable, dirty, hidden-change, ambiguous, unreadable, symlinked, non-root, and current-directory targets reject before worktree removal.
+
 Runner workdirs may be Git worktrees or any other existing directories. Runner lifecycle never creates, continues, archives, or manages remote Amp threads.
 
 For new delegated work, use Amp's authenticated native `create_thread` on the exact intended Workspace Project/Orb or exact live runner/workdir. Keep only native parent/reply routing. Do not create Amux worker, adoption, group, report, callback, deadline, shelf, or finish state.
@@ -121,6 +130,7 @@ amux launch [--workspace <name>|--workdir <path>|--current|--all]
 amux park|restart|remove|doctor|reconcile [runner selectors]
 
 amux runner pin --workspace <name> --workdir <existing-directory>
+amux runner teardown --workdir <secondary-worktree> --confirm-plan <sha256>
 amux runner list|launch|park|restart|remove|doctor|reconcile [runner selectors]
 amux workspace list
 amux workspaces
@@ -135,9 +145,9 @@ amux update
 
 Top-level lifecycle routes are runner-only aliases. Bare `amux` is equivalent to automatic runner launch across all configured rows. Mutating machine-wide routes other than launch require explicit `--all`.
 
-Runner pin is active admission. `runner unpin` removes only the exact selected registry binding after proving its local tmux runner is absent; it never stops a process. `runner remove` and missing-workdir `runner reconcile` fail closed pending authoritative process/catalog absence evidence. Use `runner park` to stop an exact owned process while retaining its row.
+Runner pin is active admission. `runner unpin` removes only the exact selected registry binding after proving its local tmux runner is absent; it never stops a process. `runner teardown` is the explicit worktree-owning retirement route described above. `runner remove` and missing-workdir `runner reconcile` fail closed pending authoritative process/catalog absence evidence. Use `runner park` to stop an exact owned process while retaining its row.
 
-Removed `worker`, `spawn`, `shelve`, `unshelve`, `teardown`, `group`, `report`, and `callback` routes fail before process or store effects. `report` does not route to `/amux-tycho`; use that separate skill explicitly.
+Removed `worker`, `spawn`, `shelve`, `unshelve`, top-level `teardown`, `group`, `report`, and `callback` routes fail before process or store effects. The active command is runner-scoped and has none of the former worker teardown's remote-thread or legacy-store behavior. `report` does not route to `/amux-tycho`; use that separate skill explicitly.
 
 ## Configuration and safety
 

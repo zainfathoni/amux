@@ -25,14 +25,14 @@
     <h2>Retained active layer</h2>
     <ul>
       <li>Machine-local runner registry and canonical-workdir bindings</li>
-      <li>Runner pin, list, launch, doctor, park, restart, remove, and fail-closed reconcile</li>
+      <li>Runner pin, list, launch, doctor, park, restart, teardown, remove, and fail-closed reconcile</li>
       <li>Automatic <code>amux launch --all</code> at graphical login or boot</li>
       <li>tmux and <code>amp --no-tui</code> process launch</li>
       <li>Install, update, maintenance, diagnostics, systemd, and launchd integration</li>
     </ul>
 
     <h2>Removed coordination layer</h2>
-    <p>Amux workers, generalized spawn/adoption, shelves, groups, worker reports, callbacks, deadlines, teardown, and finish authorization have been removed. Their historical stores are inert and remain untouched. The protected #360 inventory may inspect them read-only only after separate owner authorization.</p>
+    <p>Amux workers, generalized spawn/adoption, shelves, groups, worker reports, callbacks, deadlines, worker teardown, and finish authorization have been removed. Their historical stores are inert and remain untouched. The protected #360 inventory may inspect them read-only only after separate owner authorization.</p>
     <p><code>/amux-tycho</code> is separate: its receipt consume/acknowledge bridge is not the removed worker-report mechanism and remains under issue #328's replacement gate.</p>
 
     <h2>Install</h2>
@@ -43,6 +43,11 @@ npx skills add zainfathoni/amux --skill amux --global</code></pre>
     <pre><code>amux runner pin --workspace amux --workdir ~/Code/amux-runner
 amux runner launch --workdir ~/Code/amux-runner
 amux runner doctor --all</code></pre>
+
+    <h2>Teardown one completed worktree</h2>
+    <pre><code>amux --json --dry-run runner teardown --workdir &lt;path&gt;
+amux --json runner teardown --workdir &lt;path&gt; --confirm-plan &lt;sha256&gt;</code></pre>
+    <p>The state-bound runner command stops one exact local runner, removes one clean attached secondary worktree, and unpins it. It preserves the branch and never archives Amp threads.</p>
 
     <h2>Activation</h2>
     <p>At login/boot, the service manager runs <code>amux launch --all</code>. Verified patterns are systemd <code>Type=oneshot</code> with <code>RemainAfterExit=yes</code>, and a RunAtLoad LaunchAgent with <code>AbandonProcessGroup=true</code>. The OS activates Amux and retains its process group; it does not replace Amux with direct runner supervision.</p>

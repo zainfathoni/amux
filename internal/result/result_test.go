@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -104,7 +105,7 @@ func TestTeardownDetailsAreOptionalAndAdditiveInSchemaV1(t *testing.T) {
 	envelope.Skipped = append(envelope.Skipped, Outcome{
 		Resource: worker,
 		Action:   "teardown",
-		Teardown: &TeardownDetails{Artifacts: []TeardownArtifactDetails{
+		Teardown: &TeardownDetails{PlanDigest: strings.Repeat("a", 64), Repository: "/tmp/repo", Branch: "refs/heads/feature", Head: strings.Repeat("b", 40), Artifacts: []TeardownArtifactDetails{
 			{Artifact: "remote_thread_archive", Outcome: "completed"},
 			{Artifact: "worktree_directory", Outcome: "not_owned", Reason: "amux teardown does not own worktree directory cleanup"},
 		}},
@@ -122,6 +123,9 @@ func TestTeardownDetailsAreOptionalAndAdditiveInSchemaV1(t *testing.T) {
 		t.Fatalf("schema_version = %d, want unchanged schema v1", got)
 	}
 	teardown := document["skipped"].([]any)[0].(map[string]any)["teardown"].(map[string]any)
+	if teardown["plan_digest"] != strings.Repeat("a", 64) || teardown["repository"] != "/tmp/repo" || teardown["branch"] != "refs/heads/feature" || teardown["head"] != strings.Repeat("b", 40) {
+		t.Fatalf("teardown identity fields = %#v", teardown)
+	}
 	artifacts := teardown["artifacts"].([]any)
 	if len(artifacts) != 2 || artifacts[1].(map[string]any)["reason"] == "" {
 		t.Fatalf("teardown artifacts = %#v", artifacts)
