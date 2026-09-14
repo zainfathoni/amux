@@ -22,7 +22,7 @@ Thin machine-local Amp/tmux runner host. **Runner** = `amp --no-tui` process bou
 
 ## Route triggers
 
-- **Pin it** / **Pin this runner**: `amux runner pin --workspace <name> --workdir <existing-directory>` or `--current`.
+- **Pin it** / **Pin this runner**: `amux runner pin --workspace <name> --workdir <existing-directory> [--runner-id <id>]` or `--current [--runner-id <id>]`.
 - **List runners**: `amux runner list --all` or a canonical scope.
 - **Restore my workspace**: `amux launch --workspace <name>`.
 - **Park it**: `amux runner park --current` or exact workdir.

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type MigrationStatus string
@@ -143,7 +144,18 @@ func migratedRunners(path string) ([]byte, error) {
 		return nil, err
 	}
 	var out bytes.Buffer
-	out.WriteString("# amux-schema: runners/v1\n")
+	versionTwo := false
+	for _, row := range rows {
+		if row.RunnerID != "" {
+			versionTwo = true
+			break
+		}
+	}
+	if versionTwo {
+		out.WriteString("# amux-schema: runners/v2\n")
+	} else {
+		out.WriteString("# amux-schema: runners/v1\n")
+	}
 	seenWorkdirs := make(map[string]string)
 	for _, row := range rows {
 		workdir, err := CanonicalWorkdir(row.Workdir)
@@ -155,7 +167,11 @@ func migratedRunners(path string) ([]byte, error) {
 		}
 		seenWorkdirs[workdir] = row.Workspace
 		row.Workdir = workdir
-		out.WriteString(row.String())
+		if versionTwo && row.LegacyWindow {
+			out.WriteString(strings.Join([]string{row.Workspace, row.Window, row.Workdir, row.RunnerID}, "\t"))
+		} else {
+			out.WriteString(row.String())
+		}
 		out.WriteByte('\n')
 	}
 	return out.Bytes(), nil

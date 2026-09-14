@@ -33,6 +33,7 @@ type selectors struct {
 	Workspace                              string
 	Window                                 string
 	Workdir                                string
+	RunnerID                               string
 	Thread                                 string
 	Group                                  string
 	Groups                                 []string
@@ -150,7 +151,7 @@ func runnerCommand() *commandSpec {
 	runner.Children = []*commandSpec{
 		maintenanceCommand(),
 		runnerLeaf("list", "List configured runners", false, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
-		runnerLeaf("pin", "Pin a runner without launching it", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current"),
+		runnerLeaf("pin", "Pin a runner without launching it", true, "--workspace, -w <name>", "--workdir, -d <path>", "--runner-id <id>", "--current"),
 		runnerLeaf("unpin", "Remove an absent runner's exact registry binding", true, "--workdir, -d <path>", "--current"),
 		runnerLeaf("teardown", "Stop one exact runner, remove its Git worktree, and unpin it", true, "--workdir, -d <path>", "--confirm-plan <sha256>"),
 		runnerLeaf("launch", "Launch runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
@@ -580,6 +581,15 @@ func parseSelectors(args []string) (selectors, []string, error) {
 			if err := setSelector(&parsed.Workdir, value, "--workdir"); err != nil {
 				return parsed, nil, err
 			}
+		case "--runner-id":
+			value, next, err := selectorValue(args, i, name, inline, hasInline)
+			if err != nil {
+				return parsed, nil, err
+			}
+			i = next
+			if err := setSelector(&parsed.RunnerID, value, name); err != nil {
+				return parsed, nil, err
+			}
 		case "--thread", "-t":
 			value, next, err := selectorValue(args, i, name, inline, hasInline)
 			if err != nil {
@@ -791,6 +801,7 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 		{"--workspace", parsed.Workspace},
 		{"--window", parsed.Window},
 		{"--workdir", parsed.Workdir},
+		{"--runner-id", parsed.RunnerID},
 		{"--thread", parsed.Thread},
 		{"--group", parsed.Group},
 		{"--mode", parsed.Mode},
@@ -845,6 +856,11 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 		}
 		if command.Name != "spawn" {
 			parsed.Workdir = workdir
+		}
+	}
+	if parsed.RunnerID != "" {
+		if err := config.ValidateField("runner ID", parsed.RunnerID); err != nil {
+			return err
 		}
 	}
 	if parsed.Thread != "" {
@@ -951,7 +967,7 @@ func compactStrings(values []string) []string {
 }
 
 func selectorsEmpty(parsed selectors) bool {
-	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && parsed.WorkItemID == "" && parsed.WorkerOrdinal == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && parsed.PromptFile == "" && parsed.AssignmentPhase == "" && parsed.AssignmentOutcome == "" && parsed.NativeCapability == "" && parsed.LatestCursor == "" && parsed.PhysicalHost == "" && parsed.Generation == "" && parsed.ConfirmPlan == "" && !parsed.OwnerAuthorizedProjectlessPhysicalHost && !parsed.Reconcile
+	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.RunnerID == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && parsed.WorkItemID == "" && parsed.WorkerOrdinal == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && parsed.PromptFile == "" && parsed.AssignmentPhase == "" && parsed.AssignmentOutcome == "" && parsed.NativeCapability == "" && parsed.LatestCursor == "" && parsed.PhysicalHost == "" && parsed.Generation == "" && parsed.ConfirmPlan == "" && !parsed.OwnerAuthorizedProjectlessPhysicalHost && !parsed.Reconcile
 }
 
 func (a app) dispatch(parsed invocation) (*result.Envelope, error) {

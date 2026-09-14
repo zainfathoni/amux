@@ -7,8 +7,8 @@ Long selectors are canonical: `--workspace`, `--workdir`, `--json`, and `--dry-r
 amux list|launch|park|restart|remove|doctor|reconcile [runner selectors]
 
 # Explicit runner routes
-amux runner pin --workspace <name> --workdir <existing-directory>
-amux runner pin --current
+amux runner pin --workspace <name> --workdir <existing-directory> [--runner-id <id>]
+amux runner pin --current [--runner-id <id>]
 amux runner list|launch|park|restart|remove|doctor|reconcile [runner selectors]
 amux runner unpin --workdir <path>|--current
 amux --json --dry-run runner teardown --workdir <secondary-worktree>
@@ -36,6 +36,8 @@ Runner teardown is exact and machine-local: stop the positively identified runne
 The former `worker`, `spawn`, `shelve`, `unshelve`, top-level `teardown`, `group`, `report`, and `callback` routes are removed and fail before effects. Historical coordination stores are inert. The new runner-scoped teardown does not revive worker teardown. The `report` tombstone is not `/amux-tycho`; that explicit-only skill uses a separate receipt store and protocol.
 
 `--config-dir <path>` and `AMUX_CONFIG_DIR` select the directory containing active `runners.tsv`. Historical worker/coordination files in that directory are not part of active runner operation and must remain untouched.
+
+`--runner-id` is optional native Amp launch configuration persisted with the canonical-workdir row. It is not an Amux selector: lifecycle commands continue selecting runners by workdir or workspace.
 
 `--json` emits one v1 envelope. `--dry-run` puts prospective changes under `planned`. Exit `0` means no failures, exit `1` means runtime failure after mutation may have begun, and exit `2` means preflight rejection before mutation. Mutations and scheduled maintenance share one bounded machine lock.
 

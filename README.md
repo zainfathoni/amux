@@ -88,9 +88,11 @@ curl -fsSL https://amux.zainf.dev/install.sh | AMUX_SKILLS_SOURCE="$AMUX_REPO" s
 Pin and launch a runner bound to an existing workdir:
 
 ```sh
-amux runner pin --workspace amux --workdir ~/Code/amux-runner
+amux runner pin --workspace amux --workdir ~/Code/amux-runner --runner-id macbook-amux
 amux runner launch --workdir ~/Code/amux-runner
 ```
+
+`--runner-id` is optional. When supplied, Amux persists it with the canonical-workdir binding, launches `amp --no-tui --runner-id <id>`, and requires that exact argv when inspecting or stopping the runner. The canonical workdir remains the Amux runner identity and selector.
 
 List and diagnose runners:
 
@@ -151,7 +153,7 @@ Removed `worker`, `spawn`, `shelve`, `unshelve`, top-level `teardown`, `group`, 
 
 ## Configuration and safety
 
-Active configuration is directory-based and contains `runners.tsv` under `~/.config/amux` by default. Select another directory with `--config-dir` (`-c`) or `AMUX_CONFIG_DIR`.
+Active configuration is directory-based and contains `runners.tsv` under `~/.config/amux` by default. Named rows persist their optional native Amp runner ID in the versioned registry. Select another directory with `--config-dir` (`-c`) or `AMUX_CONFIG_DIR`.
 
 Historical files such as `workers.tsv`, `shelves.tsv`, `groups.tsv`, `reports.json`, operation records, and spawn assignments may still exist. They are inert: active Amux commands do not enroll, drain, migrate, rewrite, or delete them. Do not edit or delete them as part of runner operation. The separately owner-gated #360 inventory may inspect them read-only.
 

@@ -32,7 +32,7 @@ var completionCommands = []completionCommand{
 			{Name: "run", Description: "Run maintenance", Flags: []string{"--scheduled"}},
 		}},
 		{Name: "list", Description: "List configured runners", Flags: runnerLifecycleFlags},
-		{Name: "pin", Description: "Pin a runner", Flags: []string{"--workspace", "--workdir", "--current", "-w", "-d"}},
+		{Name: "pin", Description: "Pin a runner", Flags: []string{"--workspace", "--workdir", "--runner-id", "--current", "-w", "-d"}},
 		{Name: "unpin", Description: "Remove an absent runner's exact registry binding", Flags: []string{"--workdir", "--current", "-d"}},
 		{Name: "teardown", Description: "Stop one exact runner, remove its Git worktree, and unpin it", Flags: []string{"--workdir", "--confirm-plan", "-d"}},
 		{Name: "launch", Description: "Launch runners", Flags: runnerLifecycleFlags},

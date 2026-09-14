@@ -136,6 +136,7 @@ type RunnerDetails struct {
 	LocalState        string `json:"local_state"`
 	ProcessStart      int64  `json:"process_start,omitempty"`
 	ProcessAgeSeconds int64  `json:"process_age_seconds,omitempty"`
+	RunnerID          string `json:"runner_id,omitempty"`
 }
 
 type WorkdirState string

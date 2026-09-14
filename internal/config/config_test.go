@@ -541,6 +541,43 @@ func TestWorkerAndRunnerRegistriesEnforceCanonicalMachineIdentities(t *testing.T
 	}
 }
 
+func TestRunnerIDStoreUpgradesRegistryAndPreservesLegacyRows(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, RunnersFile)
+	legacyWorkdir := t.TempDir()
+	namedWorkdir := t.TempDir()
+	contents := "# amux-schema: runners/v1\nlegacy\told-window\t" + legacyWorkdir + "\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := StoreRunner(path, RunnerRow{Workspace: "named", Workdir: namedWorkdir, RunnerID: "macbook-named"}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := LoadRunnersReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || !rows[0].LegacyWindow || rows[0].Workdir != legacyWorkdir || rows[0].RunnerID != "" || rows[1].RunnerID != "macbook-named" {
+		t.Fatalf("upgraded runner rows = %+v", rows)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "# amux-schema: runners/v2\n") || !strings.Contains(string(data), "named\t"+namedWorkdir+"\tmacbook-named\n") {
+		t.Fatalf("upgraded runner registry = %q", data)
+	}
+	removed, err := RemoveRunnerWorkdir(path, namedWorkdir)
+	if err != nil || !removed {
+		t.Fatalf("remove named runner = %t, %v", removed, err)
+	}
+	rows, err = LoadRunnersReadOnly(path)
+	if err != nil || len(rows) != 1 || rows[0].Workdir != legacyWorkdir {
+		t.Fatalf("rows after named runner removal = %+v, %v", rows, err)
+	}
+}
+
 func TestCanonicalWorkdirUsesStableLexicalIdentity(t *testing.T) {
 	real := t.TempDir()
 	alias := filepath.Join(t.TempDir(), "alias")

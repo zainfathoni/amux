@@ -2,8 +2,8 @@
 
 | Trigger phrase | Route | Contract |
 | --- | --- | --- |
-| `Pin it` | `amux runner pin --workspace <name> --workdir <existing-directory>` or `--current` | Unqualified pin requests select the retained runner route. |
-| `Pin this runner` | `amux runner pin --workspace <name> --workdir <existing-directory>` or `--current` | Retained runner admission. |
+| `Pin it` | `amux runner pin --workspace <name> --workdir <existing-directory> [--runner-id <id>]` or `--current [--runner-id <id>]` | Unqualified pin requests select the retained runner route. |
+| `Pin this runner` | `amux runner pin --workspace <name> --workdir <existing-directory> [--runner-id <id>]` or `--current [--runner-id <id>]` | Retained runner admission. |
 | `List runners` | `amux runner list --all` or scoped selector | Read-only runner registry/runtime view. |
 | `Restore my workspace` | `amux launch --workspace <name>` | Launch configured runners only. |
 | `Park it` | `amux runner park --current` or exact workdir | Preserve runner row. |

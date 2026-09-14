@@ -538,11 +538,11 @@ func TestRunnerIDDesignDoesNotDisplaceRetainedAmuxLaunch(t *testing.T) {
 		"Amux `--runner-id` selector",
 		"Canonical workdir remains the identity of a retained Amux runner",
 		"amp --no-tui --runner-id <stable-owner-selected-id>",
-		"That passthrough is not implemented",
-		"require exactly `amp --no-tui` and reject extra arguments",
+		"amux runner pin --runner-id <id>",
+		"Launch and exact-process validation require that exact argument",
 		"native `create_thread` `runner_id` argument",
 		"systemd/launchd activates `amux launch --all`",
-		"No new runner-ID store, migration framework, lifecycle classifier, or Amux CLI surface is required",
+		"No separate runner-ID store, generated-ID migration framework, lifecycle classifier, or runner-ID selector is required",
 	} {
 		if !strings.Contains(design, required) {
 			t.Errorf("retained-launch runner-ID disposition is missing %q", required)

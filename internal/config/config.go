@@ -39,6 +39,7 @@ const (
 type RunnerRow struct {
 	Workspace string
 	Workdir   string
+	RunnerID  string
 	// Window is derived from Workdir for compatibility with legacy internal
 	// callers. It is never persisted or accepted as a public runner identity.
 	Window       string
@@ -265,20 +266,42 @@ func ParseRunners(r io.Reader) ([]RunnerRow, error) {
 	var rows []RunnerRow
 	seenWorkdirs := make(map[string]string)
 	seenLegacyWindows := make(map[string]bool)
+	schema := "runners/v1"
 	lineNo := 0
 	for scanner.Scan() {
 		lineNo++
 		line := scanner.Text()
+		if strings.HasPrefix(line, "# amux-schema: runners/") {
+			if line != "# amux-schema: runners/v1" && line != "# amux-schema: runners/v2" {
+				return nil, fmt.Errorf("unsupported runners schema on line %d: %s", lineNo, line)
+			}
+			schema = strings.TrimPrefix(line, "# amux-schema: ")
+			continue
+		}
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 2 && len(fields) != 3 {
-			return nil, fmt.Errorf("invalid runner row on line %d: expected 2 tab-separated fields", lineNo)
-		}
-		row := RunnerRow{Workspace: fields[0], Workdir: fields[1]}
-		if len(fields) == 3 {
-			row.Window, row.Workdir, row.LegacyWindow = fields[1], fields[2], true
+		var row RunnerRow
+		if schema == "runners/v1" {
+			if len(fields) != 2 && len(fields) != 3 {
+				return nil, fmt.Errorf("invalid runner row on line %d: expected 2 or 3 tab-separated fields", lineNo)
+			}
+			row = RunnerRow{Workspace: fields[0], Workdir: fields[1]}
+			if len(fields) == 3 {
+				row.Window, row.Workdir, row.LegacyWindow = fields[1], fields[2], true
+			}
+		} else {
+			if len(fields) < 2 || len(fields) > 4 {
+				return nil, fmt.Errorf("invalid runner row on line %d: expected 2, 3, or 4 tab-separated fields", lineNo)
+			}
+			row = RunnerRow{Workspace: fields[0], Workdir: fields[1]}
+			if len(fields) == 3 {
+				row.RunnerID = fields[2]
+			}
+			if len(fields) == 4 {
+				row.Window, row.Workdir, row.RunnerID, row.LegacyWindow = fields[1], fields[2], fields[3], true
+			}
 		}
 		if err := row.Validate(); err != nil {
 			return nil, fmt.Errorf("invalid runner row on line %d: %w", lineNo, err)
@@ -367,6 +390,44 @@ func StoreRunner(path string, row RunnerRow) (bool, error) {
 	lines, err := readLines(path)
 	if err != nil {
 		return false, err
+	}
+	versionTwo := row.RunnerID != ""
+	for _, line := range lines {
+		if line == "# amux-schema: runners/v2" {
+			versionTwo = true
+			break
+		}
+	}
+	if versionTwo {
+		existing, parseErr := ParseRunners(strings.NewReader(strings.Join(lines, "\n") + "\n"))
+		if parseErr != nil {
+			return false, parseErr
+		}
+		rows := make([]RunnerRow, 0, len(existing)+1)
+		replaced := false
+		for _, candidate := range existing {
+			if candidate.Workdir == row.Workdir {
+				rows = append(rows, row)
+				replaced = true
+			} else {
+				rows = append(rows, candidate)
+			}
+		}
+		if !replaced {
+			rows = append(rows, row)
+		}
+		upgraded := []string{"# amux-schema: runners/v2", "# workspace\tworkdir\t[runner-id]", "#", "# Runner identity is the canonical workdir. Runner ID is native Amp launch configuration."}
+		for _, candidate := range rows {
+			if candidate.LegacyWindow {
+				upgraded = append(upgraded, strings.Join([]string{candidate.Workspace, candidate.Window, candidate.Workdir, candidate.RunnerID}, "\t"))
+			} else {
+				upgraded = append(upgraded, candidate.String())
+			}
+		}
+		if _, parseErr := ParseRunners(strings.NewReader(strings.Join(upgraded, "\n") + "\n")); parseErr != nil {
+			return false, parseErr
+		}
+		return replaced, writeLinesAtomic(path, upgraded)
 	}
 	replaced := false
 	for i, line := range lines {
@@ -472,6 +533,13 @@ func RemoveRunnerWorkdir(path, workdir string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	versionTwo := false
+	for _, line := range lines {
+		if line == "# amux-schema: runners/v2" {
+			versionTwo = true
+			break
+		}
+	}
 	kept := lines[:0]
 	removed := false
 	for _, line := range lines {
@@ -480,9 +548,9 @@ func RemoveRunnerWorkdir(path, workdir string) (bool, error) {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) == 2 || len(fields) == 3 {
+		if len(fields) >= 2 && len(fields) <= 4 {
 			identityField := fields[1]
-			if len(fields) == 3 {
+			if !versionTwo && len(fields) == 3 || versionTwo && len(fields) == 4 {
 				identityField = fields[2]
 			}
 			candidate, candidateErr := CanonicalWorkdir(identityField)
@@ -552,9 +620,17 @@ func (r Row) String() string {
 
 func (r RunnerRow) String() string {
 	if r.LegacyWindow {
-		return strings.Join([]string{r.Workspace, r.Window, r.Workdir}, "\t")
+		fields := []string{r.Workspace, r.Window, r.Workdir}
+		if r.RunnerID != "" {
+			fields = append(fields, r.RunnerID)
+		}
+		return strings.Join(fields, "\t")
 	}
-	return strings.Join([]string{r.Workspace, r.Workdir}, "\t")
+	fields := []string{r.Workspace, r.Workdir}
+	if r.RunnerID != "" {
+		fields = append(fields, r.RunnerID)
+	}
+	return strings.Join(fields, "\t")
 }
 
 func readLines(path string) ([]string, error) {
@@ -628,6 +704,9 @@ func (r RunnerRow) Validate() error {
 		if err := validateField("window", r.Window); err != nil {
 			return err
 		}
+	}
+	if strings.ContainsAny(r.RunnerID, "\t\n\r") {
+		return errors.New("runner ID must not contain tabs or newlines")
 	}
 	return validateField("workdir", r.Workdir)
 }

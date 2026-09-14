@@ -112,7 +112,11 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 		for _, row := range rows {
 			env.Successful = append(env.Successful, runnerOutcome(row, "list", row.Workspace))
 			if !in.Options.JSON {
-				fmt.Fprintf(a.stdout, "%s\t%s\n", row.Workspace, row.Workdir)
+				fmt.Fprintf(a.stdout, "%s\t%s", row.Workspace, row.Workdir)
+				if row.RunnerID != "" {
+					fmt.Fprintf(a.stdout, "\t%s", row.RunnerID)
+				}
+				fmt.Fprintln(a.stdout)
 			}
 		}
 		return &env, nil
@@ -236,7 +240,7 @@ func (a app) executeRunner(in invocation, dir config.Directory) (*result.Envelop
 				workdirState = workdirErr.Error()
 			}
 			out.Message = fmt.Sprintf("local=%s workdir=%s%s", inspection.state, workdirState, staleAmpPIDDiagnostic(row.Workdir))
-			out.Runner = &result.RunnerDetails{LocalState: string(inspection.state), ProcessStart: inspection.pane.StartTime}
+			out.Runner = &result.RunnerDetails{LocalState: string(inspection.state), ProcessStart: inspection.pane.StartTime, RunnerID: row.RunnerID}
 			if inspection.pane.StartTime > 0 {
 				out.Runner.ProcessAgeSeconds = time.Now().Unix() - inspection.pane.StartTime
 			}
@@ -355,7 +359,7 @@ func (a app) runnerPinV1(in invocation, dir config.Directory, selected []config.
 	if in.Selectors.Workspace == "" || in.Selectors.Workdir == "" {
 		return env, result.Request(errors.New("runner pin requires --workspace and --workdir"))
 	}
-	row := config.RunnerRow{Workspace: in.Selectors.Workspace, Workdir: in.Selectors.Workdir, Window: config.RunnerWindow(in.Selectors.Workdir)}
+	row := config.RunnerRow{Workspace: in.Selectors.Workspace, Workdir: in.Selectors.Workdir, RunnerID: in.Selectors.RunnerID, Window: config.RunnerWindow(in.Selectors.Workdir)}
 	out := runnerOutcome(row, "pin", "")
 	if err := requireRunnerDirectory(row.Workdir); err != nil {
 		return env, result.Preflight(err)
@@ -366,12 +370,15 @@ func (a app) runnerPinV1(in invocation, dir config.Directory, selected []config.
 	}
 	for _, existing := range all {
 		if existing.Workdir == row.Workdir {
-			if existing.Workspace == row.Workspace {
+			if existing.Workspace == row.Workspace && (row.RunnerID == "" || existing.RunnerID == row.RunnerID) {
 				out.Message = "already pinned"
 				env.Skipped = append(env.Skipped, out)
 				return env, nil
 			}
-			return env, result.Preflight(fmt.Errorf("runner workdir %s is already configured in workspace %s", row.Workdir, existing.Workspace))
+			if existing.Workspace != row.Workspace {
+				return env, result.Preflight(fmt.Errorf("runner workdir %s is already configured in workspace %s", row.Workdir, existing.Workspace))
+			}
+			continue
 		}
 		if existing.Workspace == row.Workspace && existing.Window == row.Window {
 			return env, result.Preflight(fmt.Errorf("derived runner window %s collides with workdir %s", row.Window, existing.Workdir))
@@ -415,7 +422,11 @@ func selectRunnerRows(rows []config.RunnerRow, s selectors) []config.RunnerRow {
 
 func runnerOutcome(row config.RunnerRow, action, message string) result.Outcome {
 	id, _ := result.RunnerResource(row.Workdir)
-	return result.Outcome{Resource: id, Action: action, Message: message}
+	out := result.Outcome{Resource: id, Action: action, Message: message}
+	if row.RunnerID != "" {
+		out.Runner = &result.RunnerDetails{RunnerID: row.RunnerID}
+	}
+	return out
 }
 
 func requireRunnerDirectory(workdir string) error {
@@ -441,6 +452,13 @@ func runnerStartCommand(workdir string) string {
 	return "cd " + shellSingleQuote(workdir) + " && amp --no-tui; status=$?; sleep 2; exit $status"
 }
 
+func runnerStartCommandForRow(row config.RunnerRow) string {
+	if row.RunnerID == "" {
+		return runnerStartCommand(row.Workdir)
+	}
+	return "cd " + shellSingleQuote(row.Workdir) + " && amp --no-tui --runner-id " + shellSingleQuote(row.RunnerID) + "; status=$?; sleep 2; exit $status"
+}
+
 func runnerStartCommandMatches(actual, expected string) bool {
 	if normalizedTmuxStartCommand(actual) == expected {
 		return true
@@ -455,11 +473,11 @@ func runnerStartCommandMatches(actual, expected string) bool {
 
 func inspectRunner(row config.RunnerRow) (runnerInspection, error) {
 	legacy := row.LegacyWindow && row.Window != config.RunnerWindow(row.Workdir)
-	primary, err := inspectRunnerWindow(row, row.Window, map[bool]string{true: tmux.RunnerCommand(row.Workdir), false: runnerStartCommand(row.Workdir)}[legacy])
+	primary, err := inspectRunnerWindow(row, row.Window, map[bool]string{true: tmux.RunnerCommand(row.Workdir), false: runnerStartCommandForRow(row)}[legacy])
 	if err != nil || !legacy {
 		return primary, err
 	}
-	canonical, err := inspectRunnerWindow(row, config.RunnerWindow(row.Workdir), runnerStartCommand(row.Workdir))
+	canonical, err := inspectRunnerWindow(row, config.RunnerWindow(row.Workdir), runnerStartCommandForRow(row))
 	if err != nil {
 		return runnerInspection{}, err
 	}
@@ -498,8 +516,8 @@ func inspectRunnerWindow(row config.RunnerRow, window, expectedStart string) (ru
 		return runnerInspection{state: runnerPaneAmbiguous}, nil
 	}
 	pane := panes[0]
-	retainedShell := expectedStart == runnerStartCommand(row.Workdir)
-	exactProcess, processErr := runnerPaneHasExactProcess(pane, retainedShell)
+	retainedShell := expectedStart == runnerStartCommandForRow(row)
+	exactProcess, processErr := runnerPaneHasExactProcess(pane, retainedShell, row.RunnerID)
 	if processErr != nil {
 		return runnerInspection{}, fmt.Errorf("inspect runner process for pane %s pid %d: %w", pane.PaneID, pane.PID, processErr)
 	}
@@ -531,12 +549,16 @@ func runnerPaneWorkdirMatches(panePath, workdir string) bool {
 	return paneErr == nil && workdirErr == nil && os.SameFile(paneInfo, workdirInfo)
 }
 
-func runnerPaneHasExactProcess(pane tmux.WindowPane, retainedShell bool) (bool, error) {
-	exact, _, err := observeRunnerPaneProcess(pane, retainedShell)
+func runnerPaneHasExactProcess(pane tmux.WindowPane, retainedShell bool, runnerID ...string) (bool, error) {
+	exact, _, err := observeRunnerPaneProcess(pane, retainedShell, runnerID...)
 	return exact, err
 }
 
-func observeRunnerPaneProcess(pane tmux.WindowPane, retainedShell bool) (bool, string, error) {
+func observeRunnerPaneProcess(pane tmux.WindowPane, retainedShell bool, runnerID ...string) (bool, string, error) {
+	expectedRunnerID := ""
+	if len(runnerID) != 0 {
+		expectedRunnerID = runnerID[0]
+	}
 	if !retainedShell {
 		if pane.Command != "amp" {
 			return false, fmt.Sprintf("pane-pid=%d current-command=%q", pane.PID, pane.Command), nil
@@ -553,7 +575,7 @@ func observeRunnerPaneProcess(pane tmux.WindowPane, retainedShell bool) (bool, s
 		if err != nil {
 			return false, fmt.Sprintf("pane-pid=%d current-command=%q incarnation=%q argv=%s", pane.PID, pane.Command, before, runnerArgsDiagnostic(args)), err
 		}
-		return runnerArgsAreExact(args) && before == after, fmt.Sprintf("pane-pid=%d current-command=%q incarnation=%q argv=%s revalidated-incarnation=%q", pane.PID, pane.Command, before, runnerArgsDiagnostic(args), after), nil
+		return runnerArgsAreExact(args, expectedRunnerID) && before == after, fmt.Sprintf("pane-pid=%d current-command=%q incarnation=%q argv=%s revalidated-incarnation=%q", pane.PID, pane.Command, before, runnerArgsDiagnostic(args), after), nil
 	}
 	children, err := runnerChildProcesses(pane.PID)
 	diagnostic := fmt.Sprintf("retained-shell-pid=%d direct-children=%s", pane.PID, runnerProcessListDiagnostic(children))
@@ -572,7 +594,7 @@ func observeRunnerPaneProcess(pane tmux.WindowPane, retainedShell bool) (bool, s
 	if err != nil {
 		return false, diagnostic, err
 	}
-	if !runnerArgsAreExact(args) {
+	if !runnerArgsAreExact(args, expectedRunnerID) {
 		return false, diagnostic, nil
 	}
 	after, err := runnerChildProcesses(pane.PID)
@@ -583,8 +605,11 @@ func observeRunnerPaneProcess(pane tmux.WindowPane, retainedShell bool) (bool, s
 	return len(after) == 1 && after[0] == child, diagnostic, nil
 }
 
-func runnerArgsAreExact(args []string) bool {
-	return len(args) == 2 && filepath.Base(args[0]) == "amp" && args[1] == "--no-tui"
+func runnerArgsAreExact(args []string, runnerID string) bool {
+	if runnerID == "" {
+		return len(args) == 2 && filepath.Base(args[0]) == "amp" && args[1] == "--no-tui"
+	}
+	return len(args) == 4 && filepath.Base(args[0]) == "amp" && args[1] == "--no-tui" && args[2] == "--runner-id" && args[3] == runnerID
 }
 
 func runnerProcessListDiagnostic(processes []tmux.ProcessMetadata) string {
@@ -694,7 +719,7 @@ func launchRunner(row config.RunnerRow) (tmux.WindowPane, error) {
 	if err != nil {
 		return tmux.WindowPane{}, err
 	}
-	created, err := runner.NewRunnerPane(row.Workspace, row.Window, runnerStartCommand(row.Workdir), !exists)
+	created, err := runner.NewRunnerPane(row.Workspace, row.Window, runnerStartCommandForRow(row), !exists)
 	if err != nil {
 		return tmux.WindowPane{}, err
 	}
@@ -714,12 +739,12 @@ func launchRunner(row config.RunnerRow) (tmux.WindowPane, error) {
 				cleanupEvidenceObserved = true
 				cleanupEvidence = captureRunnerStartupCleanupEvidence(pane)
 			}
-			exactProcess, processDiagnostic, processErr := observeRunnerPaneProcess(pane, true)
+			exactProcess, processDiagnostic, processErr := observeRunnerPaneProcess(pane, true, row.RunnerID)
 			if processErr != nil {
 				lastProcessError = boundedDiagnostic(processErr.Error(), 1024)
 			}
 			workdirMatches := runnerPaneWorkdirMatches(pane.Path, row.Workdir)
-			startMatches := runnerStartCommandMatches(pane.StartCommand, runnerStartCommand(row.Workdir))
+			startMatches := runnerStartCommandMatches(pane.StartCommand, runnerStartCommandForRow(row))
 			lastObservation = fmt.Sprintf("last observed at +%s: session=%q window-name=%q pane=%s window=%s dead=%t start-command-match=%t workdir-equivalent=%t; %s; path=%q current-command=%q start-command=%q", time.Since(startupBegan).Round(time.Millisecond), pane.Session, pane.Window, pane.PaneID, pane.WindowID, pane.Dead, startMatches, workdirMatches, boundedValue(processDiagnostic, 512), boundedValue(pane.Path, 128), boundedValue(pane.Command, 64), boundedValue(pane.StartCommand, 256))
 			lastDetailedObservation = lastObservation
 			if processErr == nil && !pane.Dead && exactProcess && workdirMatches && startMatches {

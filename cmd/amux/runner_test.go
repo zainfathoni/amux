@@ -78,6 +78,29 @@ func TestRunnerPinAcceptsExistingNonGitDirectoryAndIsCanonicalIdempotent(t *test
 	}
 }
 
+func TestRunnerPinPersistsExactNativeRunnerID(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "tmux"), "#!/bin/sh\nif [ \"$1\" = has-session ]; then exit 1; fi\nexit 2\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	got := executeRunnerJSON(t, "--json", "--config-dir", dir, "runner", "pin", "--workspace", "alpha", "--workdir", workdir, "--runner-id", "macbook-alpha")
+	if len(got.Successful) != 1 || got.Successful[0].Runner == nil || got.Successful[0].Runner.RunnerID != "macbook-alpha" {
+		t.Fatalf("pin with runner ID = %+v", got)
+	}
+	rows, err := config.LoadRunnersReadOnly(filepath.Join(dir, config.RunnersFile))
+	if err != nil || len(rows) != 1 || rows[0].RunnerID != "macbook-alpha" {
+		t.Fatalf("stored runner rows = %+v err=%v", rows, err)
+	}
+
+	repeated := executeRunnerJSON(t, "--json", "--config-dir", dir, "runner", "pin", "--workspace", "alpha", "--workdir", workdir, "--runner-id", "macbook-alpha")
+	if len(repeated.Skipped) != 1 || repeated.Skipped[0].Message != "already pinned" {
+		t.Fatalf("repeated pin = %+v", repeated)
+	}
+}
+
 func TestRunnerPinRejectsMissingAndFileWorkdirsBeforeMutation(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -354,6 +377,49 @@ printf ' 5252  4242 /opt/amp/bin/amp\n'
 	}
 }
 
+func TestRunnerLaunchUsesPersistedNativeRunnerID(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	row := config.RunnerRow{Workspace: "alpha", Workdir: workdir, RunnerID: "macbook-alpha"}
+	window := config.RunnerWindow(workdir)
+	start := runnerStartCommandForRow(row)
+	if err := os.WriteFile(filepath.Join(dir, config.RunnersFile), []byte("# amux-schema: runners/v2\nalpha\t"+workdir+"\tmacbook-alpha\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	state := filepath.Join(bin, "running")
+	log := filepath.Join(bin, "tmux.log")
+	writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+echo "$*" >> "`+log+`"
+case "$1" in
+  has-session) test -e "`+state+`" ;;
+  new-session) touch "`+state+`"; printf 'alpha\t`+window+`\t@7\t%%9\n' ;;
+  list-panes)
+    if [ -e "`+state+`" ]; then printf 'alpha\t`+window+`\t@7\t%%9\t`+workdir+`\tzsh\t%s\t0\t4242\t123\n' `+shellSingleQuote(start)+`; fi ;;
+  *) exit 2 ;;
+esac
+`)
+	oldArgs := runnerProcessArgs
+	runnerProcessArgs = func(int) ([]string, error) {
+		return []string{"amp", "--no-tui", "--runner-id", "macbook-alpha"}, nil
+	}
+	t.Cleanup(func() { runnerProcessArgs = oldArgs })
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	oldTimeout, oldPoll := runnerStartupTimeout, runnerPollInterval
+	runnerStartupTimeout, runnerPollInterval = 10*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { runnerStartupTimeout, runnerPollInterval = oldTimeout, oldPoll })
+
+	got := executeRunnerJSON(t, "--json", "--config-dir", dir, "runner", "launch", "--workdir", workdir)
+	if len(got.Successful) != 1 || got.Successful[0].Runner == nil || got.Successful[0].Runner.RunnerID != "macbook-alpha" {
+		t.Fatalf("named runner launch = %+v", got)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil || !strings.Contains(string(data), "--runner-id") || !strings.Contains(string(data), "macbook-alpha") {
+		t.Fatalf("named runner launch command log = %q, %v", data, err)
+	}
+}
+
 func TestRunnerLaunchAcceptsExactPaneAtEquivalentTmuxWorkdir(t *testing.T) {
 	realWorkdir := t.TempDir()
 	aliasParent := t.TempDir()
@@ -397,6 +463,26 @@ func TestRunnerStartCommandMatcherAcceptsOnlyMeasuredTmuxEscaping(t *testing.T) 
 	}
 	if runnerStartCommandMatches(additionalEscape, expected) {
 		t.Fatalf("command with unmeasured escaping matched: %q", additionalEscape)
+	}
+}
+
+func TestNamedRunnerCommandAndArgvRequireExactID(t *testing.T) {
+	row := config.RunnerRow{Workdir: "/tmp/primary", RunnerID: "owner's-runner"}
+	want := "cd '/tmp/primary' && amp --no-tui --runner-id 'owner'\"'\"'s-runner'; status=$?; sleep 2; exit $status"
+	if got := runnerStartCommandForRow(row); got != want {
+		t.Fatalf("named runner command = %q, want %q", got, want)
+	}
+	if !runnerArgsAreExact([]string{"/opt/amp/bin/amp", "--no-tui", "--runner-id", "owner's-runner"}, row.RunnerID) {
+		t.Fatal("exact named runner argv was rejected")
+	}
+	for _, args := range [][]string{
+		{"amp", "--no-tui"},
+		{"amp", "--no-tui", "--runner-id", "other"},
+		{"amp", "--runner-id", "owner's-runner", "--no-tui"},
+	} {
+		if runnerArgsAreExact(args, row.RunnerID) {
+			t.Fatalf("non-exact named runner argv accepted: %#v", args)
+		}
 	}
 }
 
