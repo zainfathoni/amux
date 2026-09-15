@@ -3,61 +3,104 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Install and use /amux for machine-local Amp runners." />
-    <title>/amux skill guide</title>
+    <meta name="description" content="Install and use /amux for active machine-local Amp runner operations." />
+    <title>/amux — machine-local runner skill guide</title>
     <style>
       :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; background: #0c111b; color: #e8edf7; }
-      body { max-width: 820px; margin: 0 auto; padding: 4rem 1.5rem; line-height: 1.6; }
-      h1 { font-size: clamp(2.5rem, 8vw, 5rem); margin: 0; }
-      h2 { margin-top: 3rem; }
+      * { box-sizing: border-box; }
+      body { max-width: 840px; margin: 0 auto; padding: 3rem 1.5rem 5rem; line-height: 1.65; }
+      h1 { font-size: clamp(2.8rem, 9vw, 5.5rem); line-height: 1; margin: 0; letter-spacing: -.055em; }
+      h2 { margin-top: 3.25rem; line-height: 1.2; }
       a { color: #8cc8ff; }
       code, pre { font-family: ui-monospace, monospace; }
-      pre { background: #151d2b; border: 1px solid #26344a; border-radius: .75rem; padding: 1rem; overflow-x: auto; }
+      code { color: #d7eaff; }
+      pre { background: #151d2b; border: 1px solid #26344a; border-radius: .75rem; padding: 1rem; overflow-x: auto; line-height: 1.5; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { padding: .8rem .65rem; border-bottom: 1px solid #26344a; text-align: left; vertical-align: top; }
+      th { color: #bdc8da; }
+      .lede { font-size: 1.25rem; color: #bdc8da; }
+      .note { border-left: .25rem solid #68d391; padding: .15rem 0 .15rem 1rem; }
+      .warning { border-left-color: #f6ad55; }
+      @media (max-width: 640px) { body { padding: 2rem 1rem 4rem; } table { display: block; overflow-x: auto; } }
     </style>
   </head>
   <body>
     <p><a href="../">← amux</a></p>
     <h1>/amux</h1>
-    <p>The core skill operates retained machine-local runners and routes new delegated work to native Amp child threads. It has no worker or legacy coordination route.</p>
+    <p class="lede">The Amp skill for operating Amux’s active machine-local runner host.</p>
+    <p class="note">The skill manages local runner bindings and routes delegated work to native Amp threads. It never creates or adopts legacy Amux workers.</p>
 
     <h2>Install</h2>
     <pre><code>npx skills add zainfathoni/amux --skill amux --global</code></pre>
-    <p>Optional provider skills are installed separately with <code>--skill amux-tycho</code>, <code>--skill amux-claude</code>, or <code>--skill amux-pi</code>.</p>
-    <p>For a clean local checkout, the installer supports opt-in links without updating the checkout:</p>
+    <p>Experimental provider skills are separate and explicit-only:</p>
+    <pre><code>npx skills add zainfathoni/amux --skill amux-tycho --global
+npx skills add zainfathoni/amux --skill amux-claude --global
+npx skills add zainfathoni/amux --skill amux-pi --global</code></pre>
+    <p>Installing a provider skill does not select or authorize that provider. The core <code>/amux</code> skill defaults to native Amp for delegated work.</p>
+    <p>To opt into links from a clean local checkout without having the installer update that checkout:</p>
     <pre><code>AMUX_REPO="$HOME/Code/GitHub/zainfathoni/amux"
 git -C "$AMUX_REPO" pull --ff-only origin main
-curl -fsSL https://amux.zainf.dev/install.sh | AMUX_SKILLS_SOURCE="$AMUX_REPO" sh</code></pre>
+curl -fsSL https://amux.zainf.dev/install.sh |
+  AMUX_SKILLS_SOURCE="$AMUX_REPO" sh</code></pre>
 
-    <h2>Terminology</h2>
+    <h2>Core concepts</h2>
     <ul>
-      <li><strong>Runner:</strong> a machine-local <code>amp --no-tui</code> process identified by canonical workdir.</li>
-      <li><strong>Workspace:</strong> a same-named tmux session grouping runners.</li>
-      <li><strong>Native child:</strong> an Amp thread created and coordinated through Amp, never enrolled in Amux lifecycle state.</li>
+      <li><strong>Runner:</strong> a machine-local <code>amp --no-tui</code> process identified by its canonical existing workdir.</li>
+      <li><strong>Runner ID:</strong> optional native Amp launch configuration stored with the binding; it is not an Amux selector.</li>
+      <li><strong>Workspace:</strong> a named tmux session grouping one or more runners.</li>
+      <li><strong>Native child:</strong> an Amp thread created and coordinated by Amp, with no Amux worker or coordination record.</li>
     </ul>
 
-    <h2>Trigger routing</h2>
+    <h2>Common requests</h2>
+    <table>
+      <thead><tr><th>Request</th><th>Route</th></tr></thead>
+      <tbody>
+        <tr><td>“Pin this runner”</td><td><code>amux runner pin -w &lt;name&gt; -c [-i &lt;native-id&gt;]</code></td></tr>
+        <tr><td>“Restore my workspace”</td><td><code>amux launch --workspace &lt;name&gt;</code></td></tr>
+        <tr><td>“List or diagnose runners”</td><td><code>amux runner list --all</code> and <code>amux runner doctor --all</code></td></tr>
+        <tr><td>“Park this runner”</td><td><code>amux runner park --current-dir</code> or an exact <code>--workdir</code></td></tr>
+        <tr><td>“Restart this runner”</td><td><code>amux runner restart --current-dir</code> after exact ownership checks</td></tr>
+        <tr><td>“Teardown this completed worktree”</td><td>Inspect native thread completion separately, then use the state-bound two-step <code>runner teardown</code> flow.</td></tr>
+        <tr><td>“Delegate/spawn work”</td><td>Use authenticated native Amp <code>create_thread</code> on the exact intended project/Orb or live runner/workdir.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Current-directory and runner-ID workflows</h2>
+    <pre><code>cd ~/Code/project-runner
+amux runner pin -w project -c -i laptop-project
+amux runner launch -c
+
+# Preview and apply a live native-ID change
+amux --dry-run runner pin -w project -c \
+  -i laptop-project-new --restart
+amux runner pin -w project -c \
+  -i laptop-project-new --restart</code></pre>
+    <p>After a command, <code>-c</code> is <code>--current-dir</code> and is exactly equivalent to <code>--workdir .</code>. It does not inspect the tmux pane; <code>--current</code> does. Before the command name, legacy <code>-c &lt;path&gt;</code> still means global <code>--config-dir &lt;path&gt;</code>, so use the long form in reusable instructions.</p>
+    <p>A stopped runner remains stopped when its ID changes. Repeating the same ID is a no-op. A live change without <code>--restart</code> rejects without changing process or configuration. With <code>--restart</code>, Amux requires exact local ownership and executor evidence before replacing the process; it does not guarantee uninterrupted active thread execution.</p>
+
+    <h2>Safety boundaries</h2>
     <ul>
-      <li><strong>Pin this runner:</strong> <code>amux runner pin --workspace &lt;name&gt; --workdir &lt;path&gt; [--runner-id &lt;id&gt;]</code>.</li>
-      <li><strong>Restore my workspace:</strong> <code>amux launch --workspace &lt;name&gt;</code>.</li>
-      <li><strong>Park it:</strong> <code>amux runner park --current</code> or an exact workdir.</li>
-      <li><strong>Doctor amux:</strong> <code>amux runner doctor --all</code>.</li>
-      <li><strong>Teardown this runner/worktree:</strong> inspect native thread completion separately, then use the exact two-step <code>amux runner teardown --workdir</code> plan.</li>
-      <li><strong>Spawn/delegate work:</strong> native Amp <code>create_thread</code>, not Amux spawn/adoption.</li>
+      <li>Prefer <code>--dry-run</code> before mutation and <code>--json</code> when parsing output.</li>
+      <li><code>runner park</code> stops an exact owned process but keeps its row.</li>
+      <li><code>runner unpin</code> removes only one exact binding after proving its runner absent; it never stops a process.</li>
+      <li><code>runner remove</code> is currently unavailable and fails closed. Missing-workdir <code>runner reconcile</code> also retains the row and rejects.</li>
+      <li><code>runner teardown</code> requires a fresh digest, preserves the branch, and rejects dirty or unsafe worktrees. It never archives Amp threads.</li>
+      <li>Runner operations do not own remote Amp thread lifecycle.</li>
     </ul>
 
     <h2>Skill-only workflows</h2>
-    <p><code>/amux health</code> performs read-only runner diagnostics. <code>/amux sprawl</code> creates independent native Amp children only. <code>/amux sweep</code> is the protected #360 read-only inventory and requires a separate exact owner authorization; loading the skill does not authorize it.</p>
+    <p><code>/amux health</code> performs read-only runner diagnostics. <code>/amux sprawl</code> fans independent work out through native Amp child threads only. <code>/amux sweep</code> is a protected, one-time, read-only historical inventory and requires separate exact owner authorization; loading the skill does not authorize it.</p>
 
-    <h2>Removed surfaces</h2>
-    <p>Worker, spawn, shelf, top-level worker teardown, group, worker-report, callback, deadline, and finish commands are removed. Historical stores are inert and must not be migrated, rewritten, drained, or deleted. Runner-scoped teardown is machine-local only. <code>/amux-tycho</code> remains a distinct explicit-only receipt bridge.</p>
-
-    <h2>Safety</h2>
+    <h2>Legacy status and replacements</h2>
+    <p class="note warning"><strong>Removed, not merely deprecated:</strong> worker, generalized spawn/adoption, shelf, top-level worker teardown, group, worker-report, callback, deadline, and finish commands are no longer supported. Do not attempt old syntax or mutate historical stores.</p>
     <ul>
-      <li>Use long selectors and current contextual help.</li>
-      <li>Use <code>--dry-run</code> before mutation and <code>--json</code> for parsing.</li>
-      <li>Runner unpin removes an exact binding only after proving its local tmux runner absent; remove and missing-workdir reconcile remain fail-closed.</li>
-      <li>Runner teardown requires a fresh plan digest, preserves the branch, and rejects dirty or unsafe worktrees.</li>
-      <li>Runner commands never own remote Amp threads.</li>
+      <li>Use native Amp child creation and parent/reply routing instead of spawn, groups, reports, callbacks, and deadlines.</li>
+      <li>Use native Amp archive state instead of shelves.</li>
+      <li>Use native thread lifecycle separately from machine-local <code>runner teardown</code>.</li>
+      <li>Treat old worker and coordination files as inert evidence: do not migrate, rewrite, drain, or delete them.</li>
+      <li>Use <code>/amux-tycho</code> only when explicitly requested; its separate receipt bridge is not the removed report mechanism.</li>
     </ul>
+
+    <p><a href="../#commands">Read the runner command overview</a> · <a href="https://github.com/zainfathoni/amux/tree/main/skills/amux">Browse the full skill source</a></p>
   </body>
 </html>

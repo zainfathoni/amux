@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Lesson 1 — Mailbox, bukan CCTV</title>
-  <meta name="description" content="Bagaimana amux dan /amux-tycho memberi tahu coordinator bahwa subagent selesai tanpa polling session.">
-  <meta property="og:title" content="Mailbox, bukan CCTV — async reporting di amux">
-  <meta property="og:description" content="Durable report, cheap wake-up, dan boundary integrasi Tycho ke Amp.">
+  <title>Archived lesson — Mailbox, bukan CCTV</title>
+  <meta name="description" content="Arsip pembelajaran desain async reporting Amux yang sudah dihapus, beserta jalur native Amp penggantinya.">
+  <meta property="og:title" content="Archived lesson — Mailbox, bukan CCTV">
+  <meta property="og:description" content="Desain historis durable report dan jalur native Amp penggantinya.">
   <meta property="og:type" content="article">
   <meta property="og:url" content="https://amux.zainf.dev/learn/amux-async-reporting/">
   <meta name="theme-color" content="#0d3f31">
@@ -17,14 +17,14 @@
 <body>
 <a class="skip" href="#lesson-main">Lewati ke isi lesson</a>
 <main id="lesson-main">
-  <p class="eyebrow">Lesson 1 · Amux async reporting</p>
-  <h1>Mailbox, bukan CCTV</h1>
-  <p class="sub">Cara coordinator tahu subagent sudah selesai tanpa terus membuka session yang masih berjalan.</p>
+  <p class="eyebrow">Archived lesson · historical design</p>
+  <h1>Mailbox, bukan CCTV <small>(arsip)</small></h1>
+  <p class="sub">Penjelasan desain completion reporting Amux lama. Bukan dokumentasi command yang masih didukung.</p>
 
-  <p class="lead">Mas <code>firewalker06</code>, problemnya valid: kemampuan membaca session kapan saja bukan mekanisme completion. Itu seperti PM yang berkali-kali membuka layar engineer. Yang dibutuhkan adalah <strong>durable mailbox</strong> untuk hasil dan <strong>doorbell</strong> murah untuk membangunkan coordinator.</p>
+  <p class="lead">Secara historis, Amux memisahkan <strong>durable mailbox</strong> untuk hasil dari <strong>doorbell</strong> murah untuk membangunkan coordinator. Pola ini tetap berguna untuk dipelajari, tetapi implementasi worker/report/callback Amux sudah tidak aktif.</p>
 
   <div class="verdict">
-    <strong>Catatan sejarah:</strong> pola report + callback di bawah menjelaskan desain Amux lama, bukan workflow yang masih boleh dijalankan. Command group/report/callback/finish telah dihapus; store historis sekarang inert dan harus dipertahankan tanpa drain mutation. Untuk work Amp baru gunakan native parent/child reply routing. <code>/amux-tycho</code> tetap bridge receipt terpisah dan explicit-only untuk executor eksternal.
+    <strong>Status: removed.</strong> Command worker, group, report, callback, deadline, dan finish telah dihapus—bukan sekadar deprecated. Jangan jalankan syntax lama atau mengubah store historisnya. Untuk work Amp baru gunakan native child creation, parent/reply routing, authenticated messaging, dan waiting. <code>/amux-tycho</code> adalah bridge receipt terpisah dan explicit-only untuk executor eksternal.
   </div>
 
   <h2>Desain historis: simpan dulu, bunyikan bel kemudian</h2>
@@ -38,14 +38,11 @@
 
   <p>Urutannya sengaja ketat: <strong>persist report sebelum callback</strong>. Jadi jika callback gagal, report tidak hilang. Jika callback terkirim dua kali, token kedua tidak boleh mengubah state. Dan acknowledgement hanya berarti “sudah diterima”, bukan “boleh merge atau cleanup”.</p>
 
-  <p class="source-line">Kontrak sumber (lokal · pinned):
-    <a class="chip vsc" href="vscode://file/home/user/workspace/repo/skills/amux/reference/commands.md:88" aria-label="Buka commands.md baris 88 di VS Code">commands.md:88–96</a>
-    <a class="chip gh" href="https://github.com/zainfathoni/amux/blob/891cd39606791993e5dc040aa5c28432250f23ee/skills/amux/reference/commands.md#L88-L96" aria-label="Buka commands.md baris 88 sampai 96 di GitHub">GitHub↗</a>
-  </p>
+  <p class="source-line">Sumber historis: <a class="chip gh" href="https://github.com/zainfathoni/amux/blob/891cd39606791993e5dc040aa5c28432250f23ee/skills/amux/reference/commands.md#L88-L96">snapshot kontrak lama↗</a></p>
 
-  <h2>Coba sendiri: polling versus durable report</h2>
+  <h2>Simulasi historis: polling versus durable report</h2>
   <section class="simulator" aria-labelledby="sim-heading">
-    <h3 id="sim-heading">Micro-world: satu coordinator, satu subagent</h3>
+    <h3 id="sim-heading">Micro-world konseptual—bukan Amux CLI aktif</h3>
     <div class="simulator-grid">
       <div>
         <div class="status-grid" aria-live="polite">
@@ -56,10 +53,10 @@
         </div>
         <div class="controls">
           <button type="button" id="poll">Baca session sekarang</button>
-          <button type="button" id="finish">Finish + report + callback</button>
-          <button type="button" class="danger" id="finish-fail">Finish + callback gagal</button>
-          <button type="button" id="inspect">Baca durable pending</button>
-          <button type="button" id="ack">Acknowledge</button>
+          <button type="button" id="finish">Simulasikan report + callback</button>
+          <button type="button" class="danger" id="finish-fail">Simulasikan callback gagal</button>
+          <button type="button" id="inspect">Simulasikan baca pending</button>
+          <button type="button" id="ack">Simulasikan acknowledge</button>
           <button type="button" class="secondary" id="reset">Reset</button>
         </div>
         <p class="things"><strong>Things to try:</strong> tekan “Baca session” dua kali saat masih running. Reset, lalu pilih “callback gagal”. Perhatikan bahwa bel gagal tetapi report tetap bisa ditemukan melalui durable pending.</p>
@@ -80,10 +77,7 @@
     </tbody>
   </table>
 
-  <p class="source-line">Boundary Tycho (lokal · pinned):
-    <a class="chip vsc" href="vscode://file/home/user/workspace/repo/skills/amux-tycho/SKILL.md:6" aria-label="Buka SKILL.md amux-tycho baris 6 di VS Code">amux-tycho/SKILL.md:6–52</a>
-    <a class="chip gh" href="https://github.com/zainfathoni/amux/blob/891cd39606791993e5dc040aa5c28432250f23ee/skills/amux-tycho/SKILL.md#L6-L52" aria-label="Buka SKILL.md amux-tycho baris 6 sampai 52 di GitHub">GitHub↗</a>
-  </p>
+  <p class="source-line">Boundary Tycho: <a class="chip gh" href="https://github.com/zainfathoni/amux/blob/main/skills/amux-tycho/SKILL.md">skill source saat ini↗</a></p>
 
   <div class="callout">
     <strong>Kenapa receipt bridge lebih kompleks?</strong> Bukan karena kami tidak mempercayai orchestration internal Tycho, tetapi karena boundary lintas sistem butuh bukti delivery sendiri. Kami mengikat origin Amp, exact Tycho route, dan digest task/artifact agar process exit atau prose dari log tidak disalahartikan sebagai report untuk request yang salah.
@@ -92,8 +86,8 @@
   <h3>Seam yang ingin kami capai bersama Tycho</h3>
   <p>Idealnya, satu request Amp ke exact Tycho route mengembalikan tepat satu object terautentikasi pada turn yang sama: <code>status</code>, <code>summary</code>, <code>findings</code>, <code>blockers</code>, dan <code>verification</code>. Object itu harus correlated ke Amp thread/request dan task/artifact identity; tanpa fallback, transcript mining, side inbox, atau automatic retry. Kalau field run membuktikan seam ini, receipt + <code>consume</code> + <code>acknowledge</code> compatibility bridge tidak perlu dibuat untuk work baru.</p>
 
-  <h2>Nuansa 2026: desainnya berhasil, produknya sedang cutover</h2>
-  <p>Kami belajar bahwa mailbox + doorbell adalah pola yang benar. Tetapi native Amp kini sudah punya parent/child association, authenticated messaging, reply routing, dan waiting. Karena itu kami tidak ingin membuat database bayangan baru di Amux untuk setiap child baru.</p>
+  <h2>Status saat ini: desain lama sudah dihapus</h2>
+  <p>Kami belajar bahwa mailbox + doorbell adalah pola yang benar. Tetapi native Amp kini sudah punya parent/child association, authenticated messaging, reply routing, dan waiting. Karena itu Amux tidak membuat database bayangan baru untuk child baru, dan command koordinasi lamanya sudah dihapus.</p>
 
   <table>
     <thead><tr><th>Kasusmu</th><th>Pilihan sekarang</th></tr></thead>
@@ -106,7 +100,7 @@
   </table>
 
   <p class="source-line">Arah aktif:
-    <a class="chip gh" href="https://github.com/zainfathoni/amux/blob/067bfff005c30ec11775894866ef31416fbe7e32/docs/adr/0009-remove-active-legacy-coordination-surfaces.md" aria-label="Buka ADR 0009 di GitHub">ADR 0009↗</a>
+    <a class="chip gh" href="https://github.com/zainfathoni/amux/blob/main/docs/adr/0009-remove-active-legacy-coordination-surfaces.md" aria-label="Buka ADR 0009 di GitHub">ADR 0009↗</a>
   </p>
 
   <div class="cold">
@@ -149,13 +143,13 @@
   </form>
 
   <h2>Primary source</h2>
-  <p>Baca <a href="https://github.com/zainfathoni/amux/blob/067bfff005c30ec11775894866ef31416fbe7e32/docs/adr/0009-remove-active-legacy-coordination-surfaces.md">ADR 0009</a> (~8 menit) untuk arah saat ini: native Amp menangani koordinasi work baru, Amux tetap meluncurkan runner lokal, dan store koordinasi lama inert tanpa command drain. <a href="https://github.com/zainfathoni/amux/blob/e56eed4e6b8fc8cab2a5704a408d9ba96d3807b5/docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md">ADR 0007</a> tetap sebagai sejarah keputusan yang sudah dipersempit.</p>
+  <p>Baca <a href="https://github.com/zainfathoni/amux/blob/main/docs/adr/0009-remove-active-legacy-coordination-surfaces.md">ADR 0009</a> untuk arah saat ini: native Amp menangani koordinasi work baru, Amux tetap meluncurkan runner lokal, dan store koordinasi lama inert tanpa command drain. <a href="https://github.com/zainfathoni/amux/blob/main/docs/adr/0007-retire-amux-through-native-cutover-and-staged-drain.md">ADR 0007</a> tetap sebagai sejarah keputusan yang sudah dipersempit.</p>
 
   <h2>Diskusi asal</h2>
   <p>Lesson ini lahir dari <a href="https://ampcode.com/threads/T-019ff8aa-b9e5-749e-abea-ddfe1a44d7ca">thread publik Amp tentang amux, Tycho, dan completion reporting</a>. Baca thread tersebut untuk konteks pertanyaan asli dan proses penyusunan jawabannya.</p>
 
   <p class="ask">Tanyakan follow-up kapan saja—terutama jika ingin memetakan pola ini ke orchestrator temanmu sendiri.</p>
-  <p class="foot">Lesson 1 · amux.zainf.dev · menjelaskan completion reporting tanpa polling session.</p>
+  <p class="foot">Archived lesson · amux.zainf.dev · desain historis, bukan panduan command aktif.</p>
 </main>
 
 <script>
