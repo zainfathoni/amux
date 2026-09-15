@@ -12,6 +12,9 @@ _Avoid_: Worker, background worker
 
 **Runner identity** — The canonical workdir. A directory may belong to only one configured runner workspace on a machine.
 
+**Runner ID** — Optional native Amp launch configuration for a Runner. It may be changed without changing Runner identity; it is not an Amux selector.
+_Avoid_: Runner identity
+
 **Runner workdir** — A canonical existing directory owned by a runner. It may be a Git repository or worktree, but does not need to be; amux validates directory existence separately from tmux and process ownership.
 
 **Runner window** — A tmux window whose name is derived deterministically from the runner workdir as `runner-<directory>-<path-hash>`. The canonical workdir, not the generated window name, is the runner's public identity.
@@ -53,7 +56,7 @@ _Avoid_: Session when referring to the configured lifecycle group
 **Runner teardown** — Retire one exact machine-local runner and its clean secondary Git worktree while preserving its branch. Native Amp thread archival is a separate native action.
 _Avoid_: Worker teardown, thread teardown
 
-**Pin** — Add one exact canonical runner workdir binding without changing remote thread state.
+**Pin** — Add or update one exact canonical runner workdir binding without changing remote thread state. Updating a live Runner's launch configuration safely replaces its exact local process when explicitly requested.
 
 **Machine scope** — Every configured runner workspace on the current machine.
 

@@ -94,6 +94,8 @@ amux runner launch --workdir ~/Code/amux-runner
 
 `--runner-id` is optional. When supplied, Amux persists it with the canonical-workdir binding, launches `amp --no-tui --runner-id <id>`, and requires that exact argv when inspecting or stopping the runner. The canonical workdir remains the Amux runner identity and selector.
 
+Reconfigure a pinned runner's native ID with `amux runner pin -w amux -d ~/Code/amux-runner -i macbook-amux-new`. A stopped runner stays stopped. If the exact runner is live and the ID changes, add `--restart`; without it Amux refuses and leaves both process and configuration untouched. Omitting `--runner-id` preserves the stored ID.
+
 List and diagnose runners:
 
 ```sh
@@ -127,11 +129,11 @@ For new delegated work, use Amp's authenticated native `create_thread` on the ex
 Run `amux help` or `amux help runner <command>` for contextual help.
 
 ```sh
-amux list [--workspace <name>|--workdir <path>|--current|--all]
-amux launch [--workspace <name>|--workdir <path>|--current|--all]
+amux list [--workspace <name>|--workdir <path>|--current-dir|--current|--all]
+amux launch [--workspace <name>|--workdir <path>|--current-dir|--current|--all]
 amux park|restart|remove|doctor|reconcile [runner selectors]
 
-amux runner pin --workspace <name> --workdir <existing-directory>
+amux runner pin --workspace <name> (--workdir <existing-directory>|--current-dir) [--runner-id <id>] [--restart]
 amux runner teardown --workdir <secondary-worktree> --confirm-plan <sha256>
 amux runner list|launch|park|restart|remove|doctor|reconcile [runner selectors]
 amux workspace list
@@ -148,6 +150,8 @@ amux update
 Top-level lifecycle routes are runner-only aliases. Bare `amux` is equivalent to automatic runner launch across all configured rows. Mutating machine-wide routes other than launch require explicit `--all`.
 
 Runner pin is active admission. `runner unpin` removes only the exact selected registry binding after proving its local tmux runner is absent; it never stops a process. `runner teardown` is the explicit worktree-owning retirement route described above. `runner remove` and missing-workdir `runner reconcile` fail closed pending authoritative process/catalog absence evidence. Use `runner park` to stop an exact owned process while retaining its row.
+
+Runner commands that accept `--workdir` (`-d`) also accept `--current-dir` (`-c`), exactly equivalent to `-d .` in the command's cwd. It never reads the tmux pane cwd and may be combined with `--workspace`, but not with `-d`, `--current`, or `--all`. `--current` retains its tmux-based behavior. Before the command name, `-c <path>` remains the global `--config-dir` shorthand.
 
 Removed `worker`, `spawn`, `shelve`, `unshelve`, top-level `teardown`, `group`, `report`, and `callback` routes fail before process or store effects. The active command is runner-scoped and has none of the former worker teardown's remote-thread or legacy-store behavior. `report` does not route to `/amux-tycho`; use that separate skill explicitly.
 

@@ -15,7 +15,7 @@ type completionCommand struct {
 	Subcommands []completionCommand
 }
 
-var runnerLifecycleFlags = []string{"--workspace", "--workdir", "--current", "--all", "-w", "-d"}
+var runnerLifecycleFlags = []string{"--workspace", "--workdir", "--current-dir", "--current", "--all", "-w", "-d", "-c"}
 
 var completionCommands = []completionCommand{
 	{Name: "list", Description: "List configured runners", Flags: runnerLifecycleFlags},
@@ -32,9 +32,9 @@ var completionCommands = []completionCommand{
 			{Name: "run", Description: "Run maintenance", Flags: []string{"--scheduled"}},
 		}},
 		{Name: "list", Description: "List configured runners", Flags: runnerLifecycleFlags},
-		{Name: "pin", Description: "Pin a runner", Flags: []string{"--workspace", "--workdir", "--runner-id", "--current", "-w", "-d"}},
-		{Name: "unpin", Description: "Remove an absent runner's exact registry binding", Flags: []string{"--workdir", "--current", "-d"}},
-		{Name: "teardown", Description: "Stop one exact runner, remove its Git worktree, and unpin it", Flags: []string{"--workdir", "--confirm-plan", "-d"}},
+		{Name: "pin", Description: "Pin or reconfigure a runner", Flags: []string{"--workspace", "--workdir", "--current-dir", "--runner-id", "--restart", "--current", "-w", "-d", "-c", "-i"}},
+		{Name: "unpin", Description: "Remove an absent runner's exact registry binding", Flags: []string{"--workdir", "--current-dir", "--current", "-d", "-c"}},
+		{Name: "teardown", Description: "Stop one exact runner, remove its Git worktree, and unpin it", Flags: []string{"--workdir", "--current-dir", "--confirm-plan", "-d", "-c"}},
 		{Name: "launch", Description: "Launch runners", Flags: runnerLifecycleFlags},
 		{Name: "park", Description: "Park runners", Flags: runnerLifecycleFlags},
 		{Name: "restart", Description: "Restart runners", Flags: runnerLifecycleFlags},
@@ -83,8 +83,8 @@ _amux_complete() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   for ((i=1; i<COMP_CWORD; i++)); do
     word="${COMP_WORDS[i]}"
-    if [[ "$word" == --config-dir || "$word" == -c || "$word" == --terminal-launcher ]]; then ((i++)); continue; fi
-    if [[ "$word" == --config-dir=* || "$word" == -c=* || "$word" == --terminal-launcher=* || "$word" == --json || "$word" == -j || "$word" == --dry-run || "$word" == -n || "$word" == --attach || "$word" == --no-attach || "$word" == --help || "$word" == -h || "$word" == --version ]]; then continue; fi
+    if [[ "$word" == --config-dir || ( "$word" == -c && -z "$command" ) || "$word" == --terminal-launcher ]]; then ((i++)); continue; fi
+    if [[ "$word" == --config-dir=* || ( "$word" == -c=* && -z "$command" ) || "$word" == --terminal-launcher=* || "$word" == --json || "$word" == -j || "$word" == --dry-run || "$word" == -n || "$word" == --attach || "$word" == --no-attach || "$word" == --help || "$word" == -h || "$word" == --version ]]; then continue; fi
     if [[ -z "$command" ]]; then command="$word"
     elif [[ ( "$command" == runner || "$command" == workspace || "$command" == install ) && -z "$leaf" ]]; then leaf="$word"
     elif [[ "$command" == runner && "$leaf" == maintenance && -z "$branch" ]]; then branch="$word"
@@ -98,14 +98,14 @@ _amux_complete() {
       elif [[ "$leaf" == maintenance && "$branch" == install ]]; then COMPREPLY=( $(compgen -W "--update-owner" -- "$cur") )
       elif [[ "$leaf" == maintenance && "$branch" == run ]]; then COMPREPLY=( $(compgen -W "--scheduled" -- "$cur") )
       elif [[ "$leaf" == maintenance ]]; then COMPREPLY=()
-      elif [[ "$leaf" == pin ]]; then COMPREPLY=( $(compgen -W "--workspace --workdir --current -w -d" -- "$cur") )
-      elif [[ "$leaf" == unpin ]]; then COMPREPLY=( $(compgen -W "--workdir --current -d" -- "$cur") )
-      elif [[ "$leaf" == teardown ]]; then COMPREPLY=( $(compgen -W "--workdir --confirm-plan -d" -- "$cur") )
-      else COMPREPLY=( $(compgen -W "--workspace --workdir --current --all -w -d" -- "$cur") ); fi ;;
+      elif [[ "$leaf" == pin ]]; then COMPREPLY=( $(compgen -W "--workspace --workdir --current-dir --runner-id --restart --current -w -d -c -i" -- "$cur") )
+      elif [[ "$leaf" == unpin ]]; then COMPREPLY=( $(compgen -W "--workdir --current-dir --current -d -c" -- "$cur") )
+      elif [[ "$leaf" == teardown ]]; then COMPREPLY=( $(compgen -W "--workdir --current-dir --confirm-plan -d -c" -- "$cur") )
+      else COMPREPLY=( $(compgen -W "--workspace --workdir --current-dir --current --all -w -d -c" -- "$cur") ); fi ;;
     workspace) if [[ -z "$leaf" ]]; then COMPREPLY=( $(compgen -W "list" -- "$cur") ); fi ;;
     install) if [[ -z "$leaf" ]]; then COMPREPLY=( $(compgen -W "doctor" -- "$cur") ); fi ;;
     completion) COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") ) ;;
-    list|launch|park|restart|remove|doctor|reconcile) COMPREPLY=( $(compgen -W "--workspace --workdir --current --all -w -d" -- "$cur") ) ;;
+    list|launch|park|restart|remove|doctor|reconcile) COMPREPLY=( $(compgen -W "--workspace --workdir --current-dir --current --all -w -d -c" -- "$cur") ) ;;
   esac
 }
 complete -F _amux_complete amux
@@ -131,8 +131,8 @@ func writeZshCompletion(w io.Writer) {
 	fmt.Fprintln(w, `)
 for ((i=2; i<CURRENT; i++)); do
   word=$words[i]
-  if [[ $word == --config-dir || $word == -c || $word == --terminal-launcher ]]; then ((i++)); continue; fi
-  if [[ $word == --config-dir=* || $word == -c=* || $word == --terminal-launcher=* || $word == --json || $word == -j || $word == --dry-run || $word == -n || $word == --attach || $word == --no-attach || $word == --help || $word == -h || $word == --version ]]; then continue; fi
+  if [[ $word == --config-dir || ( $word == -c && -z $command ) || $word == --terminal-launcher ]]; then ((i++)); continue; fi
+  if [[ $word == --config-dir=* || ( $word == -c=* && -z $command ) || $word == --terminal-launcher=* || $word == --json || $word == -j || $word == --dry-run || $word == -n || $word == --attach || $word == --no-attach || $word == --help || $word == -h || $word == --version ]]; then continue; fi
   if [[ -z $command ]]; then command=$word
   elif [[ ( $command == runner || $command == workspace || $command == install ) && -z $leaf ]]; then leaf=$word
   elif [[ $command == runner && $leaf == maintenance && -z $branch ]]; then branch=$word
@@ -154,14 +154,14 @@ case $state in
         elif [[ $leaf == maintenance && $branch == install ]]; then _arguments '--update-owner=[update owner]:owner:(self external)'
         elif [[ $leaf == maintenance && $branch == run ]]; then _arguments '--scheduled[scheduled invocation]'
         elif [[ $leaf == maintenance ]]; then return
-        elif [[ $leaf == pin ]]; then _arguments '(-w --workspace)'{-w,--workspace}'[workspace]:name:' '(-d --workdir)'{-d,--workdir}'[workdir]:directory:_directories' '--current[current workdir]'
-        elif [[ $leaf == unpin ]]; then _arguments '(-d --workdir)'{-d,--workdir}'[workdir]:directory:_directories' '--current[current workdir]'
-        elif [[ $leaf == teardown ]]; then _arguments '(-d --workdir)'{-d,--workdir}'[workdir]:directory:_directories' '--confirm-plan=[fresh teardown plan digest]:sha256:'
-        else _arguments '(-w --workspace)'{-w,--workspace}'[workspace]:name:' '(-d --workdir)'{-d,--workdir}'[workdir]:directory:_directories' '--current[current workdir]' '--all[all runners]'; fi ;;
+        elif [[ $leaf == pin ]]; then _arguments '(-w --workspace)'{-w,--workspace}'[workspace]:name:' '(-d --workdir -c --current-dir)'{-d,--workdir}'[workdir]:directory:_directories' '(-d --workdir -c --current-dir --current --all)'{-c,--current-dir}'[command current directory]' '(-i --runner-id)'{-i,--runner-id}'[native Amp runner ID]:id:' '--restart[restart a live runner when changing its ID]' '--current[current tmux runner]'
+        elif [[ $leaf == unpin ]]; then _arguments '(-d --workdir -c --current-dir)'{-d,--workdir}'[workdir]:directory:_directories' '(-d --workdir -c --current-dir --current --all)'{-c,--current-dir}'[command current directory]' '--current[current tmux runner]'
+        elif [[ $leaf == teardown ]]; then _arguments '(-d --workdir -c --current-dir)'{-d,--workdir}'[workdir]:directory:_directories' '(-d --workdir -c --current-dir --current --all)'{-c,--current-dir}'[command current directory]' '--confirm-plan=[fresh teardown plan digest]:sha256:'
+        else _arguments '(-w --workspace)'{-w,--workspace}'[workspace]:name:' '(-d --workdir -c --current-dir)'{-d,--workdir}'[workdir]:directory:_directories' '(-d --workdir -c --current-dir --current --all)'{-c,--current-dir}'[command current directory]' '--current[current tmux runner]' '--all[all runners]'; fi ;;
       workspace) _values 'workspace command' list ;;
       install) _values 'install command' doctor ;;
       completion) _values 'shell' bash zsh fish ;;
-      list|launch|park|restart|remove|doctor|reconcile) _arguments '(-w --workspace)'{-w,--workspace}'[workspace]:name:' '(-d --workdir)'{-d,--workdir}'[workdir]:directory:_directories' '--current[current workdir]' '--all[all runners]' ;;
+      list|launch|park|restart|remove|doctor|reconcile) _arguments '(-w --workspace)'{-w,--workspace}'[workspace]:name:' '(-d --workdir -c --current-dir)'{-d,--workdir}'[workdir]:directory:_directories' '(-d --workdir -c --current-dir --current --all)'{-c,--current-dir}'[command current directory]' '--current[current tmux runner]' '--all[all runners]' ;;
     esac ;;
 esac`)
 }
@@ -175,6 +175,10 @@ func writeFishCompletion(w io.Writer) {
 		short := ""
 		if flag.short != "" {
 			short = " -s " + flag.short
+		}
+		if flag.long == "config-dir" {
+			short = ""
+			fmt.Fprintln(w, "complete -c amux -n '__fish_use_subcommand' -s c -r -d 'Select config directory before the command'")
 		}
 		requiresValue := ""
 		if flag.long == "config-dir" || flag.long == "terminal-launcher" {
@@ -196,8 +200,11 @@ func writeFishCompletion(w io.Writer) {
 	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'")
 	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from list launch park restart remove doctor reconcile pin; and not __fish_seen_subcommand_from maintenance' -l workspace -s w -r")
 	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from list launch park restart remove doctor reconcile pin unpin teardown; and not __fish_seen_subcommand_from maintenance' -l workdir -s d -r")
+	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from list launch park restart remove doctor reconcile pin unpin teardown; and not __fish_seen_subcommand_from maintenance' -l current-dir -s c")
 	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from list launch park restart remove doctor reconcile; and not __fish_seen_subcommand_from maintenance' -l all")
 	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from list launch park restart remove doctor reconcile pin unpin; and not __fish_seen_subcommand_from maintenance' -l current")
+	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from pin; and not __fish_seen_subcommand_from maintenance' -l runner-id -s i -r")
+	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from pin; and not __fish_seen_subcommand_from maintenance' -l restart")
 	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from teardown; and not __fish_seen_subcommand_from maintenance' -l confirm-plan -r")
 	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from maintenance; and __fish_seen_subcommand_from install' -l update-owner -r -a 'self external'")
 	fmt.Fprintln(w, "complete -c amux -n '__fish_seen_subcommand_from maintenance; and __fish_seen_subcommand_from run' -l scheduled")

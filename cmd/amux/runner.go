@@ -26,6 +26,9 @@ var (
 	runnerChildProcesses  = tmux.InspectChildProcesses
 	runnerPaneByID        = (tmux.Runner{}).RestartPaneByID
 	runnerCacheDir        = os.UserCacheDir
+	runnerInspect         = inspectRunner
+	runnerStore           = config.StoreRunner
+	runnerLaunch          = launchRunner
 )
 
 const runnerStartupErrorLimit = 4608
@@ -359,48 +362,109 @@ func (a app) runnerPinV1(in invocation, dir config.Directory, selected []config.
 	if in.Selectors.Workspace == "" || in.Selectors.Workdir == "" {
 		return env, result.Request(errors.New("runner pin requires --workspace and --workdir"))
 	}
-	row := config.RunnerRow{Workspace: in.Selectors.Workspace, Workdir: in.Selectors.Workdir, RunnerID: in.Selectors.RunnerID, Window: config.RunnerWindow(in.Selectors.Workdir)}
-	out := runnerOutcome(row, "pin", "")
-	if err := requireRunnerDirectory(row.Workdir); err != nil {
+	desired := config.RunnerRow{Workspace: in.Selectors.Workspace, Workdir: in.Selectors.Workdir, RunnerID: in.Selectors.RunnerID, Window: config.RunnerWindow(in.Selectors.Workdir)}
+	if err := requireRunnerDirectory(desired.Workdir); err != nil {
 		return env, result.Preflight(err)
 	}
 	all, err := config.LoadRunnersReadOnly(dir.RunnersPath())
 	if err != nil {
 		return env, result.Preflight(err)
 	}
+	var stored *config.RunnerRow
 	for _, existing := range all {
-		if existing.Workdir == row.Workdir {
-			if existing.Workspace == row.Workspace && (row.RunnerID == "" || existing.RunnerID == row.RunnerID) {
-				out.Message = "already pinned"
-				env.Skipped = append(env.Skipped, out)
-				return env, nil
+		if existing.Workdir == desired.Workdir {
+			if existing.Workspace != desired.Workspace {
+				return env, result.Preflight(fmt.Errorf("runner workdir %s is already configured in workspace %s", desired.Workdir, existing.Workspace))
 			}
-			if existing.Workspace != row.Workspace {
-				return env, result.Preflight(fmt.Errorf("runner workdir %s is already configured in workspace %s", row.Workdir, existing.Workspace))
-			}
+			copy := existing
+			stored = &copy
 			continue
 		}
-		if existing.Workspace == row.Workspace && existing.Window == row.Window {
-			return env, result.Preflight(fmt.Errorf("derived runner window %s collides with workdir %s", row.Window, existing.Workdir))
+		if existing.Workspace == desired.Workspace && existing.Window == desired.Window {
+			return env, result.Preflight(fmt.Errorf("derived runner window %s collides with workdir %s", desired.Window, existing.Workdir))
 		}
 	}
-	inspection, err := inspectRunner(row)
-	if err != nil {
-		return env, result.Preflight(err)
+	if stored == nil && in.Selectors.Restart {
+		return env, result.Request(errors.New("runner pin --restart requires an existing pinned runner; pin it without --restart first"))
 	}
-	if inspection.state != runnerPaneAbsent {
-		return env, result.Preflight(fmt.Errorf("derived runner window %s already exists in workspace %s", row.Window, row.Workspace))
+	if stored != nil && in.Selectors.RunnerID == "" {
+		desired.RunnerID = stored.RunnerID
+	}
+	oldID := ""
+	inspectionRow := desired
+	if stored != nil {
+		oldID = stored.RunnerID
+		inspectionRow = *stored
+	}
+	idChanged := stored != nil && oldID != desired.RunnerID
+	inspection, err := runnerInspect(inspectionRow)
+	if err != nil {
+		return env, result.Preflight(fmt.Errorf("runner pin blocked for %s: local runner state is unreadable; retained configuration and did not stop any process: %w", desired.Workdir, err))
+	}
+	if inspection.state == runnerPaneConflict || inspection.state == runnerPaneAmbiguous {
+		return env, result.Preflight(fmt.Errorf("runner pin blocked for %s: local runner state is %s; retained configuration and did not stop any process", desired.Workdir, inspection.state))
+	}
+	if stored == nil && inspection.state == runnerPaneExact {
+		return env, result.Preflight(fmt.Errorf("runner pin blocked for %s: an unpinned live runner already occupies workspace %s window %s; did not create a stopped pin", desired.Workdir, desired.Workspace, desired.Window))
+	}
+	restartNeeded := idChanged && inspection.state == runnerPaneExact
+	out := runnerOutcome(desired, "pin", runnerPinMessage(oldID, desired.RunnerID, restartNeeded))
+	out.Runner = &result.RunnerDetails{RunnerID: desired.RunnerID, OldRunnerID: oldID, NewRunnerID: desired.RunnerID, RestartNeeded: restartNeeded}
+	if stored != nil && !idChanged {
+		out.Message = "already pinned"
+		env.Skipped = append(env.Skipped, out)
+		return env, nil
+	}
+	if inspection.state == runnerPaneExact && !in.Selectors.Restart {
+		return env, result.Preflight(fmt.Errorf("runner pin would change live runner %s ID from %q to %q; rerun with --restart to safely replace the exact process", desired.Workdir, oldID, desired.RunnerID))
+	}
+	processes := map[string]tmux.ProcessMetadata{}
+	if inspection.state == runnerPaneExact {
+		processes, err = preflightLifecycleExecutorEvidence("runner pin --restart", []tmux.WindowPane{inspection.pane})
+		if err != nil {
+			return env, result.Preflight(err)
+		}
 	}
 	if in.Options.DryRun {
 		env.Planned = append(env.Planned, out)
 		return env, nil
 	}
-	_, err = config.StoreRunner(dir.RunnersPath(), row)
-	if err != nil {
-		return env, result.Runtime(err)
+	if inspection.state == runnerPaneAbsent {
+		if _, err = runnerStore(dir.RunnersPath(), desired); err != nil {
+			return env, result.Runtime(fmt.Errorf("persist runner ID change from %q to %q while runner is stopped: %w", oldID, desired.RunnerID, err))
+		}
+		env.Successful = append(env.Successful, out)
+		return env, nil
+	}
+	if err := stopRunner(*stored, inspection, processes[lifecyclePaneProcessKey(inspection.pane)]); err != nil {
+		out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: fmt.Sprintf("stop old runner configured with ID %q failed; retained old configuration; observed local state=%s: %v", oldID, runnerStateAfterFailedStop(*stored), err)}
+		env.Failed = append(env.Failed, out)
+		return env, result.Runtime(errors.New(out.Error.Message))
+	}
+	if _, err = runnerStore(dir.RunnersPath(), desired); err != nil {
+		out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: fmt.Sprintf("runner stopped, but persisting ID change from %q to %q failed; retained old configuration and runner remains stopped: %v", oldID, desired.RunnerID, err)}
+		env.Failed = append(env.Failed, out)
+		return env, result.Runtime(errors.New(out.Error.Message))
+	}
+	if _, err = runnerLaunch(desired); err != nil {
+		out.Error = &result.Failure{Kind: result.ErrorRuntime, Message: fmt.Sprintf("persisted new runner ID %q, but launch failed: %v; recover with `amux launch -d %s`", desired.RunnerID, err, shellSingleQuote(desired.Workdir))}
+		env.Failed = append(env.Failed, out)
+		return env, result.Runtime(errors.New(out.Error.Message))
 	}
 	env.Successful = append(env.Successful, out)
 	return env, nil
+}
+
+func runnerPinMessage(oldID, newID string, restartNeeded bool) string {
+	return fmt.Sprintf("runner ID old=%q new=%q restart-needed=%t", oldID, newID, restartNeeded)
+}
+
+func runnerStateAfterFailedStop(row config.RunnerRow) string {
+	inspection, err := runnerInspect(row)
+	if err != nil {
+		return "unreadable (" + boundedDiagnostic(err.Error(), 512) + ")"
+	}
+	return string(inspection.state)
 }
 
 func selectRunnerRows(rows []config.RunnerRow, s selectors) []config.RunnerRow {

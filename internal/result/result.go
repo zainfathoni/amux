@@ -137,6 +137,9 @@ type RunnerDetails struct {
 	ProcessStart      int64  `json:"process_start,omitempty"`
 	ProcessAgeSeconds int64  `json:"process_age_seconds,omitempty"`
 	RunnerID          string `json:"runner_id,omitempty"`
+	OldRunnerID       string `json:"old_runner_id,omitempty"`
+	NewRunnerID       string `json:"new_runner_id,omitempty"`
+	RestartNeeded     bool   `json:"restart_needed,omitempty"`
 }
 
 type WorkdirState string

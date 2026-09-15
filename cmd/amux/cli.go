@@ -42,7 +42,9 @@ type selectors struct {
 	WorkItemID                             string
 	WorkerOrdinal                          string
 	Current                                bool
+	CurrentDir                             bool
 	All                                    bool
+	Restart                                bool
 	Shelf                                  string
 	IdempotencyKey                         string
 	ReportID                               string
@@ -93,13 +95,13 @@ var rootCommand = &commandSpec{
 	Summary: "Manage machine-local Amp runners",
 	Usage:   "amux [global flags] <command> [flags]",
 	Children: []*commandSpec{
-		lifecycleCommand("list", "List configured runners", false, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
-		lifecycleCommand("launch", "Launch configured runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
-		lifecycleCommand("park", "Park running runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
-		lifecycleCommand("restart", "Restart running runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
-		lifecycleCommand("remove", "Retain configured runners and fail closed", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
-		lifecycleCommand("doctor", "Diagnose runner state", false, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
-		lifecycleCommand("reconcile", "Keep present runner rows; retain missing rows and fail closed", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
+		lifecycleCommand("list", "List configured runners", false, runnerLifecycleCommandFlags()...),
+		lifecycleCommand("launch", "Launch configured runners", true, runnerLifecycleCommandFlags()...),
+		lifecycleCommand("park", "Park running runners", true, runnerLifecycleCommandFlags()...),
+		lifecycleCommand("restart", "Restart running runners", true, runnerLifecycleCommandFlags()...),
+		lifecycleCommand("remove", "Retain configured runners and fail closed", true, runnerLifecycleCommandFlags()...),
+		lifecycleCommand("doctor", "Diagnose runner state", false, runnerLifecycleCommandFlags()...),
+		lifecycleCommand("reconcile", "Keep present runner rows; retain missing rows and fail closed", true, runnerLifecycleCommandFlags()...),
 		runnerCommand(),
 		workspaceCommand(),
 		installCommand(),
@@ -146,20 +148,24 @@ func lifecycleCommand(name, summary string, mutating bool, flags ...string) *com
 	}
 }
 
+func runnerLifecycleCommandFlags() []string {
+	return []string{"--workspace, -w <name>", "--workdir, -d <path>", "--current-dir, -c", "--current", "--all"}
+}
+
 func runnerCommand() *commandSpec {
 	runner := &commandSpec{Name: "runner", Summary: "Manage non-interactive workdir-bound clients", Usage: "amux runner <command>"}
 	runner.Children = []*commandSpec{
 		maintenanceCommand(),
-		runnerLeaf("list", "List configured runners", false, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
-		runnerLeaf("pin", "Pin a runner without launching it", true, "--workspace, -w <name>", "--workdir, -d <path>", "--runner-id <id>", "--current"),
-		runnerLeaf("unpin", "Remove an absent runner's exact registry binding", true, "--workdir, -d <path>", "--current"),
-		runnerLeaf("teardown", "Stop one exact runner, remove its Git worktree, and unpin it", true, "--workdir, -d <path>", "--confirm-plan <sha256>"),
-		runnerLeaf("launch", "Launch runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
-		runnerLeaf("park", "Park runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
-		runnerLeaf("restart", "Restart runners", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
-		runnerLeaf("remove", "Retain configured runners and fail closed", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
-		runnerLeaf("doctor", "Diagnose runners", false, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
-		runnerLeaf("reconcile", "Keep present rows unchanged; retain missing rows and fail closed", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current", "--all"),
+		runnerLeaf("list", "List configured runners", false, runnerLifecycleCommandFlags()...),
+		runnerLeaf("pin", "Pin or reconfigure a runner without launching it unless restart is required", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current-dir, -c", "--runner-id, -i <id>", "--restart", "--current"),
+		runnerLeaf("unpin", "Remove an absent runner's exact registry binding", true, "--workdir, -d <path>", "--current-dir, -c", "--current"),
+		runnerLeaf("teardown", "Stop one exact runner, remove its Git worktree, and unpin it", true, "--workdir, -d <path>", "--current-dir, -c", "--confirm-plan <sha256>"),
+		runnerLeaf("launch", "Launch runners", true, runnerLifecycleCommandFlags()...),
+		runnerLeaf("park", "Park runners", true, runnerLifecycleCommandFlags()...),
+		runnerLeaf("restart", "Restart runners", true, runnerLifecycleCommandFlags()...),
+		runnerLeaf("remove", "Retain configured runners and fail closed", true, runnerLifecycleCommandFlags()...),
+		runnerLeaf("doctor", "Diagnose runners", false, runnerLifecycleCommandFlags()...),
+		runnerLeaf("reconcile", "Keep present rows unchanged; retain missing rows and fail closed", true, runnerLifecycleCommandFlags()...),
 	}
 	return runner
 }
@@ -385,6 +391,7 @@ func parseCLIOptions(args []string) (cliOptions, []string, error) {
 	var opts cliOptions
 	words := make([]string, 0, len(args))
 	terminated := false
+	commandSeen := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if terminated {
@@ -432,6 +439,10 @@ func parseCLIOptions(args []string) (cliOptions, []string, error) {
 		case "--config":
 			return opts, nil, errors.New("--config was removed; select a directory with --config-dir or -c")
 		case "--config-dir", "-c":
+			if arg == "-c" && commandSeen {
+				words = append(words, arg)
+				continue
+			}
 			if opts.ConfigDir != "" {
 				return opts, nil, errors.New("config directory may be selected only once")
 			}
@@ -449,7 +460,7 @@ func parseCLIOptions(args []string) (cliOptions, []string, error) {
 					return opts, nil, errors.New("config directory may be selected only once")
 				}
 				opts.ConfigDir = strings.TrimPrefix(arg, "--config-dir=")
-			case strings.HasPrefix(arg, "-c="):
+			case strings.HasPrefix(arg, "-c=") && !commandSeen:
 				if opts.ConfigDir != "" {
 					return opts, nil, errors.New("config directory may be selected only once")
 				}
@@ -461,8 +472,11 @@ func parseCLIOptions(args []string) (cliOptions, []string, error) {
 				}
 			default:
 				words = append(words, arg)
+				if !strings.HasPrefix(arg, "-") {
+					commandSeen = true
+				}
 			}
-			if (strings.HasPrefix(arg, "--config-dir=") || strings.HasPrefix(arg, "-c=")) && opts.ConfigDir == "" {
+			if (strings.HasPrefix(arg, "--config-dir=") || strings.HasPrefix(arg, "-c=") && !commandSeen) && opts.ConfigDir == "" {
 				return opts, nil, errors.New("--config-dir requires a directory")
 			}
 		}
@@ -476,7 +490,7 @@ func commandOptionRequiresValue(arg string) bool {
 		return false
 	}
 	switch name {
-	case "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--thread", "-t",
+	case "--workspace", "-w", "--window", "-W", "--workdir", "-d", "--runner-id", "-i", "--thread", "-t",
 		"--group", "--mode", "-m", "--title-prefix", "--work-item-id", "--worker-ordinal", "--shelf", "--idempotency-key",
 		"--report-id", "--pane", "--status", "--issue", "--reference", "--pr", "--summary",
 		"--message", "--message-file", "--prompt-file", "--physical-host", "--generation", "--confirm-plan", "--update-owner":
@@ -549,6 +563,22 @@ func parseSelectors(args []string) (selectors, []string, error) {
 				return parsed, nil, errors.New("--current does not accept a value")
 			}
 			parsed.Current = true
+		case "--current-dir", "-c":
+			if hasInline {
+				return parsed, nil, fmt.Errorf("%s does not accept a value", name)
+			}
+			if parsed.CurrentDir {
+				return parsed, nil, errors.New("--current-dir may be specified only once")
+			}
+			parsed.CurrentDir = true
+		case "--restart":
+			if hasInline {
+				return parsed, nil, errors.New("--restart does not accept a value")
+			}
+			if parsed.Restart {
+				return parsed, nil, errors.New("--restart may be specified only once")
+			}
+			parsed.Restart = true
 		case "--all":
 			if hasInline {
 				return parsed, nil, errors.New("--all does not accept a value")
@@ -581,13 +611,13 @@ func parseSelectors(args []string) (selectors, []string, error) {
 			if err := setSelector(&parsed.Workdir, value, "--workdir"); err != nil {
 				return parsed, nil, err
 			}
-		case "--runner-id":
+		case "--runner-id", "-i":
 			value, next, err := selectorValue(args, i, name, inline, hasInline)
 			if err != nil {
 				return parsed, nil, err
 			}
 			i = next
-			if err := setSelector(&parsed.RunnerID, value, name); err != nil {
+			if err := setSelector(&parsed.RunnerID, value, "--runner-id"); err != nil {
 				return parsed, nil, err
 			}
 		case "--thread", "-t":
@@ -755,11 +785,21 @@ func parseSelectors(args []string) (selectors, []string, error) {
 			remaining = append(remaining, arg)
 		}
 	}
+	if parsed.CurrentDir && (parsed.Workdir != "" || parsed.Current || parsed.All) {
+		return parsed, nil, errors.New("--current-dir cannot be combined with --workdir, --current, or --all")
+	}
 	if parsed.All && (parsed.Current || parsed.Workspace != "" || parsed.Window != "" || parsed.Workdir != "" || parsed.Thread != "" || len(parsed.Groups) != 0) {
 		return parsed, nil, errors.New("--all cannot be combined with --current or resource selectors")
 	}
 	if parsed.Current && (parsed.Workspace != "" || parsed.Window != "" || parsed.Workdir != "" || parsed.Thread != "" || len(parsed.Groups) != 0) {
 		return parsed, nil, errors.New("--current cannot be combined with resource selectors")
+	}
+	if parsed.CurrentDir {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return parsed, nil, fmt.Errorf("resolve --current-dir: %w", err)
+		}
+		parsed.Workdir = cwd
 	}
 	return parsed, remaining, nil
 }
@@ -835,6 +875,12 @@ func validateCommandSelectors(command *commandSpec, parsed *selectors) error {
 	}
 	if parsed.Current && !commandAcceptsFlag(command, "--current") {
 		return fmt.Errorf("%s does not accept --current; run `amux help %s`", command.UsageName(), command.UsageName())
+	}
+	if parsed.CurrentDir && !commandAcceptsFlag(command, "--current-dir") {
+		return fmt.Errorf("%s does not accept --current-dir; run `amux help %s`", command.UsageName(), command.UsageName())
+	}
+	if parsed.Restart && !commandAcceptsFlag(command, "--restart") {
+		return fmt.Errorf("%s does not accept --restart; run `amux help %s`", command.UsageName(), command.UsageName())
 	}
 	if parsed.All && !commandAcceptsFlag(command, "--all") {
 		return fmt.Errorf("%s does not accept --all; run `amux help %s`", command.UsageName(), command.UsageName())
@@ -950,7 +996,7 @@ func (c *commandSpec) UsageName() string {
 }
 
 func hasResourceScope(parsed selectors) bool {
-	return parsed.All || parsed.Current || parsed.Workspace != "" || parsed.Window != "" || parsed.Workdir != "" || parsed.Thread != "" || len(parsed.Groups) != 0 || parsed.ReportID != ""
+	return parsed.All || parsed.Current || parsed.CurrentDir || parsed.Workspace != "" || parsed.Window != "" || parsed.Workdir != "" || parsed.Thread != "" || len(parsed.Groups) != 0 || parsed.ReportID != ""
 }
 
 func compactStrings(values []string) []string {
@@ -967,7 +1013,7 @@ func compactStrings(values []string) []string {
 }
 
 func selectorsEmpty(parsed selectors) bool {
-	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.RunnerID == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && parsed.WorkItemID == "" && parsed.WorkerOrdinal == "" && !parsed.Current && !parsed.All && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && parsed.PromptFile == "" && parsed.AssignmentPhase == "" && parsed.AssignmentOutcome == "" && parsed.NativeCapability == "" && parsed.LatestCursor == "" && parsed.PhysicalHost == "" && parsed.Generation == "" && parsed.ConfirmPlan == "" && !parsed.OwnerAuthorizedProjectlessPhysicalHost && !parsed.Reconcile
+	return parsed.Workspace == "" && parsed.Window == "" && parsed.Workdir == "" && parsed.RunnerID == "" && parsed.Thread == "" && parsed.Group == "" && len(parsed.Groups) == 0 && parsed.Mode == "" && parsed.TitlePrefix == "" && parsed.WorkItemID == "" && parsed.WorkerOrdinal == "" && !parsed.Current && !parsed.CurrentDir && !parsed.All && !parsed.Restart && parsed.Shelf == "" && parsed.IdempotencyKey == "" && parsed.ReportID == "" && parsed.Pane == "" && parsed.Status == "" && parsed.Issue == "" && parsed.Reference == "" && parsed.PRURL == "" && parsed.Summary == "" && parsed.Message == "" && parsed.MessageFile == "" && !parsed.MessageStdin && parsed.PromptFile == "" && parsed.AssignmentPhase == "" && parsed.AssignmentOutcome == "" && parsed.NativeCapability == "" && parsed.LatestCursor == "" && parsed.PhysicalHost == "" && parsed.Generation == "" && parsed.ConfirmPlan == "" && !parsed.OwnerAuthorizedProjectlessPhysicalHost && !parsed.Reconcile
 }
 
 func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
@@ -1192,7 +1238,7 @@ func (a app) printCommandHelp(command *commandSpec) {
 	if command == rootCommand {
 		fmt.Fprintln(a.stdout, "\nGlobal flags:")
 		for _, flag := range []string{
-			"--config-dir, -c <path>  Select the directory containing all config registries",
+			"--config-dir <path>      Select the directory containing all config registries (-c before command)",
 			"--json, -j               Emit one versioned JSON document",
 			"--dry-run, -n            Plan without mutation",
 			"--attach                  Attach after a complete explicit-workspace aggregate launch",
@@ -1220,17 +1266,21 @@ func (a app) printCommandHelp(command *commandSpec) {
 }
 
 func globalFlagRequested(args []string, long, short string) bool {
+	commandSeen := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
 			return false
 		}
-		if commandOptionRequiresValue(arg) || arg == "--config-dir" || arg == "-c" || arg == "--terminal-launcher" {
+		if commandOptionRequiresValue(arg) || arg == "--config-dir" || arg == "-c" && !commandSeen || arg == "--terminal-launcher" {
 			i++
 			continue
 		}
 		if arg == long || arg == short {
 			return true
+		}
+		if !strings.HasPrefix(arg, "-") {
+			commandSeen = true
 		}
 	}
 	return false
@@ -1252,12 +1302,13 @@ func guessedCommandPath(args []string) []string {
 		return path
 	}
 
+	commandSeen := false
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
 		if arg == "--" {
 			break
 		}
-		if arg == "--config-dir" || arg == "-c" {
+		if arg == "--config-dir" || arg == "-c" && !commandSeen {
 			index++
 			continue
 		}
@@ -1265,6 +1316,7 @@ func guessedCommandPath(args []string) []string {
 			continue
 		}
 		if !strings.HasPrefix(arg, "-") {
+			commandSeen = true
 			return []string{arg}
 		}
 	}
