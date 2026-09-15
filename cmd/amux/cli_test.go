@@ -143,14 +143,21 @@ func TestZshCompletionReturnsNestedRunnerCandidates(t *testing.T) {
 		{name: "maintenance remove has no runner flags", words: `amux runner maintenance remove ''`, current: 5, excluded: "--all"},
 		{name: "runner pin excludes all", words: `amux runner pin ''`, current: 4, excluded: "--all"},
 		{name: "runner teardown flags", words: `amux runner teardown ''`, current: 4, candidate: "--confirm-plan", excluded: "--all"},
+		{name: "runner list includes all", words: `amux runner list ''`, current: 4, candidate: "--all"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			script := `
 function _arguments {
+  local arg
   if [[ "$*" == *--update-owner* ]]; then
     print -r -- --update-owner
   elif [[ -n "$state" ]]; then
-    print -r -- "$*"
+    for arg in "$@"; do
+      while [[ "$arg" == \(*\)* ]]; do
+        arg="${arg#\(*\)}"
+      done
+      print -r -- "$arg"
+    done
   else
     state=args
   fi

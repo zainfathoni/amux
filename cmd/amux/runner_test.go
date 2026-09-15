@@ -102,8 +102,14 @@ func TestRunnerPinPersistsExactNativeRunnerID(t *testing.T) {
 }
 
 func TestRunnerSelectorAliasesAndCurrentDirectory(t *testing.T) {
-	cwd := t.TempDir()
-	other := t.TempDir()
+	cwd, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	previous, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -119,6 +125,10 @@ func TestRunnerSelectorAliasesAndCurrentDirectory(t *testing.T) {
 	}
 	if parsed.Selectors.Workdir != cwd || parsed.Selectors.RunnerID != "native-id" || parsed.Options.ConfigDir != "" {
 		t.Fatalf("alias selectors = %+v options=%+v", parsed.Selectors, parsed.Options)
+	}
+	parsedDot, err := parseInvocation([]string{"runner", "pin", "-w", "alpha", "-d", "."})
+	if err != nil || parsedDot.Selectors.Workdir != cwd || parsedDot.Selectors.Workdir != parsed.Selectors.Workdir {
+		t.Fatalf("-d . current-directory equivalence = %+v err=%v", parsedDot, err)
 	}
 	configDir := t.TempDir()
 	parsed, err = parseInvocation([]string{"-c", configDir, "runner", "list", "--current-dir"})
@@ -168,8 +178,14 @@ func TestRunnerSelectorAliasesAndCurrentDirectory(t *testing.T) {
 
 func TestRunnerCurrentDirectoryDoesNotUseTmuxInference(t *testing.T) {
 	dir := t.TempDir()
-	cwd := t.TempDir()
-	other := t.TempDir()
+	cwd, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	previous, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
