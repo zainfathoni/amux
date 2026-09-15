@@ -7,28 +7,18 @@
     <title>/amux — machine-local runner skill guide</title>
     <style>
       :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; background: #0c111b; color: #e8edf7; }
-      * { box-sizing: border-box; }
-      body { max-width: 840px; margin: 0 auto; padding: 3rem 1.5rem 5rem; line-height: 1.65; }
-      h1 { font-size: clamp(2.8rem, 9vw, 5.5rem); line-height: 1; margin: 0; letter-spacing: -.055em; }
-      h2 { margin-top: 3.25rem; line-height: 1.2; }
+      body { max-width: 820px; margin: 0 auto; padding: 4rem 1.5rem; line-height: 1.6; }
+      h1 { font-size: clamp(2.5rem, 8vw, 5rem); margin: 0; }
+      h2 { margin-top: 3rem; }
       a { color: #8cc8ff; }
       code, pre { font-family: ui-monospace, monospace; }
-      code { color: #d7eaff; }
-      pre { background: #151d2b; border: 1px solid #26344a; border-radius: .75rem; padding: 1rem; overflow-x: auto; line-height: 1.5; }
-      table { width: 100%; border-collapse: collapse; }
-      th, td { padding: .8rem .65rem; border-bottom: 1px solid #26344a; text-align: left; vertical-align: top; }
-      th { color: #bdc8da; }
-      .lede { font-size: 1.25rem; color: #bdc8da; }
-      .note { border-left: .25rem solid #68d391; padding: .15rem 0 .15rem 1rem; }
-      .warning { border-left-color: #f6ad55; }
-      @media (max-width: 640px) { body { padding: 2rem 1rem 4rem; } table { display: block; overflow-x: auto; } }
+      pre { background: #151d2b; border: 1px solid #26344a; border-radius: .75rem; padding: 1rem; overflow-x: auto; }
     </style>
   </head>
   <body>
     <p><a href="../">← amux</a></p>
     <h1>/amux</h1>
-    <p class="lede">The Amp skill for operating Amux’s active machine-local runner host.</p>
-    <p class="note">The skill manages local runner bindings and routes delegated work to native Amp threads. It never creates or adopts legacy Amux workers.</p>
+    <p>The Amp skill for operating Amux’s active machine-local runner host. It manages local runner bindings and routes delegated work to native Amp threads; it never creates or adopts legacy Amux workers.</p>
 
     <h2>Install</h2>
     <pre><code>npx skills add zainfathoni/amux --skill amux --global</code></pre>
@@ -52,18 +42,15 @@ curl -fsSL https://amux.zainf.dev/install.sh |
     </ul>
 
     <h2>Common requests</h2>
-    <table>
-      <thead><tr><th>Request</th><th>Route</th></tr></thead>
-      <tbody>
-        <tr><td>“Pin this runner”</td><td><code>amux runner pin -w &lt;name&gt; -c [-i &lt;native-id&gt;]</code></td></tr>
-        <tr><td>“Restore my workspace”</td><td><code>amux launch --workspace &lt;name&gt;</code></td></tr>
-        <tr><td>“List or diagnose runners”</td><td><code>amux runner list --all</code> and <code>amux runner doctor --all</code></td></tr>
-        <tr><td>“Park this runner”</td><td><code>amux runner park --current-dir</code> or an exact <code>--workdir</code></td></tr>
-        <tr><td>“Restart this runner”</td><td><code>amux runner restart --current-dir</code> after exact ownership checks</td></tr>
-        <tr><td>“Teardown this completed worktree”</td><td>Inspect native thread completion separately, then use the state-bound two-step <code>runner teardown</code> flow.</td></tr>
-        <tr><td>“Delegate/spawn work”</td><td>Use authenticated native Amp <code>create_thread</code> on the exact intended project/Orb or live runner/workdir.</td></tr>
-      </tbody>
-    </table>
+    <ul>
+      <li><strong>“Pin this runner”:</strong> <code>amux runner pin -w &lt;name&gt; -c [-i &lt;native-id&gt;]</code>.</li>
+      <li><strong>“Restore my workspace”:</strong> <code>amux launch --workspace &lt;name&gt;</code>.</li>
+      <li><strong>“List or diagnose runners”:</strong> <code>amux runner list --all</code> and <code>amux runner doctor --all</code>.</li>
+      <li><strong>“Park this runner”:</strong> <code>amux runner park --current-dir</code> or an exact <code>--workdir</code>.</li>
+      <li><strong>“Restart this runner”:</strong> <code>amux runner restart --current-dir</code> after exact ownership checks.</li>
+      <li><strong>“Teardown this completed worktree”:</strong> inspect native thread completion separately, then use the state-bound two-step <code>runner teardown</code> flow.</li>
+      <li><strong>“Delegate/spawn work”:</strong> use authenticated native Amp <code>create_thread</code> on the exact intended project/Orb or live runner/workdir.</li>
+    </ul>
 
     <h2>Current-directory and runner-ID workflows</h2>
     <pre><code>cd ~/Code/project-runner
@@ -92,7 +79,7 @@ amux runner pin -w project -c \
     <p><code>/amux health</code> performs read-only runner diagnostics. <code>/amux sprawl</code> fans independent work out through native Amp child threads only. <code>/amux sweep</code> is a protected, one-time, read-only historical inventory and requires separate exact owner authorization; loading the skill does not authorize it.</p>
 
     <h2>Legacy status and replacements</h2>
-    <p class="note warning"><strong>Removed, not merely deprecated:</strong> worker, generalized spawn/adoption, shelf, top-level worker teardown, group, worker-report, callback, deadline, and finish commands are no longer supported. Do not attempt old syntax or mutate historical stores.</p>
+    <p><strong>Removed, not merely deprecated:</strong> worker, generalized spawn/adoption, shelf, top-level worker teardown, group, worker-report, callback, deadline, and finish commands are no longer supported. Do not attempt old syntax or mutate historical stores.</p>
     <ul>
       <li>Use native Amp child creation and parent/reply routing instead of spawn, groups, reports, callbacks, and deadlines.</li>
       <li>Use native Amp archive state instead of shelves.</li>

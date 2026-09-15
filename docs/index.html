@@ -7,58 +7,29 @@
     <title>amux — machine-local Amp runners</title>
     <style>
       :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; background: #0c111b; color: #e8edf7; }
-      * { box-sizing: border-box; }
-      body { max-width: 880px; margin: 0 auto; padding: 3rem 1.5rem 5rem; line-height: 1.65; }
-      nav { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; margin-bottom: 3rem; }
-      h1 { font-size: clamp(3.5rem, 12vw, 6.5rem); line-height: .9; margin: 0; letter-spacing: -.065em; }
-      h2 { margin-top: 3.5rem; line-height: 1.2; }
-      h3 { margin-top: 2rem; }
+      body { max-width: 820px; margin: 0 auto; padding: 4rem 1.5rem; line-height: 1.6; }
+      h1 { font-size: clamp(3rem, 10vw, 6rem); margin: 0; letter-spacing: -.06em; }
+      h2 { margin-top: 3rem; }
       a { color: #8cc8ff; }
       code, pre { font-family: ui-monospace, monospace; }
-      code { color: #d7eaff; }
-      pre { background: #151d2b; border: 1px solid #26344a; border-radius: .75rem; padding: 1rem; overflow-x: auto; line-height: 1.5; }
-      table { width: 100%; border-collapse: collapse; }
-      th, td { padding: .8rem .65rem; border-bottom: 1px solid #26344a; text-align: left; vertical-align: top; }
-      th { color: #bdc8da; }
-      .eyebrow { color: #68d391; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
-      .lede { max-width: 720px; font-size: 1.35rem; color: #bdc8da; }
-      .note { border-left: .25rem solid #68d391; padding: .15rem 0 .15rem 1rem; }
-      .warning { border-left-color: #f6ad55; }
-      .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
-      .card { padding: 1rem; background: #111927; border: 1px solid #26344a; border-radius: .75rem; }
-      .card strong { display: block; margin-bottom: .25rem; }
-      .muted { color: #9eabc0; }
-      footer { margin-top: 4rem; padding-top: 1.5rem; border-top: 1px solid #26344a; color: #9eabc0; }
-      @media (max-width: 640px) {
-        body { padding: 2rem 1rem 4rem; }
-        nav { margin-bottom: 2rem; }
-        .grid { grid-template-columns: 1fr; }
-        table { display: block; overflow-x: auto; }
-      }
+      pre { background: #151d2b; border: 1px solid #26344a; border-radius: .75rem; padding: 1rem; overflow-x: auto; }
+      .lede { font-size: 1.3rem; color: #bdc8da; }
+      .note { border-left: .25rem solid #68d391; padding-left: 1rem; }
     </style>
   </head>
   <body>
-    <nav aria-label="Primary navigation">
-      <a href="#install">Install</a>
-      <a href="#quick-start">Quick start</a>
-      <a href="#commands">Commands</a>
-      <a href="#legacy">Legacy migration</a>
-      <a href="./skill/">/amux skill</a>
-      <a href="https://github.com/zainfathoni/amux">GitHub</a>
-    </nav>
-
-    <p class="eyebrow">Current release · v0.6.0</p>
     <h1>amux</h1>
     <p class="lede">Automatic machine-local Amp runners, bound to exact workdirs and launched through tmux.</p>
     <p class="note"><strong>Amux is active.</strong> It owns the local runner registry, launch, process lifecycle, diagnostics, and maintenance. Native Amp owns threads and task coordination.</p>
+    <p>Current release: <strong>v0.6.0</strong></p>
 
     <h2>What it does</h2>
-    <div class="grid">
-      <div class="card"><strong>Exact workdir bindings</strong>Each runner is identified by its canonical existing directory and grouped in a named tmux workspace.</div>
-      <div class="card"><strong>Stable native runner IDs</strong>Optionally pass <code>--runner-id</code> (<code>-i</code>) so every launch uses the same Amp runner ID.</div>
-      <div class="card"><strong>Safe local lifecycle</strong>List, launch, park, restart, diagnose, unpin, or tear down only runners whose exact ownership can be proved.</div>
-      <div class="card"><strong>Automatic recovery</strong>Launch all configured runners at login or boot, with separate scheduled Amp maintenance.</div>
-    </div>
+    <ul>
+      <li><strong>Exact workdir bindings:</strong> each runner is identified by its canonical existing directory and grouped in a named tmux workspace.</li>
+      <li><strong>Stable native runner IDs:</strong> optionally pass <code>--runner-id</code> (<code>-i</code>) so every launch uses the same Amp runner ID.</li>
+      <li><strong>Safe local lifecycle:</strong> list, launch, park, restart, diagnose, unpin, or tear down only runners whose exact ownership can be proved.</li>
+      <li><strong>Automatic recovery:</strong> launch all configured runners at login or boot, with separate scheduled Amp maintenance.</li>
+    </ul>
 
     <h2 id="install">Install or update</h2>
     <p>Requires the Amp CLI and tmux. The release installer supports Linux and macOS and installs to <code>~/.local/bin/amux</code>.</p>
@@ -72,7 +43,7 @@ amux update</code></pre>
 # Or use Homebrew
 brew install zainfathoni/tap/amux
 brew upgrade amux</code></pre>
-    <p class="muted"><code>amux update</code> intentionally refuses executables owned by Homebrew, mise, asdf, Nix, or a system package manager. Use that manager’s update command instead.</p>
+    <p><code>amux update</code> intentionally refuses executables owned by Homebrew, mise, asdf, Nix, or a system package manager. Use that manager’s update command instead.</p>
 
     <h2 id="quick-start">Pin this runner and launch it</h2>
     <pre><code>cd ~/Code/amux-runner
@@ -80,7 +51,7 @@ amux runner pin --workspace amux --current-dir --runner-id macbook-amux
 amux runner launch --current-dir
 amux runner doctor --current-dir</code></pre>
     <p>The shorter equivalents are <code>-w</code>, <code>-c</code>, and <code>-i</code>. After a command, <code>--current-dir</code> or <code>-c</code> means the command’s current directory—exactly <code>--workdir .</code>. It does not use the current tmux pane. The older <code>--current</code> selector keeps its tmux-based meaning.</p>
-    <p class="note warning"><strong>Compatibility caveat:</strong> before the command name, <code>-c &lt;path&gt;</code> still means global <code>--config-dir &lt;path&gt;</code>. Prefer the long spelling in scripts: <code>amux --config-dir ~/.config/amux-alt runner list --all</code>.</p>
+    <p class="note"><strong>Compatibility caveat:</strong> before the command name, <code>-c &lt;path&gt;</code> still means global <code>--config-dir &lt;path&gt;</code>. Prefer the long spelling in scripts: <code>amux --config-dir ~/.config/amux-alt runner list --all</code>.</p>
 
     <h3>Change a pinned native runner ID</h3>
     <pre><code>amux --dry-run runner pin -w amux -d ~/Code/amux-runner \
@@ -90,20 +61,17 @@ amux runner pin -w amux -d ~/Code/amux-runner \
     <p>Changing the ID of a stopped runner updates its binding but leaves it stopped. Repeating the same ID is a no-op. A live ID change requires <code>--restart</code>; Amux first verifies the exact owned tmux pane, Amp process, executable, arguments, and workdir, then replaces that local process. This is a safe local replacement, not a promise of uninterrupted execution for active remote threads.</p>
 
     <h2 id="commands">Runner lifecycle</h2>
-    <table>
-      <thead><tr><th>Command</th><th>Behavior</th></tr></thead>
-      <tbody>
-        <tr><td><code>list</code></td><td>Show configured runner bindings. Add <code>--all</code>, a workspace, or an exact workdir.</td></tr>
-        <tr><td><code>launch</code></td><td>Start absent configured runners. Bare <code>amux</code> and <code>amux launch --all</code> launch every row.</td></tr>
-        <tr><td><code>park</code></td><td>Stop an exact verified local runner while preserving its registry binding and remote thread state.</td></tr>
-        <tr><td><code>restart</code></td><td>Replace a running verified local process in place without changing its binding.</td></tr>
-        <tr><td><code>doctor</code></td><td>Diagnose workdir, tmux, process, runner-ID, and maintenance state without mutation.</td></tr>
-        <tr><td><code>unpin</code></td><td>Remove one exact binding only after proving its local runner is absent. It never stops a process.</td></tr>
-        <tr><td><code>teardown</code></td><td>Stop one exact runner, remove its clean attached secondary Git worktree, and unpin it. The branch is preserved.</td></tr>
-        <tr><td><code>remove</code></td><td><strong>Unavailable by design:</strong> retains the row and fails closed because authoritative process/catalog absence cannot yet be proved.</td></tr>
-        <tr><td><code>reconcile</code></td><td>Keeps present rows unchanged. A missing workdir is retained and rejected rather than interpreted as permission to delete.</td></tr>
-      </tbody>
-    </table>
+    <ul>
+      <li><strong><code>list</code>:</strong> show configured runner bindings. Add <code>--all</code>, a workspace, or an exact workdir.</li>
+      <li><strong><code>launch</code>:</strong> start absent configured runners. Bare <code>amux</code> and <code>amux launch --all</code> launch every row.</li>
+      <li><strong><code>park</code>:</strong> stop an exact verified local runner while preserving its registry binding and remote thread state.</li>
+      <li><strong><code>restart</code>:</strong> replace a running verified local process in place without changing its binding.</li>
+      <li><strong><code>doctor</code>:</strong> diagnose workdir, tmux, process, runner-ID, and maintenance state without mutation.</li>
+      <li><strong><code>unpin</code>:</strong> remove one exact binding only after proving its local runner is absent. It never stops a process.</li>
+      <li><strong><code>teardown</code>:</strong> stop one exact runner, remove its clean attached secondary Git worktree, and unpin it. The branch is preserved.</li>
+      <li><strong><code>remove</code>:</strong> unavailable by design. It retains the row and fails closed because authoritative process/catalog absence cannot yet be proved.</li>
+      <li><strong><code>reconcile</code>:</strong> keep present rows unchanged. A missing workdir is retained and rejected rather than interpreted as permission to delete.</li>
+    </ul>
     <p>Top-level <code>list</code>, <code>launch</code>, <code>park</code>, <code>restart</code>, <code>remove</code>, <code>doctor</code>, and <code>reconcile</code> are runner-only aliases. Use <code>--json</code> for a versioned result document and <code>--dry-run</code> to validate and plan without mutation.</p>
 
     <h3>Teardown a completed secondary worktree</h3>
@@ -121,23 +89,18 @@ amux runner maintenance install --update-owner external</code></pre>
 
     <h2 id="legacy">Legacy migration: deprecated, then removed</h2>
     <p>The old coordination model is not merely deprecated: its commands have been removed. Current Amux commands do not create, adopt, migrate, drain, rewrite, or delete its historical state.</p>
-    <table>
-      <thead><tr><th>Legacy behavior</th><th>Status</th><th>Replacement</th></tr></thead>
-      <tbody>
-        <tr><td>Workers and generalized spawn/adoption</td><td>Removed</td><td>Create native Amp threads on the exact intended Orb or live runner/workdir.</td></tr>
-        <tr><td>Groups, reports, callbacks, and deadlines</td><td>Removed</td><td>Use native parent/reply routing, authenticated messages, and waiting.</td></tr>
-        <tr><td>Shelve and unshelve</td><td>Removed</td><td>Use native Amp archive state.</td></tr>
-        <tr><td>Worker teardown and finish authorization</td><td>Removed</td><td>Manage native thread completion/archive separately; use <code>runner teardown</code> only for the local runner and worktree.</td></tr>
-      </tbody>
-    </table>
+    <ul>
+      <li><strong>Workers and generalized spawn/adoption — removed:</strong> create native Amp threads on the exact intended Orb or live runner/workdir.</li>
+      <li><strong>Groups, reports, callbacks, and deadlines — removed:</strong> use native parent/reply routing, authenticated messages, and waiting.</li>
+      <li><strong>Shelve and unshelve — removed:</strong> use native Amp archive state.</li>
+      <li><strong>Worker teardown and finish authorization — removed:</strong> manage native thread completion/archive separately; use <code>runner teardown</code> only for the local runner and worktree.</li>
+    </ul>
     <p>Historical worker, shelf, group, report, callback, operation, and spawn-assignment files are inert evidence. Leave them untouched. The separate <code>/amux-tycho</code> skill uses its own explicit-only receipt bridge; it is not the removed worker-report route.</p>
 
     <h2>Install the skill</h2>
     <pre><code>npx skills add zainfathoni/amux --skill amux --global</code></pre>
     <p>The <code>/amux</code> skill operates the retained runner host and sends new delegated work through native Amp. <a href="./skill/">Read the skill guide →</a></p>
 
-    <footer>
-      <a href="https://github.com/zainfathoni/amux">Source and full README</a> · <a href="./learn/amux-async-reporting/">Archived lesson: the former reporting design</a>
-    </footer>
+    <p><a href="https://github.com/zainfathoni/amux">Source and full README</a> · <a href="./learn/amux-async-reporting/">Archived lesson: the former reporting design</a></p>
   </body>
 </html>
