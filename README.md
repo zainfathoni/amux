@@ -1,25 +1,55 @@
 # amux
 
-`amux` is the thin machine-local runner and tmux host layer for [Amp](https://ampcode.com/). Native Amp owns new task creation and coordination; Amux owns automatic machine-local runners bound to exact workdirs.
+`amux` is the declarative machine-local configuration and activation layer for [native Amp runners](https://ampcode.com/docs/cli/runners). Amp owns multi-directory serving, dynamic directory additions, remote work, and automatic updates. Amux records how each runner should start and installs its systemd user service or launchd agent.
 
-Amux is not deprecated or archived. The active product surface is intentionally small:
+Prefer one native runner profile per machine. A profile can discover Git repositories beneath a code root while explicitly serving unrelated non-Git directories such as an Obsidian vault. Define a second profile only when you need a separately identified or isolated native runner.
 
-- a machine-local runner registry and exact canonical-workdir bindings;
-- runner pin, list, launch, doctor, park, restart, teardown, remove, and fail-closed reconcile;
-- automatic `amux launch --all` at graphical login or boot;
-- tmux and `amp --no-tui` process launch;
-- install, update, maintenance, and diagnostics; and
-- systemd/launchd activation and process-group retention.
+## Native runner profiles
+
+Create `~/.config/amux/native-runners.json`:
+
+```json
+{
+  "schema_version": 1,
+  "runners": [
+    {
+      "name": "main",
+      "runner_id": "laptop-main",
+      "startup_directory": "/home/me/Code",
+      "discover_dirs": true,
+      "dirs": [
+        "/home/me/Obsidian/Vault",
+        "/home/me/.dotfiles"
+      ],
+      "remote_control_terminal": true
+    }
+  ]
+}
+```
+
+Preview, install, and inspect the services:
+
+```sh
+amux --dry-run runner service install
+amux runner service install
+amux runner service doctor
+```
+
+On Linux, Amux installs one `com.zainfathoni.amux.runner.<name>.service` systemd user unit per profile. On macOS, it installs the equivalent LaunchAgent. Each artifact executes the resolved Amp binary directly with `--no-tui`, the stable runner ID, discovery and explicit-directory flags, and optional remote terminal access. Amux records artifact digests and refuses to replace or remove unrecognized files.
+
+Dynamic `amp runner dirs add|list|remove` remains available. Amp persists those additions against the profile's stable startup directory; keep declarative machine-critical paths in `native-runners.json` and use dynamic additions for local, temporary choices.
+
+The previous per-workdir registry, tmux lifecycle, and scheduled Amp updater remain available during migration, but they are no longer the destination architecture. Native Amp updates a running runner itself.
 
 The former worker, spawn/adoption, shelf, group, report, callback, deadline, and finish-authorization commands have been removed. Their historical files are inert compatibility evidence: current commands neither migrate nor mutate them. The protected one-time #360 inventory remains read-only under its existing owner gate. `/amux-tycho` is a separate receipt bridge and is unaffected by removal of worker reports.
 
-See [ADR 0010](docs/adr/0010-add-machine-local-runner-teardown.md), [ADR 0009](docs/adr/0009-remove-active-legacy-coordination-surfaces.md), [ADR 0008](docs/adr/0008-retain-machine-local-runner-host-and-drain-coordination.md), and the [disposition ledger](docs/staged-drain-disposition.md).
+See [ADR 0011](docs/adr/0011-consolidate-on-native-multi-directory-runners.md), which supersedes the retained-host architecture in [ADR 0008](docs/adr/0008-retain-machine-local-runner-host-and-drain-coordination.md). [ADR 0010](docs/adr/0010-add-machine-local-runner-teardown.md), [ADR 0009](docs/adr/0009-remove-active-legacy-coordination-surfaces.md), and the [disposition ledger](docs/staged-drain-disposition.md) remain migration context.
 
 Website: [amux.zainf.dev](https://amux.zainf.dev) · Skill guide: [amux.zainf.dev/skill/](https://amux.zainf.dev/skill/)
 
 ## Install
 
-Requirements: Amp CLI and tmux. Building from source also requires the Go version in `go.mod`.
+Requirements: Amp CLI. Legacy per-workdir lifecycle additionally requires tmux. Building from source requires the Go version in `go.mod`.
 
 Install the latest Linux or macOS release at `~/.local/bin/amux`:
 
@@ -30,17 +60,10 @@ curl -fsSL https://amux.zainf.dev/install.sh | sh
 For a pinned published release:
 
 ```sh
-curl -fsSL https://amux.zainf.dev/install.sh | AMUX_VERSION=v0.2.1 sh
+curl -fsSL https://amux.zainf.dev/install.sh | AMUX_VERSION=v0.6.0 sh
 ```
 
-Homebrew users can instead run:
-
-```sh
-brew install zainfathoni/tap/amux
-brew upgrade amux
-```
-
-Homebrew owns that installation. `amux update` deliberately refuses Homebrew, mise, asdf, Nix, and system-package paths.
+Homebrew users can instead run `brew install zainfathoni/tap/amux`. Homebrew owns that installation; `amux update` deliberately refuses Homebrew, mise, asdf, Nix, and system-package paths.
 
 To build from source:
 
@@ -63,27 +86,20 @@ amux update
 npx skills add zainfathoni/amux --skill amux --global
 ```
 
-Experimental provider skills are explicit-only and installed separately:
-
-```sh
-npx skills add zainfathoni/amux --skill amux-claude --global
-npx skills add zainfathoni/amux --skill amux-pi --global
-npx skills add zainfathoni/amux --skill amux-tycho --global
-```
-
-For a clean local `main` checkout, the installer can link bundled skills without updating that checkout:
+Experimental provider skills remain explicit-only and separately installed. For a clean local `main` checkout, the installer can link bundled skills without updating that checkout:
 
 ```sh
 AMUX_REPO="$HOME/Code/GitHub/zainfathoni/amux"
 git -C "$AMUX_REPO" pull --ff-only origin main
-curl -fsSL https://amux.zainf.dev/install.sh | AMUX_SKILLS_SOURCE="$AMUX_REPO" sh
+curl -fsSL https://amux.zainf.dev/install.sh |
+  AMUX_SKILLS_SOURCE="$AMUX_REPO" sh
 ```
 
 `/amux` covers retained runner operations and routes requests for new delegated work to native Amp child threads. It never creates or adopts Amux workers or enrolls native work in legacy coordination state.
 
 `/amux-tycho` is a separate, unstable receipt-based report bridge. Its consume/acknowledge protocol is not the removed `amux report` worker-group mechanism. Keep it unchanged until issue #328's authenticated same-turn direct-return gate passes.
 
-## Quick start
+## Legacy per-workdir lifecycle
 
 Pin and launch a runner bound to an existing workdir:
 
@@ -133,6 +149,7 @@ amux list [--workspace <name>|--workdir <path>|--current-dir|--current|--all]
 amux launch [--workspace <name>|--workdir <path>|--current-dir|--current|--all]
 amux park|restart|remove|doctor|reconcile [runner selectors]
 
+amux runner service install|remove|doctor
 amux runner pin --workspace <name> (--workdir <existing-directory>|--current-dir) [--runner-id <id>] [--restart]
 amux runner teardown --workdir <secondary-worktree> --confirm-plan <sha256>
 amux runner list|launch|park|restart|remove|doctor|reconcile [runner selectors]
@@ -147,7 +164,7 @@ amux migrate-config
 amux update
 ```
 
-Top-level lifecycle routes are runner-only aliases. Bare `amux` is equivalent to automatic runner launch across all configured rows. Mutating machine-wide routes other than launch require explicit `--all`.
+Runner service commands operate every profile in `native-runners.json`; service installation is machine-wide and protected by Amux's mutation lock. The remaining top-level lifecycle routes are legacy per-workdir aliases. Bare `amux` retains its legacy behavior of launching configured `runners.tsv` rows during migration.
 
 Runner pin is active admission. `runner unpin` removes only the exact selected registry binding after proving its local tmux runner is absent; it never stops a process. `runner teardown` is the explicit worktree-owning retirement route described above. `runner remove` and missing-workdir `runner reconcile` fail closed pending authoritative process/catalog absence evidence. Use `runner park` to stop an exact owned process while retaining its row.
 
@@ -157,22 +174,24 @@ Removed `worker`, `spawn`, `shelve`, `unshelve`, top-level `teardown`, `group`, 
 
 ## Configuration and safety
 
-Active configuration is directory-based and contains `runners.tsv` under `~/.config/amux` by default. Named rows persist their optional native Amp runner ID in the versioned registry. Select another directory with `--config-dir` (`-c`) or `AMUX_CONFIG_DIR`.
+Active configuration is directory-based. `native-runners.json` declares native multi-directory profiles and `runner-services.json` records installed artifact ownership under `~/.config/amux` by default. Legacy `runners.tsv` rows remain readable during migration. Select another directory with `--config-dir` (`-c`) or `AMUX_CONFIG_DIR`.
 
 Historical files such as `workers.tsv`, `shelves.tsv`, `groups.tsv`, `reports.json`, operation records, and spawn assignments may still exist. They are inert: active Amux commands do not enroll, drain, migrate, rewrite, or delete them. Do not edit or delete them as part of runner operation. The separately owner-gated #360 inventory may inspect them read-only.
 
-`--json` (`-j`) emits one versioned result envelope. `--dry-run` (`-n`) validates and plans without mutation. Exit `0` means no failure, exit `1` means a runtime failure after mutation may have begun, and exit `2` means preflight rejection before mutation. Mutations and scheduled maintenance share one bounded machine lock.
+`--json` (`-j`) emits one versioned result envelope. `--dry-run` (`-n`) validates and plans without mutation. Exit `0` means no failure, exit `1` means a runtime failure after mutation may have begun, and exit `2` means preflight rejection before mutation. Service and legacy mutations share one bounded machine lock.
 
-## Automatic launch and maintenance
+## Automatic launch
 
-At graphical login or boot, machine configuration runs `amux launch --all`. Amux reads the registry and launches the tmux/Amp process group. The OS service manager activates Amux; it does not replace Amux with direct runner supervision.
+`amux runner service install` writes and activates one OS service per native profile. systemd or launchd then executes Amp directly at login or boot; Amux does not stay resident and does not supervise the process.
 
-Verified deployment patterns are:
+The generated process arguments come entirely from the validated profile:
 
-- systemd user service: `Type=oneshot` and `RemainAfterExit=yes`;
-- macOS RunAtLoad LaunchAgent: `AbandonProcessGroup=true`.
+- `--runner-id` from `runner_id`;
+- `--discover-dirs` when `discover_dirs` is true;
+- repeated `--dir` arguments from `dirs`; and
+- `--remote-control-terminal` when enabled.
 
-Runner maintenance is a separate short-lived scheduled Amux operation. It checks every six hours with bounded jitter, updates Amp according to declared ownership, and restarts verified running runners only when the executable changed.
+Native Amp owns automatic runner updates and idle restarts. The legacy `runner maintenance` scheduler remains available only for old per-workdir tmux runners during migration.
 
 ## Shell completions
 

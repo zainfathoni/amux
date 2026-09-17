@@ -56,7 +56,7 @@ func TestHelpAndCompletionsExposeOnlyRetainedHostCommands(t *testing.T) {
 					t.Errorf("%s completion is missing retained command %q", shell, retained)
 				}
 			}
-			for _, retained := range []string{"maintenance", "install", "remove", "run", "teardown", "confirm-plan"} {
+			for _, retained := range []string{"maintenance", "service", "install", "remove", "doctor", "run", "teardown", "confirm-plan"} {
 				if !strings.Contains(output, retained) {
 					t.Errorf("%s completion is missing functional retained token %q", shell, retained)
 				}
@@ -71,8 +71,8 @@ func TestHelpAndCompletionsExposeOnlyRetainedHostCommands(t *testing.T) {
 					t.Error("zsh completion does not implement nested command and flag completion")
 				}
 			case "fish":
-				if !strings.Contains(output, "not __fish_seen_subcommand_from maintenance list pin unpin teardown launch park restart remove doctor reconcile") || strings.Contains(output, "not __fish_seen_subcommand_from 'maintenance list") || !strings.Contains(output, "__fish_seen_subcommand_from maintenance") || !strings.Contains(output, "__fish_seen_subcommand_from list launch park restart remove doctor reconcile pin; and not __fish_seen_subcommand_from maintenance") || !strings.Contains(output, "-l workdir -s d -r") || !strings.Contains(output, "-l workspace -s w -r") || !strings.Contains(output, "-l confirm-plan -r") || !strings.Contains(output, "-l config-dir -r") || !strings.Contains(output, "-l terminal-launcher -r") || !strings.Contains(output, "-l update-owner -r") {
-					t.Error("fish completion does not scope nested maintenance and runner flags")
+				if !strings.Contains(output, "not __fish_seen_subcommand_from maintenance service list pin unpin teardown launch park restart remove doctor reconcile") || strings.Contains(output, "not __fish_seen_subcommand_from 'maintenance service list") || !strings.Contains(output, "__fish_seen_subcommand_from maintenance") || !strings.Contains(output, "__fish_seen_subcommand_from service") || !strings.Contains(output, "__fish_seen_subcommand_from list launch park restart remove doctor reconcile pin; and not __fish_seen_subcommand_from maintenance service") || !strings.Contains(output, "-l workdir -s d -r") || !strings.Contains(output, "-l workspace -s w -r") || !strings.Contains(output, "-l confirm-plan -r") || !strings.Contains(output, "-l config-dir -r") || !strings.Contains(output, "-l terminal-launcher -r") || !strings.Contains(output, "-l update-owner -r") {
+					t.Error("fish completion does not scope nested maintenance, service, and runner flags")
 				}
 			}
 		})
@@ -103,6 +103,8 @@ func TestBashCompletionReturnsNestedRunnerCandidates(t *testing.T) {
 		{name: "maintenance", words: `amux runner maintenance ""`, index: 3, candidate: "install"},
 		{name: "maintenance install flags", words: `amux runner maintenance install ""`, index: 4, candidate: "--update-owner"},
 		{name: "maintenance remove has no runner flags", words: `amux runner maintenance remove ""`, index: 4, excluded: "--all"},
+		{name: "service", words: `amux runner service ""`, index: 3, candidate: "doctor"},
+		{name: "service install has no runner flags", words: `amux runner service install ""`, index: 4, excluded: "--all"},
 		{name: "teardown exact flags", words: `amux runner teardown ""`, index: 3, candidate: "--confirm-plan", excluded: "--all"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -141,6 +143,8 @@ func TestZshCompletionReturnsNestedRunnerCandidates(t *testing.T) {
 		{name: "maintenance after valued global flag", words: `amux --config-dir /tmp runner maintenance ''`, current: 6, candidate: "install"},
 		{name: "maintenance install flags", words: `amux runner maintenance install ''`, current: 5, candidate: "--update-owner"},
 		{name: "maintenance remove has no runner flags", words: `amux runner maintenance remove ''`, current: 5, excluded: "--all"},
+		{name: "service", words: `amux runner service ''`, current: 4, candidate: "doctor"},
+		{name: "service install has no runner flags", words: `amux runner service install ''`, current: 5, excluded: "--all"},
 		{name: "runner pin excludes all", words: `amux runner pin ''`, current: 4, excluded: "--all"},
 		{name: "runner teardown flags", words: `amux runner teardown ''`, current: 4, candidate: "--confirm-plan", excluded: "--all"},
 		{name: "runner list includes all", words: `amux runner list ''`, current: 4, candidate: "--all"},
@@ -199,6 +203,8 @@ func TestFishCompletionDoesNotLeakRunnerFlagsIntoMaintenance(t *testing.T) {
 	}{
 		{command: "amux runner maintenance install --", candidate: "--update-owner"},
 		{command: "amux runner maintenance remove --", excluded: "--all"},
+		{command: "amux runner service ", candidate: "doctor"},
+		{command: "amux runner service install --", excluded: "--all"},
 		{command: "amux runner pin --", excluded: "--all"},
 	} {
 		script := completion.String() + "\ncomplete -C " + shellSingleQuote(test.command) + "\n"

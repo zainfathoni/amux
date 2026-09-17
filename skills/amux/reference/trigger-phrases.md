@@ -2,6 +2,10 @@
 
 | Trigger phrase | Route | Contract |
 | --- | --- | --- |
+| `Serve my code and vault` | Configure one `native-runners.json` profile | Prefer one runner; combine discovery with explicit unrelated directories. |
+| `Start this runner at login` | `amux runner service install` | Install and activate exact owned systemd/launchd artifacts. |
+| `Check runner services` | `amux runner service doctor` | Read-only configuration, artifact, and active-state verification. |
+| `Remove runner services` | Dry-run, then `amux runner service remove` | Stop and remove only exact Amux-owned artifacts. |
 | `Pin it` | `amux runner pin --workspace <name> --workdir <existing-directory> [--runner-id <id>]` or `--current [--runner-id <id>]` | Unqualified pin requests select the retained runner route. |
 | `Pin this runner` | `amux runner pin --workspace <name> --workdir <existing-directory> [--runner-id <id>]` or `--current [--runner-id <id>]` | Retained runner admission. |
 | `List runners` | `amux runner list --all` or scoped selector | Read-only runner registry/runtime view. |
@@ -16,4 +20,4 @@
 | `/amux sprawl` | [`workflows.md#sprawl-independent-issue-threads`](workflows.md#sprawl-independent-issue-threads) | Native child fan-out only. |
 | `/amux sweep` | [`workflows.md#sweep-worktree-inventory`](workflows.md#sweep-worktree-inventory) | Protected #360 read-only route; separate owner authorization required. |
 
-Former worker, shelf, worker-teardown, group, report, callback, deadline, and finish trigger phrases have no Amux route. Unqualified teardown must resolve to the runner/worktree meaning before using the new runner-scoped route; top-level `amux teardown` remains a tombstone.
+Pin, workspace, park, restart, and teardown triggers operate the legacy per-workdir lifecycle during migration. Do not create a legacy binding when one native multi-directory profile suffices. Former worker, shelf, worker-teardown, group, report, callback, deadline, and finish trigger phrases have no Amux route. Unqualified teardown must resolve to the runner/worktree meaning before using the runner-scoped route; top-level `amux teardown` remains a tombstone.

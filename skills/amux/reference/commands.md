@@ -3,6 +3,10 @@
 Long selectors are canonical: `--workspace`, `--workdir`, `--json`, and `--dry-run`.
 
 ```sh
+# Native multi-directory runner profiles
+amux --dry-run runner service install
+amux runner service install|remove|doctor
+
 # Runner-only top-level aliases
 amux list|launch|park|restart|remove|doctor|reconcile [runner selectors]
 
@@ -14,7 +18,7 @@ amux runner unpin --workdir <path>|--current
 amux --json --dry-run runner teardown --workdir <secondary-worktree>
 amux --json runner teardown --workdir <secondary-worktree> --confirm-plan <sha256>
 
-# Workspace, maintenance, installation
+# Legacy workspace, maintenance, installation
 amux workspace list
 amux workspaces
 amux runner maintenance install --update-owner <self|external>
@@ -24,6 +28,12 @@ amux install doctor
 amux migrate-config
 amux update
 ```
+
+`native-runners.json` is the source of truth for native profiles. Each profile declares a name, stable native `runner_id`, existing `startup_directory`, optional `discover_dirs`, explicit existing `dirs`, and optional `remote_control_terminal`. Prefer one profile per machine. Use discovery for nearby Git checkouts and explicit directories for unrelated or non-Git roots such as an Obsidian vault.
+
+`runner service install` validates every directory, resolves the exact Amp executable, generates an owned systemd user service or launchd agent, and activates it. The service executes Amp directly; Amux is not resident. `runner service doctor` compares the current profile, recorded artifact digest, and active service state. `runner service remove` stops and removes only exact recorded artifacts. Use `--dry-run`; unrecognized or modified artifacts fail closed.
+
+The commands below this point operate the legacy per-workdir registry and tmux lifecycle. They remain available during migration, but should not be used for new runner topology when one native profile suffices.
 
 Bare `amux` and no-selector `launch` launch all configured runners. Other machine-wide mutations require `--all`. `workspace list` and `workspaces` report runner workspaces only.
 
@@ -35,10 +45,10 @@ Runner teardown is exact and machine-local: stop the positively identified runne
 
 The former `worker`, `spawn`, `shelve`, `unshelve`, top-level `teardown`, `group`, `report`, and `callback` routes are removed and fail before effects. Historical coordination stores are inert. The new runner-scoped teardown does not revive worker teardown. The `report` tombstone is not `/amux-tycho`; that explicit-only skill uses a separate receipt store and protocol.
 
-`--config-dir <path>` and `AMUX_CONFIG_DIR` select the directory containing active `runners.tsv`. Historical worker/coordination files in that directory are not part of active runner operation and must remain untouched.
+`--config-dir <path>` and `AMUX_CONFIG_DIR` select the directory containing active `native-runners.json`, service ownership metadata, and legacy `runners.tsv`. Historical worker/coordination files in that directory are not part of active runner operation and must remain untouched.
 
 `--runner-id` is optional native Amp launch configuration persisted with the canonical-workdir row. It is not an Amux selector: lifecycle commands continue selecting runners by workdir or workspace.
 
 `--json` emits one v1 envelope. `--dry-run` puts prospective changes under `planned`. Exit `0` means no failures, exit `1` means runtime failure after mutation may have begun, and exit `2` means preflight rejection before mutation. Mutations and scheduled maintenance share one bounded machine lock.
 
-At login/boot, systemd or launchd runs `amux launch --all`. Verified patterns are systemd `Type=oneshot` plus `RemainAfterExit=yes`, and a RunAtLoad LaunchAgent with `AbandonProcessGroup=true`. The OS activates Amux; it does not directly supervise replacement Amp runners.
+For native profiles, systemd or launchd runs the resolved Amp executable directly and keeps it alive. Native Amp owns automatic updates and idle restarts. The old `amux launch --all` activation and scheduled maintenance model applies only to legacy per-workdir runners during migration.

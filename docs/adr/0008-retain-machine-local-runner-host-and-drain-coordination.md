@@ -1,11 +1,14 @@
 ---
-status: accepted
+status: superseded
 date: 2026-08-30
 partially-supersedes: 0007
 partially-superseded-by: 0009
+superseded-by: 0011
 ---
 
 # Retain the machine-local runner host and drain legacy coordination
+
+> **Superseded by [ADR 0011](0011-consolidate-on-native-multi-directory-runners.md).** Native Amp now owns multi-directory runner execution and automatic updates. Amux retains declarative runner profiles and systemd/launchd service generation; the per-workdir registry and tmux lifecycle below remain transitional compatibility behavior, not the destination architecture.
 
 ## Decision
 
