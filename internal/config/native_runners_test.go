@@ -29,9 +29,21 @@ func TestLoadNativeRunnersCanonicalizesMixedRootsDeterministically(t *testing.T)
 		t.Fatal(err)
 	}
 	profile := got.Runners[0]
-	wantDirectories := []string{vault, dotfiles}
+	wantCode, err := filepath.EvalSymlinks(code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantVault, err := filepath.EvalSymlinks(vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDotfiles, err := filepath.EvalSymlinks(dotfiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDirectories := []string{wantVault, wantDotfiles}
 	sort.Strings(wantDirectories)
-	if profile.StartupDirectory != code || !slices.Equal(profile.Directories, wantDirectories) {
+	if profile.StartupDirectory != wantCode || !slices.Equal(profile.Directories, wantDirectories) {
 		t.Fatalf("profile = %+v", profile)
 	}
 }

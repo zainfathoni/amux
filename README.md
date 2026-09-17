@@ -1,6 +1,6 @@
 # amux
 
-`amux` is the declarative machine-local configuration and activation layer for [native Amp runners](https://ampcode.com/docs/cli/runners). Amp owns multi-directory serving, dynamic directory additions, remote work, and automatic updates. Amux records how each runner should start and installs its systemd user service or launchd agent.
+`amux` is the declarative machine-local configuration and activation layer for [native Amp runners](https://ampcode.com/docs/cli/runners). Amp owns multi-directory serving, dynamic directory additions, remote work, and its native update behavior. Amux records how each runner should start and installs its systemd user service or launchd agent.
 
 Prefer one native runner profile per machine. A profile can discover Git repositories beneath a code root while explicitly serving unrelated non-Git directories such as an Obsidian vault. Define a second profile only when you need a separately identified or isolated native runner.
 
@@ -182,7 +182,7 @@ Historical files such as `workers.tsv`, `shelves.tsv`, `groups.tsv`, `reports.js
 
 ## Automatic launch
 
-`amux runner service install` writes and activates one OS service per native profile. systemd or launchd then executes Amp directly at login or boot; Amux does not stay resident and does not supervise the process.
+`amux runner service install` writes and activates one OS service per native profile. launchd starts it at macOS GUI login. A systemd user service starts with the user's service manager; starting it without login requires systemd lingering configured outside Amux. Amux does not stay resident or supervise the process.
 
 The generated process arguments come entirely from the validated profile:
 
@@ -191,7 +191,7 @@ The generated process arguments come entirely from the validated profile:
 - repeated `--dir` arguments from `dirs`; and
 - `--remote-control-terminal` when enabled.
 
-Native Amp owns automatic runner updates and idle restarts. The legacy `runner maintenance` scheduler remains available only for old per-workdir tmux runners during migration.
+Native Amp owns runner update and idle-restart behavior. Automatic update availability still depends on the Amp installation and settings—for example, package-manager installations or disabled updates remain externally managed. The legacy `runner maintenance` scheduler remains available only for old per-workdir tmux runners during migration.
 
 ## Shell completions
 

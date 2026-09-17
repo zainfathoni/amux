@@ -592,7 +592,7 @@ func TestNativeRunnerConfigurationDirectionIsUnambiguous(t *testing.T) {
 			"Historical worker/coordination files are inert",
 		}},
 		"ledger": {ledger, []string{
-			"Native Amp owns task coordination, multi-directory runner execution, and automatic updates",
+			"Native Amp owns task coordination, multi-directory runner execution, and native update behavior",
 			"`native-runners.json`",
 			"`amux runner service install|remove|doctor`",
 			"executes the resolved Amp binary directly",

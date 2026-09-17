@@ -108,7 +108,7 @@ amux runner pin -w project -c \
           <p class="note">Runner-ID replacement verifies the exact owned tmux pane, Amp process, executable, arguments, and canonical workdir before mutation. If proof is incomplete, Amux rejects rather than guessing.</p>
 
           <h2 id="activation">Activation and maintenance</h2>
-          <p><code>amux runner service install</code> generates one service per profile. systemd or launchd executes Amp directly and keeps it running; Amux is not a resident supervisor. Native Amp owns automatic updates and idle restart.</p>
+          <p><code>amux runner service install</code> generates one service per profile. systemd or launchd executes Amp directly and keeps it running; Amux is not a resident supervisor. launchd starts at GUI login. Starting a systemd user service without login requires lingering configured outside Amux. Amp owns update and idle-restart behavior, subject to its installation and settings.</p>
           <p>The old per-workdir registry, tmux lifecycle, and scheduled Amux maintenance remain available only during migration. Do not use them for new profiles.</p>
 
           <h2 id="workflows">Skill-only workflows</h2>

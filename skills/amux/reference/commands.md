@@ -51,4 +51,4 @@ The former `worker`, `spawn`, `shelve`, `unshelve`, top-level `teardown`, `group
 
 `--json` emits one v1 envelope. `--dry-run` puts prospective changes under `planned`. Exit `0` means no failures, exit `1` means runtime failure after mutation may have begun, and exit `2` means preflight rejection before mutation. Mutations and scheduled maintenance share one bounded machine lock.
 
-For native profiles, systemd or launchd runs the resolved Amp executable directly and keeps it alive. Native Amp owns automatic updates and idle restarts. The old `amux launch --all` activation and scheduled maintenance model applies only to legacy per-workdir runners during migration.
+For native profiles, systemd or launchd runs the resolved Amp executable directly and keeps it alive. launchd starts at GUI login; a systemd user service starts with the user's service manager and requires externally configured lingering to start without login. Native Amp owns update and idle-restart behavior, subject to its installation and settings. The old `amux launch --all` activation and scheduled maintenance model applies only to legacy per-workdir runners during migration.

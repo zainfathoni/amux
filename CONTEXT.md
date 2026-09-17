@@ -24,7 +24,7 @@ _Avoid_: Runner identity
 
 **Discovered directory** — Git checkout selected by native Amp beneath a Runner's startup directory when directory discovery is enabled.
 
-**Runner service** — A systemd user service or launchd agent generated from one Runner profile that executes native Amp directly at login or boot.
+**Runner service** — A systemd user service or launchd agent generated from one Runner profile that executes native Amp directly when that user's service manager starts it.
 _Avoid_: Amux supervisor
 
 **Legacy runner workdir** — Historical canonical directory identity used by the per-workdir Amux registry and tmux lifecycle.

@@ -76,12 +76,34 @@ func nativeRunnerArgs(profile config.NativeRunnerProfile) []string {
 	return args
 }
 
-func systemdRunnerServiceArtifact(ampPath string, profile config.NativeRunnerProfile) string {
+func systemdRunnerServiceArtifact(ampPath string, profile config.NativeRunnerProfile) (string, error) {
 	arguments := []string{systemdQuote(ampPath)}
 	for _, argument := range nativeRunnerArgs(profile) {
 		arguments = append(arguments, systemdQuote(argument))
 	}
-	return "[Unit]\nDescription=Amp native runner " + profile.Name + "\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory=" + systemdQuote(profile.StartupDirectory) + "\nExecStart=" + strings.Join(arguments, " ") + "\nRestart=always\nRestartSec=5s\n\n[Install]\nWantedBy=default.target\n"
+	workingDirectory, err := systemdPath(profile.StartupDirectory)
+	if err != nil {
+		return "", fmt.Errorf("runner profile %s startup_directory: %w", profile.Name, err)
+	}
+	return "[Unit]\nDescription=Amp native runner " + profile.Name + "\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory=" + workingDirectory + "\nExecStart=" + strings.Join(arguments, " ") + "\nRestart=always\nRestartSec=5s\n\n[Install]\nWantedBy=default.target\n", nil
+}
+
+func systemdPath(path string) (string, error) {
+	if strings.HasSuffix(path, " ") || strings.HasSuffix(path, `\`) {
+		return "", errors.New("systemd paths cannot end with a space or backslash")
+	}
+	var escaped strings.Builder
+	for _, r := range path {
+		switch {
+		case r < 0x20 || r == 0x7f:
+			return "", errors.New("systemd paths cannot contain control characters")
+		case r == '%':
+			escaped.WriteString("%%")
+		default:
+			escaped.WriteRune(r)
+		}
+	}
+	return escaped.String(), nil
 }
 
 func launchdRunnerServiceArtifact(ampPath string, profile config.NativeRunnerProfile) string {
@@ -112,7 +134,11 @@ func runnerServiceArtifacts(ampPath string, profiles []config.NativeRunnerProfil
 		}
 		for _, profile := range profiles {
 			path := filepath.Join(root, "systemd", "user", runnerServiceLabelPrefix+profile.Name+".service")
-			artifacts[path] = []byte(systemdRunnerServiceArtifact(ampPath, profile))
+			artifact, err := systemdRunnerServiceArtifact(ampPath, profile)
+			if err != nil {
+				return nil, err
+			}
+			artifacts[path] = []byte(artifact)
 		}
 		return artifacts, nil
 	}
@@ -225,6 +251,43 @@ func verifyOwnedRunnerServiceArtifacts(metadata runnerServiceMetadata) error {
 	return nil
 }
 
+func runnerServiceOwnedArtifacts(metadata runnerServiceMetadata) (map[string]string, error) {
+	owned := make(map[string]string, len(metadata.Artifacts)+len(metadata.PreviousArtifacts))
+	for path, artifactDigest := range metadata.Artifacts {
+		owned[path] = artifactDigest
+	}
+	for path, artifactDigest := range metadata.PreviousArtifacts {
+		if _, current := owned[path]; !current {
+			owned[path] = artifactDigest
+		}
+	}
+	for path := range owned {
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		actual := digest(data)
+		currentDigest, current := metadata.Artifacts[path]
+		previousDigest, previous := metadata.PreviousArtifacts[path]
+		if (!current || actual != currentDigest) && (!metadata.ActivationPending || !previous || actual != previousDigest) {
+			return nil, fmt.Errorf("refusing to modify unrecognized runner service artifact %s", path)
+		}
+		owned[path] = actual
+	}
+	return owned, nil
+}
+
+func artifactDigests(artifacts map[string][]byte) map[string]string {
+	digests := make(map[string]string, len(artifacts))
+	for path, data := range artifacts {
+		digests[path] = digest(data)
+	}
+	return digests
+}
+
 func (a app) installRunnerServices(in invocation, dir config.Directory, env *result.Envelope) (*result.Envelope, error) {
 	configuration, err := config.LoadNativeRunners(dir.NativeRunnersPath())
 	if err != nil {
@@ -246,88 +309,117 @@ func (a app) installRunnerServices(in invocation, dir config.Directory, env *res
 		return env, result.Preflight(err)
 	}
 	prior, priorErr := loadRunnerServiceMetadata(dir.RunnerServicesPath())
+	owned := map[string]string{}
 	if priorErr == nil {
 		if prior.Platform != runnerServiceGOOS {
 			return env, result.Preflight(fmt.Errorf("installed runner services target %s; remove them before installing for %s", prior.Platform, runnerServiceGOOS))
 		}
-		if err := verifyOwnedRunnerServiceArtifacts(prior); err != nil {
+		owned, err = runnerServiceOwnedArtifacts(prior)
+		if err != nil {
 			return env, result.Preflight(err)
 		}
 	} else if !os.IsNotExist(priorErr) {
 		return env, result.Preflight(fmt.Errorf("load runner service metadata: %w", priorErr))
 	}
-	for path, expected := range artifacts {
-		data, readErr := os.ReadFile(path)
+	for path := range artifacts {
+		_, readErr := os.ReadFile(path)
 		if readErr == nil {
-			_, previouslyOwned := prior.Artifacts[path]
-			if !previouslyOwned && digest(data) != digest(expected) {
+			if _, previouslyOwned := owned[path]; !previouslyOwned {
 				return env, result.Preflight(fmt.Errorf("refusing to overwrite unrecognized runner service artifact %s", path))
 			}
 		} else if !os.IsNotExist(readErr) {
 			return env, result.Preflight(readErr)
 		}
 	}
-	paths := sortedArtifactPaths(artifacts)
-	outcomes := make([]result.Outcome, 0, len(paths))
-	for _, path := range paths {
-		out := result.Outcome{Resource: result.ConfigResource(path), Action: "install-runner-service", Message: "install native Amp runner service " + path}
-		if in.Options.DryRun {
-			env.Planned = append(env.Planned, out)
-			if !in.Options.JSON {
-				fmt.Fprintln(a.stdout, out.Message)
-			}
-		} else {
-			outcomes = append(outcomes, out)
+	desiredDigests := artifactDigests(artifacts)
+	installArtifacts := make(map[string][]byte)
+	removeArtifacts := make(map[string]string)
+	for path, data := range artifacts {
+		actual, readErr := os.ReadFile(path)
+		ownedDigest, previouslyOwned := owned[path]
+		unchanged := priorErr == nil && !prior.ActivationPending && previouslyOwned && readErr == nil && ownedDigest == desiredDigests[path] && digest(actual) == desiredDigests[path]
+		if unchanged && !runnerServiceArtifactActive(runnerServiceGOOS, path) {
+			unchanged = false
+		}
+		if !unchanged {
+			installArtifacts[path] = data
 		}
 	}
+	for path, artifactDigest := range owned {
+		if _, retained := artifacts[path]; !retained {
+			removeArtifacts[path] = artifactDigest
+		}
+	}
+	installPaths := sortedArtifactPaths(installArtifacts)
+	removePaths := sortedDigestPaths(removeArtifacts)
+	outcomes := make([]result.Outcome, 0, len(installPaths)+len(removePaths))
+	for _, path := range removePaths {
+		outcomes = append(outcomes, result.Outcome{Resource: result.ConfigResource(path), Action: "remove-runner-service", Message: "stop and remove native Amp runner service " + path})
+	}
+	for _, path := range installPaths {
+		action, message := "install-runner-service", "install and start native Amp runner service "+path
+		if _, replacing := owned[path]; replacing {
+			action, message = "replace-runner-service", "replace and restart native Amp runner service "+path
+		}
+		outcomes = append(outcomes, result.Outcome{Resource: result.ConfigResource(path), Action: action, Message: message})
+	}
+	if len(outcomes) == 0 {
+		env.Skipped = append(env.Skipped, result.Outcome{Resource: result.ConfigResource(dir.RunnerServicesPath()), Action: "install-runner-services", Message: "runner services already match native-runners.json"})
+	}
 	if in.Options.DryRun {
+		env.Planned = append(env.Planned, outcomes...)
+		if !in.Options.JSON {
+			for _, out := range outcomes {
+				fmt.Fprintln(a.stdout, out.Message)
+			}
+		}
+		return env, nil
+	}
+	if len(outcomes) == 0 {
 		return env, nil
 	}
 	profiles := make([]string, 0, len(configuration.Runners))
-	digests := make(map[string]string, len(artifacts))
-	previous := make(map[string]string)
 	for _, profile := range configuration.Runners {
 		profiles = append(profiles, profile.Name)
 	}
 	sort.Strings(profiles)
-	for path, data := range artifacts {
-		digests[path] = digest(data)
-	}
-	if priorErr == nil {
-		for path := range prior.Artifacts {
-			if data, readErr := os.ReadFile(path); readErr == nil {
-				previous[path] = digest(data)
-			}
-		}
-		if err := deactivateRunnerServices(prior); err != nil {
-			return env, result.Runtime(err)
-		}
-	}
-	metadata := runnerServiceMetadata{SchemaVersion: 1, Platform: runnerServiceGOOS, AmpPath: ampPath, Profiles: profiles, Artifacts: digests, ActivationPending: true, PreviousArtifacts: previous}
+	metadata := runnerServiceMetadata{SchemaVersion: 1, Platform: runnerServiceGOOS, AmpPath: ampPath, Profiles: profiles, Artifacts: desiredDigests, ActivationPending: true, PreviousArtifacts: owned}
 	if err := atomicJSON(dir.RunnerServicesPath(), metadata); err != nil {
 		return env, result.Runtime(err)
 	}
-	oldArtifacts := make(map[string]struct{}, len(prior.Artifacts)+len(prior.PreviousArtifacts))
-	for path := range prior.Artifacts {
-		oldArtifacts[path] = struct{}{}
+	affected := make(map[string]string, len(removeArtifacts)+len(installArtifacts))
+	for path, artifactDigest := range removeArtifacts {
+		affected[path] = artifactDigest
 	}
-	for path := range prior.PreviousArtifacts {
-		oldArtifacts[path] = struct{}{}
-	}
-	for path := range oldArtifacts {
-		if _, retained := artifacts[path]; !retained {
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				return env, result.Runtime(err)
-			}
+	for path := range installArtifacts {
+		if artifactDigest, exists := owned[path]; exists {
+			affected[path] = artifactDigest
 		}
 	}
-	for path, data := range artifacts {
+	if len(affected) != 0 {
+		if err := deactivateRunnerServices(runnerServiceMetadata{Platform: runnerServiceGOOS, Artifacts: affected}); err != nil {
+			return env, result.Runtime(err)
+		}
+	}
+	for path := range removeArtifacts {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return env, result.Runtime(err)
+		}
+	}
+	for path, data := range installArtifacts {
 		if err := atomicWrite(path, data, 0o600); err != nil {
 			return env, result.Runtime(err)
 		}
 	}
-	if err := activateRunnerServices(metadata); err != nil {
-		return env, result.Runtime(err)
+	if runnerServiceGOOS == "linux" && len(removeArtifacts) != 0 && len(installArtifacts) == 0 {
+		if output, err := runnerServiceCall("systemctl", "--user", "daemon-reload"); err != nil {
+			return env, result.Runtime(fmt.Errorf("systemctl daemon-reload: %s: %w", strings.TrimSpace(string(output)), err))
+		}
+	}
+	if len(installArtifacts) != 0 {
+		if err := activateRunnerServices(runnerServiceMetadata{Platform: runnerServiceGOOS, Artifacts: artifactDigests(installArtifacts)}); err != nil {
+			return env, result.Runtime(err)
+		}
 	}
 	metadata.ActivationPending = false
 	metadata.PreviousArtifacts = nil
@@ -344,6 +436,15 @@ func (a app) installRunnerServices(in invocation, dir config.Directory, env *res
 }
 
 func sortedArtifactPaths(artifacts map[string][]byte) []string {
+	paths := make([]string, 0, len(artifacts))
+	for path := range artifacts {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func sortedDigestPaths(artifacts map[string]string) []string {
 	paths := make([]string, 0, len(artifacts))
 	for path := range artifacts {
 		paths = append(paths, path)
@@ -395,9 +496,22 @@ func deactivateRunnerServices(metadata runnerServiceMetadata) error {
 	}
 	domain := "gui/" + fmt.Sprint(os.Getuid())
 	for _, path := range paths {
-		output, err := runnerServiceCall("launchctl", "bootout", domain, path)
-		if err != nil && !benignNotLoaded(output) && !benignNotLoaded([]byte(err.Error())) {
-			return fmt.Errorf("launchctl bootout %s: %s: %w", path, strings.TrimSpace(string(output)), err)
+		label := strings.TrimSuffix(filepath.Base(path), ".plist")
+		target := domain + "/" + label
+		output, err := runnerServiceCall("launchctl", "print", target)
+		if err != nil {
+			if benignNotLoaded(output) || benignNotLoaded([]byte(err.Error())) {
+				continue
+			}
+			return fmt.Errorf("launchctl print %s: %s: %w", target, strings.TrimSpace(string(output)), err)
+		}
+		output, err = runnerServiceCall("launchctl", "bootout", target)
+		if err != nil {
+			verifyOutput, verifyErr := runnerServiceCall("launchctl", "print", target)
+			if verifyErr != nil && (benignNotLoaded(verifyOutput) || benignNotLoaded([]byte(verifyErr.Error()))) {
+				continue
+			}
+			return fmt.Errorf("launchctl bootout %s: %s: %w", target, strings.TrimSpace(string(output)), err)
 		}
 	}
 	return nil
@@ -412,17 +526,11 @@ func (a app) removeRunnerServices(in invocation, dir config.Directory, env *resu
 	if err != nil {
 		return env, result.Preflight(fmt.Errorf("load runner service metadata: %w", err))
 	}
-	if metadata.ActivationPending {
-		return env, result.Preflight(errors.New("runner service installation was interrupted; run amux runner service install again before removing services"))
-	}
-	if err := verifyOwnedRunnerServiceArtifacts(metadata); err != nil {
+	owned, err := runnerServiceOwnedArtifacts(metadata)
+	if err != nil {
 		return env, result.Preflight(err)
 	}
-	paths := make([]string, 0, len(metadata.Artifacts))
-	for path := range metadata.Artifacts {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
+	paths := sortedDigestPaths(owned)
 	outcomes := make([]result.Outcome, 0, len(paths))
 	for _, path := range paths {
 		out := result.Outcome{Resource: result.ConfigResource(path), Action: "remove-runner-service", Message: "remove native Amp runner service " + path}
@@ -438,10 +546,10 @@ func (a app) removeRunnerServices(in invocation, dir config.Directory, env *resu
 	if in.Options.DryRun {
 		return env, nil
 	}
-	if err := deactivateRunnerServices(metadata); err != nil {
+	if err := deactivateRunnerServices(runnerServiceMetadata{Platform: metadata.Platform, Artifacts: owned}); err != nil {
 		return env, result.Runtime(err)
 	}
-	for path := range metadata.Artifacts {
+	for path := range owned {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return env, result.Runtime(err)
 		}
@@ -481,6 +589,9 @@ func (a app) doctorRunnerServices(in invocation, dir config.Directory, env *resu
 	if err := verifyOwnedRunnerServiceArtifacts(metadata); err != nil {
 		return env, result.Preflight(err)
 	}
+	if err := verifyInstalledRunnerServiceArtifacts(metadata); err != nil {
+		return env, result.Preflight(err)
+	}
 	profiles := make([]string, 0, len(configuration.Runners))
 	for _, profile := range configuration.Runners {
 		profiles = append(profiles, profile.Name)
@@ -513,6 +624,22 @@ func (a app) doctorRunnerServices(in invocation, dir config.Directory, env *resu
 	return env, nil
 }
 
+func verifyInstalledRunnerServiceArtifacts(metadata runnerServiceMetadata) error {
+	for path, expected := range metadata.Artifacts {
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			return fmt.Errorf("runner service artifact is missing: %s", path)
+		}
+		if err != nil {
+			return err
+		}
+		if digest(data) != expected {
+			return fmt.Errorf("runner service artifact does not match installed metadata: %s", path)
+		}
+	}
+	return nil
+}
+
 func checkRunnerServicesActive(metadata runnerServiceMetadata) error {
 	paths := make([]string, 0, len(metadata.Artifacts))
 	for path := range metadata.Artifacts {
@@ -534,9 +661,27 @@ func checkRunnerServicesActive(metadata runnerServiceMetadata) error {
 	domain := "gui/" + fmt.Sprint(os.Getuid())
 	for _, profile := range metadata.Profiles {
 		label := runnerServiceLabelPrefix + profile
-		if output, err := runnerServiceCall("launchctl", "print", domain+"/"+label); err != nil {
+		output, err := runnerServiceCall("launchctl", "print", domain+"/"+label)
+		if err != nil {
 			return fmt.Errorf("runner service %s is not loaded: %s: %w", label, strings.TrimSpace(string(output)), err)
+		}
+		if !strings.Contains(string(output), "state = running") {
+			return fmt.Errorf("runner service %s is loaded but not running", label)
 		}
 	}
 	return nil
+}
+
+func runnerServiceArtifactActive(platform, path string) bool {
+	if platform == "linux" {
+		unit := filepath.Base(path)
+		if _, err := runnerServiceCall("systemctl", "--user", "is-enabled", unit); err != nil {
+			return false
+		}
+		_, err := runnerServiceCall("systemctl", "--user", "is-active", unit)
+		return err == nil
+	}
+	label := strings.TrimSuffix(filepath.Base(path), ".plist")
+	output, err := runnerServiceCall("launchctl", "print", "gui/"+fmt.Sprint(os.Getuid())+"/"+label)
+	return err == nil && strings.Contains(string(output), "state = running")
 }

@@ -1050,7 +1050,7 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 		}
 	}
 
-	if parsed.Command.NeedsConfig && parsed.Command.Name != "migrate-config" && parsed.Command.Name != "path" && parsed.Command.Name != "__sweep-validate-reports" {
+	if parsed.Command.NeedsConfig && parsed.Command.Name != "migrate-config" && parsed.Command.Name != "path" && parsed.Command.Name != "__sweep-validate-reports" && !isRunnerServicePath(parsed.Path) {
 		required, err := config.MigrationRequired(dir)
 		if err != nil {
 			return nil, result.Preflight(err)

@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -16,14 +20,17 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 	profile := config.NativeRunnerProfile{
 		Name:                  "main",
 		RunnerID:              "laptop-main",
-		StartupDirectory:      "/Users/me/Code",
+		StartupDirectory:      "/Users/me/Code Root%$",
 		DiscoverDirectories:   true,
 		Directories:           []string{"/Users/me/Obsidian/Vault", "/Users/me/.dotfiles"},
 		RemoteControlTerminal: true,
 	}
-	systemd := systemdRunnerServiceArtifact("/opt/amp/bin/amp", profile)
+	systemd, err := systemdRunnerServiceArtifact("/opt/amp/bin/amp", profile)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, want := range []string{
-		`WorkingDirectory="/Users/me/Code"`,
+		`WorkingDirectory=/Users/me/Code Root%%$`,
 		`ExecStart="/opt/amp/bin/amp" "--no-tui" "--runner-id" "laptop-main" "--discover-dirs" "--dir" "/Users/me/Obsidian/Vault" "--dir" "/Users/me/.dotfiles" "--remote-control-terminal"`,
 		"Restart=always",
 	} {
@@ -33,7 +40,7 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 	}
 	launchd := launchdRunnerServiceArtifact("/opt/amp/bin/amp", profile)
 	for _, want := range []string{
-		"<key>WorkingDirectory</key><string>/Users/me/Code</string>",
+		"<key>WorkingDirectory</key><string>/Users/me/Code Root%$</string>",
 		"<string>--discover-dirs</string>",
 		"<string>/Users/me/Obsidian/Vault</string>",
 		"<string>--remote-control-terminal</string>",
@@ -43,6 +50,31 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 		if !strings.Contains(launchd, want) {
 			t.Errorf("launchd artifact missing %q:\n%s", want, launchd)
 		}
+	}
+}
+
+func TestSystemdRunnerServiceArtifactPassesSystemdAnalyze(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd-analyze verification is Linux-only")
+	}
+	systemdAnalyze, err := exec.LookPath("systemd-analyze")
+	if err != nil {
+		t.Skip("systemd-analyze unavailable")
+	}
+	workdir := filepath.Join(t.TempDir(), "Code Root%$")
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := systemdRunnerServiceArtifact("/bin/true", config.NativeRunnerProfile{Name: "main", RunnerID: "test-runner", StartupDirectory: workdir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "runner.service")
+	if err := os.WriteFile(path, []byte(artifact), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(systemdAnalyze, "verify", path).CombinedOutput(); err != nil {
+		t.Fatalf("systemd-analyze verify: %v\n%s\n%s", err, output, artifact)
 	}
 }
 
@@ -69,8 +101,12 @@ func TestRunnerServiceLinuxLifecycleAndDoctorDetectsConfigurationDrift(t *testin
 	runnerServiceUserConfigDir = func() (string, error) { return filepath.Join(root, "user-config"), nil }
 	runnerServiceLookPath = func(string) (string, error) { return ampPath, nil }
 	var calls []string
+	inactive := false
 	runnerServiceExec = func(_ context.Context, name string, args ...string) ([]byte, error) {
 		calls = append(calls, strings.Join(append([]string{name}, args...), " "))
+		if inactive && slicesContain(args, "is-active") {
+			return []byte("inactive"), errors.New("exit status 3")
+		}
 		return nil, nil
 	}
 	t.Cleanup(func() {
@@ -93,6 +129,39 @@ func TestRunnerServiceLinuxLifecycleAndDoctorDetectsConfigurationDrift(t *testin
 	if metadata.ActivationPending || !strings.Contains(strings.Join(calls, "\n"), "systemctl --user enable --now "+runnerServiceLabelPrefix+"main.service") {
 		t.Fatalf("metadata=%+v calls=%v", metadata, calls)
 	}
+	calls = nil
+	envelope, err = app.executeRunnerService(install, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHealthChecks := []string{
+		"systemctl --user is-enabled " + runnerServiceLabelPrefix + "main.service",
+		"systemctl --user is-active " + runnerServiceLabelPrefix + "main.service",
+	}
+	if len(envelope.Skipped) != 1 || !slices.Equal(calls, wantHealthChecks) {
+		t.Fatalf("unchanged install disrupted services: envelope=%+v calls=%v", envelope, calls)
+	}
+
+	calls = nil
+	inactive = true
+	envelope, err = app.executeRunnerService(install, dir)
+	inactive = false
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceCalls := strings.Join(calls, "\n")
+	if len(envelope.Successful) != 1 || !strings.Contains(serviceCalls, "systemctl --user disable --now "+runnerServiceLabelPrefix+"main.service") || !strings.Contains(serviceCalls, "systemctl --user enable --now "+runnerServiceLabelPrefix+"main.service") {
+		t.Fatalf("inactive unchanged service was not replaced: envelope=%+v calls=%v", envelope, calls)
+	}
+
+	otherConfig := config.Directory{Path: filepath.Join(root, "other-config")}
+	if err := os.MkdirAll(otherConfig.Path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeNativeRunnerConfig(t, otherConfig.NativeRunnersPath(), code, vault)
+	if _, err := app.executeRunnerService(install, otherConfig); err == nil || !strings.Contains(err.Error(), "unrecognized") {
+		t.Fatalf("second config ownership error = %v", err)
+	}
 
 	doctor := invocation{Command: &commandSpec{Name: "doctor", Usage: "amux runner service doctor"}, Path: []string{"runner", "service", "doctor"}}
 	if _, err := app.executeRunnerService(doctor, dir); err != nil {
@@ -114,6 +183,124 @@ func TestRunnerServiceLinuxLifecycleAndDoctorDetectsConfigurationDrift(t *testin
 	}
 	if _, err := os.Stat(dir.RunnerServicesPath()); !os.IsNotExist(err) {
 		t.Fatalf("metadata remains after remove: %v", err)
+	}
+}
+
+func TestRunnerServiceRemoveRecoversPendingInstallationWithoutDesiredConfigOrAmp(t *testing.T) {
+	root := t.TempDir()
+	dir := config.Directory{Path: filepath.Join(root, "config")}
+	if err := os.MkdirAll(dir.Path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	current := filepath.Join(root, runnerServiceLabelPrefix+"main.service")
+	previous := filepath.Join(root, runnerServiceLabelPrefix+"old.service")
+	currentData, previousData := []byte("current"), []byte("previous")
+	for path, data := range map[string][]byte{current: currentData, previous: previousData} {
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	metadata := runnerServiceMetadata{
+		SchemaVersion:     1,
+		Platform:          "linux",
+		AmpPath:           "/missing/amp",
+		Profiles:          []string{"main"},
+		Artifacts:         map[string]string{current: digest(currentData)},
+		ActivationPending: true,
+		PreviousArtifacts: map[string]string{previous: digest(previousData)},
+	}
+	if err := atomicJSON(dir.RunnerServicesPath(), metadata); err != nil {
+		t.Fatal(err)
+	}
+
+	oldGOOS, oldExec := runnerServiceGOOS, runnerServiceExec
+	runnerServiceGOOS = "linux"
+	runnerServiceExec = func(context.Context, string, ...string) ([]byte, error) { return nil, nil }
+	t.Cleanup(func() { runnerServiceGOOS, runnerServiceExec = oldGOOS, oldExec })
+	remove := invocation{Command: &commandSpec{Name: "remove", Usage: "amux runner service remove"}, Path: []string{"runner", "service", "remove"}}
+	if _, err := (app{stdout: &bytes.Buffer{}}).executeRunnerService(remove, dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{current, previous, dir.RunnerServicesPath()} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("pending artifact remains at %s: %v", path, err)
+		}
+	}
+}
+
+func TestRunnerServiceRetryPreservesInstalledDigestAcrossFailures(t *testing.T) {
+	root := t.TempDir()
+	directories := []string{filepath.Join(root, "Code"), filepath.Join(root, "Vault A"), filepath.Join(root, "Vault B"), filepath.Join(root, "Vault C")}
+	for _, directory := range directories {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := config.Directory{Path: filepath.Join(root, "config")}
+	if err := os.MkdirAll(dir.Path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ampPath := filepath.Join(root, "amp")
+	writeExecutable(t, ampPath, "#!/bin/sh\nexit 0\n")
+
+	oldGOOS, oldConfigDir, oldLookPath, oldExec := runnerServiceGOOS, runnerServiceUserConfigDir, runnerServiceLookPath, runnerServiceExec
+	runnerServiceGOOS = "linux"
+	runnerServiceUserConfigDir = func() (string, error) { return filepath.Join(root, "user-config"), nil }
+	runnerServiceLookPath = func(string) (string, error) { return ampPath, nil }
+	failCommand := ""
+	runnerServiceExec = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if slicesContain(args, failCommand) {
+			return []byte("injected failure"), errors.New("exit status 1")
+		}
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		runnerServiceGOOS, runnerServiceUserConfigDir, runnerServiceLookPath, runnerServiceExec = oldGOOS, oldConfigDir, oldLookPath, oldExec
+	})
+
+	app := app{stdout: &bytes.Buffer{}}
+	install := invocation{Command: &commandSpec{Name: "install", Usage: "amux runner service install"}, Path: []string{"runner", "service", "install"}}
+	writeNativeRunnerConfig(t, dir.NativeRunnersPath(), directories[0], directories[1])
+	if _, err := app.executeRunnerService(install, dir); err != nil {
+		t.Fatal(err)
+	}
+
+	writeNativeRunnerConfig(t, dir.NativeRunnersPath(), directories[0], directories[2])
+	failCommand = "enable"
+	if _, err := app.executeRunnerService(install, dir); err == nil {
+		t.Fatal("install succeeded despite injected activation failure")
+	}
+	failedActivation, err := loadRunnerServiceMetadata(dir.RunnerServicesPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := sortedDigestPaths(failedActivation.Artifacts)[0]
+	installed, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installedDigest := digest(installed)
+	if !failedActivation.ActivationPending || failedActivation.Artifacts[path] != installedDigest {
+		t.Fatalf("activation failure metadata = %+v, installed digest = %s", failedActivation, installedDigest)
+	}
+
+	writeNativeRunnerConfig(t, dir.NativeRunnersPath(), directories[0], directories[3])
+	failCommand = "disable"
+	if _, err := app.executeRunnerService(install, dir); err == nil {
+		t.Fatal("retry succeeded despite injected deactivation failure")
+	}
+	failedRetry, err := loadRunnerServiceMetadata(dir.RunnerServicesPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !failedRetry.ActivationPending || failedRetry.PreviousArtifacts[path] != installedDigest {
+		t.Fatalf("retry did not journal installed artifact: metadata=%+v installed digest=%s", failedRetry, installedDigest)
+	}
+
+	failCommand = ""
+	remove := invocation{Command: &commandSpec{Name: "remove", Usage: "amux runner service remove"}, Path: []string{"runner", "service", "remove"}}
+	if _, err := app.executeRunnerService(remove, dir); err != nil {
+		t.Fatalf("remove after interrupted retry: %v", err)
 	}
 }
 
@@ -156,6 +343,41 @@ func TestActivateLaunchdRunnerService(t *testing.T) {
 	}
 }
 
+func TestDeactivateLaunchdRunnerServiceUsesTargetAndHandlesAbsence(t *testing.T) {
+	oldExec := runnerServiceExec
+	path := "/missing/Library/LaunchAgents/" + runnerServiceLabelPrefix + "main.plist"
+	target := "gui/" + fmt.Sprint(os.Getuid()) + "/" + runnerServiceLabelPrefix + "main"
+	var calls []string
+	loaded := true
+	runnerServiceExec = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		call := strings.Join(append([]string{name}, args...), " ")
+		calls = append(calls, call)
+		if args[0] == "print" && !loaded {
+			return []byte("Could not find service in domain"), errors.New("exit status 113")
+		}
+		if args[0] == "bootout" {
+			loaded = false
+		}
+		return nil, nil
+	}
+	t.Cleanup(func() { runnerServiceExec = oldExec })
+	metadata := runnerServiceMetadata{Platform: "darwin", Artifacts: map[string]string{path: strings.Repeat("a", 64)}}
+	if err := deactivateRunnerServices(metadata); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"launchctl print " + target, "launchctl bootout " + target}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("deactivation calls = %v, want %v", calls, want)
+	}
+	calls = nil
+	if err := deactivateRunnerServices(metadata); err != nil {
+		t.Fatalf("already absent service: %v", err)
+	}
+	if !slices.Equal(calls, []string{"launchctl print " + target}) {
+		t.Fatalf("absent service calls = %v", calls)
+	}
+}
+
 func TestCheckRunnerServicesActiveReportsInactiveUnit(t *testing.T) {
 	oldExec := runnerServiceExec
 	runnerServiceExec = func(_ context.Context, _ string, args ...string) ([]byte, error) {
@@ -169,6 +391,26 @@ func TestCheckRunnerServicesActiveReportsInactiveUnit(t *testing.T) {
 	err := checkRunnerServicesActive(runnerServiceMetadata{Platform: "linux", Artifacts: map[string]string{path: strings.Repeat("a", 64)}})
 	if err == nil || !strings.Contains(err.Error(), "not active") {
 		t.Fatalf("active check error = %v", err)
+	}
+}
+
+func TestCheckRunnerServicesActiveReportsLoadedButStoppedLaunchAgent(t *testing.T) {
+	oldExec := runnerServiceExec
+	runnerServiceExec = func(context.Context, string, ...string) ([]byte, error) {
+		return []byte("state = exited\nlast exit code = 1\n"), nil
+	}
+	t.Cleanup(func() { runnerServiceExec = oldExec })
+	err := checkRunnerServicesActive(runnerServiceMetadata{Platform: "darwin", Profiles: []string{"main"}})
+	if err == nil || !strings.Contains(err.Error(), "not running") {
+		t.Fatalf("launchd active check error = %v", err)
+	}
+}
+
+func TestVerifyInstalledRunnerServiceArtifactsRejectsMissingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), runnerServiceLabelPrefix+"main.service")
+	err := verifyInstalledRunnerServiceArtifacts(runnerServiceMetadata{Artifacts: map[string]string{path: strings.Repeat("a", 64)}})
+	if err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("missing artifact check error = %v", err)
 	}
 }
 
@@ -215,6 +457,45 @@ func TestRunnerServiceInstallDryRunPlansWithoutWritingOrActivating(t *testing.T)
 		t.Fatalf("dry run wrote metadata: %v", err)
 	}
 	if !strings.Contains(stdout.String(), runnerServiceLabelPrefix+"main.service") {
+		t.Fatalf("dry-run output = %q", stdout.String())
+	}
+}
+
+func TestRunnerServiceDispatchIgnoresUnmigratedLegacyRegistry(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(config.ConfigDirEnv, "")
+	legacyDir := filepath.Join(home, ".config", "amp-tmux")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, config.RunnersFile), []byte("malformed legacy registry\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configDir := config.Directory{Path: filepath.Join(home, config.DefaultDirectoryRelativePath)}
+	code, vault := filepath.Join(home, "Code"), filepath.Join(home, "Vault")
+	for _, directory := range []string{configDir.Path, code, vault} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeNativeRunnerConfig(t, configDir.NativeRunnersPath(), code, vault)
+	ampPath := filepath.Join(home, "amp")
+	writeExecutable(t, ampPath, "#!/bin/sh\nexit 0\n")
+
+	oldGOOS, oldConfigDir, oldLookPath := runnerServiceGOOS, runnerServiceUserConfigDir, runnerServiceLookPath
+	runnerServiceGOOS = "linux"
+	runnerServiceUserConfigDir = func() (string, error) { return filepath.Join(home, ".config"), nil }
+	runnerServiceLookPath = func(string) (string, error) { return ampPath, nil }
+	t.Cleanup(func() {
+		runnerServiceGOOS, runnerServiceUserConfigDir, runnerServiceLookPath = oldGOOS, oldConfigDir, oldLookPath
+	})
+
+	var stdout bytes.Buffer
+	if err := (app{stdout: &stdout, stderr: &bytes.Buffer{}}).execute([]string{"--dry-run", "runner", "service", "install"}); err != nil {
+		t.Fatalf("native service dispatch was blocked by legacy migration: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "install and start native Amp runner service") {
 		t.Fatalf("dry-run output = %q", stdout.String())
 	}
 }

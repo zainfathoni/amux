@@ -8,7 +8,7 @@ supersedes: 0008
 
 ## Decision
 
-Keep Amux active as a small declarative configuration and operating-system activation layer for native Amp runners. Native Amp owns runner execution, its served-directory catalog, and automatic updates. Amux owns named runner profiles and generates systemd user services or launchd agents that execute Amp directly.
+Keep Amux active as a small declarative configuration and operating-system activation layer for native Amp runners. Native Amp owns runner execution, its served-directory catalog, and native update behavior. Amux owns named runner profiles and generates systemd user services or launchd agents that execute Amp directly.
 
 Use one native `amp --no-tui` runner per machine where practical. Native Amp serves directories through repeated `--dir`, dynamic `amp runner dirs add|list|remove`, and `--discover-dirs`; arbitrary non-Git directories such as Obsidian vaults are valid explicit directories. A second named profile is appropriate only when a separately identified or isolated runner is required.
 
@@ -37,5 +37,5 @@ This ADR does not itself authorize a release, deployment, machine-configuration 
 - One profile may span code roots, Obsidian vaults, dotfiles, and other arbitrary directories.
 - Profile names identify generated service artifacts; runner IDs remain native Amp identities.
 - Service installation owns only artifacts recorded by digest and refuses unrecognized files.
-- Amp updates itself; new runner profiles do not use Amux scheduled maintenance.
+- Amp owns its update behavior; package-manager ownership or disabled native updates remain external concerns. New runner profiles do not use Amux scheduled maintenance.
 - Existing CLI commands and historical stores remain behaviorally compatible during the transition.
