@@ -83,6 +83,95 @@ func TestRunnerTeardownCanonicalizesWorkdirSelector(t *testing.T) {
 	}
 }
 
+func TestRunnerTeardownRejectsInstalledOrPendingNativeServices(t *testing.T) {
+	for _, pending := range []bool{false, true} {
+		t.Run(map[bool]string{false: "installed", true: "activation pending"}[pending], func(t *testing.T) {
+			_, worktree, _ := newRunnerTeardownRepo(t, false)
+			dir := config.Directory{Path: t.TempDir()}
+			writeRunnerRegistry(t, dir.Path, "alpha\t"+worktree+"\n")
+			writeRunnerServiceMetadata(t, dir, pending)
+			installAbsentRunnerTmux(t)
+
+			err := executeRunnerJSONError(t, "--dry-run", "--json", "--config-dir", dir.Path, "runner", "teardown", "--workdir", worktree)
+			if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), "native runner services") || !strings.Contains(err.Error(), "park") || !strings.Contains(err.Error(), "unpin") {
+				t.Fatalf("native-service teardown error = %v, exit=%d", err, result.ExitCode(err))
+			}
+			if _, statErr := os.Stat(worktree); statErr != nil {
+				t.Fatalf("rejected teardown changed worktree: %v", statErr)
+			}
+			if rows, loadErr := config.LoadRunnersReadOnly(dir.RunnersPath()); loadErr != nil || len(rows) != 1 {
+				t.Fatalf("rejected teardown changed runner rows: rows=%+v err=%v", rows, loadErr)
+			}
+		})
+	}
+}
+
+func TestRunnerTeardownRejectsUnreadableOrDanglingNativeServiceMetadata(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T, path string)
+	}{
+		{
+			name: "malformed metadata",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "dangling symlink",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Symlink(filepath.Join(filepath.Dir(path), "missing-runner-services.json"), path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, worktree, _ := newRunnerTeardownRepo(t, false)
+			dir := config.Directory{Path: t.TempDir()}
+			writeRunnerRegistry(t, dir.Path, "alpha\t"+worktree+"\n")
+			test.setup(t, dir.RunnerServicesPath())
+			installAbsentRunnerTmux(t)
+
+			err := executeRunnerJSONError(t, "--dry-run", "--json", "--config-dir", dir.Path, "runner", "teardown", "--workdir", worktree)
+			if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), "absence cannot be proven") || !strings.Contains(err.Error(), "park") || !strings.Contains(err.Error(), "unpin") {
+				t.Fatalf("unreadable native-service metadata error = %v, exit=%d", err, result.ExitCode(err))
+			}
+			if _, statErr := os.Stat(worktree); statErr != nil {
+				t.Fatalf("rejected teardown changed worktree: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestRunnerTeardownApplyRechecksNativeServiceMetadata(t *testing.T) {
+	_, worktree, _ := newRunnerTeardownRepo(t, false)
+	dir := config.Directory{Path: t.TempDir()}
+	writeRunnerRegistry(t, dir.Path, "alpha\t"+worktree+"\n")
+	installAbsentRunnerTmux(t)
+
+	dry := executeRunnerJSON(t, "--dry-run", "--json", "--config-dir", dir.Path, "runner", "teardown", "--workdir", worktree)
+	digest := dry.Planned[0].Teardown.PlanDigest
+	if err := os.Symlink(filepath.Join(dir.Path, "missing-runner-services.json"), dir.RunnerServicesPath()); err != nil {
+		t.Fatal(err)
+	}
+
+	err := executeRunnerJSONError(t, "--json", "--config-dir", dir.Path, "runner", "teardown", "--workdir", worktree, "--confirm-plan", digest)
+	if err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), "absence cannot be proven") {
+		t.Fatalf("apply-time native-service recheck error = %v, exit=%d", err, result.ExitCode(err))
+	}
+	if _, statErr := os.Stat(worktree); statErr != nil {
+		t.Fatalf("apply-time rejection changed worktree: %v", statErr)
+	}
+	if rows, loadErr := config.LoadRunnersReadOnly(dir.RunnersPath()); loadErr != nil || len(rows) != 1 {
+		t.Fatalf("apply-time rejection changed runner rows: rows=%+v err=%v", rows, loadErr)
+	}
+}
+
 func TestRunnerTeardownRejectsConfirmationWithDryRunBeforeSelection(t *testing.T) {
 	dir := t.TempDir()
 	writeRunnerRegistry(t, dir, "")

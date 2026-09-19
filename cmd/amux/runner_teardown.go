@@ -78,6 +78,9 @@ func (a app) runnerTeardown(in invocation, dir config.Directory, rows []config.R
 	if in.Options.DryRun && in.Selectors.ConfirmPlan != "" {
 		return &env, result.Request(errors.New("--confirm-plan is not valid with --dry-run"))
 	}
+	if err := requireNativeRunnerServicesAbsent(dir, "runner teardown", "tmux absence does not prove native Amp absence; preserve the worktree, park the legacy runner, verify native coverage through the documented soak, then unpin the exact absent legacy row"); err != nil {
+		return &env, result.Preflight(err)
+	}
 	if len(rows) == 0 {
 		if _, err := os.Lstat(in.Selectors.Workdir); os.IsNotExist(err) {
 			resource, _ := result.RunnerResource(in.Selectors.Workdir)

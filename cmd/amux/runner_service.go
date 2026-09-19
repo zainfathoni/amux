@@ -215,6 +215,72 @@ func loadRunnerServiceMetadata(path string) (runnerServiceMetadata, error) {
 	return metadata, nil
 }
 
+func requireNativeRunnerServicesAbsent(dir config.Directory, operation, remediation string) error {
+	path := dir.RunnerServicesPath()
+	_, lstatErr := os.Lstat(path)
+	if os.IsNotExist(lstatErr) {
+		return nil
+	}
+	if lstatErr != nil {
+		return fmt.Errorf("%s blocked because native runner service absence cannot be proven for %s: %w", operation, path, lstatErr)
+	}
+	_, err := loadRunnerServiceMetadata(path)
+	if err != nil {
+		return fmt.Errorf("%s blocked because native runner service absence cannot be proven for %s: %w; %s", operation, path, err, remediation)
+	}
+	return fmt.Errorf("%s blocked while native runner services are installed or activation pending; %s", operation, remediation)
+}
+
+func loadLegacyRunnerRowsForCollision(path string) ([]config.RunnerRow, error) {
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return config.ParseRunners(file)
+}
+
+func preflightRunnerServiceInstallCoexistence(dir config.Directory, profiles []config.NativeRunnerProfile) error {
+	maintenancePath := dir.MaintenancePath()
+	maintenance, err := loadMaintenance(maintenancePath)
+	if err == nil && maintenance.Owner == "self" {
+		return errors.New("runner service install blocked while self-owned legacy maintenance is installed or activation pending; remove legacy maintenance before activating native services, or reinstall it with --update-owner external for the compatibility tail")
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		if _, lstatErr := os.Lstat(maintenancePath); lstatErr == nil {
+			return fmt.Errorf("inspect legacy maintenance before runner service install: metadata entry %s exists but its target is unavailable: %w", maintenancePath, err)
+		} else if !os.IsNotExist(lstatErr) {
+			return fmt.Errorf("inspect legacy maintenance before runner service install: %w", lstatErr)
+		}
+	} else if err != nil {
+		return fmt.Errorf("inspect legacy maintenance before runner service install: %w", err)
+	}
+
+	registryPath := dir.RunnersPath()
+	legacyRows, err := loadLegacyRunnerRowsForCollision(registryPath)
+	if err != nil {
+		return fmt.Errorf("inspect legacy runner IDs before runner service install: %w", err)
+	}
+	nativeIDs := make(map[string]config.NativeRunnerProfile, len(profiles))
+	for _, profile := range profiles {
+		nativeIDs[strings.ToLower(profile.RunnerID)] = profile
+	}
+	for _, row := range legacyRows {
+		if row.RunnerID == "" {
+			continue
+		}
+		if profile, collision := nativeIDs[strings.ToLower(row.RunnerID)]; collision {
+			return fmt.Errorf("runner service install blocked: native profile %q runner ID %q conflicts case-insensitively with legacy runners.tsv ID %q for %s; assign distinct runner IDs without rewriting the legacy registry", profile.Name, profile.RunnerID, row.RunnerID, row.Workdir)
+		}
+	}
+	return nil
+}
+
 func runnerServiceCall(name string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), runnerServiceTimeout)
 	defer cancel()
@@ -295,6 +361,9 @@ func (a app) installRunnerServices(in invocation, dir config.Directory, env *res
 	}
 	if len(configuration.Runners) == 0 {
 		return env, result.Preflight(errors.New("native-runners.json must contain at least one runner profile"))
+	}
+	if err := preflightRunnerServiceInstallCoexistence(dir, configuration.Runners); err != nil {
+		return env, result.Preflight(err)
 	}
 	ampPath, err := runnerServiceLookPath("amp")
 	if err != nil {

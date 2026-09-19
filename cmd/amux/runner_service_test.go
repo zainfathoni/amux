@@ -461,6 +461,139 @@ func TestRunnerServiceInstallDryRunPlansWithoutWritingOrActivating(t *testing.T)
 	}
 }
 
+func TestRunnerServiceInstallInterlocksLegacyMaintenanceOwnership(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		owner   string
+		pending bool
+		blocked bool
+	}{
+		{name: "installed self-owned", owner: "self", blocked: true},
+		{name: "pending self-owned", owner: "self", pending: true, blocked: true},
+		{name: "pending externally-owned tail", owner: "external", pending: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			code, vault := filepath.Join(root, "Code"), filepath.Join(root, "Vault")
+			for _, path := range []string{code, vault} {
+				if err := os.MkdirAll(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			dir := config.Directory{Path: filepath.Join(root, "config")}
+			if err := os.MkdirAll(dir.Path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeNativeRunnerConfig(t, dir.NativeRunnersPath(), code, vault)
+			if err := atomicJSON(dir.MaintenancePath(), maintenanceMetadata{
+				SchemaVersion: 1, ActivationPending: test.pending, Owner: test.owner,
+				Platform: "linux", Schedule: "6h", Path: "/usr/bin", AmuxPath: "/opt/amux",
+				AmpPath: "/opt/amp", AmpTarget: "/opt/amp", Artifacts: map[string]string{"/artifact": strings.Repeat("a", 64)},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			ampPath := filepath.Join(root, "amp")
+			writeExecutable(t, ampPath, "#!/bin/sh\nexit 0\n")
+			oldGOOS, oldConfigDir, oldLookPath := runnerServiceGOOS, runnerServiceUserConfigDir, runnerServiceLookPath
+			runnerServiceGOOS = "linux"
+			runnerServiceUserConfigDir = func() (string, error) { return filepath.Join(root, "user-config"), nil }
+			runnerServiceLookPath = func(string) (string, error) { return ampPath, nil }
+			t.Cleanup(func() {
+				runnerServiceGOOS, runnerServiceUserConfigDir, runnerServiceLookPath = oldGOOS, oldConfigDir, oldLookPath
+			})
+
+			in := invocation{Options: cliOptions{DryRun: true}, Command: &commandSpec{Name: "install", Usage: "amux runner service install"}, Path: []string{"runner", "service", "install"}}
+			envelope, err := (app{stdout: &bytes.Buffer{}}).executeRunnerService(in, dir)
+			if test.blocked {
+				if err == nil || !strings.Contains(err.Error(), "self-owned legacy maintenance") {
+					t.Fatalf("service install error = %v", err)
+				}
+				return
+			}
+			if err != nil || len(envelope.Planned) != 1 {
+				t.Fatalf("external maintenance tail blocked: envelope=%+v err=%v", envelope, err)
+			}
+		})
+	}
+}
+
+func TestRunnerServiceInstallRejectsLegacyRunnerIDCollisionWithoutRewritingRegistry(t *testing.T) {
+	root := t.TempDir()
+	code, vault, legacyWorkdir := filepath.Join(root, "Code"), filepath.Join(root, "Vault"), filepath.Join(root, "Legacy")
+	for _, path := range []string{code, vault, legacyWorkdir} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := config.Directory{Path: filepath.Join(root, "config")}
+	if err := os.MkdirAll(dir.Path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeNativeRunnerConfig(t, dir.NativeRunnersPath(), code, vault)
+	registry := []byte("# amux-schema: runners/v2\n# workspace\tworkdir\t[runner-id]\nlegacy\t" + legacyWorkdir + "\tLAPTOP-MAIN\n")
+	if err := os.WriteFile(dir.RunnersPath(), registry, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	in := invocation{Options: cliOptions{DryRun: true}, Command: &commandSpec{Name: "install", Usage: "amux runner service install"}, Path: []string{"runner", "service", "install"}}
+	_, err := (app{stdout: &bytes.Buffer{}}).executeRunnerService(in, dir)
+	if err == nil || !strings.Contains(err.Error(), "runner ID") || !strings.Contains(err.Error(), "LAPTOP-MAIN") {
+		t.Fatalf("runner ID collision error = %v", err)
+	}
+	got, readErr := os.ReadFile(dir.RunnersPath())
+	if readErr != nil || !bytes.Equal(got, registry) {
+		t.Fatalf("collision check rewrote runners.tsv: got=%q err=%v", got, readErr)
+	}
+}
+
+func TestRunnerServiceInstallRejectsDanglingLegacyMaintenanceMetadata(t *testing.T) {
+	root := t.TempDir()
+	code, vault := filepath.Join(root, "Code"), filepath.Join(root, "Vault")
+	for _, path := range []string{code, vault} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := config.Directory{Path: filepath.Join(root, "config")}
+	if err := os.MkdirAll(dir.Path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeNativeRunnerConfig(t, dir.NativeRunnersPath(), code, vault)
+	if err := os.Symlink(filepath.Join(root, "missing-maintenance.json"), dir.MaintenancePath()); err != nil {
+		t.Fatal(err)
+	}
+
+	in := invocation{Options: cliOptions{DryRun: true}, Command: &commandSpec{Name: "install", Usage: "amux runner service install"}, Path: []string{"runner", "service", "install"}}
+	_, err := (app{stdout: &bytes.Buffer{}}).executeRunnerService(in, dir)
+	if err == nil || !strings.Contains(err.Error(), "metadata entry") || !strings.Contains(err.Error(), "target is unavailable") {
+		t.Fatalf("dangling maintenance metadata error = %v", err)
+	}
+}
+
+func TestRunnerServiceInstallRejectsDanglingLegacyRegistry(t *testing.T) {
+	root := t.TempDir()
+	code, vault := filepath.Join(root, "Code"), filepath.Join(root, "Vault")
+	for _, path := range []string{code, vault} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := config.Directory{Path: filepath.Join(root, "config")}
+	if err := os.MkdirAll(dir.Path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeNativeRunnerConfig(t, dir.NativeRunnersPath(), code, vault)
+	if err := os.Symlink(filepath.Join(root, "missing-runners.tsv"), dir.RunnersPath()); err != nil {
+		t.Fatal(err)
+	}
+
+	in := invocation{Options: cliOptions{DryRun: true}, Command: &commandSpec{Name: "install", Usage: "amux runner service install"}, Path: []string{"runner", "service", "install"}}
+	_, err := (app{stdout: &bytes.Buffer{}}).executeRunnerService(in, dir)
+	if err == nil || !strings.Contains(err.Error(), "legacy runner IDs") || !strings.Contains(err.Error(), "no such file") {
+		t.Fatalf("dangling legacy registry error = %v", err)
+	}
+}
+
 func TestRunnerServiceDispatchIgnoresUnmigratedLegacyRegistry(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -508,6 +641,17 @@ func writeNativeRunnerConfig(t *testing.T, path, startupDirectory, directory str
 	t.Helper()
 	document := `{"schema_version":1,"runners":[{"name":"main","runner_id":"laptop-main","startup_directory":` + jsonString(startupDirectory) + `,"discover_dirs":true,"dirs":[` + jsonString(directory) + `]}]}`
 	if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeRunnerServiceMetadata(t *testing.T, dir config.Directory, pending bool) {
+	t.Helper()
+	artifact := filepath.Join(t.TempDir(), runnerServiceLabelPrefix+"main.service")
+	if err := atomicJSON(dir.RunnerServicesPath(), runnerServiceMetadata{
+		SchemaVersion: 1, Platform: "linux", AmpPath: "/opt/amp", Profiles: []string{"main"},
+		Artifacts: map[string]string{artifact: strings.Repeat("a", 64)}, ActivationPending: pending,
+	}); err != nil {
 		t.Fatal(err)
 	}
 }

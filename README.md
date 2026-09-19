@@ -35,11 +35,13 @@ amux runner service install
 amux runner service doctor
 ```
 
-On Linux, Amux installs one `com.zainfathoni.amux.runner.<name>.service` systemd user unit per profile. On macOS, it installs the equivalent LaunchAgent. Each artifact executes the resolved Amp binary directly with `--no-tui`, the stable runner ID, discovery and explicit-directory flags, and optional remote terminal access. Amux records artifact digests and refuses to replace or remove unrecognized files.
+On Linux, Amux installs one `com.zainfathoni.amux.runner.<name>.service` systemd user unit per profile. On macOS, it installs the equivalent LaunchAgent. Each artifact executes the resolved Amp binary directly with `--no-tui`, the stable runner ID, discovery and explicit-directory flags, and optional remote terminal access. Amux records artifact digests and refuses to replace or remove unrecognized files. Installation also rejects a case-insensitive runner-ID collision with a retained `runners.tsv` row and rejects installed or activation-pending self-owned legacy maintenance; it does not rewrite either legacy record.
 
 Dynamic `amp runner dirs add|list|remove` remains available. Amp persists those additions against the profile's stable startup directory; keep declarative machine-critical paths in `native-runners.json` and use dynamic additions for local, temporary choices.
 
-The previous per-workdir registry, tmux lifecycle, and scheduled Amp updater remain available during migration, but they are no longer the destination architecture. Native Amp updates a running runner itself.
+The previous per-workdir registry, tmux lifecycle, and scheduled Amp updater remain available during migration, but they are no longer the destination architecture. Native Amp updates a running runner itself. Self-owned legacy maintenance cannot be installed or run while native runner services are installed or activation pending. External or package-manager update ownership remains an explicit compatibility-tail option.
+
+For cutover, first disable any login automation that invokes bare `amux` or `amux launch --all`. Give native and legacy runners distinct IDs, remove self-owned legacy maintenance (or explicitly retain external ownership), install and verify native service coverage, then **park → soak → unpin** each legacy runner. Include a login or reboot in the soak. Never use `runner teardown` for this migration: preserve the worktree, and roll back before unpin by removing the native services and relaunching the retained legacy row.
 
 The former worker, spawn/adoption, shelf, group, report, callback, deadline, and finish-authorization commands have been removed. Their historical files are inert compatibility evidence: current commands neither migrate nor mutate them. The protected one-time #360 inventory remains read-only under its existing owner gate. `/amux-tycho` is a separate receipt bridge and is unaffected by removal of worker reports.
 
@@ -134,7 +136,7 @@ amux --json --dry-run runner teardown --workdir ~/Code/amux-runner
 amux --json runner teardown --workdir ~/Code/amux-runner --confirm-plan <sha256-from-dry-run>
 ```
 
-Runner teardown stops only the exact verified local runner, removes only the exact clean attached secondary worktree, and unpins only its exact row. It preserves the local branch and never archives Amp threads. Primary, detached, locked, prunable, dirty, hidden-change, ambiguous, unreadable, symlinked, non-root, and current-directory targets reject before worktree removal.
+Runner teardown stops only the exact verified local runner, removes only the exact clean attached secondary worktree, and unpins only its exact row. It preserves the local branch and never archives Amp threads. Primary, detached, locked, prunable, dirty, hidden-change, ambiguous, unreadable, symlinked, non-root, and current-directory targets reject before worktree removal. It also fails closed whenever `runner-services.json` records installed or activation-pending native services: tmux absence is not proof that native Amp is absent. Use park → soak → unpin, never teardown, for native-service cutover.
 
 Runner workdirs may be Git worktrees or any other existing directories. Runner lifecycle never creates, continues, archives, or manages remote Amp threads.
 
@@ -164,7 +166,7 @@ amux migrate-config
 amux update
 ```
 
-Runner service commands operate every profile in `native-runners.json`; service installation is machine-wide and protected by Amux's mutation lock. The remaining top-level lifecycle routes are legacy per-workdir aliases. Bare `amux` retains its legacy behavior of launching configured `runners.tsv` rows during migration.
+Runner service commands operate every profile in `native-runners.json`; service installation is machine-wide and protected by Amux's mutation lock. The remaining top-level lifecycle routes are legacy per-workdir aliases. Bare `amux` retains its legacy behavior of launching configured `runners.tsv` rows during migration, so disable any login automation that invokes it or `launch --all` before parking legacy runners.
 
 Runner pin is active admission. `runner unpin` removes only the exact selected registry binding after proving its local tmux runner is absent; it never stops a process. `runner teardown` is the explicit worktree-owning retirement route described above. `runner remove` and missing-workdir `runner reconcile` fail closed pending authoritative process/catalog absence evidence. Use `runner park` to stop an exact owned process while retaining its row.
 

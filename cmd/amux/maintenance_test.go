@@ -381,6 +381,56 @@ func TestMaintenanceRunDryRunHasNoCommandOrWrite(t *testing.T) {
 	}
 }
 
+func TestSelfOwnedMaintenanceInstallAndRunRejectNativeServices(t *testing.T) {
+	for _, pending := range []bool{false, true} {
+		t.Run(map[bool]string{false: "installed", true: "activation pending"}[pending], func(t *testing.T) {
+			dir := config.Directory{Path: t.TempDir()}
+			writeRunnerServiceMetadata(t, dir, pending)
+
+			install := invocation{Command: maintenanceCommand().Children[0], Path: []string{"runner", "maintenance", "install"}, MaintenanceOwner: "self"}
+			installEnv := result.NewEnvelope("runner maintenance install", false)
+			if _, err := (app{}).installMaintenance(install, dir, &installEnv); err == nil || !strings.Contains(err.Error(), "native runner services") {
+				t.Fatalf("self-owned maintenance install error = %v", err)
+			}
+
+			amp := filepath.Join(dir.Path, "amp")
+			if err := os.WriteFile(amp, []byte("amp"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := atomicJSON(dir.MaintenancePath(), maintenanceMetadata{
+				SchemaVersion: 1, Owner: "self", Platform: "linux", Schedule: "6h", Path: "/usr/bin",
+				AmuxPath: "/amux", AmpPath: amp, AmpTarget: amp, Artifacts: map[string]string{"/artifact": strings.Repeat("a", 64)},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			oldExec := maintenanceExec
+			maintenanceExec = func(context.Context, string, ...string) ([]byte, error) {
+				t.Fatal("rejected self-owned maintenance invoked a command")
+				return nil, nil
+			}
+			t.Cleanup(func() { maintenanceExec = oldExec })
+			run := invocation{Command: maintenanceCommand().Children[2], Path: []string{"runner", "maintenance", "run"}}
+			runEnv := result.NewEnvelope("runner maintenance run", false)
+			if _, err := (app{}).runMaintenance(run, dir, &runEnv); err == nil || !strings.Contains(err.Error(), "native runner services") {
+				t.Fatalf("self-owned maintenance run error = %v", err)
+			}
+			if _, err := os.Stat(dir.MaintenanceResultPath()); !os.IsNotExist(err) {
+				t.Fatalf("rejected maintenance wrote result: %v", err)
+			}
+		})
+	}
+}
+
+func TestExternallyOwnedMaintenanceRunRemainsAvailableWithNativeServices(t *testing.T) {
+	f := newMaintenanceLifecycleFixture(t, "external", 0)
+	writeRunnerServiceMetadata(t, f.dir, true)
+
+	env, err := runLifecycle(t, f)
+	if err != nil || len(env.Skipped) != 1 {
+		t.Fatalf("external maintenance tail blocked: env=%+v err=%v", env, err)
+	}
+}
+
 func setMaintenanceIntegrationSeams(t *testing.T, goos, home, amux, amp string) {
 	t.Helper()
 	oldGOOS, oldHome, oldUserConfigDir, oldLookPath, oldExec := maintenanceGOOS, maintenanceHome, maintenanceUserConfigDir, maintenanceLookPath, maintenanceExec
