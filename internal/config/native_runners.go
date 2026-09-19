@@ -58,6 +58,7 @@ func (c *NativeRunnerConfig) Validate() error {
 	}
 	seenNames := make(map[string]bool, len(c.Runners))
 	seenIDs := make(map[string]bool, len(c.Runners))
+	seenStartups := make(map[string]string, len(c.Runners))
 	for i := range c.Runners {
 		profile := &c.Runners[i]
 		if !runnerProfileNamePattern.MatchString(profile.Name) {
@@ -79,6 +80,10 @@ func (c *NativeRunnerConfig) Validate() error {
 		if err != nil {
 			return fmt.Errorf("runner profile %q startup_directory: %w", profile.Name, err)
 		}
+		if previous, exists := seenStartups[startup]; exists {
+			return fmt.Errorf("runner profiles %q and %q share startup_directory %s; use a dedicated startup directory per profile", previous, profile.Name, startup)
+		}
+		seenStartups[startup] = profile.Name
 		profile.StartupDirectory = startup
 		seenDirectories := map[string]bool{startup: true}
 		for j, directory := range profile.Directories {

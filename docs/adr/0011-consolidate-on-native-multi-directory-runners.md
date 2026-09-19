@@ -25,7 +25,7 @@ ADR 0008 retained Amux because native Amp did not provide multi-directory servin
 ## Migration
 
 1. Disable old login automation that invokes bare `amux` or `amux launch --all`; otherwise the next login can relaunch every retained legacy row.
-2. Create `native-runners.json` with one profile for each required native process. Give every native profile a runner ID distinct, case-insensitively, from optional IDs in retained `runners.tsv` rows.
+2. Create `native-runners.json` with one profile for each required native process. Give every native profile a runner ID distinct, case-insensitively, from optional IDs in retained `runners.tsv` rows. Also give each profile a dedicated persistent startup directory distinct from other profiles and retained legacy workdirs (including symlink aliases); a different ID alone does not avoid Amp's headless-instance startup exclusion. Create that directory first and serve the existing workdirs through explicit `dirs` with `discover_dirs: false` during coexistence. This does not transfer existing threads.
 3. Use `--discover-dirs` semantics for nearby Git checkouts and explicit directories for unrelated or non-Git roots.
 4. Remove self-owned scheduled maintenance before native service activation. External or package-manager update ownership may remain only as an explicit compatibility tail.
 5. Dry-run and install the generated systemd or launchd services, then confirm every required directory appears in the Amp location picker.

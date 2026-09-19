@@ -271,6 +271,15 @@ func preflightRunnerServiceInstallCoexistence(dir config.Directory, profiles []c
 		nativeIDs[strings.ToLower(profile.RunnerID)] = profile
 	}
 	for _, row := range legacyRows {
+		workdir, err := filepath.EvalSymlinks(row.Workdir)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("inspect legacy runner workdir %s before runner service install: %w", row.Workdir, err)
+		}
+		for _, profile := range profiles {
+			if profile.StartupDirectory == row.Workdir || (err == nil && profile.StartupDirectory == workdir) {
+				return fmt.Errorf("runner service install blocked: native profile %q startup_directory conflicts with retained legacy runners.tsv workdir %s; use a dedicated startup directory and serve the legacy workdir through dirs", profile.Name, row.Workdir)
+			}
+		}
 		if row.RunnerID == "" {
 			continue
 		}

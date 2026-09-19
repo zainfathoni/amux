@@ -75,6 +75,39 @@ func TestLoadNativeRunnersRejectsAmbiguousOrUnsafeProfiles(t *testing.T) {
 	}
 }
 
+func TestNativeRunnerStartupDirectoriesMustBeDistinct(t *testing.T) {
+	root := t.TempDir()
+	other := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, second string
+		wantError    bool
+	}{
+		{"same path", root, true},
+		{"symlink alias", alias, true},
+		{"distinct startups sharing served directory", other, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			shared := t.TempDir()
+			c := NativeRunnerConfig{SchemaVersion: 1, Runners: []NativeRunnerProfile{
+				{Name: "one", RunnerID: "one", StartupDirectory: root, Directories: []string{shared}},
+				{Name: "two", RunnerID: "two", StartupDirectory: test.second, Directories: []string{shared}},
+			}}
+			err := c.Validate()
+			if test.wantError {
+				if err == nil || !strings.Contains(err.Error(), "share startup_directory") {
+					t.Fatalf("error = %v, want shared startup rejection", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func quoteJSON(value string) string {
 	return `"` + strings.ReplaceAll(value, `\`, `\\`) + `"`
 }

@@ -546,6 +546,54 @@ func TestRunnerServiceInstallRejectsLegacyRunnerIDCollisionWithoutRewritingRegis
 	}
 }
 
+func TestRunnerServiceStartupCollisionWithLegacyWorkdir(t *testing.T) {
+	legacy := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(legacy, alias); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, startup, workdir, id string
+		wantError                  bool
+	}{
+		{"distinct ID same startup", legacy, legacy, "legacy", true},
+		{"unnamed legacy row", legacy, legacy, "", true},
+		{"legacy alias", legacy, alias, "legacy", true},
+		{"native alias", alias, legacy, "legacy", true},
+		{"dedicated startup serves legacy directory", t.TempDir(), legacy, "legacy", false},
+		{"missing legacy directory", t.TempDir(), filepath.Join(t.TempDir(), "missing"), "legacy", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := config.Directory{Path: t.TempDir()}
+			registry := []byte("# amux-schema: runners/v2\nlegacy\t" + test.workdir + "\t" + test.id + "\n")
+			if err := os.WriteFile(dir.RunnersPath(), registry, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c := config.NativeRunnerConfig{SchemaVersion: 1, Runners: []config.NativeRunnerProfile{
+				{Name: "pilot", RunnerID: "native", StartupDirectory: test.startup},
+			}}
+			if !test.wantError {
+				c.Runners[0].Directories = []string{legacy}
+			}
+			if err := c.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			err := preflightRunnerServiceInstallCoexistence(dir, c.Runners)
+			if test.wantError {
+				if err == nil || !strings.Contains(err.Error(), "startup_directory conflicts") || !strings.Contains(err.Error(), "dedicated startup directory") {
+					t.Fatalf("error = %v, want startup collision with remediation", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(dir.RunnersPath())
+			if err != nil || !bytes.Equal(got, registry) {
+				t.Fatalf("registry changed: %q, %v", got, err)
+			}
+		})
+	}
+}
+
 func TestRunnerServiceInstallRejectsDanglingLegacyMaintenanceMetadata(t *testing.T) {
 	root := t.TempDir()
 	code, vault := filepath.Join(root, "Code"), filepath.Join(root, "Vault")
