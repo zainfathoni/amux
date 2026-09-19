@@ -1,12 +1,12 @@
 ---
-status: active-thin-host-2026-08-30
-decisions: adr-0007, adr-0008, adr-0009
-as-of: 2026-08-30
+status: active-native-runner-config-2026-09-17
+decisions: adr-0007, adr-0009, adr-0011
+as-of: 2026-09-17
 ---
 
 # Amux thin-host and staged-drain disposition ledger
 
-This ledger applies [ADR 0009](adr/0009-remove-active-legacy-coordination-surfaces.md) and [ADR 0008](adr/0008-retain-machine-local-runner-host-and-drain-coordination.md) to the still-valid boundaries in [ADR 0007](adr/0007-retire-amux-through-native-cutover-and-staged-drain.md). Amux is not being fully deprecated or archived. Native Amp owns new task coordination; Amux retains automatic machine-local runner launch and safety; core legacy coordination commands are removed and their stores are inert.
+This ledger applies [ADR 0009](adr/0009-remove-active-legacy-coordination-surfaces.md) and [ADR 0011](adr/0011-consolidate-on-native-multi-directory-runners.md) to the still-valid boundaries in [ADR 0007](adr/0007-retire-amux-through-native-cutover-and-staged-drain.md). Amux is not being fully deprecated or archived. Native Amp owns task coordination, multi-directory runner execution, and native update behavior. Amux retains declarative runner profiles and systemd/launchd service installation; core legacy coordination commands are removed and their stores are inert.
 
 The 2026-08-30 PR #375/#376 hygiene remains valid: the issue graph stays narrow, #374 stays closed, #366 is preflight-only, #328's direct-return gate remains open, and legacy coordination admission does not reopen. The obsolete full-retirement, runner-admission closure, and native/OS replacement-launch conclusions are withdrawn.
 
@@ -17,8 +17,9 @@ The 2026-08-30 PR #375/#376 hygiene remains valid: the issue graph stays narrow,
 | Layer | Destination |
 | --- | --- |
 | New tasks | Native authenticated Amp creation, exact Orb/runner placement, parent/reply routing, messaging, waiting, and archive state. No generalized Amux spawn/adoption or automatic lifecycle enrollment. |
-| Machine-local runners | Retained Amux workdir registry; pin/list/doctor/park/remove; minimum safe reconcile; `amux launch --all`; tmux/Amp process launch; install/update/maintenance diagnostics. |
-| OS activation | systemd/launchd activates Amux and retains its process group. Verified patterns: systemd `Type=oneshot` + `RemainAfterExit=yes`; RunAtLoad LaunchAgent + `AbandonProcessGroup=true`. Direct OS supervision does not replace Amux launch. |
+| Machine-local runners | Native Amp serves one startup directory plus discovered and explicit unrelated directories. Prefer one named profile per machine; use another only for separate identity or isolation. |
+| Amux configuration | `native-runners.json` declares profiles. `amux runner service install|remove|doctor` manages exact digest-owned service artifacts. The per-workdir registry and tmux lifecycle remain transitional compatibility behavior. |
+| OS activation | systemd/launchd executes the resolved Amp binary directly and keeps it alive. Amux is not resident. Native Amp owns update and idle-restart behavior, subject to its installation and settings. |
 | Worker/coordination stores | Existing workers, shelves, groups, reports, callbacks, deadlines, finish authorization, operations, and spawn assignments are inert evidence. Active commands do not enroll, migrate, drain, rewrite, or delete them. |
 | Provider bridges | Drain only after each existing replacement gate is proven. `/amux-tycho` remains unchanged until #328 passes; never dual-route. |
 | Git/worktree safety | Independent safety guidance; not a reason to retain coordination state and not contingent on full-product archive. |
@@ -54,7 +55,7 @@ Closed #232 remains safety evidence implemented by preflight-only PR #366. Close
 
 The proposed 2026-09-01 cutover and 2026-11-30 reader-window date were never landed and are withdrawn. No replacement date is selected.
 
-There is no runner-admission closure gate and no complete-product archive gate. Any future date applies only to a named legacy coordination/provider family and requires a separate owner decision. The retained runner registry, launch, maintenance, and diagnostics are not governed by a legacy-store reader window.
+There is no complete-product archive gate. Any future date applies only to a named legacy coordination/provider family or the transitional per-workdir runner lifecycle and requires a separate owner decision. Native runner profiles and service installation are not governed by a legacy-store reader window.
 
 ## Owner decisions still required
 

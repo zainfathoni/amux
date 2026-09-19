@@ -7,19 +7,32 @@ _Avoid_: Using worker for a native Amp thread or retained runner
 
 **Worker identity (historical)** — The canonical Amp thread ID stored in old worker evidence. It grants no current lifecycle authority.
 
-**Runner** — A non-interactive Amp client that makes a machine and working directory available for remote work. The retained Amux host layer registers, launches, and safely operates it.
+**Runner** — A non-interactive native Amp client that makes one startup directory plus zero or more discovered or explicit directories available for remote work.
 _Avoid_: Worker, background worker
 
-**Runner identity** — The canonical workdir. A directory may belong to only one configured runner workspace on a machine.
+**Runner profile** — Declarative machine configuration for one Runner: its name, native Runner ID, startup directory, discovery choice, explicit served directories, and remote-terminal choice.
+_Avoid_: Workspace, per-workdir runner
 
-**Runner ID** — Optional native Amp launch configuration for a Runner. It may be changed without changing Runner identity; it is not an Amux selector.
+**Runner ID** — Stable native Amp identity for one Runner. Runner IDs are unique on a machine and independent of served directory paths.
+_Avoid_: Profile name, workdir identity
+
+**Startup directory** — Stable directory from which a Runner starts and against which native Amp persists dynamically added directories.
+_Avoid_: Primary workdir
+
+**Served directory** — Existing Git or non-Git directory made available by a Runner, either as its startup directory or through explicit native directory configuration.
 _Avoid_: Runner identity
 
-**Runner workdir** — A canonical existing directory owned by a runner. It may be a Git repository or worktree, but does not need to be; amux validates directory existence separately from tmux and process ownership.
+**Discovered directory** — Git checkout selected by native Amp beneath a Runner's startup directory when directory discovery is enabled.
+
+**Runner service** — A systemd user service or launchd agent generated from one Runner profile that executes native Amp directly when that user's service manager starts it.
+_Avoid_: Amux supervisor
+
+**Legacy runner workdir** — Historical canonical directory identity used by the per-workdir Amux registry and tmux lifecycle.
+_Avoid_: Served directory for new profiles
 
 **Runner window** — A tmux window whose name is derived deterministically from the runner workdir as `runner-<directory>-<path-hash>`. The canonical workdir, not the generated window name, is the runner's public identity.
 
-**Runner maintenance** — A short-lived, machine-level scheduled operation that keeps Amp current and recycles verified runners when their installed Amp executable changes. The operating system schedules it; amux does not keep a resident supervisor.
+**Runner maintenance (historical)** — Legacy scheduled operation that updated Amp and recycled per-workdir tmux runners. Native multi-directory runners update themselves.
 
 **Thread** — The conversation identity underlying Amp work, independent of whether or how a local client is running.
 _Avoid_: Worker when referring to the local TUI client

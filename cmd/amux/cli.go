@@ -153,8 +153,9 @@ func runnerLifecycleCommandFlags() []string {
 }
 
 func runnerCommand() *commandSpec {
-	runner := &commandSpec{Name: "runner", Summary: "Manage non-interactive workdir-bound clients", Usage: "amux runner <command>"}
+	runner := &commandSpec{Name: "runner", Summary: "Manage native Amp runner services and legacy workdir-bound clients", Usage: "amux runner <command>"}
 	runner.Children = []*commandSpec{
+		runnerServiceCommand(),
 		maintenanceCommand(),
 		runnerLeaf("list", "List configured runners", false, runnerLifecycleCommandFlags()...),
 		runnerLeaf("pin", "Pin or reconfigure a runner without launching it unless restart is required", true, "--workspace, -w <name>", "--workdir, -d <path>", "--current-dir, -c", "--runner-id, -i <id>", "--restart", "--current"),
@@ -168,6 +169,14 @@ func runnerCommand() *commandSpec {
 		runnerLeaf("reconcile", "Keep present rows unchanged; retain missing rows and fail closed", true, runnerLifecycleCommandFlags()...),
 	}
 	return runner
+}
+
+func runnerServiceCommand() *commandSpec {
+	return &commandSpec{Name: "service", Summary: "Manage native multi-directory runner services", Usage: "amux runner service <command>", Children: []*commandSpec{
+		{Name: "install", Summary: "Install and start services from native-runners.json", Usage: "amux runner service install", NeedsConfig: true, Mutating: true},
+		{Name: "remove", Summary: "Stop and remove Amux-managed native runner services", Usage: "amux runner service remove", NeedsConfig: true, Mutating: true},
+		{Name: "doctor", Summary: "Inspect native runner configuration and installed services", Usage: "amux runner service doctor", NeedsConfig: true},
+	}}
 }
 
 func maintenanceCommand() *commandSpec {
@@ -332,7 +341,7 @@ func parseInvocation(args []string) (invocation, error) {
 	if !spec.FoundationOnly && len(parsed.Args) != 0 {
 		return parsed, fmt.Errorf("positional selectors were removed from %s; use named selectors shown by `amux help %s`", strings.Join(path, " "), strings.Join(path, " "))
 	}
-	if !spec.FoundationOnly && spec.Mutating && spec.Name != "launch" && !isMaintenancePath(path) && !hasResourceScope(parsed.Selectors) {
+	if !spec.FoundationOnly && spec.Mutating && spec.Name != "launch" && !isMaintenancePath(path) && !isRunnerServicePath(path) && !hasResourceScope(parsed.Selectors) {
 		return parsed, fmt.Errorf("%s requires a resource scope; use an explicit selector or --all", strings.Join(path, " "))
 	}
 	if opts.AttachMode == attachAlways {
@@ -385,6 +394,10 @@ func parseMaintenanceFlags(args []string) ([]string, string, bool, error) {
 
 func isMaintenancePath(path []string) bool {
 	return len(path) == 3 && path[0] == "runner" && path[1] == "maintenance"
+}
+
+func isRunnerServicePath(path []string) bool {
+	return len(path) == 3 && path[0] == "runner" && path[1] == "service"
 }
 
 func parseCLIOptions(args []string) (cliOptions, []string, error) {
@@ -1037,7 +1050,7 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 		}
 	}
 
-	if parsed.Command.NeedsConfig && parsed.Command.Name != "migrate-config" && parsed.Command.Name != "path" && parsed.Command.Name != "__sweep-validate-reports" {
+	if parsed.Command.NeedsConfig && parsed.Command.Name != "migrate-config" && parsed.Command.Name != "path" && parsed.Command.Name != "__sweep-validate-reports" && !isRunnerServicePath(parsed.Path) {
 		required, err := config.MigrationRequired(dir)
 		if err != nil {
 			return nil, result.Preflight(err)
@@ -1059,6 +1072,17 @@ func (a app) dispatch(parsed invocation) (*result.Envelope, error) {
 			defer held.Release()
 		}
 		return a.executeMaintenance(parsed, dir)
+	}
+	if isRunnerServicePath(parsed.Path) {
+		var held *lock.Lock
+		if parsed.Command.Mutating {
+			held, err = acquireMutationLock(parsed.Path)
+			if err != nil {
+				return nil, result.Preflight(err)
+			}
+			defer held.Release()
+		}
+		return a.executeRunnerService(parsed, dir)
 	}
 
 	if !parsed.Command.FoundationOnly && !isAggregateLifecycle(parsed.Path) && !isWorkspaceList(parsed.Path) && (len(parsed.Path) != 2 || parsed.Path[0] != "runner") {

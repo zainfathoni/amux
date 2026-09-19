@@ -53,8 +53,8 @@ func TestTriggerChecklistMatchesSkillActivationAndRouting(t *testing.T) {
 
 	triggerPattern := regexp.MustCompile(`(?m)^\| \x60([^\x60]+)\x60 \|`)
 	matches := triggerPattern.FindAllStringSubmatch(checklist, -1)
-	if len(matches) != 13 {
-		t.Fatalf("trigger checklist has %d routes, want 13", len(matches))
+	if len(matches) != 17 {
+		t.Fatalf("trigger checklist has %d routes, want 17", len(matches))
 	}
 	for _, match := range matches {
 		trigger := match[1]
@@ -550,11 +550,12 @@ func TestRunnerIDDesignDoesNotDisplaceRetainedAmuxLaunch(t *testing.T) {
 	}
 }
 
-func TestThinHostDirectionIsUnambiguous(t *testing.T) {
+func TestNativeRunnerConfigurationDirectionIsUnambiguous(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	adr7 := readSkillFile(t, root, filepath.Join("docs", "adr", "0007-retire-amux-through-native-cutover-and-staged-drain.md"))
 	adr8 := readSkillFile(t, root, filepath.Join("docs", "adr", "0008-retain-machine-local-runner-host-and-drain-coordination.md"))
+	adr11 := readSkillFile(t, root, filepath.Join("docs", "adr", "0011-consolidate-on-native-multi-directory-runners.md"))
 	adr5 := readSkillFile(t, root, filepath.Join("docs", "adr", "0005-maintain-amux-as-a-local-worker-lifecycle-and-recovery-tool.md"))
 	adr6 := readSkillFile(t, root, filepath.Join("docs", "adr", "0006-bound-thread-delegation-and-require-preservation-before-retirement.md"))
 	readme := readSkillFile(t, root, "README.md")
@@ -563,47 +564,39 @@ func TestThinHostDirectionIsUnambiguous(t *testing.T) {
 	homepage := readSkillFile(t, root, filepath.Join("docs", "index.html"))
 	skillGuide := readSkillFile(t, root, filepath.Join("docs", "skill", "index.html"))
 	triggers := readSkillFile(t, root, filepath.Join("skills", "amux", "reference", "trigger-phrases.md"))
-	active := adr8 + readme + skill + ledger
+	active := adr11 + readme + skill + ledger
 
 	for name, check := range map[string]struct {
 		contents string
 		markers  []string
 	}{
-		"ADR 0008": {adr8, []string{
-			"Native Amp owns new task coordination",
-			"machine-local runner registry",
-			"`amux launch --all`",
-			"Type=oneshot",
-			"RemainAfterExit=yes",
-			"AbandonProcessGroup=true",
-			"preflight-only",
-			"legacy coordination",
-			"not being fully deprecated or archived",
+		"ADR 0011": {adr11, []string{
+			"native multi-directory runners",
+			"`native-runners.json`",
+			"`amux runner service install`",
+			"systemd user services or launchd agents",
+			"invokes Amp directly",
+			"not a resident supervisor",
 		}},
 		"README": {readme, []string{
-			"Native Amp owns new task creation and coordination",
-			"machine-local runner registry",
-			"`amux launch --all`",
-			"Type=oneshot",
-			"RemainAfterExit=yes",
-			"AbandonProcessGroup=true",
-			"Amux is not deprecated or archived",
+			"declarative machine-local configuration",
+			"`native-runners.json`",
+			"amux runner service install",
+			"Obsidian vault",
+			"executes the resolved Amp binary directly",
 		}},
 		"skill": {skill, []string{
-			"machine-local Amux runner registry",
-			"Routes new delegated work to native Amp child threads",
-			"`amux launch --all`",
+			"native Amp multi-directory runner profiles",
+			"`native-runners.json`",
+			"`amux runner service install|remove|doctor`",
 			"Historical worker/coordination files are inert",
 		}},
 		"ledger": {ledger, []string{
-			"Native Amp owns new task coordination",
-			"machine-local runner launch",
-			"`amux launch --all`",
-			"Type=oneshot",
-			"RemainAfterExit=yes",
-			"AbandonProcessGroup=true",
+			"Native Amp owns task coordination, multi-directory runner execution, and native update behavior",
+			"`native-runners.json`",
+			"`amux runner service install|remove|doctor`",
+			"executes the resolved Amp binary directly",
 			"preflight-only",
-			"legacy coordination",
 			"not being fully deprecated or archived",
 		}},
 	} {
@@ -653,7 +646,6 @@ func TestThinHostDirectionIsUnambiguous(t *testing.T) {
 		"2026-09-01 cutover date",
 		"2026-11-30 reader window begins",
 		"Runner admission closes",
-		"OS supervision of native runners",
 	} {
 		if strings.Contains(active, forbidden) {
 			t.Errorf("active thin-host guidance retains obsolete direction %q", forbidden)
@@ -680,14 +672,9 @@ func TestThinHostDirectionIsUnambiguous(t *testing.T) {
 			t.Errorf("%s must not actively route new worker pin admission", name)
 		}
 	}
-	for name, contents := range map[string]string{
-		"skill":         skill,
-		"trigger table": triggers,
-		"homepage":      homepage,
-		"skill guide":   skillGuide,
-	} {
+	for name, contents := range map[string]string{"skill": skill, "trigger table": triggers, "skill guide": skillGuide} {
 		if !strings.Contains(contents, "Pin this runner") {
-			t.Errorf("%s must route retained pin admission to runners", name)
+			t.Errorf("%s must document transitional runner pin admission", name)
 		}
 	}
 	for name, contents := range map[string]string{
@@ -695,8 +682,8 @@ func TestThinHostDirectionIsUnambiguous(t *testing.T) {
 		"skill routing":     skill,
 		"trigger table":     triggers,
 	} {
-		if !strings.Contains(contents, "Pin it") {
-			t.Errorf("%s must retain the unqualified runner pin trigger", name)
+		if !strings.Contains(contents, "runner service") && !strings.Contains(contents, "Runner service") {
+			t.Errorf("%s must route native runner service management", name)
 		}
 	}
 	for _, forbidden := range []string{"amux worker adopt", "amux group declare", "amux report submit"} {

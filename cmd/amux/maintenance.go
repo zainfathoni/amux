@@ -225,6 +225,11 @@ func (a app) installMaintenance(in invocation, dir config.Directory, env *result
 	if in.MaintenanceOwner != "self" && in.MaintenanceOwner != "external" {
 		return env, result.Request(errors.New("--update-owner must be self or external"))
 	}
+	if in.MaintenanceOwner == "self" {
+		if err := requireNativeRunnerServicesAbsent(dir, "self-owned maintenance install", "native Amp owns updates for these services; remove the native services first, or use --update-owner external for the legacy compatibility tail"); err != nil {
+			return env, result.Preflight(err)
+		}
+	}
 	amuxPath, err := canonicalSelfUpdatePath()
 	if err != nil {
 		return env, result.Preflight(err)
@@ -631,6 +636,11 @@ func (a app) runMaintenance(in invocation, dir config.Directory, env *result.Env
 	m, err := loadMaintenance(dir.MaintenancePath())
 	if err != nil {
 		return env, result.Preflight(fmt.Errorf("load maintenance installation: %w", err))
+	}
+	if m.Owner == "self" {
+		if err := requireNativeRunnerServicesAbsent(dir, "self-owned maintenance run", "native Amp owns updates for these services; remove native services first, or remove and reinstall legacy maintenance with --update-owner external for the compatibility tail"); err != nil {
+			return env, result.Preflight(err)
+		}
 	}
 	prior := maintenanceOutcome{}
 	if !in.Options.DryRun {

@@ -1,17 +1,19 @@
 ---
 name: amux
-description: "Operates the retained machine-local Amux runner registry, exact workdir bindings, automatic tmux/Amp launch, diagnostics, maintenance, teardown, and fail-closed runner lifecycle. Routes new delegated work to native Amp child threads without Amux workers, spawn/adoption, groups, reports, callbacks, deadlines, shelves, or finish state. Use for runner pin/list/launch/doctor/park/restart/teardown/remove/reconcile, runner workspaces, 'Pin it', /amux health, /amux sprawl, and the separately owner-gated read-only /amux sweep. Experimental Tycho execution uses a separate explicit-only skill."
+description: "Configures named native Amp multi-directory runner profiles and installs their systemd or launchd services. Also operates legacy Amux runner bindings during migration. Use for native-runners.json, runner service install/remove/doctor, mixed code and non-Git roots, and legacy runner recovery."
 ---
 
 # amux
 
-Thin machine-local Amp/tmux runner host. **Runner** = `amp --no-tui` process bound to one canonical workdir. **Workspace** = same-named tmux session grouping runners.
+Thin machine-local configuration and activation layer for native Amp multi-directory runners. Prefer one Runner profile per machine, combining `--discover-dirs` with explicit unrelated directories such as Obsidian vaults. Legacy per-workdir tmux operations remain available only during migration.
 
 ## Contract
 
-- Canonical runner identity is `--workdir`; `--workspace` selects a runner lifecycle group. Use long selectors.
-- Top-level `list`, `launch`, `park`, `restart`, `remove`, `doctor`, and `reconcile` are runner-only aliases. Bare `amux` launches all configured runners. Other machine-wide mutations require explicit `--all`.
-- Runner pin/list/launch/doctor/park/restart/teardown/remove and minimum fail-closed reconcile are active operations. Graphical-login/boot integration runs `amux launch --all`; systemd/launchd activate Amux and retain its process group rather than replacing it.
+- For new configuration, prefer one profile in `native-runners.json` with one stable startup directory, native discovery for nearby Git repositories, and explicit `dirs` for unrelated or non-Git roots. Add a second profile only for a separately identified or isolated native process.
+- `amux runner service install|remove|doctor` owns systemd/launchd artifacts by exact recorded digest. The generated service executes Amp directly; Amux is not a resident supervisor or updater. Install rejects self-owned legacy maintenance and case-insensitive runner-ID collisions with retained `runners.tsv` rows; it never rewrites those records.
+- For legacy per-workdir operations, canonical runner identity is `--workdir`; `--workspace` selects a runner lifecycle group. Use long selectors.
+- Top-level `list`, `launch`, `park`, `restart`, `remove`, `doctor`, and `reconcile` are legacy per-workdir aliases. Bare `amux` retains legacy launch behavior during migration. Other legacy machine-wide mutations require explicit `--all`.
+- Legacy runner pin/list/launch/doctor/park/restart/teardown/remove and minimum fail-closed reconcile remain active during migration. Do not create new per-workdir bindings when one native multi-directory profile suffices. Before native cutover, disable login automation that invokes bare `amux` or `amux launch --all`, remove self-owned maintenance (external ownership is an explicit tail option), then park → soak through login or reboot → unpin. Preserve the worktree; never teardown for cutover.
 - The `worker`, `spawn`, shelf, top-level worker teardown, group, report, callback, deadline, and finish surfaces are removed. Never attempt their historical syntax, edit their stores, or manufacture a compatibility transition. `runner teardown` is a new machine-local command, not a compatibility transition.
 - Native-created work receives no Amux worker, adoption, group, report, callback, deadline, shelf, finish authorization, or lifecycle instructions.
 - For delegated work, use authenticated native Amp `create_thread` on the exact intended Workspace Project and Orb, or exact live runner and intended workdir. Keep the native parent/reply route. Do not call the child an Amux worker.
@@ -22,6 +24,10 @@ Thin machine-local Amp/tmux runner host. **Runner** = `amp --no-tui` process bou
 
 ## Route triggers
 
+- **Serve my code and vault**: create or update `native-runners.json`; prefer discovery for nearby Git checkouts and explicit `dirs` for everything else.
+- **Start this runner at login**: dry-run, then run `amux runner service install` to install and activate exact systemd/launchd artifacts.
+- **Check runner services**: run `amux runner service doctor` for read-only verification.
+- **Remove runner services**: dry-run before `amux runner service remove`.
 - **Pin it** / **Pin this runner**: `amux runner pin --workspace <name> --workdir <existing-directory> [--runner-id <id>]` or `--current [--runner-id <id>]`.
 - **List runners**: `amux runner list --all` or a canonical scope.
 - **Restore my workspace**: `amux launch --workspace <name>`.
@@ -29,7 +35,7 @@ Thin machine-local Amp/tmux runner host. **Runner** = `amp --no-tui` process bou
 - **Restart unresponsive runners**: use the exact runner scope; preserve rows and fail closed on ambiguity.
 - **Doctor amux**: `amux doctor --all` or scoped runner doctor.
 - **Remove/unpin/reconcile a runner**: dry-run first. Unpin removes only an exact selected binding whose local tmux runner is positively absent and never stops a process. Remove and missing-workdir reconcile fail closed without authoritative process/catalog absence evidence; preserve the row on any blocker.
-- **Teardown this runner/worktree or completed thread worktree**: load [`reference/workflows.md`](reference/workflows.md#teardown-completed-native-thread-worktrees). Teardown requires one exact workdir, a fresh state-bound plan, and explicit application of that digest. Archive native threads separately and only when requested.
+- **Teardown this runner/worktree or completed thread worktree**: load [`reference/workflows.md`](reference/workflows.md#teardown-completed-native-thread-worktrees). Teardown requires one exact workdir, a fresh state-bound plan, and explicit application of that digest. It is unavailable while native service metadata records installed or activation-pending services; use park → soak → unpin for cutover. Archive native threads separately and only when requested.
 - **Spawn a worker for / delegate work**: this means native `create_thread`, never Amux spawn/adoption. Load [`reference/workflows.md`](reference/workflows.md).
 - **Coordinate child threads**: use native parent/reply routing, messaging, and waiting only.
 - **/amux health**: [`workflows.md`](reference/workflows.md#health-runners).

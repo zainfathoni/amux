@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>The /amux skill — machine-local runner operations</title>
-    <meta name="description" content="Install and use /amux for active machine-local Amp runner operations." />
+    <title>The /amux skill — native runner configuration</title>
+    <meta name="description" content="Configure native Amp multi-directory runners and their systemd or launchd services." />
     <meta property="og:title" content="The /amux runner skill" />
-    <meta property="og:description" content="Safe agent routing for Amux runner and tmux workspace lifecycle." />
+    <meta property="og:description" content="Declarative directories and login services for native Amp runners." />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://amux.zainf.dev/skill/" />
     <meta name="theme-color" content="#161e2e" />
@@ -42,7 +42,7 @@
         <aside aria-label="On this page"><strong>On this page</strong><a href="#install">Install</a><a href="#model">Core concepts</a><a href="#routing">Common requests</a><a href="#current-dir">Current directory and IDs</a><a href="#safety">Safety boundaries</a><a href="#activation">Activation</a><a href="#workflows">Skill workflows</a><a href="#legacy">Legacy replacements</a></aside>
         <main>
           <h1>The <span style="color:var(--red)">/amux</span> skill</h1>
-          <p class="lede">The Amp skill for operating Amux’s active machine-local runner host. It manages local runner bindings and routes delegated work to native Amp threads; it never creates or adopts legacy Amux workers.</p>
+          <p class="lede">The Amp skill for declaring native multi-directory runners and installing their systemd or launchd services. Amp owns runner execution, updates, and task coordination; Amux keeps reproducible machine configuration.</p>
 
           <h2 id="install">Install globally</h2>
           <pre><code>npx skills add zainfathoni/amux --skill amux --global</code></pre>
@@ -57,10 +57,14 @@ curl -fsSL https://amux.zainf.dev/install.sh |
   AMUX_SKILLS_SOURCE="$AMUX_REPO" sh</code></pre>
 
           <h2 id="model">Core concepts</h2>
-          <ul><li><strong>Runner:</strong> a machine-local <code>amp --no-tui</code> process identified by its canonical existing workdir.</li><li><strong>Runner ID:</strong> optional native Amp launch configuration stored with the binding; it is not an Amux selector.</li><li><strong>Workspace:</strong> a named tmux session grouping one or more runners.</li><li><strong>Native child:</strong> an Amp thread created and coordinated by Amp, with no Amux worker or coordination record.</li></ul>
+          <ul><li><strong>Runner profile:</strong> named configuration for one native <code>amp --no-tui</code> process.</li><li><strong>Startup directory:</strong> the stable directory from which Amp starts and remembers dynamic directory additions.</li><li><strong>Served directory:</strong> any existing Git or non-Git directory made available by the runner.</li><li><strong>Runner service:</strong> a generated systemd user service or launchd agent that executes Amp directly.</li></ul>
 
           <h2 id="routing">Common requests</h2>
           <table><thead><tr><th>Say</th><th>Agent route</th><th>Effect</th></tr></thead><tbody>
+            <tr><td>Serve my code and vault</td><td>Configure one <code>native-runners.json</code> profile</td><td>Combine discovery beneath a code root with explicit unrelated directories.</td></tr>
+            <tr><td>Start the runner at login</td><td><code>amux runner service install</code></td><td>Install and activate an owned systemd or launchd artifact.</td></tr>
+            <tr><td>Check runner services</td><td><code>amux runner service doctor</code></td><td>Verify profile, artifact digest, and active service state.</td></tr>
+            <tr><td>Remove runner services</td><td><code>amux --dry-run runner service remove</code></td><td>Plan removal of exact Amux-owned artifacts.</td></tr>
             <tr><td>Pin this runner</td><td><code>amux runner pin -w &lt;name&gt; -c [-i &lt;native-id&gt;]</code></td><td>Record an exact canonical-workdir binding; do not launch.</td></tr>
             <tr><td>Restore my workspace</td><td><code>amux launch --workspace &lt;name&gt;</code></td><td>Launch absent configured runners.</td></tr>
             <tr><td>List or diagnose</td><td><code>amux runner list --all</code><br><code>amux runner doctor --all</code></td><td>Inspect runner and maintenance state without mutation.</td></tr>
@@ -69,6 +73,22 @@ curl -fsSL https://amux.zainf.dev/install.sh |
             <tr><td>Teardown this worktree</td><td>Two-step <code>runner teardown</code> plan and fresh digest</td><td>Stop the runner, remove a safe secondary worktree, and unpin; preserve branch and threads.</td></tr>
             <tr><td>Delegate work</td><td>Authenticated native Amp creation on the exact target</td><td>Create no Amux worker or coordination state.</td></tr>
           </tbody></table>
+
+          <h3>Example profile</h3>
+          <pre><code>{
+  "schema_version": 1,
+  "runners": [{
+    "name": "main",
+    "runner_id": "laptop-main",
+    "startup_directory": "/home/me/Code",
+    "discover_dirs": true,
+    "dirs": ["/home/me/Obsidian/Vault"]
+  }]
+}
+
+amux --dry-run runner service install
+amux runner service install
+amux runner service doctor</code></pre>
 
           <h2 id="current-dir">Current directory and runner IDs</h2>
           <pre><code>cd ~/Code/project-runner
@@ -88,10 +108,8 @@ amux runner pin -w project -c \
           <p class="note">Runner-ID replacement verifies the exact owned tmux pane, Amp process, executable, arguments, and canonical workdir before mutation. If proof is incomplete, Amux rejects rather than guessing.</p>
 
           <h2 id="activation">Activation and maintenance</h2>
-          <p>At graphical login or boot, systemd or launchd runs <code>amux launch --all</code>. The OS activates Amux and retains its process group; it does not replace Amux with direct runner supervision. Scheduled maintenance is separate and short-lived:</p>
-          <pre><code>amux runner maintenance install --update-owner self
-# Use external when another package manager owns Amp:
-amux runner maintenance install --update-owner external</code></pre>
+          <p><code>amux runner service install</code> generates one service per profile. systemd or launchd executes Amp directly and keeps it running; Amux is not a resident supervisor. launchd starts at GUI login. Starting a systemd user service without login requires lingering configured outside Amux. Amp owns update and idle-restart behavior, subject to its installation and settings.</p>
+          <p>The old per-workdir registry, tmux lifecycle, and scheduled Amux maintenance remain available only during migration. Do not use them for new profiles.</p>
 
           <h2 id="workflows">Skill-only workflows</h2>
           <p><code>/amux health</code> performs read-only runner diagnostics. <code>/amux sprawl</code> fans independent work out through native Amp child threads only. <code>/amux sweep</code> is a protected, one-time, read-only historical inventory and requires separate exact owner authorization; loading the skill does not authorize it.</p>

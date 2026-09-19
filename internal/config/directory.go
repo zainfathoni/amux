@@ -19,6 +19,8 @@ const (
 	ReportsFile                  = "reports.json"
 	MaintenanceFile              = "runner-maintenance.json"
 	MaintenanceResultFile        = "runner-maintenance-result.json"
+	NativeRunnersFile            = "native-runners.json"
+	RunnerServicesFile           = "runner-services.json"
 )
 
 // Directory is the complete on-disk configuration selected for one invocation.
@@ -82,3 +84,6 @@ func (d Directory) MaintenancePath() string { return filepath.Join(d.Path, Maint
 func (d Directory) MaintenanceResultPath() string {
 	return filepath.Join(d.Path, MaintenanceResultFile)
 }
+
+func (d Directory) NativeRunnersPath() string  { return filepath.Join(d.Path, NativeRunnersFile) }
+func (d Directory) RunnerServicesPath() string { return filepath.Join(d.Path, RunnerServicesFile) }
