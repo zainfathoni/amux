@@ -17,6 +17,7 @@ Create `~/.config/amux/native-runners.json`:
       "runner_id": "laptop-main",
       "startup_directory": "/home/me/Code",
       "discover_dirs": true,
+      "discover_depth": 3,
       "dirs": [
         "/home/me/Obsidian/Vault",
         "/home/me/.dotfiles"
@@ -38,6 +39,8 @@ amux runner service doctor
 On Linux, Amux installs one `com.zainfathoni.amux.runner.<name>.service` systemd user unit per profile. On macOS, it installs the equivalent LaunchAgent. Each artifact executes the resolved Amp binary directly with `--no-tui`, the stable runner ID, discovery and explicit-directory flags, and optional remote terminal access. Amux records artifact digests and refuses to replace or remove unrecognized files. Installation also rejects a case-insensitive runner-ID collision with a retained `runners.tsv` row and rejects installed or activation-pending self-owned legacy maintenance; it does not rewrite either legacy record.
 
 Dynamic `amp runner dirs add|list|remove` remains available. Amp persists those additions against the profile's stable startup directory; keep declarative machine-critical paths in `native-runners.json` and use dynamic additions for local, temporary choices.
+
+When `discover_dirs` is true, Amp scans two levels beneath `startup_directory` by default. Set `discover_depth` from 1 through 10 when repositories are nested more or less deeply; for example, an owner/repository layout beneath a code root uses the default depth 2. Amux requires discovery to be explicitly enabled when a depth is configured. Use `dirs` for repositories or non-Git directories outside the discovery root.
 
 During coexistence, use a dedicated persistent startup directory, for example `~/.local/share/amux/native-main` (create it first), set `discover_dirs` to `false`, and list the existing workdirs explicitly in `dirs`. Amp can reject a second headless instance starting in the same directory even with a different runner ID. Installation rejects startup directories matching retained legacy TSV workdirs, including parked rows; native profiles must also have distinct startup directories. Symlink aliases are resolved for these checks. Sharing explicit served directories is allowed; it does not migrate existing threads. A successful `service doctor` is a point-in-time check, not proof of sustained health.
 
@@ -192,6 +195,7 @@ The generated process arguments come entirely from the validated profile:
 
 - `--runner-id` from `runner_id`;
 - `--discover-dirs` when `discover_dirs` is true;
+- `--discover-depth` from optional `discover_depth` (1 through 10; omitted keeps Amp's default 2);
 - repeated `--dir` arguments from `dirs`; and
 - `--remote-control-terminal` when enabled.
 

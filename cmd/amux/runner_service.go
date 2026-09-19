@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -66,6 +67,9 @@ func nativeRunnerArgs(profile config.NativeRunnerProfile) []string {
 	args := []string{"--no-tui", "--runner-id", profile.RunnerID}
 	if profile.DiscoverDirectories {
 		args = append(args, "--discover-dirs")
+	}
+	if profile.DiscoverDepth != nil {
+		args = append(args, "--discover-depth", strconv.Itoa(*profile.DiscoverDepth))
 	}
 	for _, directory := range profile.Directories {
 		args = append(args, "--dir", directory)
@@ -693,7 +697,14 @@ func (a app) doctorRunnerServices(in invocation, dir config.Directory, env *resu
 		return env, result.Preflight(err)
 	}
 	for _, profile := range configuration.Runners {
-		out := result.Outcome{Resource: result.ConfigResource(dir.NativeRunnersPath()), Action: "doctor-runner-service", Message: fmt.Sprintf("runner profile %s serves startup=%s discover=%t explicit-dirs=%d", profile.Name, profile.StartupDirectory, profile.DiscoverDirectories, len(profile.Directories))}
+		discoveryDepth := "off"
+		if profile.DiscoverDirectories {
+			discoveryDepth = "default"
+		}
+		if profile.DiscoverDepth != nil {
+			discoveryDepth = strconv.Itoa(*profile.DiscoverDepth)
+		}
+		out := result.Outcome{Resource: result.ConfigResource(dir.NativeRunnersPath()), Action: "doctor-runner-service", Message: fmt.Sprintf("runner profile %s serves startup=%s discover=%t discovery-depth=%s explicit-dirs=%d", profile.Name, profile.StartupDirectory, profile.DiscoverDirectories, discoveryDepth, len(profile.Directories))}
 		env.Successful = append(env.Successful, out)
 		if !in.Options.JSON {
 			fmt.Fprintln(a.stdout, out.Message)

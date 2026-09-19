@@ -20,7 +20,7 @@ func TestLoadNativeRunnersCanonicalizesMixedRootsDeterministically(t *testing.T)
 		}
 	}
 	path := filepath.Join(root, "native-runners.json")
-	document := `{"schema_version":1,"runners":[{"name":"main","runner_id":"Laptop.Main","startup_directory":` + quoteJSON(code) + `,"discover_dirs":true,"dirs":[` + quoteJSON(vault) + `,` + quoteJSON(dotfiles) + `],"remote_control_terminal":true}]}`
+	document := `{"schema_version":1,"runners":[{"name":"main","runner_id":"Laptop.Main","startup_directory":` + quoteJSON(code) + `,"discover_dirs":true,"discover_depth":3,"dirs":[` + quoteJSON(vault) + `,` + quoteJSON(dotfiles) + `],"remote_control_terminal":true}]}`
 	if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -43,8 +43,43 @@ func TestLoadNativeRunnersCanonicalizesMixedRootsDeterministically(t *testing.T)
 	}
 	wantDirectories := []string{wantVault, wantDotfiles}
 	sort.Strings(wantDirectories)
-	if profile.StartupDirectory != wantCode || !slices.Equal(profile.Directories, wantDirectories) {
+	if profile.StartupDirectory != wantCode || profile.DiscoverDepth == nil || *profile.DiscoverDepth != 3 || !slices.Equal(profile.Directories, wantDirectories) {
 		t.Fatalf("profile = %+v", profile)
+	}
+}
+
+func TestLoadNativeRunnersValidatesOptionalDiscoveryDepth(t *testing.T) {
+	root := t.TempDir()
+	for _, test := range []struct {
+		name, fields, want string
+	}{
+		{"omitted", `"discover_dirs":true`, ""},
+		{"minimum", `"discover_dirs":true,"discover_depth":1`, ""},
+		{"maximum", `"discover_dirs":true,"discover_depth":10`, ""},
+		{"zero", `"discover_dirs":true,"discover_depth":0`, "between 1 and 10"},
+		{"above maximum", `"discover_dirs":true,"discover_depth":11`, "between 1 and 10"},
+		{"discovery disabled", `"discover_dirs":false,"discover_depth":3`, "requires discover_dirs"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "native-runners.json")
+			document := `{"schema_version":1,"runners":[{"name":"main","runner_id":"runner","startup_directory":` + quoteJSON(root) + `,` + test.fields + `}]}`
+			if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := LoadNativeRunners(path)
+			if test.want != "" {
+				if err == nil || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("error = %v, want %q", err, test.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (test.name == "omitted") != (got.Runners[0].DiscoverDepth == nil) {
+				t.Fatalf("discovery depth = %v", got.Runners[0].DiscoverDepth)
+			}
+		})
 	}
 }
 
