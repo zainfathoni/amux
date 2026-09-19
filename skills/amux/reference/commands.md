@@ -29,7 +29,7 @@ amux migrate-config
 amux update
 ```
 
-`native-runners.json` is the source of truth for native profiles. Each profile declares a name, stable native `runner_id`, existing `startup_directory`, optional `discover_dirs`, explicit existing `dirs`, and optional `remote_control_terminal`. Prefer one profile per machine. Use discovery for nearby Git checkouts and explicit directories for unrelated or non-Git roots such as an Obsidian vault.
+`native-runners.json` is the source of truth for native profiles. Each profile declares a name, stable native `runner_id`, existing `startup_directory`, optional `discover_dirs`, optional `discover_depth` from 1 through 10, explicit existing `dirs`, and optional `remote_control_terminal`. Prefer one profile per machine. Discovery defaults to depth 2 and must be explicitly enabled to configure another depth. Use discovery for nearby Git checkouts and explicit directories for unrelated or non-Git roots such as an Obsidian vault.
 
 `runner service install` validates every directory, resolves the exact Amp executable, generates an owned systemd user service or launchd agent, and activates it. It rejects installed or activation-pending self-owned legacy maintenance and case-insensitive runner-ID collisions with optional IDs in retained `runners.tsv`; it does not rewrite those records. The service executes Amp directly; Amux is not resident. `runner service doctor` compares the current profile, recorded artifact digest, and active service state. `runner service remove` stops and removes only exact recorded artifacts. Use `--dry-run`; unrecognized or modified artifacts fail closed.
 

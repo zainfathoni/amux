@@ -26,6 +26,7 @@ type NativeRunnerProfile struct {
 	RunnerID              string   `json:"runner_id"`
 	StartupDirectory      string   `json:"startup_directory"`
 	DiscoverDirectories   bool     `json:"discover_dirs,omitempty"`
+	DiscoverDepth         *int     `json:"discover_depth,omitempty"`
 	Directories           []string `json:"dirs,omitempty"`
 	RemoteControlTerminal bool     `json:"remote_control_terminal,omitempty"`
 }
@@ -85,6 +86,14 @@ func (c *NativeRunnerConfig) Validate() error {
 		}
 		seenStartups[startup] = profile.Name
 		profile.StartupDirectory = startup
+		if profile.DiscoverDepth != nil {
+			if *profile.DiscoverDepth < 1 || *profile.DiscoverDepth > 10 {
+				return fmt.Errorf("runner profile %q discover_depth must be between 1 and 10", profile.Name)
+			}
+			if !profile.DiscoverDirectories {
+				return fmt.Errorf("runner profile %q discover_depth requires discover_dirs to be true", profile.Name)
+			}
+		}
 		seenDirectories := map[string]bool{startup: true}
 		for j, directory := range profile.Directories {
 			canonical, err := canonicalExistingDirectory(directory)

@@ -17,11 +17,13 @@ import (
 )
 
 func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
+	discoveryDepth := 3
 	profile := config.NativeRunnerProfile{
 		Name:                  "main",
 		RunnerID:              "laptop-main",
 		StartupDirectory:      "/Users/me/Code Root%$",
 		DiscoverDirectories:   true,
+		DiscoverDepth:         &discoveryDepth,
 		Directories:           []string{"/Users/me/Obsidian/Vault", "/Users/me/.dotfiles"},
 		RemoteControlTerminal: true,
 	}
@@ -31,7 +33,7 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 	}
 	for _, want := range []string{
 		`WorkingDirectory=/Users/me/Code Root%%$`,
-		`ExecStart="/opt/amp/bin/amp" "--no-tui" "--runner-id" "laptop-main" "--discover-dirs" "--dir" "/Users/me/Obsidian/Vault" "--dir" "/Users/me/.dotfiles" "--remote-control-terminal"`,
+		`ExecStart="/opt/amp/bin/amp" "--no-tui" "--runner-id" "laptop-main" "--discover-dirs" "--discover-depth" "3" "--dir" "/Users/me/Obsidian/Vault" "--dir" "/Users/me/.dotfiles" "--remote-control-terminal"`,
 		"Restart=always",
 	} {
 		if !strings.Contains(systemd, want) {
@@ -42,6 +44,7 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 	for _, want := range []string{
 		"<key>WorkingDirectory</key><string>/Users/me/Code Root%$</string>",
 		"<string>--discover-dirs</string>",
+		"<string>--discover-depth</string><string>3</string>",
 		"<string>/Users/me/Obsidian/Vault</string>",
 		"<string>--remote-control-terminal</string>",
 		"<key>RunAtLoad</key><true/>",
@@ -50,6 +53,13 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 		if !strings.Contains(launchd, want) {
 			t.Errorf("launchd artifact missing %q:\n%s", want, launchd)
 		}
+	}
+}
+
+func TestNativeRunnerArgsOmitUnconfiguredDiscoveryDepth(t *testing.T) {
+	args := nativeRunnerArgs(config.NativeRunnerProfile{RunnerID: "runner", DiscoverDirectories: true})
+	if slices.Contains(args, "--discover-depth") {
+		t.Fatalf("args = %q", args)
 	}
 }
 
