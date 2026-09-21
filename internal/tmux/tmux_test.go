@@ -456,7 +456,7 @@ exit 2
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "list-panes -t =alpha:=worker -F #{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_start_command}"
+	want := "list-panes -t =alpha:=worker -F " + tmuxFormat("#{session_name}", "#{window_name}", "#{window_id}", "#{pane_id}", "#{pane_start_command}")
 	if got := strings.TrimSpace(string(logBytes)); got != want {
 		t.Fatalf("WindowPanesWithPaneID sent %q, want %q", got, want)
 	}
@@ -484,6 +484,28 @@ exit 2
 	}
 	if len(panes) != 1 || panes[0].Session != "alpha" || panes[0].Window != "worker" || panes[0].PaneID != "%1" {
 		t.Fatalf("exact worker panes = %+v", panes)
+	}
+}
+
+func TestNewRunnerPaneUsesPortableFieldSeparator(t *testing.T) {
+	tmp := t.TempDir()
+	format := strings.Join([]string{"#{session_name}", "#{window_name}", "#{window_id}", "#{pane_id}"}, tmuxFieldSeparator)
+	writeExecutable(t, filepath.Join(tmp, "tmux"), `#!/bin/sh
+if [ "$1" = new-session ] && [ "$5" = '`+format+`' ]; then
+  printf 'alpha`+tmuxFieldSeparator+`runner`+tmuxFieldSeparator+`@1`+tmuxFieldSeparator+`%%1\n'
+  exit 0
+fi
+printf 'unexpected format: %s\n' "$5" >&2
+exit 9
+`)
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	pane, err := (Runner{}).NewRunnerPane("alpha", "runner", "amp --no-tui", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pane.Session != "alpha" || pane.Window != "runner" || pane.WindowID != "@1" || pane.PaneID != "%1" {
+		t.Fatalf("created runner pane = %+v", pane)
 	}
 }
 
