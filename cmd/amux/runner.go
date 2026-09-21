@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -911,6 +912,14 @@ func inspectRunnerPIDMarker(workdir string) runnerPIDMarkerInspection {
 		return runnerPIDMarkerInspection{diagnostic: fmt.Sprintf("; Amp-owned PID marker %s could not be read: %v; left unchanged", marker, readErr), ambiguous: true}
 	}
 	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+	if parseErr != nil {
+		var current struct {
+			PID int `json:"pid"`
+		}
+		if err := json.Unmarshal(data, &current); err == nil {
+			pid, parseErr = current.PID, nil
+		}
+	}
 	if parseErr != nil || pid <= 0 {
 		return runnerPIDMarkerInspection{diagnostic: fmt.Sprintf("; Amp-owned PID marker %s has an invalid PID; left unchanged", marker)}
 	}

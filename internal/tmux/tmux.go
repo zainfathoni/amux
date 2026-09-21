@@ -53,10 +53,23 @@ type ProcessMetadata struct {
 	Identity  string
 }
 
-const restartPaneFormat = "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}\t#{pane_dead}\t#{pane_pid}\t#{pane_created}"
+const tmuxFieldSeparator = "|||amux-field|||"
+
+var restartPaneFormat = tmuxFormat("#{session_name}", "#{window_name}", "#{window_id}", "#{pane_id}", "#{pane_current_path}", "#{pane_current_command}", "#{pane_start_command}", "#{pane_dead}", "#{pane_pid}", "#{pane_created}")
 
 var inspectProcessIdentity = ProcessIdentity
 var inspectProcessName = ProcessName
+
+func tmuxFormat(fields ...string) string {
+	return strings.Join(fields, tmuxFieldSeparator)
+}
+
+func splitTmuxFields(line string, count int) []string {
+	if strings.Contains(line, tmuxFieldSeparator) {
+		return strings.SplitN(line, tmuxFieldSeparator, count)
+	}
+	return strings.SplitN(line, "\t", count)
+}
 
 func parseRestartPanes(out []byte) ([]WindowPane, error) {
 	text := strings.TrimSuffix(string(out), "\n")
@@ -65,7 +78,7 @@ func parseRestartPanes(out []byte) ([]WindowPane, error) {
 	}
 	var panes []WindowPane
 	for _, line := range strings.Split(text, "\n") {
-		fields := strings.Split(line, "\t")
+		fields := splitTmuxFields(line, 10)
 		if (len(fields) != 8 && len(fields) != 9 && len(fields) != 10) || (fields[7] != "0" && fields[7] != "1") {
 			return nil, fmt.Errorf("unexpected tmux restart pane row %q", line)
 		}
@@ -287,7 +300,7 @@ func (r Runner) Panes(session string) ([]Pane, error) {
 	if r.DryRun {
 		return nil, nil
 	}
-	out, err := tmuxOutput("list-panes", "-s", "-t", session, "-F", "#{window_name}\t#{pane_current_path}")
+	out, err := tmuxOutput("list-panes", "-s", "-t", session, "-F", tmuxFormat("#{window_name}", "#{pane_current_path}"))
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +311,7 @@ func (r Runner) Panes(session string) ([]Pane, error) {
 	lines := strings.Split(text, "\n")
 	panes := make([]Pane, 0, len(lines))
 	for _, line := range lines {
-		fields := strings.SplitN(line, "\t", 2)
+		fields := splitTmuxFields(line, 2)
 		if len(fields) != 2 {
 			return nil, fmt.Errorf("unexpected tmux pane row %q", line)
 		}
@@ -311,7 +324,7 @@ func (r Runner) WindowPanes(session, window string) ([]WindowPane, error) {
 	if r.DryRun {
 		return nil, nil
 	}
-	out, err := tmuxOutput("list-panes", "-s", "-t", session, "-F", "#{window_name}\t#{window_id}\t#{pane_start_command}")
+	out, err := tmuxOutput("list-panes", "-s", "-t", session, "-F", tmuxFormat("#{window_name}", "#{window_id}", "#{pane_start_command}"))
 	if err != nil {
 		return nil, err
 	}
@@ -322,7 +335,7 @@ func (r Runner) WindowPanes(session, window string) ([]WindowPane, error) {
 	lines := strings.Split(text, "\n")
 	panes := make([]WindowPane, 0, len(lines))
 	for _, line := range lines {
-		fields := strings.SplitN(line, "\t", 3)
+		fields := splitTmuxFields(line, 3)
 		if len(fields) != 3 {
 			return nil, fmt.Errorf("unexpected tmux pane row %q", line)
 		}
@@ -338,7 +351,7 @@ func (r Runner) WindowPanesWithCommand(session, window string) ([]WindowPane, er
 	if r.DryRun {
 		return nil, nil
 	}
-	out, err := tmuxOutput("list-panes", "-s", "-t", session, "-F", "#{window_name}\t#{window_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}")
+	out, err := tmuxOutput("list-panes", "-s", "-t", session, "-F", tmuxFormat("#{window_name}", "#{window_id}", "#{pane_current_path}", "#{pane_current_command}", "#{pane_start_command}"))
 	if err != nil {
 		return nil, err
 	}
@@ -349,7 +362,7 @@ func (r Runner) WindowPanesWithCommand(session, window string) ([]WindowPane, er
 	lines := strings.Split(text, "\n")
 	panes := make([]WindowPane, 0, len(lines))
 	for _, line := range lines {
-		fields := strings.SplitN(line, "\t", 5)
+		fields := splitTmuxFields(line, 5)
 		if len(fields) != 5 {
 			return nil, fmt.Errorf("unexpected tmux pane row %q", line)
 		}
@@ -365,7 +378,7 @@ func (r Runner) AllWindowPanes() ([]WindowPane, error) {
 	if r.DryRun {
 		return nil, nil
 	}
-	out, err := tmuxOutput("list-panes", "-a", "-F", "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_start_command}")
+	out, err := tmuxOutput("list-panes", "-a", "-F", tmuxFormat("#{session_name}", "#{window_name}", "#{window_id}", "#{pane_start_command}"))
 	if err != nil {
 		if missingServerMessage(err.Error()) {
 			return nil, nil
@@ -379,7 +392,7 @@ func (r Runner) AllWindowPanes() ([]WindowPane, error) {
 	lines := strings.Split(text, "\n")
 	panes := make([]WindowPane, 0, len(lines))
 	for _, line := range lines {
-		fields := strings.SplitN(line, "\t", 4)
+		fields := splitTmuxFields(line, 4)
 		if len(fields) != 4 {
 			return nil, fmt.Errorf("unexpected tmux pane row %q", line)
 		}
@@ -390,7 +403,7 @@ func (r Runner) AllWindowPanes() ([]WindowPane, error) {
 
 func (r Runner) WindowPanesWithPaneID(session, window string) ([]WindowPane, error) {
 	target := exactSessionTarget(session) + ":=" + window
-	out, err := tmuxOutput("list-panes", "-t", target, "-F", "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_start_command}")
+	out, err := tmuxOutput("list-panes", "-t", target, "-F", tmuxFormat("#{session_name}", "#{window_name}", "#{window_id}", "#{pane_id}", "#{pane_start_command}"))
 	if err != nil {
 		return nil, err
 	}
@@ -400,7 +413,7 @@ func (r Runner) WindowPanesWithPaneID(session, window string) ([]WindowPane, err
 	}
 	var panes []WindowPane
 	for _, line := range strings.Split(text, "\n") {
-		fields := strings.SplitN(line, "\t", 5)
+		fields := splitTmuxFields(line, 5)
 		if len(fields) != 5 {
 			return nil, fmt.Errorf("unexpected tmux pane identity row %q", line)
 		}
@@ -413,7 +426,7 @@ func (r Runner) WindowPanesWithPaneID(session, window string) ([]WindowPane, err
 }
 
 func (r Runner) AllWindowPanesWithPaneID() ([]WindowPane, error) {
-	out, err := tmuxOutput("list-panes", "-a", "-F", "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_start_command}")
+	out, err := tmuxOutput("list-panes", "-a", "-F", tmuxFormat("#{session_name}", "#{window_name}", "#{window_id}", "#{pane_id}", "#{pane_start_command}"))
 	if err != nil {
 		return nil, err
 	}
@@ -423,7 +436,7 @@ func (r Runner) AllWindowPanesWithPaneID() ([]WindowPane, error) {
 	}
 	var panes []WindowPane
 	for _, line := range strings.Split(text, "\n") {
-		fields := strings.SplitN(line, "\t", 5)
+		fields := splitTmuxFields(line, 5)
 		if len(fields) != 5 {
 			return nil, fmt.Errorf("unexpected tmux global pane identity row %q", line)
 		}
@@ -477,7 +490,7 @@ func (r Runner) NewWindowID(session, window, command string) (string, error) {
 }
 
 func (r Runner) NewRunnerPane(session, window, command string, createSession bool) (WindowPane, error) {
-	format := "#{session_name}\t#{window_name}\t#{window_id}\t#{pane_id}"
+	format := tmuxFormat("#{session_name}", "#{window_name}", "#{window_id}", "#{pane_id}")
 	var args []string
 	if createSession {
 		args = []string{"new-session", "-d", "-P", "-F", format, "-s", session, "-n", window, command}
@@ -492,7 +505,7 @@ func (r Runner) NewRunnerPane(session, window, command string, createSession boo
 	if err != nil {
 		return WindowPane{}, err
 	}
-	fields := strings.Split(strings.TrimRight(string(out), "\r\n"), "\t")
+	fields := splitTmuxFields(strings.TrimRight(string(out), "\r\n"), 4)
 	if len(fields) != 4 || fields[0] != session || fields[1] != window || fields[2] == "" || fields[3] == "" {
 		return WindowPane{}, fmt.Errorf("unexpected tmux runner creation identity %q", strings.TrimSpace(string(out)))
 	}

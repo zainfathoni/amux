@@ -1513,6 +1513,30 @@ func TestStaleAmpPIDDiagnosticReportsLiveAmbiguousOwnershipWithoutDeletion(t *te
 	}
 }
 
+func TestStaleAmpPIDDiagnosticAcceptsCurrentJSONMarker(t *testing.T) {
+	workdir := filepath.Join(t.TempDir(), "project")
+	cache := t.TempDir()
+	oldCacheDir := runnerCacheDir
+	runnerCacheDir = func() (string, error) { return cache, nil }
+	t.Cleanup(func() { runnerCacheDir = oldCacheDir })
+	sum := sha256.Sum256([]byte(workdir))
+	marker := filepath.Join(cache, "amp", "pids", fmt.Sprintf("runner-%x.pid", sum[:8]))
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte(`{"pid":12345,"processIdentity":"darwin:1788102723000"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldProbe := runnerProcessAlive
+	runnerProcessAlive = func(pid int) bool { return pid == 12345 }
+	t.Cleanup(func() { runnerProcessAlive = oldProbe })
+
+	got := staleAmpPIDDiagnostic(workdir)
+	if !strings.Contains(got, "live but ownership is ambiguous pid 12345") || strings.Contains(got, "invalid PID") {
+		t.Fatalf("JSON PID diagnostic = %q", got)
+	}
+}
+
 func TestRunnerLaunchRejectsAmpChildThatDoesNotSurviveVerificationWindow(t *testing.T) {
 	dir := t.TempDir()
 	workdir := t.TempDir()
