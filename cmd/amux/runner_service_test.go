@@ -27,11 +27,13 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 		Directories:           []string{"/Users/me/Obsidian/Vault", "/Users/me/.dotfiles"},
 		RemoteControlTerminal: true,
 	}
-	systemd, err := systemdRunnerServiceArtifact("/opt/amp/bin/amp", profile)
+	servicePath := "/opt/homebrew/bin:/usr/bin:/bin"
+	systemd, err := systemdRunnerServiceArtifact("/opt/amp/bin/amp", servicePath, profile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
+		`Environment="PATH=/opt/homebrew/bin:/usr/bin:/bin"`,
 		`WorkingDirectory=/Users/me/Code Root%%$`,
 		`ExecStart="/opt/amp/bin/amp" "--no-tui" "--runner-id" "laptop-main" "--discover-dirs" "--discover-depth" "3" "--dir" "/Users/me/Obsidian/Vault" "--dir" "/Users/me/.dotfiles" "--remote-control-terminal"`,
 		"Restart=always",
@@ -40,8 +42,9 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 			t.Errorf("systemd artifact missing %q:\n%s", want, systemd)
 		}
 	}
-	launchd := launchdRunnerServiceArtifact("/opt/amp/bin/amp", profile)
+	launchd := launchdRunnerServiceArtifact("/opt/amp/bin/amp", servicePath, profile)
 	for _, want := range []string{
+		"<key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin</string></dict>",
 		"<key>WorkingDirectory</key><string>/Users/me/Code Root%$</string>",
 		"<string>--discover-dirs</string>",
 		"<string>--discover-depth</string><string>3</string>",
@@ -63,6 +66,19 @@ func TestNativeRunnerArgsOmitUnconfiguredDiscoveryDepth(t *testing.T) {
 	}
 }
 
+func TestSanitizedServicePathKeepsUniqueAbsoluteCallerEntries(t *testing.T) {
+	got, err := sanitizedServicePath("relative:/opt/homebrew/bin::/usr/bin:/opt/homebrew/bin:/bin/../bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "/opt/homebrew/bin:/usr/bin:/bin"; got != want {
+		t.Fatalf("sanitized PATH = %q, want %q", got, want)
+	}
+	if _, err := sanitizedServicePath("relative:also-relative"); err == nil {
+		t.Fatal("relative-only PATH was accepted")
+	}
+}
+
 func TestSystemdRunnerServiceArtifactPassesSystemdAnalyze(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("systemd-analyze verification is Linux-only")
@@ -75,7 +91,7 @@ func TestSystemdRunnerServiceArtifactPassesSystemdAnalyze(t *testing.T) {
 	if err := os.MkdirAll(workdir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	artifact, err := systemdRunnerServiceArtifact("/bin/true", config.NativeRunnerProfile{Name: "main", RunnerID: "test-runner", StartupDirectory: workdir})
+	artifact, err := systemdRunnerServiceArtifact("/bin/true", "/usr/local/bin:/usr/bin:/bin", config.NativeRunnerProfile{Name: "main", RunnerID: "test-runner", StartupDirectory: workdir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,6 +209,94 @@ func TestRunnerServiceLinuxLifecycleAndDoctorDetectsConfigurationDrift(t *testin
 	}
 	if _, err := os.Stat(dir.RunnerServicesPath()); !os.IsNotExist(err) {
 		t.Fatalf("metadata remains after remove: %v", err)
+	}
+}
+
+func TestRunnerServiceInstallReplacesLegacyLaunchAgentWithCallerPath(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	code := filepath.Join(root, "Code")
+	vault := filepath.Join(root, "Vault")
+	for _, directory := range []string{home, code, vault} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := config.Directory{Path: filepath.Join(root, "config")}
+	if err := os.MkdirAll(dir.Path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeNativeRunnerConfig(t, dir.NativeRunnersPath(), code, vault)
+	configuration, err := config.LoadNativeRunners(dir.NativeRunnersPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ampPath := filepath.Join(root, "amp")
+	writeExecutable(t, ampPath, "#!/bin/sh\nexit 0\n")
+	launchAgent := filepath.Join(home, "Library", "LaunchAgents", runnerServiceLabelPrefix+"main.plist")
+	legacy := []byte(launchdRunnerServiceArtifact(ampPath, "", configuration.Runners[0]))
+	if err := os.MkdirAll(filepath.Dir(launchAgent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launchAgent, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicJSON(dir.RunnerServicesPath(), runnerServiceMetadata{
+		SchemaVersion: 1,
+		Platform:      "darwin",
+		AmpPath:       ampPath,
+		Profiles:      []string{"main"},
+		Artifacts:     map[string]string{launchAgent: digest(legacy)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldGOOS, oldHome, oldLookPath, oldExec := runnerServiceGOOS, runnerServiceHome, runnerServiceLookPath, runnerServiceExec
+	runnerServiceGOOS = "darwin"
+	runnerServiceHome = func() (string, error) { return home, nil }
+	runnerServiceLookPath = func(string) (string, error) { return ampPath, nil }
+	loaded := true
+	runnerServiceExec = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "print":
+			if loaded {
+				return []byte("state = running"), nil
+			}
+			return []byte("Could not find service in domain"), errors.New("exit status 113")
+		case "bootout":
+			loaded = false
+		case "bootstrap":
+			loaded = true
+		}
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		runnerServiceGOOS, runnerServiceHome, runnerServiceLookPath, runnerServiceExec = oldGOOS, oldHome, oldLookPath, oldExec
+	})
+	t.Setenv("PATH", "relative:/opt/homebrew/bin:/usr/bin:/bin:/opt/homebrew/bin")
+
+	install := invocation{Command: &commandSpec{Name: "install", Usage: "amux runner service install"}, Path: []string{"runner", "service", "install"}}
+	envelope, err := (app{stdout: &bytes.Buffer{}}).executeRunnerService(install, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(envelope.Successful) != 1 || envelope.Successful[0].Action != "replace-runner-service" {
+		t.Fatalf("install envelope = %+v", envelope)
+	}
+	updated, err := os.ReadFile(launchAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPath := "/opt/homebrew/bin:/usr/bin:/bin"
+	if !strings.Contains(string(updated), "<key>EnvironmentVariables</key><dict><key>PATH</key><string>"+wantPath+"</string></dict>") {
+		t.Fatalf("updated LaunchAgent lacks caller PATH:\n%s", updated)
+	}
+	metadata, err := loadRunnerServiceMetadata(dir.RunnerServicesPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.ActivationPending || metadata.Path != wantPath || !loaded {
+		t.Fatalf("metadata=%+v loaded=%t", metadata, loaded)
 	}
 }
 

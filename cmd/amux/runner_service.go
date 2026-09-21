@@ -37,6 +37,7 @@ type runnerServiceMetadata struct {
 	SchemaVersion     int               `json:"schema_version"`
 	Platform          string            `json:"platform"`
 	AmpPath           string            `json:"amp_path"`
+	Path              string            `json:"path,omitempty"`
 	Profiles          []string          `json:"profiles"`
 	Artifacts         map[string]string `json:"artifacts"`
 	ActivationPending bool              `json:"activation_pending,omitempty"`
@@ -80,7 +81,27 @@ func nativeRunnerArgs(profile config.NativeRunnerProfile) []string {
 	return args
 }
 
-func systemdRunnerServiceArtifact(ampPath string, profile config.NativeRunnerProfile) (string, error) {
+func sanitizedServicePath(value string) (string, error) {
+	seen := make(map[string]struct{})
+	paths := make([]string, 0)
+	for _, path := range filepath.SplitList(value) {
+		if path == "" || !filepath.IsAbs(path) {
+			continue
+		}
+		path = filepath.Clean(path)
+		if _, duplicate := seen[path]; duplicate {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	if len(paths) == 0 {
+		return "", errors.New("PATH has no absolute entries; cannot install runner services")
+	}
+	return strings.Join(paths, string(os.PathListSeparator)), nil
+}
+
+func systemdRunnerServiceArtifact(ampPath, path string, profile config.NativeRunnerProfile) (string, error) {
 	arguments := []string{systemdQuote(ampPath)}
 	for _, argument := range nativeRunnerArgs(profile) {
 		arguments = append(arguments, systemdQuote(argument))
@@ -89,7 +110,12 @@ func systemdRunnerServiceArtifact(ampPath string, profile config.NativeRunnerPro
 	if err != nil {
 		return "", fmt.Errorf("runner profile %s startup_directory: %w", profile.Name, err)
 	}
-	return "[Unit]\nDescription=Amp native runner " + profile.Name + "\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory=" + workingDirectory + "\nExecStart=" + strings.Join(arguments, " ") + "\nRestart=always\nRestartSec=5s\n\n[Install]\nWantedBy=default.target\n", nil
+	environment := ""
+	if path != "" {
+		pathAssignment := strings.ReplaceAll(systemdQuote("PATH="+path), "$$", "$")
+		environment = "Environment=" + pathAssignment + "\n"
+	}
+	return "[Unit]\nDescription=Amp native runner " + profile.Name + "\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nType=simple\n" + environment + "WorkingDirectory=" + workingDirectory + "\nExecStart=" + strings.Join(arguments, " ") + "\nRestart=always\nRestartSec=5s\n\n[Install]\nWantedBy=default.target\n", nil
 }
 
 func systemdPath(path string) (string, error) {
@@ -110,22 +136,26 @@ func systemdPath(path string) (string, error) {
 	return escaped.String(), nil
 }
 
-func launchdRunnerServiceArtifact(ampPath string, profile config.NativeRunnerProfile) string {
+func launchdRunnerServiceArtifact(ampPath, path string, profile config.NativeRunnerProfile) string {
 	var arguments strings.Builder
 	arguments.WriteString("<string>" + html.EscapeString(ampPath) + "</string>")
 	for _, argument := range nativeRunnerArgs(profile) {
 		arguments.WriteString("<string>" + html.EscapeString(argument) + "</string>")
 	}
 	label := runnerServiceLabelPrefix + profile.Name
+	environment := ""
+	if path != "" {
+		environment = `<key>EnvironmentVariables</key><dict><key>PATH</key><string>` + html.EscapeString(path) + `</string></dict>`
+	}
 	return `<?xml version="1.0" encoding="UTF-8"?>` + "\n" +
 		`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n" +
 		`<plist version="1.0"><dict><key>Label</key><string>` + html.EscapeString(label) +
-		`</string><key>ProgramArguments</key><array>` + arguments.String() +
+		`</string>` + environment + `<key>ProgramArguments</key><array>` + arguments.String() +
 		`</array><key>WorkingDirectory</key><string>` + html.EscapeString(profile.StartupDirectory) +
 		`</string><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>5</integer><key>ProcessType</key><string>Background</string></dict></plist>` + "\n"
 }
 
-func runnerServiceArtifacts(ampPath string, profiles []config.NativeRunnerProfile) (map[string][]byte, error) {
+func runnerServiceArtifacts(ampPath, servicePath string, profiles []config.NativeRunnerProfile) (map[string][]byte, error) {
 	artifacts := make(map[string][]byte, len(profiles))
 	if runnerServiceGOOS == "linux" {
 		root, err := runnerServiceUserConfigDir()
@@ -138,7 +168,7 @@ func runnerServiceArtifacts(ampPath string, profiles []config.NativeRunnerProfil
 		}
 		for _, profile := range profiles {
 			path := filepath.Join(root, "systemd", "user", runnerServiceLabelPrefix+profile.Name+".service")
-			artifact, err := systemdRunnerServiceArtifact(ampPath, profile)
+			artifact, err := systemdRunnerServiceArtifact(ampPath, servicePath, profile)
 			if err != nil {
 				return nil, err
 			}
@@ -152,7 +182,7 @@ func runnerServiceArtifacts(ampPath string, profiles []config.NativeRunnerProfil
 	}
 	for _, profile := range profiles {
 		path := filepath.Join(home, "Library", "LaunchAgents", runnerServiceLabelPrefix+profile.Name+".plist")
-		artifacts[path] = []byte(launchdRunnerServiceArtifact(ampPath, profile))
+		artifacts[path] = []byte(launchdRunnerServiceArtifact(ampPath, servicePath, profile))
 	}
 	return artifacts, nil
 }
@@ -386,7 +416,11 @@ func (a app) installRunnerServices(in invocation, dir config.Directory, env *res
 	if err != nil {
 		return env, result.Preflight(err)
 	}
-	artifacts, err := runnerServiceArtifacts(ampPath, configuration.Runners)
+	installPath, err := sanitizedServicePath(os.Getenv("PATH"))
+	if err != nil {
+		return env, result.Preflight(err)
+	}
+	artifacts, err := runnerServiceArtifacts(ampPath, installPath, configuration.Runners)
 	if err != nil {
 		return env, result.Preflight(err)
 	}
@@ -465,7 +499,7 @@ func (a app) installRunnerServices(in invocation, dir config.Directory, env *res
 		profiles = append(profiles, profile.Name)
 	}
 	sort.Strings(profiles)
-	metadata := runnerServiceMetadata{SchemaVersion: 1, Platform: runnerServiceGOOS, AmpPath: ampPath, Profiles: profiles, Artifacts: desiredDigests, ActivationPending: true, PreviousArtifacts: owned}
+	metadata := runnerServiceMetadata{SchemaVersion: 1, Platform: runnerServiceGOOS, AmpPath: ampPath, Path: installPath, Profiles: profiles, Artifacts: desiredDigests, ActivationPending: true, PreviousArtifacts: owned}
 	if err := atomicJSON(dir.RunnerServicesPath(), metadata); err != nil {
 		return env, result.Runtime(err)
 	}
@@ -682,7 +716,7 @@ func (a app) doctorRunnerServices(in invocation, dir config.Directory, env *resu
 	if !slices.Equal(profiles, metadata.Profiles) {
 		return env, result.Preflight(errors.New("runner service installation does not match native-runners.json; reinstall services"))
 	}
-	expected, err := runnerServiceArtifacts(metadata.AmpPath, configuration.Runners)
+	expected, err := runnerServiceArtifacts(metadata.AmpPath, metadata.Path, configuration.Runners)
 	if err != nil {
 		return env, result.Preflight(err)
 	}
