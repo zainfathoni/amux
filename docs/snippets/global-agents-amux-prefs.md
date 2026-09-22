@@ -13,4 +13,8 @@ AGENTS.md or any machine-local copy.
 - If thread creation is unavailable, rejected, or indeterminate, stop and report it; do not retry or switch executors.
 - Use `low` for mechanical tasks, `medium` for ordinary implementation, and `high` for hard architecture, debugging, or review. Other modes require my explicit request.
 - Use Tycho only when I explicitly request it; follow the requested route's guidance and keep Amp as coordinator.
+
+# Writing standard: ASD-STE100
+
+Use ASD-STE100 Simplified Technical English for all English prose, including documents, PR descriptions, issues, and agent responses.
 ```
