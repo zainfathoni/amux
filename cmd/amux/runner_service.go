@@ -81,6 +81,9 @@ func nativeRunnerArgs(profile config.NativeRunnerProfile) []string {
 	if profile.Share {
 		args = append(args, "--share")
 	}
+	if profile.AmpEnv {
+		args = append(args, "--amp-env")
+	}
 	return args
 }
 

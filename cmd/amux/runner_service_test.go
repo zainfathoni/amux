@@ -27,6 +27,7 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 		Directories:           []string{"/Users/me/Obsidian/Vault", "/Users/me/.dotfiles"},
 		RemoteControlTerminal: true,
 		Share:                 true,
+		AmpEnv:                true,
 	}
 	servicePath := "/opt/homebrew/bin:/usr/bin:/bin"
 	systemd, err := systemdRunnerServiceArtifact("/opt/amp/bin/amp", servicePath, profile)
@@ -36,7 +37,7 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 	for _, want := range []string{
 		`Environment="PATH=/opt/homebrew/bin:/usr/bin:/bin"`,
 		`WorkingDirectory=/Users/me/Code Root%%$`,
-		`ExecStart="/opt/amp/bin/amp" "--no-tui" "--runner-id" "laptop-main" "--discover-dirs" "--discover-depth" "3" "--dir" "/Users/me/Obsidian/Vault" "--dir" "/Users/me/.dotfiles" "--remote-control-terminal" "--share"`,
+		`ExecStart="/opt/amp/bin/amp" "--no-tui" "--runner-id" "laptop-main" "--discover-dirs" "--discover-depth" "3" "--dir" "/Users/me/Obsidian/Vault" "--dir" "/Users/me/.dotfiles" "--remote-control-terminal" "--share" "--amp-env"`,
 		"Restart=always",
 	} {
 		if !strings.Contains(systemd, want) {
@@ -52,6 +53,7 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 		"<string>/Users/me/Obsidian/Vault</string>",
 		"<string>--remote-control-terminal</string>",
 		"<string>--share</string>",
+		"<string>--amp-env</string>",
 		"<key>RunAtLoad</key><true/>",
 		"<key>KeepAlive</key><true/>",
 	} {
@@ -68,6 +70,9 @@ func TestNativeRunnerArgsOmitUnconfiguredDiscoveryDepth(t *testing.T) {
 	}
 	if slices.Contains(args, "--share") {
 		t.Fatalf("private runner args = %q", args)
+	}
+	if slices.Contains(args, "--amp-env") {
+		t.Fatalf("default runner args = %q", args)
 	}
 }
 
@@ -202,6 +207,10 @@ func TestRunnerServiceLinuxLifecycleAndDoctorDetectsConfigurationDrift(t *testin
 	if !strings.Contains(doctorEnvelope.Successful[0].Message, "share=false") {
 		t.Fatalf("doctor message = %s", doctorEnvelope.Successful[0].Message)
 	}
+	initialArtifact, err := os.ReadFile(sortedDigestPaths(metadata.Artifacts)[0])
+	if err != nil || strings.Contains(string(initialArtifact), `"--amp-env"`) {
+		t.Fatalf("default artifact = %s, error = %v", initialArtifact, err)
+	}
 	if !strings.Contains(strings.Join(calls, "\n"), "systemctl --user is-active "+runnerServiceLabelPrefix+"main.service") {
 		t.Fatalf("doctor did not check active state: %v", calls)
 	}
@@ -227,6 +236,28 @@ func TestRunnerServiceLinuxLifecycleAndDoctorDetectsConfigurationDrift(t *testin
 	sharedArtifact, err := os.ReadFile(sortedDigestPaths(sharedMetadata.Artifacts)[0])
 	if err != nil || !strings.Contains(string(sharedArtifact), `"--share"`) {
 		t.Fatalf("shared artifact = %s, error = %v", sharedArtifact, err)
+	}
+	if strings.Contains(string(sharedArtifact), `"--amp-env"`) {
+		t.Fatalf("shared artifact unexpectedly enables amp-env: %s", sharedArtifact)
+	}
+
+	ampEnvDocument := `{"schema_version":1,"runners":[{"name":"main","runner_id":"laptop-main","startup_directory":` + jsonString(code) + `,"discover_dirs":true,"dirs":[` + jsonString(vault) + `],"share":true,"amp_env":true}]}`
+	if err := os.WriteFile(dir.NativeRunnersPath(), []byte(ampEnvDocument), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.executeRunnerService(doctor, dir); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("doctor amp_env drift error = %v", err)
+	}
+	updated, err := app.executeRunnerService(install, dir)
+	if err != nil || len(updated.Successful) != 1 || updated.Successful[0].Action != "replace-runner-service" {
+		t.Fatalf("install amp_env service: envelope=%+v error=%v", updated, err)
+	}
+	ampEnvArtifact, err := os.ReadFile(sortedDigestPaths(sharedMetadata.Artifacts)[0])
+	if err != nil || !strings.Contains(string(ampEnvArtifact), `"--amp-env"`) {
+		t.Fatalf("amp_env artifact = %s, error = %v", ampEnvArtifact, err)
+	}
+	if _, err := app.executeRunnerService(doctor, dir); err != nil {
+		t.Fatalf("doctor amp_env service: %v", err)
 	}
 
 	writeNativeRunnerConfig(t, dir.NativeRunnersPath(), code, other)
