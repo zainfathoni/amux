@@ -1126,3 +1126,107 @@ func TestRunnerServiceMetadataRejectsInvalidPendingArtifacts(t *testing.T) {
 		})
 	}
 }
+
+func TestRunnerServiceRecoveryReintroducesUncertainProfileAfterFailedRemoval(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := config.Directory{Path: root}
+	ampPath := filepath.Join(root, "amp")
+	writeExecutable(t, ampPath, "#!/bin/sh\nexit 0\n")
+	oldGOOS, oldHome, oldLookPath, oldExec := runnerServiceGOOS, runnerServiceHome, runnerServiceLookPath, runnerServiceExec
+	runnerServiceGOOS = "darwin"
+	runnerServiceHome = func() (string, error) { return root, nil }
+	runnerServiceLookPath = func(string) (string, error) { return ampPath, nil }
+	t.Cleanup(func() {
+		runnerServiceGOOS, runnerServiceHome, runnerServiceLookPath, runnerServiceExec = oldGOOS, oldHome, oldLookPath, oldExec
+	})
+	t.Setenv("PATH", "/usr/bin:/bin")
+	profiles := make([]config.NativeRunnerProfile, 0, 3)
+	for _, name := range []string{"a", "b", "healthy"} {
+		startup := filepath.Join(root, name)
+		if err := os.Mkdir(startup, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		profiles = append(profiles, config.NativeRunnerProfile{Name: name, RunnerID: name, StartupDirectory: startup, AmpEnv: name == "a"})
+	}
+	artifacts, err := runnerServiceArtifacts(ampPath, "/usr/bin:/bin", profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pathA := filepath.Join(root, "Library", "LaunchAgents", runnerServiceLabelPrefix+"a.plist")
+	pathB := filepath.Join(filepath.Dir(pathA), runnerServiceLabelPrefix+"b.plist")
+	pathH := filepath.Join(filepath.Dir(pathA), runnerServiceLabelPrefix+"healthy.plist")
+	oldA := profiles[0]
+	oldA.AmpEnv = false
+	metadata := runnerServiceMetadata{SchemaVersion: 1, Platform: "darwin", AmpPath: ampPath, Path: "/usr/bin:/bin", Profiles: []string{"a", "healthy"},
+		Artifacts: map[string]string{pathA: digest(artifacts[pathA]), pathH: digest(artifacts[pathH])}, ActivationPending: true,
+		PreviousArtifacts: map[string]string{pathA: digest([]byte(launchdRunnerServiceArtifact(ampPath, "/usr/bin:/bin", oldA))), pathH: digest(artifacts[pathH])}}
+	for _, path := range []string{pathA, pathH} {
+		if err := atomicWrite(path, artifacts[path], 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := atomicJSON(dir.RunnerServicesPath(), metadata); err != nil {
+		t.Fatal(err)
+	}
+	domain := "gui/" + fmt.Sprint(os.Getuid())
+	targetA := domain + "/" + runnerServiceLabelPrefix + "a"
+	loaded := map[string]bool{targetA: true, domain + "/" + runnerServiceLabelPrefix + "healthy": true}
+	failBootout := true
+	var mutations []string
+	runnerServiceExec = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if args[0] == "print" {
+			if loaded[args[1]] {
+				return []byte("state = running"), nil
+			}
+			return []byte("Could not find service in domain"), errors.New("exit status 113")
+		}
+		mutations = append(mutations, strings.Join(args, " "))
+		if args[0] == "bootout" {
+			if failBootout {
+				return []byte("injected bootout failure"), errors.New("exit status 5")
+			}
+			loaded[args[1]] = false
+		} else if args[0] == "bootstrap" {
+			loaded[domain+"/"+strings.TrimSuffix(filepath.Base(args[2]), ".plist")] = true
+		}
+		return nil, nil
+	}
+	application := app{stdout: &bytes.Buffer{}}
+	install := invocation{Command: &commandSpec{Name: "install"}, Path: []string{"runner", "service", "install"}}
+	// Remove uncertain A and add B. Failure leaves A loaded with an unknown
+	// definition, while the new journal has only B in its activation list.
+	if err := atomicJSON(dir.NativeRunnersPath(), config.NativeRunnerConfig{SchemaVersion: 1, Runners: profiles[1:]}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.executeRunnerService(install, dir); err == nil || !strings.Contains(err.Error(), "injected bootout failure") {
+		t.Fatalf("removal failure = %v", err)
+	}
+	pending, err := loadRunnerServiceMetadata(dir.RunnerServicesPath())
+	if err != nil || !slices.Equal(pending.PendingArtifacts, []string{pathB}) || pending.PreviousArtifacts[pathA] != digest(artifacts[pathA]) || !slices.Equal(mutations, []string{"bootout " + targetA}) {
+		t.Fatalf("failed removal metadata=%+v error=%v calls=%v", pending, err, mutations)
+	}
+	// Reintroduce A without changing its on-disk bytes. Its absence from the
+	// activation list must not make it safe to skip, and H must stay running.
+	if err := atomicJSON(dir.NativeRunnersPath(), config.NativeRunnerConfig{SchemaVersion: 1, Runners: profiles}); err != nil {
+		t.Fatal(err)
+	}
+	failBootout = false
+	mutations = nil
+	if _, err := application.executeRunnerService(install, dir); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"bootout " + targetA, "bootstrap " + domain + " " + pathA, "bootstrap " + domain + " " + pathB}
+	if !slices.Equal(mutations, want) {
+		t.Fatalf("recovery calls=%v, want=%v", mutations, want)
+	}
+	final, err := loadRunnerServiceMetadata(dir.RunnerServicesPath())
+	if err != nil || final.ActivationPending || len(final.PendingArtifacts) != 0 || len(final.PreviousArtifacts) != 0 {
+		t.Fatalf("final metadata=%+v error=%v", final, err)
+	}
+	if err := verifyInstalledRunnerServiceArtifacts(final); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -465,10 +465,11 @@ func (a app) installRunnerServices(in invocation, dir config.Directory, env *res
 	for path, data := range artifacts {
 		actual, readErr := os.ReadFile(path)
 		ownedDigest, previouslyOwned := owned[path]
-		// Older metadata has only a global pending flag. Preserve its unchanged
-		// services, but do not assume a changed plist is the loaded definition.
+		// Digest differences also preserve uncertainty for old metadata and for
+		// profiles reintroduced after a failed removal. The pending list alone
+		// does not include those removed profiles.
 		pending := prior.ActivationPending && (slices.Contains(prior.PendingArtifacts, path) ||
-			(len(prior.PendingArtifacts) == 0 && prior.PreviousArtifacts[path] != prior.Artifacts[path]))
+			prior.PreviousArtifacts[path] != prior.Artifacts[path])
 		unchanged := priorErr == nil && !pending && previouslyOwned && readErr == nil && ownedDigest == desiredDigests[path] && digest(actual) == desiredDigests[path]
 		if unchanged && !runnerServiceArtifactActive(runnerServiceGOOS, path) {
 			unchanged = false
