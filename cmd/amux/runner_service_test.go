@@ -894,7 +894,10 @@ func slicesContain(values []string, target string) bool {
 func TestRunnerServicePendingRecoveryPreservesHealthyServices(t *testing.T) {
 	for _, state := range []string{"absent", "running", "changed-running", "pending-running", "old-artifact", "unrecognized", "removal-timeout", "bootstrap-failure"} {
 		t.Run(state, func(t *testing.T) {
-			root := t.TempDir()
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
 			dir := config.Directory{Path: root}
 			ampPath := filepath.Join(root, "amp")
 			writeExecutable(t, ampPath, "#!/bin/sh\nexit 0\n")
