@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zainfathoni/amux/internal/config"
 )
@@ -542,7 +543,7 @@ func TestDeactivateLaunchdRunnerServiceUsesTargetAndHandlesAbsence(t *testing.T)
 	if err := deactivateRunnerServices(metadata); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"launchctl print " + target, "launchctl bootout " + target}
+	want := []string{"launchctl print " + target, "launchctl bootout " + target, "launchctl print " + target}
 	if !slices.Equal(calls, want) {
 		t.Fatalf("deactivation calls = %v, want %v", calls, want)
 	}
@@ -888,4 +889,237 @@ func slicesContain(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func TestRunnerServicePendingRecoveryPreservesHealthyServices(t *testing.T) {
+	for _, state := range []string{"absent", "running", "changed-running", "pending-running", "old-artifact", "unrecognized", "removal-timeout", "bootstrap-failure"} {
+		t.Run(state, func(t *testing.T) {
+			root := t.TempDir()
+			dir := config.Directory{Path: root}
+			ampPath := filepath.Join(root, "amp")
+			writeExecutable(t, ampPath, "#!/bin/sh\nexit 0\n")
+			oldGOOS, oldHome, oldLookPath, oldExec := runnerServiceGOOS, runnerServiceHome, runnerServiceLookPath, runnerServiceExec
+			oldTimeout := runnerServiceTimeout
+			runnerServiceTimeout = 20 * time.Millisecond
+			runnerServiceGOOS = "darwin"
+			runnerServiceHome = func() (string, error) { return root, nil }
+			runnerServiceLookPath = func(string) (string, error) { return ampPath, nil }
+			t.Cleanup(func() {
+				runnerServiceGOOS, runnerServiceHome, runnerServiceLookPath, runnerServiceExec = oldGOOS, oldHome, oldLookPath, oldExec
+				runnerServiceTimeout = oldTimeout
+			})
+			t.Setenv("PATH", "/usr/bin:/bin")
+			profiles := []config.NativeRunnerProfile{
+				{Name: "healthy", RunnerID: "healthy", StartupDirectory: filepath.Join(root, "healthy")},
+				{Name: "changed", RunnerID: "changed", StartupDirectory: filepath.Join(root, "changed"), AmpEnv: true},
+			}
+			for _, profile := range profiles {
+				if err := os.Mkdir(profile.StartupDirectory, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := atomicJSON(dir.NativeRunnersPath(), config.NativeRunnerConfig{SchemaVersion: 1, Runners: profiles}); err != nil {
+				t.Fatal(err)
+			}
+			artifacts, err := runnerServiceArtifacts(ampPath, "/usr/bin:/bin", profiles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed := filepath.Join(root, "Library", "LaunchAgents", runnerServiceLabelPrefix+"changed.plist")
+			healthy := filepath.Join(filepath.Dir(changed), runnerServiceLabelPrefix+"healthy.plist")
+			oldProfile := profiles[1]
+			oldProfile.AmpEnv = false
+			oldArtifact := []byte(launchdRunnerServiceArtifact(ampPath, "/usr/bin:/bin", oldProfile))
+			metadata := runnerServiceMetadata{SchemaVersion: 1, Platform: "darwin", AmpPath: ampPath, Path: "/usr/bin:/bin", Profiles: []string{"changed", "healthy"}, Artifacts: artifactDigests(artifacts), ActivationPending: true,
+				PreviousArtifacts: map[string]string{changed: digest(oldArtifact), healthy: digest(artifacts[healthy])}}
+			if state == "running" || state == "pending-running" {
+				metadata.PreviousArtifacts[changed] = metadata.Artifacts[changed]
+			}
+			if state == "pending-running" {
+				metadata.PendingArtifacts = []string{changed}
+			}
+			for path, data := range artifacts {
+				if path == changed && (state == "old-artifact" || state == "removal-timeout") {
+					data = oldArtifact
+				} else if path == changed && state == "unrecognized" {
+					data = []byte("<plist><array><string>--amp-env</string></array></plist>")
+				}
+				if err := atomicWrite(path, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := atomicJSON(dir.RunnerServicesPath(), metadata); err != nil {
+				t.Fatal(err)
+			}
+			before, _ := os.ReadFile(dir.RunnerServicesPath())
+			loaded := state != "absent" && state != "bootstrap-failure"
+			failBootstrap := state == "bootstrap-failure"
+			var mutations []string
+			runnerServiceExec = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+				if args[0] == "print" {
+					if strings.HasSuffix(args[1], ".healthy") || loaded {
+						return []byte("state = running"), nil
+					}
+					return []byte("Could not find service in domain"), errors.New("exit status 113")
+				}
+				mutations = append(mutations, strings.Join(args, " "))
+				if args[0] == "bootout" {
+					loaded = state == "removal-timeout"
+				} else if args[0] == "bootstrap" {
+					if failBootstrap {
+						return []byte("Bootstrap failed: 5: Input/output error"), errors.New("exit status 5")
+					}
+					loaded = true
+				}
+				return nil, nil
+			}
+			application := app{stdout: &bytes.Buffer{}}
+			install := invocation{Command: &commandSpec{Name: "install"}, Path: []string{"runner", "service", "install"}}
+			install.Options.DryRun = true
+			envelope, err := application.executeRunnerService(install, dir)
+			after, _ := os.ReadFile(dir.RunnerServicesPath())
+			if !bytes.Equal(before, after) || len(mutations) != 0 {
+				t.Fatal("dry run changed metadata or services")
+			}
+			if state == "unrecognized" {
+				if err == nil || !strings.Contains(err.Error(), "refusing to modify unrecognized runner service artifact") {
+					t.Fatalf("ownership refusal = %v", err)
+				}
+				install.Options.DryRun = false
+				if _, err := application.executeRunnerService(install, dir); err == nil || !strings.Contains(err.Error(), "refusing to modify unrecognized runner service artifact") {
+					t.Fatalf("apply ownership refusal = %v", err)
+				}
+				after, _ = os.ReadFile(dir.RunnerServicesPath())
+				if !bytes.Equal(before, after) || len(mutations) != 0 {
+					t.Fatal("ownership refusal changed metadata or services")
+				}
+				return
+			}
+			if err != nil || len(envelope.Planned) != 1 {
+				t.Fatalf("dry run = %+v, %v", envelope, err)
+			}
+			wantAction := "replace-runner-service"
+			if state == "running" {
+				wantAction = "complete-runner-service-activation"
+			} else if !strings.Contains(envelope.Planned[0].Message, changed) {
+				t.Fatalf("wrong service selected: %+v", envelope.Planned)
+			}
+			if envelope.Planned[0].Action != wantAction {
+				t.Fatalf("plan = %+v", envelope.Planned)
+			}
+			install.Options.DryRun = false
+			_, err = application.executeRunnerService(install, dir)
+			if state == "removal-timeout" || state == "bootstrap-failure" {
+				pending, metadataErr := loadRunnerServiceMetadata(dir.RunnerServicesPath())
+				if err == nil || metadataErr != nil || !pending.ActivationPending || !slices.Equal(pending.PendingArtifacts, []string{changed}) || len(mutations) != 1 || strings.Contains(mutations[0], ".healthy") {
+					t.Fatalf("failed recovery: error=%v metadata=%+v metadata error=%v calls=%v", err, pending, metadataErr, mutations)
+				}
+				if state == "removal-timeout" {
+					data, readErr := os.ReadFile(changed)
+					if !errors.Is(err, context.DeadlineExceeded) || readErr != nil || !bytes.Equal(data, oldArtifact) {
+						t.Fatalf("removal timeout changed artifact: %v, %v", err, readErr)
+					}
+					return
+				}
+				if !strings.Contains(err.Error(), "Bootstrap failed: 5") {
+					t.Fatalf("bootstrap error = %v", err)
+				}
+				failBootstrap = false
+				mutations = nil
+				_, err = application.executeRunnerService(install, dir)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantMutations := 1
+			if state == "running" {
+				wantMutations = 0
+			} else if state == "old-artifact" || state == "changed-running" || state == "pending-running" {
+				wantMutations = 2
+			}
+			if len(mutations) != wantMutations || strings.Contains(strings.Join(mutations, "\n"), ".healthy") {
+				t.Fatalf("unexpected service changes: %v", mutations)
+			}
+			final, err := loadRunnerServiceMetadata(dir.RunnerServicesPath())
+			if err != nil || final.ActivationPending || len(final.PreviousArtifacts) != 0 || len(final.PendingArtifacts) != 0 || !loaded {
+				t.Fatalf("recovery metadata = %+v, loaded=%t, error=%v", final, loaded, err)
+			}
+			if err := verifyInstalledRunnerServiceArtifacts(final); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestWaitRunnerServiceAbsentIsBoundedAndRequiresAbsence(t *testing.T) {
+	for _, state := range []string{"delayed", "still-loaded", "unknown-error", "blocked-print"} {
+		t.Run(state, func(t *testing.T) {
+			oldExec, oldTimeout := runnerServiceExec, runnerServiceTimeout
+			t.Cleanup(func() { runnerServiceExec, runnerServiceTimeout = oldExec, oldTimeout })
+			runnerServiceTimeout = 20 * time.Millisecond
+			if state == "delayed" {
+				runnerServiceTimeout = time.Second
+			}
+			calls := 0
+			runnerServiceExec = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+				calls++
+				if name != "launchctl" || !slices.Equal(args, []string{"print", "gui/501/test"}) {
+					t.Fatalf("unexpected command %s %v", name, args)
+				}
+				switch state {
+				case "delayed":
+					if calls == 2 {
+						return []byte("Could not find service in domain"), errors.New("exit status 113")
+					}
+				case "unknown-error":
+					return []byte("permission denied"), errors.New("exit status 1")
+				case "blocked-print":
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+				return []byte("state = running"), nil
+			}
+			err := waitRunnerServiceAbsent("gui/501/test")
+			switch state {
+			case "delayed":
+				if err != nil || calls != 2 {
+					t.Fatalf("wait result = %v, calls=%d", err, calls)
+				}
+			case "unknown-error":
+				if err == nil || !strings.Contains(err.Error(), "permission denied") || calls != 1 {
+					t.Fatalf("unknown error = %v, calls=%d", err, calls)
+				}
+			default:
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("deadline error = %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestRunnerServiceMetadataRejectsInvalidPendingArtifacts(t *testing.T) {
+	for _, state := range []string{"unknown", "duplicate", "not-pending"} {
+		t.Run(state, func(t *testing.T) {
+			root := t.TempDir()
+			artifact := filepath.Join(root, runnerServiceLabelPrefix+"main.plist")
+			metadata := runnerServiceMetadata{SchemaVersion: 1, Platform: "darwin", AmpPath: "/opt/amp", Profiles: []string{"main"},
+				Artifacts: map[string]string{artifact: strings.Repeat("a", 64)}, ActivationPending: true, PendingArtifacts: []string{artifact}}
+			switch state {
+			case "unknown":
+				metadata.PendingArtifacts = []string{filepath.Join(root, "unknown.plist")}
+			case "duplicate":
+				metadata.PendingArtifacts = append(metadata.PendingArtifacts, artifact)
+			case "not-pending":
+				metadata.ActivationPending = false
+			}
+			path := filepath.Join(root, "runner-services.json")
+			if err := atomicJSON(path, metadata); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadRunnerServiceMetadata(path); err == nil || !strings.Contains(err.Error(), "invalid pending artifacts") {
+				t.Fatalf("invalid pending metadata was not rejected: %v", err)
+			}
+		})
+	}
 }
