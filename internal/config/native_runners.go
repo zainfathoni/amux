@@ -29,6 +29,7 @@ type NativeRunnerProfile struct {
 	DiscoverDepth         *int     `json:"discover_depth,omitempty"`
 	Directories           []string `json:"dirs,omitempty"`
 	RemoteControlTerminal bool     `json:"remote_control_terminal,omitempty"`
+	Share                 bool     `json:"share,omitempty"`
 }
 
 func LoadNativeRunners(path string) (NativeRunnerConfig, error) {

@@ -26,6 +26,7 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 		DiscoverDepth:         &discoveryDepth,
 		Directories:           []string{"/Users/me/Obsidian/Vault", "/Users/me/.dotfiles"},
 		RemoteControlTerminal: true,
+		Share:                 true,
 	}
 	servicePath := "/opt/homebrew/bin:/usr/bin:/bin"
 	systemd, err := systemdRunnerServiceArtifact("/opt/amp/bin/amp", servicePath, profile)
@@ -35,7 +36,7 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 	for _, want := range []string{
 		`Environment="PATH=/opt/homebrew/bin:/usr/bin:/bin"`,
 		`WorkingDirectory=/Users/me/Code Root%%$`,
-		`ExecStart="/opt/amp/bin/amp" "--no-tui" "--runner-id" "laptop-main" "--discover-dirs" "--discover-depth" "3" "--dir" "/Users/me/Obsidian/Vault" "--dir" "/Users/me/.dotfiles" "--remote-control-terminal"`,
+		`ExecStart="/opt/amp/bin/amp" "--no-tui" "--runner-id" "laptop-main" "--discover-dirs" "--discover-depth" "3" "--dir" "/Users/me/Obsidian/Vault" "--dir" "/Users/me/.dotfiles" "--remote-control-terminal" "--share"`,
 		"Restart=always",
 	} {
 		if !strings.Contains(systemd, want) {
@@ -50,6 +51,7 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 		"<string>--discover-depth</string><string>3</string>",
 		"<string>/Users/me/Obsidian/Vault</string>",
 		"<string>--remote-control-terminal</string>",
+		"<string>--share</string>",
 		"<key>RunAtLoad</key><true/>",
 		"<key>KeepAlive</key><true/>",
 	} {
@@ -63,6 +65,9 @@ func TestNativeRunnerArgsOmitUnconfiguredDiscoveryDepth(t *testing.T) {
 	args := nativeRunnerArgs(config.NativeRunnerProfile{RunnerID: "runner", DiscoverDirectories: true})
 	if slices.Contains(args, "--discover-depth") {
 		t.Fatalf("args = %q", args)
+	}
+	if slices.Contains(args, "--share") {
+		t.Fatalf("private runner args = %q", args)
 	}
 }
 
@@ -190,11 +195,38 @@ func TestRunnerServiceLinuxLifecycleAndDoctorDetectsConfigurationDrift(t *testin
 	}
 
 	doctor := invocation{Command: &commandSpec{Name: "doctor", Usage: "amux runner service doctor"}, Path: []string{"runner", "service", "doctor"}}
-	if _, err := app.executeRunnerService(doctor, dir); err != nil {
+	doctorEnvelope, err := app.executeRunnerService(doctor, dir)
+	if err != nil {
 		t.Fatalf("doctor healthy services: %v", err)
+	}
+	if !strings.Contains(doctorEnvelope.Successful[0].Message, "share=false") {
+		t.Fatalf("doctor message = %s", doctorEnvelope.Successful[0].Message)
 	}
 	if !strings.Contains(strings.Join(calls, "\n"), "systemctl --user is-active "+runnerServiceLabelPrefix+"main.service") {
 		t.Fatalf("doctor did not check active state: %v", calls)
+	}
+
+	sharedDocument := `{"schema_version":1,"runners":[{"name":"main","runner_id":"laptop-main","startup_directory":` + jsonString(code) + `,"discover_dirs":true,"dirs":[` + jsonString(vault) + `],"share":true}]}`
+	if err := os.WriteFile(dir.NativeRunnersPath(), []byte(sharedDocument), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.executeRunnerService(doctor, dir); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("doctor share drift error = %v", err)
+	}
+	if _, err := app.executeRunnerService(install, dir); err != nil {
+		t.Fatalf("install shared service: %v", err)
+	}
+	doctorEnvelope, err = app.executeRunnerService(doctor, dir)
+	if err != nil || len(doctorEnvelope.Successful) != 1 || !strings.Contains(doctorEnvelope.Successful[0].Message, "share=true") {
+		t.Fatalf("doctor shared service: envelope=%+v error=%v", doctorEnvelope, err)
+	}
+	sharedMetadata, err := loadRunnerServiceMetadata(dir.RunnerServicesPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sharedArtifact, err := os.ReadFile(sortedDigestPaths(sharedMetadata.Artifacts)[0])
+	if err != nil || !strings.Contains(string(sharedArtifact), `"--share"`) {
+		t.Fatalf("shared artifact = %s, error = %v", sharedArtifact, err)
 	}
 
 	writeNativeRunnerConfig(t, dir.NativeRunnersPath(), code, other)
