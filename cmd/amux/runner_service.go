@@ -78,6 +78,9 @@ func nativeRunnerArgs(profile config.NativeRunnerProfile) []string {
 	if profile.RemoteControlTerminal {
 		args = append(args, "--remote-control-terminal")
 	}
+	if profile.Share {
+		args = append(args, "--share")
+	}
 	return args
 }
 
@@ -738,7 +741,7 @@ func (a app) doctorRunnerServices(in invocation, dir config.Directory, env *resu
 		if profile.DiscoverDepth != nil {
 			discoveryDepth = strconv.Itoa(*profile.DiscoverDepth)
 		}
-		out := result.Outcome{Resource: result.ConfigResource(dir.NativeRunnersPath()), Action: "doctor-runner-service", Message: fmt.Sprintf("runner profile %s serves startup=%s discover=%t discovery-depth=%s explicit-dirs=%d", profile.Name, profile.StartupDirectory, profile.DiscoverDirectories, discoveryDepth, len(profile.Directories))}
+		out := result.Outcome{Resource: result.ConfigResource(dir.NativeRunnersPath()), Action: "doctor-runner-service", Message: fmt.Sprintf("runner profile %s serves startup=%s discover=%t discovery-depth=%s explicit-dirs=%d share=%t", profile.Name, profile.StartupDirectory, profile.DiscoverDirectories, discoveryDepth, len(profile.Directories), profile.Share)}
 		env.Successful = append(env.Successful, out)
 		if !in.Options.JSON {
 			fmt.Fprintln(a.stdout, out.Message)

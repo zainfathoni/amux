@@ -38,6 +38,10 @@ amux runner service doctor
 
 On Linux, Amux installs one `com.zainfathoni.amux.runner.<name>.service` systemd user unit per profile. On macOS, it installs the equivalent LaunchAgent. Each artifact executes the resolved Amp binary directly with `--no-tui`, the stable runner ID, discovery and explicit-directory flags, and optional remote terminal access. Amux records artifact digests and refuses to replace or remove unrecognized files. Installation also rejects a case-insensitive runner-ID collision with a retained `runners.tsv` row and rejects installed or activation-pending self-owned legacy maintenance; it does not rewrite either legacy record.
 
+To share a separate native runner with your Amp workspace, set `"share": true` on only that profile. For example, add `{"name":"team-runner","runner_id":"team-runner","startup_directory":"/home/me/team-runner","share":true}` to the `runners` array after you create that directory. The field is optional and defaults to `false`; Amux adds `--share` only when it is true. Keep a private profile without `share` unchanged. Run `amux --dry-run runner service install`, then `amux runner service install` and `amux runner service doctor` to apply and check the complete configuration. Doctor reports `share=true` or `share=false` for each profile and rejects config-to-service drift. Changing sharing requires reinstalling the service so Amp restarts with the new flag.
+
+**Security:** Workspace members can run code as the runner's OS user and can access its files, credentials, and logins. Concurrent threads can overwrite changes. Share only with people you trust. Stopping sharing does not undo changes or stop programs already started. Amp requires workspace-default thread visibility for members to create shared-runner threads; workspace admins can disable runner sharing. See [Amp's shared-runner contract](https://ampcode.com/docs/cli/runners#share-a-runner-with-your-workspace).
+
 Dynamic `amp runner dirs add|list|remove` remains available. Amp persists those additions against the profile's stable startup directory; keep declarative machine-critical paths in `native-runners.json` and use dynamic additions for local, temporary choices.
 
 When `discover_dirs` is true, Amp scans two levels beneath `startup_directory` by default. Set `discover_depth` from 1 through 10 when repositories are nested more or less deeply; for example, an owner/repository layout beneath a code root uses the default depth 2. Amux requires discovery to be explicitly enabled when a depth is configured. Use `dirs` for repositories or non-Git directories outside the discovery root.
@@ -202,8 +206,9 @@ The generated process arguments come entirely from the validated profile:
 - `--runner-id` from `runner_id`;
 - `--discover-dirs` when `discover_dirs` is true;
 - `--discover-depth` from optional `discover_depth` (1 through 10; omitted keeps Amp's default 2);
-- repeated `--dir` arguments from `dirs`; and
-- `--remote-control-terminal` when enabled.
+- repeated `--dir` arguments from `dirs`;
+- `--remote-control-terminal` when enabled; and
+- `--share` when `share` is true (omitted or false keeps the runner private).
 
 Native Amp owns runner update and idle-restart behavior. Automatic update availability still depends on the Amp installation and settings—for example, package-manager installations or disabled updates remain externally managed. The legacy `runner maintenance` scheduler remains available only for old per-workdir tmux runners during migration.
 

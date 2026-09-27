@@ -83,6 +83,41 @@ func TestLoadNativeRunnersValidatesOptionalDiscoveryDepth(t *testing.T) {
 	}
 }
 
+func TestLoadNativeRunnersShareDefaultsOffAndRejectsNonBoolean(t *testing.T) {
+	root := t.TempDir()
+	for _, test := range []struct {
+		name, field string
+		want        bool
+		wantError   bool
+	}{
+		{"omitted", "", false, false},
+		{"disabled", `,"share":false`, false, false},
+		{"enabled", `,"share":true`, true, false},
+		{"non-boolean", `,"share":"true"`, false, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "native-runners.json")
+			document := `{"schema_version":1,"runners":[{"name":"main","runner_id":"runner","startup_directory":` + quoteJSON(root) + test.field + `}]}`
+			if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := LoadNativeRunners(path)
+			if test.wantError {
+				if err == nil {
+					t.Fatal("non-boolean share was accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Runners[0].Share != test.want {
+				t.Fatalf("share = %t, want %t", got.Runners[0].Share, test.want)
+			}
+		})
+	}
+}
+
 func TestLoadNativeRunnersRejectsAmbiguousOrUnsafeProfiles(t *testing.T) {
 	root := t.TempDir()
 	for _, test := range []struct {
