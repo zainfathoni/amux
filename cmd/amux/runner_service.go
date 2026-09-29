@@ -41,6 +41,7 @@ type runnerServiceMetadata struct {
 	Profiles          []string          `json:"profiles"`
 	Artifacts         map[string]string `json:"artifacts"`
 	ActivationPending bool              `json:"activation_pending,omitempty"`
+	PendingArtifacts  []string          `json:"pending_artifacts,omitempty"`
 	PreviousArtifacts map[string]string `json:"previous_artifacts,omitempty"`
 }
 
@@ -223,6 +224,11 @@ func loadRunnerServiceMetadata(path string) (runnerServiceMetadata, error) {
 	}
 	if len(metadata.Artifacts) != len(metadata.Profiles) || (!metadata.ActivationPending && len(metadata.PreviousArtifacts) != 0) {
 		return metadata, errors.New("runner service metadata has inconsistent artifacts")
+	}
+	for i, path := range metadata.PendingArtifacts {
+		if _, exists := metadata.Artifacts[path]; !metadata.ActivationPending || !exists || (i > 0 && metadata.PendingArtifacts[i-1] >= path) {
+			return metadata, errors.New("runner service metadata has invalid pending artifacts")
+		}
 	}
 	for path, artifactDigest := range metadata.Artifacts {
 		if !filepath.IsAbs(path) || len(artifactDigest) != 64 {
@@ -459,7 +465,12 @@ func (a app) installRunnerServices(in invocation, dir config.Directory, env *res
 	for path, data := range artifacts {
 		actual, readErr := os.ReadFile(path)
 		ownedDigest, previouslyOwned := owned[path]
-		unchanged := priorErr == nil && !prior.ActivationPending && previouslyOwned && readErr == nil && ownedDigest == desiredDigests[path] && digest(actual) == desiredDigests[path]
+		// Digest differences also preserve uncertainty for old metadata and for
+		// profiles reintroduced after a failed removal. The pending list alone
+		// does not include those removed profiles.
+		pending := prior.ActivationPending && (slices.Contains(prior.PendingArtifacts, path) ||
+			prior.PreviousArtifacts[path] != prior.Artifacts[path])
+		unchanged := priorErr == nil && !pending && previouslyOwned && readErr == nil && ownedDigest == desiredDigests[path] && digest(actual) == desiredDigests[path]
 		if unchanged && !runnerServiceArtifactActive(runnerServiceGOOS, path) {
 			unchanged = false
 		}
@@ -486,7 +497,11 @@ func (a app) installRunnerServices(in invocation, dir config.Directory, env *res
 		outcomes = append(outcomes, result.Outcome{Resource: result.ConfigResource(path), Action: action, Message: message})
 	}
 	if len(outcomes) == 0 {
-		env.Skipped = append(env.Skipped, result.Outcome{Resource: result.ConfigResource(dir.RunnerServicesPath()), Action: "install-runner-services", Message: "runner services already match native-runners.json"})
+		if prior.ActivationPending {
+			outcomes = append(outcomes, result.Outcome{Resource: result.ConfigResource(dir.RunnerServicesPath()), Action: "complete-runner-service-activation", Message: "clear pending activation metadata; runner services already match native-runners.json and are active"})
+		} else {
+			env.Skipped = append(env.Skipped, result.Outcome{Resource: result.ConfigResource(dir.RunnerServicesPath()), Action: "install-runner-services", Message: "runner services already match native-runners.json"})
+		}
 	}
 	if in.Options.DryRun {
 		env.Planned = append(env.Planned, outcomes...)
@@ -505,7 +520,7 @@ func (a app) installRunnerServices(in invocation, dir config.Directory, env *res
 		profiles = append(profiles, profile.Name)
 	}
 	sort.Strings(profiles)
-	metadata := runnerServiceMetadata{SchemaVersion: 1, Platform: runnerServiceGOOS, AmpPath: ampPath, Path: installPath, Profiles: profiles, Artifacts: desiredDigests, ActivationPending: true, PreviousArtifacts: owned}
+	metadata := runnerServiceMetadata{SchemaVersion: 1, Platform: runnerServiceGOOS, AmpPath: ampPath, Path: installPath, Profiles: profiles, Artifacts: desiredDigests, ActivationPending: true, PendingArtifacts: installPaths, PreviousArtifacts: owned}
 	if err := atomicJSON(dir.RunnerServicesPath(), metadata); err != nil {
 		return env, result.Runtime(err)
 	}
@@ -544,6 +559,7 @@ func (a app) installRunnerServices(in invocation, dir config.Directory, env *res
 		}
 	}
 	metadata.ActivationPending = false
+	metadata.PendingArtifacts = nil
 	metadata.PreviousArtifacts = nil
 	if err := atomicJSON(dir.RunnerServicesPath(), metadata); err != nil {
 		return env, result.Runtime(err)
@@ -635,8 +651,35 @@ func deactivateRunnerServices(metadata runnerServiceMetadata) error {
 			}
 			return fmt.Errorf("launchctl bootout %s: %s: %w", target, strings.TrimSpace(string(output)), err)
 		}
+		if err := waitRunnerServiceAbsent(target); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// Do not replace an artifact or bootstrap its label until launchd reports it
+// absent. A successful bootout alone is not an observation of that state.
+func waitRunnerServiceAbsent(target string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), runnerServiceTimeout)
+	defer cancel()
+	for {
+		output, err := runnerServiceExec(ctx, "launchctl", "print", target)
+		if ctx.Err() != nil {
+			return fmt.Errorf("waiting for launchctl removal of %s: %w", target, ctx.Err())
+		}
+		if err != nil {
+			if benignNotLoaded(output) || benignNotLoaded([]byte(err.Error())) {
+				return nil
+			}
+			return fmt.Errorf("launchctl print while waiting for removal of %s: %s: %w", target, strings.TrimSpace(string(output)), err)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for launchctl removal of %s: %w", target, ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 func (a app) removeRunnerServices(in invocation, dir config.Directory, env *result.Envelope) (*result.Envelope, error) {
