@@ -29,6 +29,7 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 		RemoteControlTerminal: true,
 		Share:                 true,
 		AmpEnv:                true,
+		Desktop:               true,
 	}
 	servicePath := "/opt/homebrew/bin:/usr/bin:/bin"
 	systemd, err := systemdRunnerServiceArtifact("/opt/amp/bin/amp", servicePath, profile)
@@ -38,7 +39,7 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 	for _, want := range []string{
 		`Environment="PATH=/opt/homebrew/bin:/usr/bin:/bin"`,
 		`WorkingDirectory=/Users/me/Code Root%%$`,
-		`ExecStart="/opt/amp/bin/amp" "--no-tui" "--runner-id" "laptop-main" "--discover-dirs" "--discover-depth" "3" "--dir" "/Users/me/Obsidian/Vault" "--dir" "/Users/me/.dotfiles" "--remote-control-terminal" "--share" "--amp-env"`,
+		`ExecStart="/opt/amp/bin/amp" "--no-tui" "--runner-id" "laptop-main" "--discover-dirs" "--discover-depth" "3" "--dir" "/Users/me/Obsidian/Vault" "--dir" "/Users/me/.dotfiles" "--remote-control-terminal" "--share" "--amp-env" "--desktop"`,
 		"Restart=always",
 	} {
 		if !strings.Contains(systemd, want) {
@@ -55,6 +56,7 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 		"<string>--remote-control-terminal</string>",
 		"<string>--share</string>",
 		"<string>--amp-env</string>",
+		"<string>--desktop</string>",
 		"<key>RunAtLoad</key><true/>",
 		"<key>KeepAlive</key><true/>",
 	} {
@@ -74,6 +76,9 @@ func TestNativeRunnerArgsOmitUnconfiguredDiscoveryDepth(t *testing.T) {
 	}
 	if slices.Contains(args, "--amp-env") {
 		t.Fatalf("default runner args = %q", args)
+	}
+	if slices.Contains(args, "--desktop") {
+		t.Fatalf("default runner shares desktop: %q", args)
 	}
 }
 
