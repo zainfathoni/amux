@@ -85,6 +85,9 @@ func nativeRunnerArgs(profile config.NativeRunnerProfile) []string {
 	if profile.AmpEnv {
 		args = append(args, "--amp-env")
 	}
+	if profile.Desktop {
+		args = append(args, "--desktop")
+	}
 	return args
 }
 

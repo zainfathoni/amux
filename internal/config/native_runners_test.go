@@ -153,6 +153,41 @@ func TestLoadNativeRunnersAmpEnvDefaultsOffAndRejectsNonBoolean(t *testing.T) {
 	}
 }
 
+func TestLoadNativeRunnersDesktopDefaultsOffAndRejectsNonBoolean(t *testing.T) {
+	root := t.TempDir()
+	for _, test := range []struct {
+		name, field string
+		want        bool
+		wantError   bool
+	}{
+		{"omitted", "", false, false},
+		{"disabled", `,"desktop":false`, false, false},
+		{"enabled", `,"desktop":true`, true, false},
+		{"non-boolean", `,"desktop":"true"`, false, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "native-runners.json")
+			document := `{"schema_version":1,"runners":[{"name":"main","runner_id":"runner","startup_directory":` + quoteJSON(root) + test.field + `}]}`
+			if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := LoadNativeRunners(path)
+			if test.wantError {
+				if err == nil {
+					t.Fatal("non-boolean desktop was accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Runners[0].Desktop != test.want {
+				t.Fatalf("desktop = %t, want %t", got.Runners[0].Desktop, test.want)
+			}
+		})
+	}
+}
+
 func TestLoadNativeRunnersRejectsAmbiguousOrUnsafeProfiles(t *testing.T) {
 	root := t.TempDir()
 	for _, test := range []struct {
