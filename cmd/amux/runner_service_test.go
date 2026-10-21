@@ -266,6 +266,25 @@ func TestRunnerServiceLinuxLifecycleAndDoctorDetectsConfigurationDrift(t *testin
 		t.Fatalf("doctor amp_env service: %v", err)
 	}
 
+	desktopDocument := strings.Replace(ampEnvDocument, `"amp_env":true`, `"amp_env":true,"desktop":true`, 1)
+	if err := os.WriteFile(dir.NativeRunnersPath(), []byte(desktopDocument), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.executeRunnerService(doctor, dir); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("doctor desktop drift error = %v", err)
+	}
+	updated, err = app.executeRunnerService(install, dir)
+	if err != nil || len(updated.Successful) != 1 || updated.Successful[0].Action != "replace-runner-service" {
+		t.Fatalf("install desktop service: envelope=%+v error=%v", updated, err)
+	}
+	desktopArtifact, err := os.ReadFile(sortedDigestPaths(sharedMetadata.Artifacts)[0])
+	if err != nil || !strings.Contains(string(desktopArtifact), `"--desktop"`) {
+		t.Fatalf("desktop artifact = %s, error = %v", desktopArtifact, err)
+	}
+	if _, err := app.executeRunnerService(doctor, dir); err != nil {
+		t.Fatalf("doctor desktop service: %v", err)
+	}
+
 	writeNativeRunnerConfig(t, dir.NativeRunnersPath(), code, other)
 	if _, err := app.executeRunnerService(doctor, dir); err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("doctor configuration drift error = %v", err)
