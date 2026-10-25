@@ -1,14 +1,16 @@
 ---
-status: active-native-runner-config-2026-09-17
+status: active-native-runner-config-2026-10-25
 decisions: adr-0007, adr-0009, adr-0011
-as-of: 2026-09-17
+as-of: 2026-10-25
 ---
 
 # Amux thin-host and staged-drain disposition ledger
 
 This ledger applies [ADR 0009](adr/0009-remove-active-legacy-coordination-surfaces.md) and [ADR 0011](adr/0011-consolidate-on-native-multi-directory-runners.md) to the still-valid boundaries in [ADR 0007](adr/0007-retire-amux-through-native-cutover-and-staged-drain.md). Amux is not being fully deprecated or archived. Native Amp owns task coordination, multi-directory runner execution, and native update behavior. Amux retains declarative runner profiles and systemd/launchd service installation; core legacy coordination commands are removed and their stores are inert.
 
-The 2026-08-30 PR #375/#376 hygiene remains valid: the issue graph stays narrow, #374 stays closed, #366 is preflight-only, #328's direct-return gate remains open, and legacy coordination admission does not reopen. The obsolete full-retirement, runner-admission closure, and native/OS replacement-launch conclusions are withdrawn.
+The owner retired the three experimental provider skills on 2026-10-25. Their bundles, helpers, install paths, and active routing are removed without waiting for the former replacement gates. Existing provider processes, receipts, and artifacts remain preserved. The earlier issue dispositions below are historical; this change does not update GitHub issues.
+
+The 2026-08-30 PR #375/#376 hygiene remains context: #374 stayed closed, #366 was preflight-only, and legacy coordination admission did not reopen. The obsolete full-retirement, runner-admission closure, and native/OS replacement-launch conclusions remain withdrawn.
 
 **Release boundary:** v0.3.10 / `e7b0a67` shipped macOS-over-SSH lifecycle behavior. PR #375 / `3a38a93` and PR #376 / `a196659` are post-v0.3.10 documentation/issue hygiene. No release or runtime transition follows from this ledger.
 
@@ -21,7 +23,7 @@ The 2026-08-30 PR #375/#376 hygiene remains valid: the issue graph stays narrow,
 | Amux configuration | `native-runners.json` declares profiles. `amux runner service install|remove|doctor` manages exact digest-owned service artifacts. The per-workdir registry and tmux lifecycle remain transitional compatibility behavior. |
 | OS activation | systemd/launchd executes the resolved Amp binary directly and keeps it alive. Amux is not resident. Native Amp owns update and idle-restart behavior, subject to its installation and settings. |
 | Worker/coordination stores | Existing workers, shelves, groups, reports, callbacks, deadlines, finish authorization, operations, and spawn assignments are inert evidence. Active commands do not enroll, migrate, drain, rewrite, or delete them. |
-| Provider bridges | Drain only after each existing replacement gate is proven. `/amux-tycho` remains unchanged until #328 passes; never dual-route. |
+| Provider bridges | Retired. Use native Amp communication. Preserve existing processes, receipts, and artifacts; skill removal grants no cleanup authority. |
 | Git/worktree safety | Independent safety guidance; not a reason to retain coordination state and not contingent on full-product archive. |
 
 ## Pull-request dispositions retained
@@ -36,18 +38,18 @@ The 2026-08-30 PR #375/#376 hygiene remains valid: the issue graph stays narrow,
 
 The closed symmetric-retirement graph and superseded provider/productization PRs remain closed. Nothing in ADR 0008 revives an append-only retirement stream, six-class planner, finalizer, provider-neutral control plane, or permanent Lead hierarchy.
 
-## Live issue disposition
+## Historical issue disposition
 
-The narrow six-issue open set remains #221, #311, #318, #328, #331, and #339.
+The earlier six-issue set was #221, #311, #318, #328, #331, and #339. These records do not assert current GitHub issue status.
 
 | Issue | Current role |
 | --- | --- |
 | [#331](https://github.com/zainfathoni/amux/issues/331) | Keep open as the umbrella for the retained runner-launch core, removed active coordination surfaces, and preservation/replacement gates for inert historical state. |
 | [#339](https://github.com/zainfathoni/amux/issues/339) | Keep open as rollout/documentation alignment for the retained host boundary and preservation/replacement gates. No replacement dates yet. |
-| [#328](https://github.com/zainfathoni/amux/issues/328) | Keep narrowly open for the authenticated same-turn structured-return gate. Until it passes, keep `/amux-tycho` unchanged and never dual-route. |
+| [#328](https://github.com/zainfathoni/amux/issues/328) | Historical authenticated same-turn structured-return gate. It no longer blocks provider-skill retirement. |
 | [#221](https://github.com/zainfathoni/amux/issues/221) | Preserve already-bound Claude pairs and track a separately proven replacement/disposition. No currently authorized drain mutation or new paired protocol. |
 | [#311](https://github.com/zainfathoni/amux/issues/311) | Historical compatibility evidence only; do not mutate receipts for digest drift without a separately proven replacement and owner disposition. |
-| [#318](https://github.com/zainfathoni/amux/issues/318) | Reassess against removed core compatibility commands; provider-specific selectors remain under their own skills. No issue mutation is authorized by this ledger. |
+| [#318](https://github.com/zainfathoni/amux/issues/318) | Historical provider-selector work. The provider skills are removed. No issue mutation is authorized by this ledger. |
 
 Closed #232 remains safety evidence implemented by preflight-only PR #366. Closed #374 remains closed; its long-running-supervisor idea is still not required, and its obsolete rationale that OS/native launch replaces Amux received the [authorized non-reopening correction recorded here](issue-direction-corrections.md#applied-corrective-comment-on-closed-374-not-reopened). Closed #212–#216 remain closed because ADR 0008 retains workdir identity and does not revive their separate Amux runner-ID product graph.
 
@@ -61,7 +63,7 @@ There is no complete-product archive gate. Any future date applies only to a nam
 
 1. For #360, accept one complete inventory or explicitly disposition incomplete/error and separately confirm no repeat before the existing deletion condition activates.
 2. Decide implementation scope and release sequencing for completing retained runner remove/reconcile behavior using #232/#366 safety evidence.
-3. Name and field-validate #328's concrete authenticated same-turn Tycho return route before receipt admission closes.
+3. Authorize any provider process or receipt cleanup separately; the former #328 replacement gate no longer blocks skill removal.
 4. Disposition provider-specific receipts whose final paired step formerly required core worker teardown; preserve evidence and fail closed meanwhile.
 5. Authorize any further issue-body rewrite/comment, release, process/store mutation, or external deployment change separately.
 

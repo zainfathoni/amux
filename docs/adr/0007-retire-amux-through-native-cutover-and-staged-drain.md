@@ -8,6 +8,8 @@ partially-superseded-by: 0008, 0009
 
 # Retire Amux through native cutover and staged drain
 
+> **Provider-skill update, 2026-10-25:** The owner retired the experimental provider skills and helpers without waiting for the replacement gates below. Those gates and proposed skill migrations are historical only. Native Amp owns new delegated work. Existing provider processes, receipts, and artifacts remain preserved. See the [current disposition ledger](../staged-drain-disposition.md).
+
 > **Partially superseded:** [ADR 0008](0008-retain-machine-local-runner-host-and-drain-coordination.md) rejects this ADR's complete-product retirement destination. Amux remains active as the machine-local runner registry and launcher, including automatic `amux launch --all`, tmux/Amp process launch, diagnostics, maintenance, and OS activation integration. [ADR 0009](0009-remove-active-legacy-coordination-surfaces.md) supersedes this ADR's active drain transitions for core workers, adoption, spawn, shelves, groups, reports, callbacks, deadlines, and finish authorization; those historical stores are inert. This ADR remains current for native ownership of new task coordination, no-dual-write safety, and separately gated provider evidence. References below to active core drain, closing runner admission, native/OS replacement launch, a whole-product reader sunset, or product archive are historical superseded direction and are not implementation authority.
 
 ## Decision

@@ -6,6 +6,8 @@ supersedes-active-drain-routes: 0008
 
 # Remove active legacy coordination surfaces
 
+> **Provider-skill update, 2026-10-25:** The owner retired the experimental provider skills and helpers. The requirement below to retain the Tycho bridge until #328 passes is superseded. Native Amp owns new delegated work. Existing provider processes, receipts, and artifacts remain preserved. See the [current disposition ledger](../staged-drain-disposition.md).
+
 ## Decision
 
 Remove the active Amux worker and legacy coordination command surfaces now. Retain the thin machine-local runner host selected by ADR 0008.

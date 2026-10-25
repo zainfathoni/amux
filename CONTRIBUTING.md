@@ -34,22 +34,16 @@ CI runs formatting, tests, a build, and a Destructive Command Guard scan.
 
 ## Develop the bundled skills
 
-Normal users install published skills globally with `skills` as documented in
-the README. Core lifecycle is `skills/amux`. Experimental Tycho, Claude, and Pi
-routes are separate packages under `skills/amux-tycho`, `skills/amux-claude`,
-and `skills/amux-pi`.
+Normal users install the published runner-service skill globally with `skills`
+as documented in the README. Its source is `skills/amux`.
 Contributors may symlink this checkout so Amp loads the worktree copies:
 
 ```sh
 ln -sfn "$PWD/skills/amux" ~/.agents/skills/amux
-ln -sfn "$PWD/skills/amux-tycho" ~/.agents/skills/amux-tycho
-ln -sfn "$PWD/skills/amux-claude" ~/.agents/skills/amux-claude
-ln -sfn "$PWD/skills/amux-pi" ~/.agents/skills/amux-pi
 ```
 
 Reload Amp after changing the links. Run the skill consistency tests with
-`go test ./scripts` (and experimental helper tests under each skill's
-`experimental/...` directory). They also run as part of
+`go test ./scripts`. They also run as part of
 `go test ./...`. Do not document these development symlinks as the primary
 installation path.
 

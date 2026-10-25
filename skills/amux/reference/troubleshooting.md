@@ -18,6 +18,6 @@ Runner pin requires a canonical existing directory. Runner unpin removes only th
 
 Runner teardown uses a fresh two-step plan. Exit `1` can mean the runner was stopped but the worktree and row remain, or the worktree was removed but the row remains. Re-inspect and generate a new dry-run plan; the missing-workdir recovery plan can safely unpin the retained exact row. Never force-remove a rejected worktree, bypass hidden-content checks, or reuse the old digest.
 
-If a removed worker/coordination command is required by old operational notes, stop. Do not find an older binary, edit registries, synthesize a terminal transition, or redirect `amux report` to `/amux-tycho`. Historical stores are inert evidence.
+If a removed worker/coordination command is required by old operational notes, stop. Do not find an older binary, edit registries, or synthesize a terminal transition. Historical stores are inert evidence.
 
-Provider-specific receipts remain governed by their separate explicit-only skills. A Claude route that requires later core Amux worker teardown is blocked because that teardown no longer exists; preserve its process, receipt, evidence, artifacts, and fence.
+The experimental provider skills are retired. Preserve existing provider processes, receipts, evidence, artifacts, and fences. Removing a skill does not authorize process or data cleanup.

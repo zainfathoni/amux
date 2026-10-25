@@ -118,7 +118,7 @@ var removedCommands = map[string]string{
 	"worker":         "Amux worker lifecycle was removed; use native Amp threads for task coordination",
 	"spawn":          "Amux spawn was removed; use native Amp thread creation",
 	"group":          "Amux work groups were removed; use native Amp parent/reply routing",
-	"report":         "Amux worker reports were removed; /amux-tycho uses its separate receipt bridge",
+	"report":         "Amux worker reports were removed; use native Amp replies",
 	"callback":       "Amux callback leases were removed; use native Amp replies or inspect the owning native thread",
 	"shelve":         "Amux worker shelves were removed; use native Amp archive state",
 	"unshelve":       "Amux worker shelves were removed; use native Amp archive state",

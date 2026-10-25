@@ -1,8 +1,8 @@
-# Provider executor readiness
+# Historical provider executor readiness
 
-This matrix is the versioned source of truth for when `/amux-tycho`, `/amux-claude`, and `/amux-pi` may be used. It records contract readiness, not a promise that a provider account has current entitlement, quota, or availability. Every route remains explicit-owner-only and must still pass its live preflight.
+**Retired on 2026-10-25:** `amux-tycho`, `amux-claude`, and `amux-pi` and their experimental helpers are removed. Use native Amp threads and communication. The matrix below records prior decisions and evidence only; none of its statuses or gates authorize execution. Existing provider processes, receipts, and artifacts remain untouched.
 
-Statuses:
+Historical statuses:
 
 - **Proven experimental** — at least one bounded real run established the named route; each later run still requires preflight and exact authorization.
 - **Conditional** — the contract is implemented for the stated narrow task shape, but host, model, capacity, or runtime evidence remains run-specific.
@@ -24,8 +24,8 @@ Statuses:
 | Pi fresh-Orb Spark | Runtime-unverified | Fresh Linux x86_64 Amp Orb | Bounded no-tool marker and useful read-only task only | Exact Spark selector through owner-operated ChatGPT Codex OAuth | No API keys or credential transfer; trusted before/after quota evidence; logout and experiment-owned cleanup required | [#206](https://github.com/zainfathoni/amux/issues/206) owns the remaining real runtime validation. |
 | Pi general repository mutation | Unsupported | Any | No multi-file, arbitrary edit, worktree, commit, push, PR, or merge authority | None | The one-file physical helper and read-only Orb recipe cannot be widened by analogy | Requires a separately designed and accepted authority contract. |
 
-## Maintenance rules
+## Historical promotion policy
 
-Update this matrix in the same pull request that changes a route's model allowlist, authority, platform, runtime pin, or promotion status. Link the governing GitHub issue; do not close a runtime-evidence issue from static tests alone. Historical proposals remain evidence, while this table states current usability.
+Before retirement, route changes required a matching matrix update and a governing GitHub issue. Static tests alone were not sufficient to close a runtime-evidence issue. This policy no longer provides an admission or promotion path.
 
-A newer CLI exposing a flag or model name is not enough to promote a row. Model support requires an exact approved identifier and complete binding through the route's policy and receipt chain. Runtime acceptance additionally requires the row's real authentication, entitlement, model-identity, output, lifecycle, and cleanup evidence.
+Prior runtime acceptance required exact model binding, authentication, entitlement, output, lifecycle, and cleanup evidence. These records do not extend Amux beyond runner configuration and service management.

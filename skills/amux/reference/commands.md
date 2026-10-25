@@ -45,7 +45,7 @@ Runner park preserves the row. Runner unpin removes only the exact selected regi
 
 Runner teardown is exact and machine-local: stop the positively identified runner if live, remove its exact clean attached secondary Git worktree, then unpin its exact row. It accepts only `--workdir`; there is no `--all` or `--current`. Dry-run returns a SHA-256 plan digest and apply requires that fresh digest. It preserves the branch ref and rejects primary, detached, locked, prunable, dirty, hidden-change, symlinked, non-root, current-directory, conflicting, ambiguous, and unreadable targets. It also rejects installed or activation-pending native service metadata because tmux absence is not proof that native Amp is absent. It never archives native Amp threads, deletes branches, or reads/writes historical coordination stores.
 
-The former `worker`, `spawn`, `shelve`, `unshelve`, top-level `teardown`, `group`, `report`, and `callback` routes are removed and fail before effects. Historical coordination stores are inert. The new runner-scoped teardown does not revive worker teardown. The `report` tombstone is not `/amux-tycho`; that explicit-only skill uses a separate receipt store and protocol.
+The former `worker`, `spawn`, `shelve`, `unshelve`, top-level `teardown`, `group`, `report`, and `callback` routes are removed and fail before effects. Historical coordination stores are inert. The new runner-scoped teardown does not revive worker teardown.
 
 `--config-dir <path>` and `AMUX_CONFIG_DIR` select the directory containing active `native-runners.json`, service ownership metadata, and legacy `runners.tsv`. Historical worker/coordination files in that directory are not part of active runner operation and must remain untouched.
 

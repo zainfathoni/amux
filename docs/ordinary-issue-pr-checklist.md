@@ -14,7 +14,6 @@ Compose-only operating guidance for one coherent issue or PR review after [ADR 0
 
 | Concern | Owner |
 | --- | --- |
-| Amp `/team-review` + optional `/amux-tycho` second opinion | [#328](https://github.com/zainfathoni/amux/issues/328); load `/amux-tycho` when explicitly requested |
 | Thin host / legacy drain umbrella and rollout docs | [#331](https://github.com/zainfathoni/amux/issues/331), [#339](https://github.com/zainfathoni/amux/issues/339); [disposition ledger](staged-drain-disposition.md) |
 
 ## Non-goals

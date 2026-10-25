@@ -62,7 +62,7 @@ Before a primary-service rollout, inspect the exact row, dry-run the launch, and
 
 For cutover, first disable any login automation that invokes bare `amux` or `amux launch --all`. Give native and legacy runners distinct IDs, remove self-owned legacy maintenance (or explicitly retain external ownership), install and verify native service coverage, then **park → soak → unpin** each legacy runner. Include a login or reboot in the soak. Never use `runner teardown` for this migration: preserve the worktree, and roll back before unpin by removing the native services and relaunching the retained legacy row.
 
-The former worker, spawn/adoption, shelf, group, report, callback, deadline, and finish-authorization commands have been removed. Their historical files are inert compatibility evidence: current commands neither migrate nor mutate them. The protected one-time #360 inventory remains read-only under its existing owner gate. `/amux-tycho` is a separate receipt bridge and is unaffected by removal of worker reports.
+The former worker, spawn/adoption, shelf, group, report, callback, deadline, and finish-authorization commands have been removed. Their historical files are inert compatibility evidence: current commands neither migrate nor mutate them. The protected one-time #360 inventory remains read-only under its existing owner gate. The experimental provider skills are retired.
 
 See [ADR 0011](docs/adr/0011-consolidate-on-native-multi-directory-runners.md), which supersedes the retained-host architecture in [ADR 0008](docs/adr/0008-retain-machine-local-runner-host-and-drain-coordination.md). [ADR 0010](docs/adr/0010-add-machine-local-runner-teardown.md), [ADR 0009](docs/adr/0009-remove-active-legacy-coordination-surfaces.md), and the [disposition ledger](docs/staged-drain-disposition.md) remain migration context.
 
@@ -107,7 +107,7 @@ amux update
 npx skills add zainfathoni/amux --skill amux --global
 ```
 
-Experimental provider skills remain explicit-only and separately installed. For a clean local `main` checkout, the installer can link bundled skills without updating that checkout:
+Only the runner-service skill is shipped. For a clean local `main` checkout, the installer can link `/amux` without updating that checkout:
 
 ```sh
 AMUX_REPO="$HOME/Code/GitHub/zainfathoni/amux"
@@ -118,7 +118,7 @@ curl -fsSL https://amux.zainf.dev/install.sh |
 
 `/amux` covers retained runner operations and routes requests for new delegated work to native Amp child threads. It never creates or adopts Amux workers or enrolls native work in legacy coordination state.
 
-`/amux-tycho` is a separate, unstable receipt-based report bridge. Its consume/acknowledge protocol is not the removed `amux report` worker-group mechanism. Keep it unchanged until issue #328's authenticated same-turn direct-return gate passes.
+`amux-claude`, `amux-pi`, and `amux-tycho` are retired. Their skill bundles and experimental helpers are removed. Use native Amp threads and communication for delegated work. Existing provider receipts and artifacts remain untouched.
 
 ## Legacy per-workdir lifecycle
 
@@ -191,7 +191,7 @@ Runner pin is active admission. `runner unpin` removes only the exact selected r
 
 Runner commands that accept `--workdir` (`-d`) also accept `--current-dir` (`-c`), exactly equivalent to `-d .` in the command's cwd. It never reads the tmux pane cwd and may be combined with `--workspace`, but not with `-d`, `--current`, or `--all`. `--current` retains its tmux-based behavior. Before the command name, `-c <path>` remains the global `--config-dir` shorthand.
 
-Removed `worker`, `spawn`, `shelve`, `unshelve`, top-level `teardown`, `group`, `report`, and `callback` routes fail before process or store effects. The active command is runner-scoped and has none of the former worker teardown's remote-thread or legacy-store behavior. `report` does not route to `/amux-tycho`; use that separate skill explicitly.
+Removed `worker`, `spawn`, `shelve`, `unshelve`, top-level `teardown`, `group`, `report`, and `callback` routes fail before process or store effects. The active command is runner-scoped and has none of the former worker teardown's remote-thread or legacy-store behavior.
 
 ## Configuration and safety
 

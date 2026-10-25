@@ -46,11 +46,8 @@
 
           <h2 id="install">Install globally</h2>
           <pre><code>npx skills add zainfathoni/amux --skill amux --global</code></pre>
-          <p>Experimental provider skills are separate, explicit-only installs:</p>
-          <pre><code>npx skills add zainfathoni/amux --skill amux-tycho --global
-npx skills add zainfathoni/amux --skill amux-claude --global
-npx skills add zainfathoni/amux --skill amux-pi --global</code></pre>
-          <p>Installing a provider skill does not select or authorize it. Core <code>/amux</code> defaults to native Amp. To opt into links from a clean local checkout without having the installer update that checkout:</p>
+          <p>Only the runner-service skill is shipped. The experimental provider skills and helpers are retired. Use native Amp threads and communication for delegated work.</p>
+          <p>To link <code>/amux</code> from a clean local checkout without having the installer update that checkout:</p>
           <pre><code>AMUX_REPO="$HOME/Code/GitHub/zainfathoni/amux"
 git -C "$AMUX_REPO" pull --ff-only origin main
 curl -fsSL https://amux.zainf.dev/install.sh |
@@ -116,7 +113,7 @@ amux runner pin -w project -c \
 
           <h2 id="legacy">Legacy status and replacements</h2>
           <p class="note"><strong>Removed, not merely deprecated:</strong> worker, generalized spawn/adoption, shelf, top-level worker teardown, group, worker-report, callback, deadline, and finish commands are no longer supported. Do not run old syntax or mutate historical stores.</p>
-          <ul><li>Use native Amp child creation and parent/reply routing instead of spawn, groups, reports, callbacks, and deadlines.</li><li>Use native Amp archive state instead of shelves.</li><li>Use native thread lifecycle separately from machine-local <code>runner teardown</code>.</li><li>Treat old worker and coordination files as inert evidence: do not migrate, rewrite, drain, or delete them.</li><li>Use <code>/amux-tycho</code> only when explicitly requested; its separate receipt bridge is not the removed report mechanism.</li></ul>
+          <ul><li>Use native Amp child creation and parent/reply routing instead of spawn, groups, reports, callbacks, and deadlines.</li><li>Use native Amp archive state instead of shelves.</li><li>Use native thread lifecycle separately from machine-local <code>runner teardown</code>.</li><li>Treat old worker and coordination files as inert evidence: do not migrate, rewrite, drain, or delete them.</li><li>Preserve existing provider processes, receipts, and artifacts. Skill retirement does not authorize their cleanup.</li></ul>
         </main>
       </div>
     </div>

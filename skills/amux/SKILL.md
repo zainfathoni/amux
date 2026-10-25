@@ -44,8 +44,6 @@ Thin machine-local configuration and activation layer for native Amp multi-direc
 - **/amux sprawl**: [`workflows.md`](reference/workflows.md#sprawl-independent-issue-threads).
 - **/amux sweep**: [`workflows.md`](reference/workflows.md#sweep-worktree-inventory).
 
-Load `/amux-tycho` only on an explicit owner request. The receipt's immutable real Amp origin remains coordinator and consume/acknowledgement authority. Tycho is a typed report-only producer with no group, member, callback, finish, label, provider-identity, or lifecycle authority. An owner-authorized external Tycho second opinion must never grant Tycho GitHub review mutation or readiness promotion. Its receipts are separate from the removed worker-report store and remain until #328 passes.
-
 ## Load only what you need
 
 - Runner selectors, side effects, installation: [`reference/commands.md`](reference/commands.md)

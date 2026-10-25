@@ -10,15 +10,7 @@ import (
 	"testing"
 )
 
-var bundledSkillNames = []string{"amux", "amux-tycho", "amux-claude", "amux-pi"}
-
-func writeTychoRuntimePayload(t *testing.T, source string) {
-	t.Helper()
-	root := filepath.Join(source, "skills", "amux-tycho")
-	writeFile(t, filepath.Join(root, "reference", "tycho-report-bridge.md"), "bridge\n", 0o644)
-	writeFile(t, filepath.Join(root, "reference", "trigger-phrases.md"), "triggers\n", 0o644)
-	writeFile(t, filepath.Join(root, "experimental", "tycho-report-bridge", "tycho_report_bridge.py"), "#!/usr/bin/env python3\n", 0o755)
-}
+var bundledSkillNames = []string{"amux"}
 
 func TestInstallerMapsSupportedPlatformsAndInstalls(t *testing.T) {
 	for _, test := range []struct {
@@ -85,9 +77,12 @@ func TestInstallerLinksBundledSkillsAndPreservesExistingInstalls(t *testing.T) {
 		writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
 		writeFile(t, filepath.Join(fixture.home, ".agents", "skills", skill, "old"), "preserved\n", 0o600)
 	}
-	writeTychoRuntimePayload(t, source)
+	// A checkout from before retirement must not reinstall provider skills.
+	for _, skill := range []string{"amux-claude", "amux-pi", "amux-tycho"} {
+		writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
+	}
 	writeFile(t, filepath.Join(fixture.home, ".config", "amp", "skills", "amux", "old"), "legacy amp\n", 0o600)
-	writeFile(t, filepath.Join(fixture.home, ".config", "agents", "skills", "amux-pi", "old"), "legacy agents\n", 0o600)
+	writeFile(t, filepath.Join(fixture.home, ".config", "agents", "skills", "amux", "old"), "legacy agents\n", 0o600)
 	fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
 
 	output, err := fixture.run()
@@ -111,7 +106,7 @@ func TestInstallerLinksBundledSkillsAndPreservesExistingInstalls(t *testing.T) {
 	}
 	for _, legacy := range []string{
 		filepath.Join(fixture.home, ".config", "amp", "skills", "amux"),
-		filepath.Join(fixture.home, ".config", "agents", "skills", "amux-pi"),
+		filepath.Join(fixture.home, ".config", "agents", "skills", "amux"),
 	} {
 		if _, statErr := os.Lstat(legacy); !os.IsNotExist(statErr) {
 			t.Fatalf("legacy skill remains active at %s: %v", legacy, statErr)
@@ -124,6 +119,11 @@ func TestInstallerLinksBundledSkillsAndPreservesExistingInstalls(t *testing.T) {
 	if !strings.Contains(output, "Linked bundled skills from "+source) || !strings.Contains(output, "Reload Amp") {
 		t.Fatalf("skill installation output:\n%s", output)
 	}
+	for _, skill := range []string{"amux-claude", "amux-pi", "amux-tycho"} {
+		if _, err := os.Lstat(filepath.Join(fixture.home, ".agents", "skills", skill)); !os.IsNotExist(err) {
+			t.Fatalf("retired skill %s was installed: %v", skill, err)
+		}
+	}
 }
 
 func TestInstallerSkillLinksAreIdempotent(t *testing.T) {
@@ -132,7 +132,6 @@ func TestInstallerSkillLinksAreIdempotent(t *testing.T) {
 	for _, skill := range bundledSkillNames {
 		writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
 	}
-	writeTychoRuntimePayload(t, source)
 	fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
 	if output, err := fixture.run(); err != nil {
 		t.Fatalf("first installer run failed: %v\n%s", err, output)
@@ -151,36 +150,39 @@ func TestInstallerSkillLinksAreIdempotent(t *testing.T) {
 }
 
 func TestInstallerReplacesWrongAndBrokenSkillSymlinks(t *testing.T) {
-	fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
-	source := filepath.Join(fixture.root, "amux-source")
-	for _, skill := range bundledSkillNames {
-		writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
-	}
-	writeTychoRuntimePayload(t, source)
-	destinationRoot := filepath.Join(fixture.home, ".agents", "skills")
-	if err := os.MkdirAll(destinationRoot, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(fixture.root, "wrong"), filepath.Join(destinationRoot, "amux")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(fixture.root, "missing"), filepath.Join(destinationRoot, "amux-claude")); err != nil {
-		t.Fatal(err)
-	}
-	fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
+	for _, target := range []string{"wrong", "missing"} {
+		t.Run(target, func(t *testing.T) {
+			fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
+			source := filepath.Join(fixture.root, "amux-source")
+			for _, skill := range bundledSkillNames {
+				writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
+			}
+			destinationRoot := filepath.Join(fixture.home, ".agents", "skills")
+			if err := os.MkdirAll(destinationRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if target == "wrong" {
+				writeFile(t, filepath.Join(fixture.root, target, "SKILL.md"), "old skill\n", 0o644)
+			}
+			if err := os.Symlink(filepath.Join(fixture.root, target), filepath.Join(destinationRoot, "amux")); err != nil {
+				t.Fatal(err)
+			}
+			fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
 
-	if output, err := fixture.run(); err != nil {
-		t.Fatalf("installer failed: %v\n%s", err, output)
-	}
-	for _, skill := range bundledSkillNames {
-		target, err := os.Readlink(filepath.Join(destinationRoot, skill))
-		if err != nil || target != filepath.Join(source, "skills", skill) {
-			t.Fatalf("skill %s target=%q err=%v", skill, target, err)
-		}
-	}
-	backups, err := filepath.Glob(filepath.Join(destinationRoot, "*.backup-*"))
-	if err != nil || len(backups) != 0 {
-		t.Fatalf("replaced symlinks created backups=%v err=%v", backups, err)
+			if output, err := fixture.run(); err != nil {
+				t.Fatalf("installer failed: %v\n%s", err, output)
+			}
+			for _, skill := range bundledSkillNames {
+				target, err := os.Readlink(filepath.Join(destinationRoot, skill))
+				if err != nil || target != filepath.Join(source, "skills", skill) {
+					t.Fatalf("skill %s target=%q err=%v", skill, target, err)
+				}
+			}
+			backups, err := filepath.Glob(filepath.Join(destinationRoot, "*.backup-*"))
+			if err != nil || len(backups) != 0 {
+				t.Fatalf("replaced symlinks created backups=%v err=%v", backups, err)
+			}
+		})
 	}
 }
 
@@ -196,19 +198,18 @@ func TestInstallerRejectsInvalidSkillSourceBeforeDownload(t *testing.T) {
 	}
 }
 
-func TestInstallerPreflightsPiBeforeMutation(t *testing.T) {
+func TestInstallerPreflightsRunnerSkillBeforeMutation(t *testing.T) {
 	fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
 	source := filepath.Join(fixture.root, "amux-source")
-	for _, skill := range []string{"amux", "amux-tycho", "amux-claude"} {
-		writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
+	if err := os.MkdirAll(source, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	writeTychoRuntimePayload(t, source)
 	existing := filepath.Join(fixture.home, ".agents", "skills", "amux", "old")
 	writeFile(t, existing, "preserved\n", 0o600)
 	fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
 
 	output, err := fixture.run()
-	if err == nil || !strings.Contains(output, "missing bundled skill directory") || !strings.Contains(output, filepath.Join(source, "skills", "amux-pi")) {
+	if err == nil || !strings.Contains(output, "missing bundled skill directory") || !strings.Contains(output, filepath.Join(source, "skills", "amux")) {
 		t.Fatalf("output=%q err=%v", output, err)
 	}
 	if got := readFile(t, existing); got != "preserved\n" {
@@ -219,28 +220,25 @@ func TestInstallerPreflightsPiBeforeMutation(t *testing.T) {
 	}
 }
 
-func TestInstallerRejectsMissingTychoRuntimePayloadBeforeMutation(t *testing.T) {
+func TestInstallerRejectsMissingSkillEntrypointBeforeMutation(t *testing.T) {
 	fixture := newInstallerFixture(t, "Linux", "x86_64", "amux-linux-amd64.tar.gz")
 	source := filepath.Join(fixture.root, "amux-source")
-	for _, skill := range bundledSkillNames {
-		writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
+	if err := os.MkdirAll(filepath.Join(source, "skills", "amux"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	tycho := filepath.Join(source, "skills", "amux-tycho")
-	writeFile(t, filepath.Join(tycho, "reference", "tycho-report-bridge.md"), "bridge\n", 0o644)
-	writeFile(t, filepath.Join(tycho, "reference", "trigger-phrases.md"), "triggers\n", 0o644)
 	existing := filepath.Join(fixture.home, ".agents", "skills", "amux", "old")
 	writeFile(t, existing, "preserved\n", 0o600)
 	fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
 
 	output, err := fixture.run()
-	if err == nil || !strings.Contains(output, "missing readable bundled amux-tycho runtime payload") || !strings.Contains(output, "tycho_report_bridge.py") {
+	if err == nil || !strings.Contains(output, "missing readable bundled skill entrypoint") || !strings.Contains(output, filepath.Join(source, "skills", "amux", "SKILL.md")) {
 		t.Fatalf("output=%q err=%v", output, err)
 	}
 	if got := readFile(t, existing); got != "preserved\n" {
-		t.Fatalf("runtime payload preflight changed existing skill to %q", got)
+		t.Fatalf("entrypoint preflight changed existing skill to %q", got)
 	}
 	if _, statErr := os.Stat(fixture.log); !os.IsNotExist(statErr) {
-		t.Fatalf("missing Tycho runtime payload reached download: %v", statErr)
+		t.Fatalf("missing skill entrypoint reached download: %v", statErr)
 	}
 }
 
@@ -255,7 +253,6 @@ func TestInstallerRejectsSkillSourceOverlappingManagedDestinations(t *testing.T)
 			for _, skill := range bundledSkillNames {
 				writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
 			}
-			writeTychoRuntimePayload(t, source)
 			fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
 
 			output, err := fixture.run()
@@ -280,7 +277,6 @@ func TestInstallerRejectsInvalidSkillDestinationParentsBeforeDownload(t *testing
 			for _, skill := range bundledSkillNames {
 				writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
 			}
-			writeTychoRuntimePayload(t, source)
 			writeFile(t, filepath.Join(fixture.home, relativeParent), "not a directory\n", 0o600)
 			fixture.env = append(fixture.env, "AMUX_SKILLS_SOURCE="+source)
 
@@ -309,7 +305,6 @@ func TestInstallerReportsSequentialSkillFailureAndPreservesBackup(t *testing.T) 
 	for _, skill := range bundledSkillNames {
 		writeFile(t, filepath.Join(source, "skills", skill, "SKILL.md"), "name: "+skill+"\n", 0o644)
 	}
-	writeTychoRuntimePayload(t, source)
 	destination := filepath.Join(fixture.home, ".agents", "skills", "amux")
 	writeFile(t, filepath.Join(destination, "old"), "recoverable\n", 0o600)
 	writeFile(t, filepath.Join(fixture.bin, "ln"), "#!/bin/sh\nexit 1\n", 0o755)

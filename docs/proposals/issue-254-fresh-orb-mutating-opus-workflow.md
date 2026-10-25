@@ -7,7 +7,7 @@ promotion: not-authorized
 
 # Issue 254 fresh-Orb mutating Claude Opus workflow
 
-This document specifies the desired bounded mutating Claude Opus workflow for a fresh Amp Orb, as requested by [issue #254](https://github.com/zainfathoni/amux/issues/254). It is a design specification plus a record of the repository/Amp primitive audit. The audit proved that the workflow is not currently implementable because the authenticated native authority adapters named below do not exist. This document does not authorize a mutating Orb launch or promote fresh-Orb delegation to generic use. Requests route to the blocked [`claude-opus-orb-mutating.md`](../../skills/amux-claude/reference/claude-opus-orb-mutating.md) reference.
+This document records the proposed bounded mutating Claude Opus workflow for a fresh Amp Orb from [issue #254](https://github.com/zainfathoni/amux/issues/254). It is historical design evidence, not execution authority. The provider skills are retired. The former blocked route remains available as an archived [`claude-opus-orb-mutating.md`](https://github.com/zainfathoni/amux/blob/e50d54c1afc5481b861fdce135c64055f68c91b9/skills/amux-claude/reference/claude-opus-orb-mutating.md) snapshot.
 
 The scope is exactly one explicitly requested bounded repository mutation by exact `claude-opus-4-8` in a fresh Orb, returning independently verifiable commit evidence to the originating coordinator while keeping delivery, acknowledgement, archive, and cleanup as separate decisions. It preserves the `stop/narrow` posture recorded for the local mutating pilots and adds no autonomous admission.
 
@@ -63,9 +63,9 @@ It does not:
 
 At the recorded base:
 
-- The read-only Orb recipe in [`claude-opus-orb-executor.md`](../../skills/amux-claude/reference/claude-opus-orb-executor.md) provisions a fresh Orb with `CLAUDE_CODE_OAUTH_TOKEN` as a project secret, runs a fail-closed credential/auth preflight, pins exact `claude-opus-4-8`, selects one tool profile, enforces process/output bounds, validates single-key `modelUsage`, and reports through native Amp messaging. Mutation is unavailable by default in that recipe.
-- The [`claude-opus-result-validator`](../../skills/amux-claude/reference/claude-opus-orb-executor.md) already enforces the single-key `modelUsage`, turn-bound, permission-denial, and result-shape checks reused below.
-- The local mutating reference [`claude-mutating-delegation.md`](../../skills/amux-claude/reference/claude-mutating-delegation.md) already separates an exclusive-writer frozen handoff from Amp-owned preparation, validation, delivery, acknowledgement, and parking. Its handoff invariants are portable; its tmux/process and parking identity semantics are not portable to an Orb.
+- The read-only Orb recipe in [`claude-opus-orb-executor.md`](https://github.com/zainfathoni/amux/blob/e50d54c1afc5481b861fdce135c64055f68c91b9/skills/amux-claude/reference/claude-opus-orb-executor.md) provisions a fresh Orb with `CLAUDE_CODE_OAUTH_TOKEN` as a project secret, runs a fail-closed credential/auth preflight, pins exact `claude-opus-4-8`, selects one tool profile, enforces process/output bounds, validates single-key `modelUsage`, and reports through native Amp messaging. Mutation is unavailable by default in that recipe.
+- The [`claude-opus-result-validator`](https://github.com/zainfathoni/amux/blob/e50d54c1afc5481b861fdce135c64055f68c91b9/skills/amux-claude/reference/claude-opus-orb-executor.md) already enforces the single-key `modelUsage`, turn-bound, permission-denial, and result-shape checks reused below.
+- The local mutating reference [`claude-mutating-delegation.md`](https://github.com/zainfathoni/amux/blob/e50d54c1afc5481b861fdce135c64055f68c91b9/skills/amux-claude/reference/claude-mutating-delegation.md) already separates an exclusive-writer frozen handoff from Amp-owned preparation, validation, delivery, acknowledgement, and parking. Its handoff invariants are portable; its tmux/process and parking identity semantics are not portable to an Orb.
 - The [#247 design grill](issue-247-mutating-opus-workflow-design-grill.md) established that autonomous capacity admission is externally blocked and that an unknown-capacity path requires one fresh, single-use owner acknowledgement. That result is preserved unchanged here.
 
 ## Workflow specification
@@ -240,6 +240,6 @@ No ADR is added. This proposal is a specification for an experimental, externall
 - [Local Darwin Stage A, issue #253](https://github.com/zainfathoni/amux/issues/253)
 - [Mutating Opus workflow design grill, issue #247](issue-247-mutating-opus-workflow-design-grill.md)
 - [Mutating Pilot 2 evaluation, issue #151](issue-151-mutating-claude-pilot-2-evaluation.md)
-- [Read-only Orb executor recipe](../../skills/amux-claude/reference/claude-opus-orb-executor.md)
-- [Blocked fresh-Orb mutation route](../../skills/amux-claude/reference/claude-opus-orb-mutating.md)
-- [Local mutating delegation reference](../../skills/amux-claude/reference/claude-mutating-delegation.md)
+- [Archived read-only Orb executor recipe](https://github.com/zainfathoni/amux/blob/e50d54c1afc5481b861fdce135c64055f68c91b9/skills/amux-claude/reference/claude-opus-orb-executor.md)
+- [Archived blocked fresh-Orb mutation route](https://github.com/zainfathoni/amux/blob/e50d54c1afc5481b861fdce135c64055f68c91b9/skills/amux-claude/reference/claude-opus-orb-mutating.md)
+- [Archived local mutating delegation reference](https://github.com/zainfathoni/amux/blob/e50d54c1afc5481b861fdce135c64055f68c91b9/skills/amux-claude/reference/claude-mutating-delegation.md)

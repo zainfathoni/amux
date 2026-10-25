@@ -24,7 +24,7 @@
   <p class="lead">Secara historis, Amux memisahkan <strong>durable mailbox</strong> untuk hasil dari <strong>doorbell</strong> murah untuk membangunkan coordinator. Pola ini tetap berguna untuk dipelajari, tetapi implementasi worker/report/callback Amux sudah tidak aktif.</p>
 
   <div class="verdict">
-    <strong>Status: removed.</strong> Command worker, group, report, callback, deadline, dan finish telah dihapus—bukan sekadar deprecated. Jangan jalankan syntax lama atau mengubah store historisnya. Untuk work Amp baru gunakan native child creation, parent/reply routing, authenticated messaging, dan waiting. <code>/amux-tycho</code> adalah bridge receipt terpisah dan explicit-only untuk executor eksternal.
+    <strong>Status: removed.</strong> Command worker, group, report, callback, deadline, dan finish telah dihapus—bukan sekadar deprecated. Skill provider eksperimental, termasuk <code>/amux-tycho</code>, juga sudah dihapus. Semua contoh provider di bawah hanya catatan historis, bukan jalur eksekusi aktif. Jangan jalankan syntax lama atau mengubah store historisnya. Untuk work Amp baru gunakan native child creation, parent/reply routing, authenticated messaging, dan waiting.
   </div>
 
   <h2>Desain historis: simpan dulu, bunyikan bel kemudian</h2>
@@ -77,7 +77,7 @@
     </tbody>
   </table>
 
-  <p class="source-line">Boundary Tycho: <a class="chip gh" href="https://github.com/zainfathoni/amux/blob/main/skills/amux-tycho/SKILL.md">skill source saat ini↗</a></p>
+  <p class="source-line">Boundary Tycho historis: <a class="chip gh" href="https://github.com/zainfathoni/amux/blob/e50d54c1afc5481b861fdce135c64055f68c91b9/skills/amux-tycho/SKILL.md">snapshot skill sebelum dihapus↗</a></p>
 
   <div class="callout">
     <strong>Kenapa receipt bridge lebih kompleks?</strong> Bukan karena kami tidak mempercayai orchestration internal Tycho, tetapi karena boundary lintas sistem butuh bukti delivery sendiri. Kami mengikat origin Amp, exact Tycho route, dan digest task/artifact agar process exit atau prose dari log tidak disalahartikan sebagai report untuk request yang salah.
@@ -94,7 +94,7 @@
     <tbody>
       <tr><td>Agent dan subagent sama-sama native Amp</td><td>Pakai native child creation + reply routing/waiting. Jangan onboard ke group/report Amux baru.</td></tr>
       <tr><td>Sudah punya durable group/report Amux lama</td><td>Pertahankan bytes sebagai evidence inert. Jangan memakai binary lama, mengedit store, acknowledge, authorize-finish, atau membuat terminal transition.</td></tr>
-      <tr><td>Executor eksternal melalui Tycho</td><td><code>/amux-tycho</code> bisa dipakai secara explicit-only dan conditional; Tycho hanya mengirim typed report.</td></tr>
+      <tr><td>Executor eksternal melalui Tycho</td><td>Skill <code>/amux-tycho</code> sudah dihapus. Gunakan komunikasi native Amp untuk work baru; pertahankan receipt dan artifact lama.</td></tr>
       <tr><td>Orchestrator buatan sendiri</td><td>Ambil kontraknya: durable report + cheap wake-up + idempotency + coordinator-owned verification. Tidak harus mengadopsi seluruh Amux.</td></tr>
     </tbody>
   </table>
@@ -112,7 +112,7 @@
   <blockquote>
     “Iya, Mas—secara pattern ini problem yang dahulu kami pecahkan di Amux: durable result dipisahkan dari wake-up. Implementasi worker/group/report/callback itu sekarang historical-only dan tidak boleh dijalankan atau di-drain; native Amp menangani koordinasi Amp-to-Amp baru.<br><br>
     Di <code>/amux-tycho</code>, kami adaptasi pattern itu untuk output dari Tycho. Bukan mengganti orchestration Tycho: Tycho tetap mengatur agent/provider-nya, sedangkan boundary ke Amp hanya memberi Tycho authority <code>report_only</code>. Receipt mengikat Amp origin, exact Tycho route, dan task/artifact digest; hanya typed <code>complete/blocked</code> submit yang dianggap hasil—bukan process exit atau log.<br><br>
-    Nuansanya, <code>/amux-tycho</code> adalah bridge terpisah yang masih experimental. Target akhirnya justru lebih simpel: exact Tycho route return satu structured result langsung ke invoking Amp turn, authenticated dan correlated. Kalau seam itu terbukti, side receipt/consume/ack tidak diperlukan untuk work baru. Group/report core Amux lama tetap inert dan dipertahankan tanpa mutation.”
+    Bridge <code>/amux-tycho</code> sekarang sudah dihapus bersama skill provider eksperimental lainnya. Untuk work baru gunakan native Amp threads dan komunikasi native Amp. Receipt, artifact, dan group/report Amux lama tetap dipertahankan tanpa mutation.”
   </blockquote>
 
   <h2>Cek pemahaman</h2>

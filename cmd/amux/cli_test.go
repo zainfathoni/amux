@@ -235,7 +235,7 @@ func TestRemovedCoordinationCommandsAreTombstonesBeforeSideEffects(t *testing.T)
 		{"worker", "native Amp threads"},
 		{"spawn", "native Amp thread creation"},
 		{"group", "native Amp parent/reply routing"},
-		{"report", "/amux-tycho uses its separate receipt bridge"},
+		{"report", "native Amp replies"},
 		{"callback", "callback leases were removed"},
 		{"shelve", "native Amp archive state"},
 		{"unshelve", "native Amp archive state"},
@@ -342,7 +342,7 @@ func TestPathIsReadOnlyAndJSONRejectionIsOneDocument(t *testing.T) {
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		t.Fatalf("JSON output has more than one document: %v", err)
 	}
-	if len(env.Failed) != 1 || !strings.Contains(env.Failed[0].Error.Message, "/amux-tycho") {
+	if len(env.Failed) != 1 || !strings.Contains(env.Failed[0].Error.Message, "native Amp replies") {
 		t.Fatalf("report tombstone JSON = %+v", env)
 	}
 }
