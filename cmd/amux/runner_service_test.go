@@ -27,7 +27,6 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 		DiscoverDepth:         &discoveryDepth,
 		Directories:           []string{"/Users/me/Obsidian/Vault", "/Users/me/.dotfiles"},
 		RemoteControlTerminal: true,
-		RemoteControlPortals:  true,
 		Share:                 true,
 		AmpEnv:                true,
 		Desktop:               true,
@@ -40,7 +39,7 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 	for _, want := range []string{
 		`Environment="PATH=/opt/homebrew/bin:/usr/bin:/bin"`,
 		`WorkingDirectory=/Users/me/Code Root%%$`,
-		`ExecStart="/opt/amp/bin/amp" "--no-tui" "--runner-id" "laptop-main" "--discover-dirs" "--discover-depth" "3" "--dir" "/Users/me/Obsidian/Vault" "--dir" "/Users/me/.dotfiles" "--remote-control-terminal" "--remote-control-portals" "--share" "--amp-env" "--desktop"`,
+		`ExecStart="/opt/amp/bin/amp" "--no-tui" "--runner-id" "laptop-main" "--discover-dirs" "--discover-depth" "3" "--dir" "/Users/me/Obsidian/Vault" "--dir" "/Users/me/.dotfiles" "--remote-control-terminal" "--share" "--amp-env" "--desktop"`,
 		"Restart=always",
 	} {
 		if !strings.Contains(systemd, want) {
@@ -55,7 +54,6 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 		"<string>--discover-depth</string><string>3</string>",
 		"<string>/Users/me/Obsidian/Vault</string>",
 		"<string>--remote-control-terminal</string>",
-		"<string>--remote-control-portals</string>",
 		"<string>--share</string>",
 		"<string>--amp-env</string>",
 		"<string>--desktop</string>",
@@ -81,9 +79,6 @@ func TestNativeRunnerArgsOmitUnconfiguredDiscoveryDepth(t *testing.T) {
 	}
 	if slices.Contains(args, "--desktop") {
 		t.Fatalf("default runner shares desktop: %q", args)
-	}
-	if slices.Contains(args, "--remote-control-portals") {
-		t.Fatalf("default runner enables portals: %q", args)
 	}
 }
 

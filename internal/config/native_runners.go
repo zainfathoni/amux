@@ -29,7 +29,6 @@ type NativeRunnerProfile struct {
 	DiscoverDepth         *int     `json:"discover_depth,omitempty"`
 	Directories           []string `json:"dirs,omitempty"`
 	RemoteControlTerminal bool     `json:"remote_control_terminal,omitempty"`
-	RemoteControlPortals  bool     `json:"remote_control_portals,omitempty"`
 	Share                 bool     `json:"share,omitempty"`
 	AmpEnv                bool     `json:"amp_env,omitempty"`
 	Desktop               bool     `json:"desktop,omitempty"`

@@ -79,9 +79,6 @@ func nativeRunnerArgs(profile config.NativeRunnerProfile) []string {
 	if profile.RemoteControlTerminal {
 		args = append(args, "--remote-control-terminal")
 	}
-	if profile.RemoteControlPortals {
-		args = append(args, "--remote-control-portals")
-	}
 	if profile.Share {
 		args = append(args, "--share")
 	}
