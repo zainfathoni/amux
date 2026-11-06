@@ -32,6 +32,7 @@ type NativeRunnerProfile struct {
 	Share                 bool     `json:"share,omitempty"`
 	AmpEnv                bool     `json:"amp_env,omitempty"`
 	Desktop               bool     `json:"desktop,omitempty"`
+	RemoteControlPortals  bool     `json:"remote_control_portals,omitempty"`
 }
 
 func LoadNativeRunners(path string) (NativeRunnerConfig, error) {

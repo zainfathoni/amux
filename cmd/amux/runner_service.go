@@ -88,6 +88,9 @@ func nativeRunnerArgs(profile config.NativeRunnerProfile) []string {
 	if profile.Desktop {
 		args = append(args, "--desktop")
 	}
+	if profile.RemoteControlPortals {
+		args = append(args, "--remote-control-portals")
+	}
 	return args
 }
 

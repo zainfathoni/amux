@@ -153,36 +153,44 @@ func TestLoadNativeRunnersAmpEnvDefaultsOffAndRejectsNonBoolean(t *testing.T) {
 	}
 }
 
-func TestLoadNativeRunnersDesktopDefaultsOffAndRejectsNonBoolean(t *testing.T) {
+func TestLoadNativeRunnersDesktopAndPortalsDefaultOffAndRejectNonBoolean(t *testing.T) {
 	root := t.TempDir()
-	for _, test := range []struct {
-		name, field string
-		want        bool
-		wantError   bool
-	}{
-		{"omitted", "", false, false},
-		{"disabled", `,"desktop":false`, false, false},
-		{"enabled", `,"desktop":true`, true, false},
-		{"non-boolean", `,"desktop":"true"`, false, true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "native-runners.json")
-			document := `{"schema_version":1,"runners":[{"name":"main","runner_id":"runner","startup_directory":` + quoteJSON(root) + test.field + `}]}`
-			if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			got, err := LoadNativeRunners(path)
-			if test.wantError {
-				if err == nil {
-					t.Fatal("non-boolean desktop was accepted")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got.Runners[0].Desktop != test.want {
-				t.Fatalf("desktop = %t, want %t", got.Runners[0].Desktop, test.want)
+	for _, field := range []string{"desktop", "remote_control_portals"} {
+		t.Run(field, func(t *testing.T) {
+			for _, test := range []struct {
+				name, field string
+				want        bool
+				wantError   bool
+			}{
+				{"omitted", "", false, false},
+				{"disabled", `,"` + field + `":false`, false, false},
+				{"enabled", `,"` + field + `":true`, true, false},
+				{"non-boolean", `,"` + field + `":"true"`, false, true},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					path := filepath.Join(t.TempDir(), "native-runners.json")
+					document := `{"schema_version":1,"runners":[{"name":"main","runner_id":"runner","startup_directory":` + quoteJSON(root) + test.field + `}]}`
+					if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					got, err := LoadNativeRunners(path)
+					if test.wantError {
+						if err == nil {
+							t.Fatalf("non-boolean %s was accepted", field)
+						}
+						return
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					value := got.Runners[0].Desktop
+					if field == "remote_control_portals" {
+						value = got.Runners[0].RemoteControlPortals
+					}
+					if value != test.want {
+						t.Fatalf("%s = %t, want %t", field, value, test.want)
+					}
+				})
 			}
 		})
 	}

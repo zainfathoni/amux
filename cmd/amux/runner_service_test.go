@@ -30,6 +30,7 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 		Share:                 true,
 		AmpEnv:                true,
 		Desktop:               true,
+		RemoteControlPortals:  true,
 	}
 	servicePath := "/opt/homebrew/bin:/usr/bin:/bin"
 	systemd, err := systemdRunnerServiceArtifact("/opt/amp/bin/amp", servicePath, profile)
@@ -39,7 +40,7 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 	for _, want := range []string{
 		`Environment="PATH=/opt/homebrew/bin:/usr/bin:/bin"`,
 		`WorkingDirectory=/Users/me/Code Root%%$`,
-		`ExecStart="/opt/amp/bin/amp" "--no-tui" "--runner-id" "laptop-main" "--discover-dirs" "--discover-depth" "3" "--dir" "/Users/me/Obsidian/Vault" "--dir" "/Users/me/.dotfiles" "--remote-control-terminal" "--share" "--amp-env" "--desktop"`,
+		`ExecStart="/opt/amp/bin/amp" "--no-tui" "--runner-id" "laptop-main" "--discover-dirs" "--discover-depth" "3" "--dir" "/Users/me/Obsidian/Vault" "--dir" "/Users/me/.dotfiles" "--remote-control-terminal" "--share" "--amp-env" "--desktop" "--remote-control-portals"`,
 		"Restart=always",
 	} {
 		if !strings.Contains(systemd, want) {
@@ -57,6 +58,7 @@ func TestNativeRunnerArtifactsPreserveMixedRootConfiguration(t *testing.T) {
 		"<string>--share</string>",
 		"<string>--amp-env</string>",
 		"<string>--desktop</string>",
+		"<string>--remote-control-portals</string>",
 		"<key>RunAtLoad</key><true/>",
 		"<key>KeepAlive</key><true/>",
 	} {
@@ -79,6 +81,9 @@ func TestNativeRunnerArgsOmitUnconfiguredDiscoveryDepth(t *testing.T) {
 	}
 	if slices.Contains(args, "--desktop") {
 		t.Fatalf("default runner shares desktop: %q", args)
+	}
+	if slices.Contains(args, "--remote-control-portals") {
+		t.Fatalf("default runner enables portals: %q", args)
 	}
 }
 
@@ -283,6 +288,27 @@ func TestRunnerServiceLinuxLifecycleAndDoctorDetectsConfigurationDrift(t *testin
 	}
 	if _, err := app.executeRunnerService(doctor, dir); err != nil {
 		t.Fatalf("doctor desktop service: %v", err)
+	}
+
+	for _, enabled := range []bool{true, false} {
+		portalsDocument := strings.Replace(desktopDocument, `"desktop":true`, fmt.Sprintf(`"desktop":true,"remote_control_portals":%t`, enabled), 1)
+		if err := os.WriteFile(dir.NativeRunnersPath(), []byte(portalsDocument), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.executeRunnerService(doctor, dir); err == nil || !strings.Contains(err.Error(), "does not match") {
+			t.Fatalf("doctor portals=%t drift error = %v", enabled, err)
+		}
+		updated, err = app.executeRunnerService(install, dir)
+		if err != nil || len(updated.Successful) != 1 || updated.Successful[0].Action != "replace-runner-service" {
+			t.Fatalf("install portals=%t service: envelope=%+v error=%v", enabled, updated, err)
+		}
+		portalsArtifact, err := os.ReadFile(sortedDigestPaths(sharedMetadata.Artifacts)[0])
+		if err != nil || strings.Contains(string(portalsArtifact), `"--remote-control-portals"`) != enabled {
+			t.Fatalf("portals=%t artifact = %s, error = %v", enabled, portalsArtifact, err)
+		}
+		if _, err := app.executeRunnerService(doctor, dir); err != nil {
+			t.Fatalf("doctor portals=%t service: %v", enabled, err)
+		}
 	}
 
 	writeNativeRunnerConfig(t, dir.NativeRunnersPath(), code, other)
