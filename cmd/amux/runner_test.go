@@ -923,6 +923,55 @@ func TestNamedRunnerCommandAndArgvRequireExactID(t *testing.T) {
 	}
 }
 
+func TestRunnerParkRecognizesAccountBoundRunnerWithoutAcceptingOtherArgs(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "original", args: []string{"amp", "--no-tui", "--runner-id", "maintenance"}, want: true},
+		{name: "account bound", args: []string{"amp", "--no-tui", "--runner-id", "maintenance", "--runner-account-email", "owner@example.com"}, want: true},
+		{name: "wrong ID", args: []string{"amp", "--no-tui", "--runner-id", "other", "--runner-account-email", "owner@example.com"}},
+		{name: "missing account", args: []string{"amp", "--no-tui", "--runner-id", "maintenance", "--runner-account-email"}},
+		{name: "empty account", args: []string{"amp", "--no-tui", "--runner-id", "maintenance", "--runner-account-email", ""}},
+		{name: "flag as account", args: []string{"amp", "--no-tui", "--runner-id", "maintenance", "--runner-account-email", "--desktop"}},
+		{name: "extra capability", args: []string{"amp", "--no-tui", "--runner-id", "maintenance", "--desktop", "--runner-account-email", "owner@example.com"}},
+		{name: "duplicate account", args: []string{"amp", "--no-tui", "--runner-id", "maintenance", "--runner-account-email", "owner@example.com", "--runner-account-email", "other@example.com"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			workdir := t.TempDir()
+			row := config.RunnerRow{Workspace: "maintenance", Workdir: workdir, RunnerID: "maintenance"}
+			if _, err := config.StoreRunner(filepath.Join(dir, config.RunnersFile), row); err != nil {
+				t.Fatal(err)
+			}
+			bin := t.TempDir()
+			writeExecutable(t, filepath.Join(bin, "tmux"), `#!/bin/sh
+case "$1" in
+  has-session) exit 0 ;;
+  list-panes) printf 'maintenance\t`+config.RunnerWindow(workdir)+`\t@7\t%%9\t`+workdir+`\tzsh\t%s\t0\t4242\t123\n' `+shellSingleQuote(runnerStartCommandForRow(row))+` ;;
+  *) exit 2 ;;
+esac
+`)
+			oldArgs := runnerProcessArgs
+			runnerProcessArgs = func(int) ([]string, error) { return test.args, nil }
+			t.Cleanup(func() { runnerProcessArgs = oldArgs })
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+			args := []string{"--dry-run", "--json", "--config-dir", dir, "runner", "park", "--workdir", workdir}
+			if test.want {
+				got := executeRunnerJSON(t, args...)
+				if len(got.Planned) != 1 || got.Planned[0].Resource.Workdir != workdir {
+					t.Fatalf("park plan = %+v", got)
+				}
+			} else if err := executeRunnerJSONError(t, args...); err == nil || result.ExitCode(err) != result.ExitRejected || !strings.Contains(err.Error(), "conflict tmux identity") {
+				t.Fatalf("non-exact runner park error = %v", err)
+			}
+		})
+	}
+}
+
 func TestRunnerLaunchReportsLastObservedIdentityRejection(t *testing.T) {
 	workdir := t.TempDir()
 	wrongWorkdir := t.TempDir()
@@ -1136,6 +1185,8 @@ func TestRunnerPaneLegacyDirectAmpRequiresExactArgs(t *testing.T) {
 		want bool
 	}{
 		{name: "exact", args: []string{"/opt/amp/bin/amp", "--no-tui"}, want: true},
+		{name: "account bound", args: []string{"/opt/amp/bin/amp", "--no-tui", "--runner-account-email", "owner@example.com"}, want: true},
+		{name: "extra argument with account", args: []string{"amp", "--no-tui", "unexpected", "--runner-account-email", "owner@example.com"}},
 		{name: "extra argument", args: []string{"amp", "--no-tui", "unexpected"}},
 		{name: "wrong mode", args: []string{"amp", "threads"}},
 	} {

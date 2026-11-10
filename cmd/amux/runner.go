@@ -671,6 +671,14 @@ func observeRunnerPaneProcess(pane tmux.WindowPane, retainedShell bool, runnerID
 }
 
 func runnerArgsAreExact(args []string, runnerID string) bool {
+	// Amp can append an account binding to its runner argv.
+	if len(args) >= 4 && args[len(args)-2] == "--runner-account-email" {
+		account := args[len(args)-1]
+		if strings.TrimSpace(account) == "" || strings.HasPrefix(account, "-") {
+			return false
+		}
+		args = args[:len(args)-2]
+	}
 	if runnerID == "" {
 		return len(args) == 2 && filepath.Base(args[0]) == "amp" && args[1] == "--no-tui"
 	}
